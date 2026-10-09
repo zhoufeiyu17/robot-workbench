@@ -29,6 +29,7 @@ class Session:
     STANDARD_MOTION_SEED = 'x5-standard-head-motion-seed-v1'
     def __init__(self, geometry, output, config):
         self.geometry, self.output = geometry, Path(output)
+        self.display_only=config.get('display_only') is True
         self.asset_identity = {key: config[key] for key in ('asset_geometry_id', 'asset_seal_sha256') if config.get(key)}
         self.output.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -122,7 +123,7 @@ class Session:
                     'wrist_contract_sha256': contract_sha256(self.wrist_contract) if self.wrist_contract else None,
                     'wrist_config_pending': self.pending_wrist_config is not None,
                     'reason': self.reason, 'feedback_kind': 'real joint feedback mirrored in DSW' if self.mirror else 'DSW RTX commanded kinematic state; not motor feedback',
-                    'capabilities': {'jaw_gap_mm':True, 'preview': True, 'execute': self.mirror is None, 'capture': self.mirror is None, 'hardware': False, 'mirror': True},
+                    'capabilities': {'jaw_gap_mm':True, 'preview': True, 'execute': not self.display_only and self.mirror is None, 'capture': not self.display_only and self.mirror is None, 'hardware': False, 'mirror': True},
                     'physics_tracking_validated': False}
 
     def expire_mirror(self):
@@ -170,6 +171,8 @@ class Session:
     def command(self, endpoint, body):
         if not isinstance(body, dict):
             raise ValueError('JSON object required')
+        if self.display_only and endpoint not in ('/preview','/overview-view','/mirror','/overlay-rendering','/stop'):
+            raise ValueError('dedicated target renderer has no execute/capture/configuration authority')
         if endpoint == '/overlay-rendering':
             if set(body)!={'enabled'} or type(body['enabled']) is not bool:raise ValueError('enabled must be boolean')
             with self.lock:
@@ -1307,6 +1310,8 @@ def main():
     parser.add_argument('--duration-s', type=float, default=0,
                         help='Optional runtime limit in seconds; 0 keeps the service running')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--display-only',action='store_true')
+    parser.add_argument('--execution-json')
     args = parser.parse_args()
     if not 1 <= args.port <= 65535 or not 0 <= args.duration_s <= 14400 or args.render_gpu < 0:
         raise ValueError('invalid port/lifetime/render GPU')
@@ -1315,6 +1320,7 @@ def main():
         raise ValueError('token must have at least 32 characters')
     from arx_env.joint_head_workbench_geometry import Geometry
     config = json.loads(args.config.read_text())
+    if args.display_only:config['display_only']=True
     if config.get('jaw_mapping_file'):
         from arx_env.joint_head_jaw_mapping import configure_mapping
         configure_mapping(config['jaw_mapping_file'])
@@ -1328,6 +1334,10 @@ def main():
     if args.output.exists():
         raise FileExistsError(args.output)
     session = Session(geometry, args.output, config)
+    registration=None
+    if args.execution_json:
+        from local_execution import register_role
+        registration=register_role(json.loads(args.execution_json),'preview',__file__,instance_id=session.renderer_instance_id)
     from isaacsim import SimulationApp
     app = SimulationApp({'headless': True, 'active_gpu': args.render_gpu, 'multi_gpu': False, 'renderer': 'RayTracedLighting',
                          'limit_cpu_threads':len(os.sched_getaffinity(0)) if hasattr(os,'sched_getaffinity') else 4})
@@ -1336,6 +1346,7 @@ def main():
         renderer = RTXRenderer(geometry)
         session.tick(renderer, 0)
         server = serve(session, token, args.port)
+        if registration:registration('ready')
         deadline = time.monotonic()+args.duration_s if args.duration_s else float('inf')
         previous = time.monotonic()
         while time.monotonic() < deadline and app.is_running():
@@ -1351,6 +1362,7 @@ def main():
         if server:
             server.shutdown()
         app.close()
+        if registration:registration('stopped')
 
 
 if __name__ == '__main__':

@@ -1557,6 +1557,8 @@ if __name__ == "__main__":
     for field in ("suite", "assets", "output", "plan", "source", "barrier"):
         p.add_argument("--" + field, type=Path, required=field in {"suite", "assets", "output"})
     args = p.parse_args()
+    from local_execution import register_auxiliary
+    register_auxiliary(args,__file__)
     expected = {side: (lane["instance_id"], lane["gpu"]) for side, lane in PIPELINE_LANES.items()}
     if args.execution_json:
         from local_execution import validate

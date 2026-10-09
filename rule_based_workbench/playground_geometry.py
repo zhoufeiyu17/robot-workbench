@@ -84,6 +84,8 @@ def load(path, source, native_code, assets):
 
 
 def main(args):
+    from local_execution import register_auxiliary
+    register_auxiliary(args,__file__)
     started=time.monotonic();args.output.mkdir(parents=True,exist_ok=False)
     requested_backend=getattr(args,'backend','native')
     backend='curobo_world_broadphase_native_exact' if requested_backend=='curobo' else 'native'

@@ -1,6 +1,8 @@
 """Trusted single-host deployment on the task-owned 734 GPU1; no SSH fallback."""
 import hashlib
+import fcntl
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -15,12 +17,13 @@ def validate(config, contract=None):
     if value is None:
         return None
     fields={*TARGET,'session_id','plant','max_processes','min_free_memory_mib'}
+    if isinstance(value,dict) and value.get('max_processes')==5:fields.add('roles')
     if (not isinstance(value,dict) or set(value)!=fields or any(value.get(k)!=v for k,v in TARGET.items())
             or any(type(value[k]) is not int for k in ('gpu_index','vulkan_gpu'))):
         raise ValueError('local execution must freeze exactly 734 GPU1/CUDA mask1/Vulkan1')
     if not isinstance(value['session_id'],str) or not value['session_id']:
         raise ValueError('local execution requires its owning Session')
-    if (type(value['max_processes']) is not int or value['max_processes']!=4
+    if (type(value['max_processes']) is not int or value['max_processes'] not in (4,5)
             or type(value['min_free_memory_mib']) is not int or value['min_free_memory_mib']<=0):
         raise ValueError('explicit bounded local process/memory budgets required')
     plant=value['plant']
@@ -39,6 +42,26 @@ def validate(config, contract=None):
     if (Path(plant['script']).name!='serve_physx_device.py' or plant['script'] not in plant['argv']
             or not any(plant['argv'][i:i+2]==['--output',plant['scope']] for i in range(len(plant['argv'])-1))):
         raise ValueError('plant command must bind its exact owned output scope')
+    if value['max_processes']==5:
+        roles=value.get('roles')
+        if not isinstance(roles,dict) or set(roles)!={'preview','auxiliary'}:
+            raise ValueError('five-role execution requires explicit preview and auxiliary registration slots')
+        for role,spec in roles.items():
+            required={'root','registration','max_memory_mib'}|({'script','script_sha256','config_path','config_sha256','token_file','port'}
+                if role=='preview' else {'entrypoints'})
+            if not isinstance(spec,dict) or set(spec)!=required or type(spec['max_memory_mib']) is not int or spec['max_memory_mib']<=0:
+                raise ValueError('explicit '+role+' scope/code/config/memory contract required')
+            for name in ('root','registration'):
+                path=Path(spec[name])
+                if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(plant['scope']):
+                    raise ValueError('GPU role registration escaped the resident scope')
+            if role=='preview':
+                if type(spec['port']) is not int or not 0<spec['port']<65536:raise ValueError('frozen preview port required')
+                pins={spec['script']:spec['script_sha256'],spec['config_path']:spec['config_sha256']}
+                if not Path(spec['token_file']).is_relative_to(spec['root']):raise ValueError('private preview token scope required')
+            else:pins=spec['entrypoints']
+            if not isinstance(pins,dict) or not pins or any(not Path(p).is_absolute() or not isinstance(h,str) or not re.fullmatch('[0-9a-f]{64}',h) for p,h in pins.items()):
+                raise ValueError('GPU role entrypoints/config require absolute SHA pins')
     if contract is not None:
         if (contract.get('execution')!=value or contract.get('identity',{}).get('session_id')!=value['session_id']
                 or contract['resources'].get('max_workers_per_instance')!=value['max_processes']):
@@ -49,6 +72,72 @@ def validate(config, contract=None):
                 or pins.get(plant['script'])!=plant['script_sha256']):
             raise ValueError('plant scope/code must be declared and pinned in the same contract')
     return value
+
+
+def role_spec_digest(spec):return hashlib.sha256(json.dumps(spec,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def role_argv(execution,role,argv,entrypoint):
+    """Check the actual Python command against the frozen role, not a PID label."""
+    spec=execution['roles'][role]
+    if entrypoint not in argv:raise ValueError('GPU role entrypoint absent from actual argv')
+    tail=argv[argv.index(entrypoint)+1:]
+    def argument(name):
+        if tail.count(name)!=1 or tail.index(name)+1>=len(tail):raise ValueError('GPU role argument missing/duplicated: '+name)
+        return tail[tail.index(name)+1]
+    output=Path(argument('--output'))
+    if not output.is_absolute() or '..' in output.parts or output==Path(spec['root']) or not output.is_relative_to(spec['root']):
+        raise ValueError('GPU role output escaped its private scope')
+    if json.loads(argument('--execution-json'))!=execution:raise ValueError('GPU role execution contract differs')
+    if role=='preview':
+        expected={'--config':spec['config_path'],'--token-file':spec['token_file'],'--port':str(spec['port']),'--render-gpu':'1'}
+        if entrypoint!=spec['script'] or any(argument(k)!=v for k,v in expected.items()) or '--display-only' not in tail:
+            raise ValueError('preview code/config/port/display-only binding differs')
+        duration=float(argument('--duration-s'))
+        if not 0<duration<=14400:raise ValueError('bounded preview lifetime required')
+    else:
+        if entrypoint not in spec['entrypoints']:raise ValueError('unregistered auxiliary GPU entrypoint')
+        if '--gpu' in tail and argument('--gpu')!='1':raise ValueError('auxiliary Vulkan GPU differs')
+
+
+_role_locks=[]
+def register_role(execution,role,entrypoint,*,instance_id=None,proc_root='/proc'):
+    """Called before native GPU imports; owns one fixed slot until process exit."""
+    validate({'execution':execution})
+    if execution['max_processes']==4:return lambda status:None
+    spec=execution['roles'][role];entrypoint=str(Path(entrypoint).resolve());pid=os.getpid();proc=Path(proc_root)/str(pid)
+    argv=[v.decode() for v in (proc/'cmdline').read_bytes().split(b'\0') if v]
+    role_argv(execution,role,argv,entrypoint)
+    sha=hashlib.sha256(Path(entrypoint).read_bytes()).hexdigest()
+    expected=spec['script_sha256'] if role=='preview' else spec['entrypoints'][entrypoint]
+    if sha!=expected:raise ValueError('GPU role code changed after contract freeze')
+    if role=='preview' and hashlib.sha256(Path(spec['config_path']).read_bytes()).hexdigest()!=spec['config_sha256']:
+        raise ValueError('preview config changed after contract freeze')
+    if os.environ.get('CUDA_VISIBLE_DEVICES')!='1' or os.environ.get('ROBOT_WORKBENCH_SESSION_ID')!=execution['session_id']:
+        raise ValueError('GPU role Session/CUDA mask differs')
+    path=Path(spec['registration']);path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    fd=os.open(str(path)+'.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BaseException:os.close(fd);raise
+    _role_locks.append(fd)
+    state=dict(role=role,session_id=execution['session_id'],spec_sha256=role_spec_digest(spec),pid=pid,
+        process_start_ticks=(proc/'stat').read_text().rsplit(')',1)[1].split()[19],argv=argv,
+        entrypoint=entrypoint,entrypoint_sha256=sha,renderer_instance_id=instance_id,
+        config_sha256=spec.get('config_sha256'))
+    def update(status):
+        state['status']=status
+        temporary=path.with_suffix('.partial')
+        with temporary.open('w') as stream:json.dump(state,stream,allow_nan=False)
+        temporary.chmod(0o600);temporary.replace(path)
+    update('starting');return update
+
+
+def register_auxiliary(args,entrypoint):
+    if Path(entrypoint).name=='playground_geometry.py' and (getattr(args,'backend','native')=='native' or getattr(args,'initial',None)):
+        return
+    if getattr(args,'execution_json',None):
+        execution=json.loads(args.execution_json)
+        if execution.get('max_processes')==5:register_role(execution,'auxiliary',entrypoint)
 
 
 def _process(pid, start, *, proc_root, expected_argv=None, required=(), session=None,expected_env=None):
@@ -124,6 +213,31 @@ def gpu_check(config, *, require=None, exclude=None, proc_root='/proc', query=su
         if pid in known:raise ValueError('GPU process assigned to two scopes')
         known[pid]=spec['max_memory_mib']
         if uses_gpu:required.add(pid)
+    for role,spec in execution.get('roles',{}).items():
+        if role==exclude:continue
+        path=Path(spec['registration'])
+        if not path.is_file():
+            if role==require:raise ValueError(role+' GPU role has not registered')
+            continue
+        state=json.loads(path.read_text());pid=state.get('pid');proc=Path(proc_root)/str(pid)
+        if type(pid) is not int or not proc.exists():
+            if role==require:raise ValueError(role+' GPU role is not alive')
+            continue
+        if state.get('spec_sha256')!=role_spec_digest(spec) or state.get('session_id')!=execution['session_id'] or state.get('role')!=role:
+            raise ValueError('GPU role private registration identity differs')
+        _process(pid,state.get('process_start_ticks'),proc_root=proc_root,expected_argv=state.get('argv'),session=execution['session_id'])
+        entry=state.get('entrypoint');role_argv(execution,role,state['argv'],entry)
+        expected=spec['script_sha256'] if role=='preview' else spec['entrypoints'][entry]
+        if state.get('entrypoint_sha256')!=expected or hashlib.sha256(Path(entry).read_bytes()).hexdigest()!=expected:
+            raise ValueError('registered GPU role code changed')
+        if role=='preview' and (state.get('config_sha256')!=spec['config_sha256']
+                or hashlib.sha256(Path(spec['config_path']).read_bytes()).hexdigest()!=spec['config_sha256']
+                or not isinstance(state.get('renderer_instance_id'),str) or not re.fullmatch('[0-9a-f]{32}',state['renderer_instance_id'])):
+            raise ValueError('preview renderer instance/config binding differs')
+        if pid in known:raise ValueError('GPU PID registered under more than one role')
+        known[pid]=spec['max_memory_mib']
+        if state.get('status')=='ready':required.add(pid)
+        if role==require and state.get('status')!='ready':raise ValueError(role+' GPU role not ready')
     xml=ET.fromstring(query(['nvidia-smi','-i','1','-q','-x'],text=True))
     cards=xml.findall('gpu')
     if len(cards)!=1 or cards[0].findtext('uuid')!=execution['gpu_uuid']:

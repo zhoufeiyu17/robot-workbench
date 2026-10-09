@@ -85,7 +85,7 @@ def run(args, base, nominal):
     app=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',active_gpu=args.gpu,multi_gpu=False,
         kit_args=f'--/renderer/activeGpu={args.gpu} --/renderer/multiGpu/enabled=false '
         '--/renderer/multiGpu/autoEnable=false --/renderer/gpuEnumeration/glInterop/enabled=false').app
-    env=producer=device=ui=gateway=collection_preparation=task_observer=None
+    env=producer=device=ui=gateway=collection_preparation=task_observer=preview_service=None
     done=threading.Event();requests=queue.Queue(maxsize=1)
     events=queue.Queue(maxsize=4096);logging_failed=threading.Event()
     writer_done=threading.Event()
@@ -216,6 +216,22 @@ def run(args, base, nominal):
         from robot_workbench.workflows import CalibrationWorkflow
         calibration=Workbench(calibration_config,args.output/'calibration-workbench')
         device.workflows['calibration']=CalibrationWorkflow(calibration,device,application)
+        if args.collection_spec is not None and args.collection_spec['resources']['max_workers']==5:
+            from robot_workbench.preview_service import prepare_preview_roles,resident_execution,PreviewService,calibration_mesh_inputs
+            from arx_env.joint_head_workbench_geometry import jaw_gaps
+            prepare_preview_roles(args.collection_spec,args.output,calibration_config)
+            def preview_admission():
+                if collection_preparation and collection_preparation.parts:
+                    from run_pipeline import load_config
+                    return load_config(Path(collection_preparation.parts.pipeline_config))[0]
+                return {'execution':resident_execution(args.collection_spec,args.output)}
+            preview_service=PreviewService(execution=resident_execution(args.collection_spec,args.output),
+                deadline_wall_ns=resident_deadline_wall_ns,deps=base['pipeline_config']['deps'],
+                admission_config=preview_admission,
+                validate_pose=lambda q,gaps:(calibration.geometry._q(q),jaw_gaps(gaps)),
+                mesh_inputs=lambda camera,candidate:calibration_mesh_inputs(calibration,producer,camera,candidate))
+            device.preview=preview_service
+            preview_service.start()
         if args.collection_spec is not None:
             collection_preparation=CollectionPreparation(contract=args.collection_spec,output=args.output,base=base,
                 device=device,application=application,ports=ports,directories=producer.directories,
@@ -239,6 +255,7 @@ def run(args, base, nominal):
             collection_binding=str(args.output/'collection-binding.json'),
             collection_contract=str(args.collection_contract) if args.collection_contract else None,
             collection_enabled=args.collection_spec is not None,
+            preview_enabled=preview_service is not None,
             full_pipeline_qualified=False,physical_hardware_connected=False))
         save(args.output/'collection-runtime.json',dict(environment='fake',clock=source_clock,
             robot_id=device.id,camera_serials=calibration_config['hardware_camera_serials'],
@@ -313,6 +330,12 @@ def run(args, base, nominal):
                     cameras=producer.snapshot(),owner=actor(),contact=plant.contact_status,
                     evidence_logging_healthy=not logging_failed.is_set()))
                 last_status=time.monotonic()
+            if preview_service and clock.index%120==0:
+                from arx_env.joint_head_jaw_mapping import feedback_gaps
+                feedback=backend.read_calibration_state();q=feedback['qpos']
+                preview_service.mirror_feedback(dict(q=q[:6]+q[7:13],jaw_gap_mm=feedback_gaps(q),
+                    source_id=backend.source_clock_id,sequence=backend.physics_step,
+                    source_age_s=max(0.,(time.time_ns()-feedback['sample_wall_ns'])/1e9)))
         save(args.output/'final.json',dict(status='bounded-service-ended',clock=source_clock,
             physics_step=backend.physics_step,cameras=producer.snapshot(),full_pipeline_qualified=False,
             physical_hardware_connected=False,teardown_verified=False))
@@ -334,6 +357,9 @@ def run(args, base, nominal):
             except Exception as error:event('teardown_error',error=str(error))
         if collection_preparation:
             try:collection_preparation.close()
+            except Exception as error:event('teardown_error',error=str(error))
+        if preview_service:
+            try:preview_service.close()
             except Exception as error:event('teardown_error',error=str(error))
         if device:
             for workflow in list(device.workflows.values()):

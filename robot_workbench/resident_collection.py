@@ -152,11 +152,18 @@ def load_collection_contract(path,output,gpu,duration):
     if (value.get('schema_version')!='anyverse.dsw-codex-experiment.v1'
             or not value.get('identity',{}).get('session_id') or gpu!=1
             or resources.get('gpu_uuid')!=TARGET['gpu_uuid'] or resources.get('cuda_visible_devices')!=[1]
-            or resources.get('max_workers')!=4 or resources.get('max_cpu_threads',0)<4
+            or resources.get('max_workers') not in (4,5) or resources.get('max_cpu_threads',0)<4
             or type(resources.get('service_lifetime_seconds')) is not int
             or resources['service_lifetime_seconds']<=0
             or not duration+45<=resources.get('max_wall_time_minutes',0)*60):
-        raise ValueError('explicit same-Session GPU1 four-process resident contract and cleanup reserve required')
+        raise ValueError('explicit same-Session GPU1 four/five-process resident contract and cleanup reserve required')
+    if resources['max_workers']==5:
+        preview=value.get('preview_setup')
+        if (not isinstance(preview,dict) or set(preview)!={'port','max_memory_mib','auxiliary_max_memory_mib'}
+                or type(preview['port']) is not int or not 0<=preview['port']<=65535
+                or any(type(preview[key]) is not int or preview[key]<=0 for key in ('max_memory_mib','auxiliary_max_memory_mib'))):
+            raise ValueError('five roles require explicit preview port and preview/auxiliary memory budgets')
+    elif value.get('preview_setup') is not None:raise ValueError('preview cannot enter the four-role contract')
     if not any(Path(output).resolve().is_relative_to(Path(root).resolve()) for root in value['filesystem']['writable_roots']):
         raise ValueError('resident output is outside the collection contract')
     if set(details)!={'profile_template','detection_runtime_root','plant_max_memory_mib','min_free_memory_mib'}:
@@ -219,14 +226,10 @@ class CollectionPreparation:
             if state.get('automatic_enabled') or (state.get('recording') or {}).get('done') is False:
                 raise ValueError('new installation preparation waits for the current frozen D run to finish')
             self._close_parts()
-        details=self.contract['collection_setup'];pid=os.getpid();proc=Path('/proc')/str(pid)
+        details=self.contract['collection_setup']
         script=str(Path(__file__).resolve().parents[1]/'scripts/serve_physx_device.py')
-        execution=dict(TARGET,session_id=self.contract['identity']['session_id'],max_processes=4,
-            min_free_memory_mib=details['min_free_memory_mib'],plant=dict(session_id=self.contract['identity']['session_id'],pid=pid,
-                process_start_ticks=(proc/'stat').read_text().rsplit(')',1)[1].split()[19],scope=str(root),
-                script=script,script_sha256=hashlib.sha256(Path(script).read_bytes()).hexdigest(),
-                argv=[row.decode() for row in (proc/'cmdline').read_bytes().split(b'\0') if row],
-                max_memory_mib=details['plant_max_memory_mib']))
+        from robot_workbench.preview_service import resident_execution
+        execution=resident_execution(self.contract,root)
         output=root/('collection-'+expected['manifest_sha256'][:16]+'-'+str(time.time_ns()))
         self._status('preparing_profile',installed=expected,output=str(output))
         detector_entry=Path(__file__).resolve().parents[1]/'detector_adapter'/'isaac_rgbd_detection.py'

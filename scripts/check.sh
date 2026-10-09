@@ -17,6 +17,14 @@ python tests/test_physx_task.py
 python tests/test_resident_collection.py
 python tests/test_detector_adapter.py
 python tests/test_target_preview.py
+python tests/test_preview_http.py
+python tests/test_preview_service.py
+if [ -n "${AC_ONE_ASSET_ROOT:-}" ]; then
+    python tests/test_collection_setup.py --a1 "$AC_ONE_ASSET_ROOT" --roles 4
+    python tests/test_collection_setup.py --a1 "$AC_ONE_ASSET_ROOT" --roles 5
+else
+    echo 'SKIP collection setup 4/5-role asset checks: set AC_ONE_ASSET_ROOT to sealed A1 assets'
+fi
 python tests/test_serve_physx_device.py
 python tests/test_collection_physx_protocol.py
 python rule_based_workbench/test_fake_device_pipeline.py

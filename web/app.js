@@ -1,6 +1,7 @@
 const BUSINESS = {calibration: '标定', collection: '数采'};
 const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理设备'};
 const CALIBRATION_TOOLS=['configure_calibration','plan_batch','preview_batch','fit_source','fit_batch'];
+const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','preview_recover'];
 const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
@@ -39,22 +40,37 @@ export function safeMediaUrl(value, origin) {
   catch { return null; }
 }
 
+export function verifyPreviewFrame(media,metadata,environment){
+  if(!metadata||metadata.environment!==environment||metadata.view!==media.preview_view||metadata.revision!==media.revision)
+    throw Error('预览帧身份或修订不匹配，等待当前请求的画面');
+  if(media.renderer_id&&metadata.renderer_id!==media.renderer_id)throw Error('渲染服务身份已变化，丢弃旧画面');
+  if(media.preview_view!=='mesh'&&metadata.view_revision!==media.view_revision)throw Error('观察视角修订不匹配，丢弃旧画面');
+  if(media.preview_view==='mesh'&&(metadata.camera!==media.camera||metadata.candidate_id!==media.candidate_id))
+    throw Error('叠加相机或标定候选不匹配，丢弃旧画面');
+  if(!Number.isFinite(metadata.source_wall_ns)||metadata.source_wall_ns<=0)throw Error('预览帧缺少可核验的源时间');
+  return metadata;
+}
+
 export function createWorkbench({document:doc, fetch:request, location, performance:clock, URL:urls, crypto, setInterval, clearInterval, setTimeout, clearTimeout}) {
   const el = id => doc.getElementById(id);
   const setText = (id, value) => { el(id).textContent = textValue(value); };
   let context = {environment:'fake', business:'calibration'}, tab = 'calibration';
   let state = null, generation = 0, revision = -1, receivedAt = 0, online = false, polling = null;
   let requestSequence = 0, displayedRequest = 0, reviewKey = '', manualKey = '', replayKey = '', stopped = false;
+  let waitingForStateNotice=true;
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
   let resultActions=[],queueActions=[],replayControlsKey='',manualQueueKey='';
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
+  let previewView='target',meshCamera='head',meshCandidate='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
+  let overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0},overviewDirty=false,overviewSending=false,overviewPointer=null;
+  const displayRequests=new Map(),previewFloors=new Map(),previewErrors=new Map(),planPreviewButtons=[];
   const jointInputs=role=>[...el('joint-inputs').querySelectorAll('input')].filter(input=>input.dataset.role===role);
   const key = () => context.environment + '/' + context.business;
   const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked});
   const permission = action => ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
-    ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : actionPermission(state, action, options());
+    ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
   const make = (tag, content, className) => { const node = doc.createElement(tag); if (content !== undefined) node.textContent = textValue(content); if(className)node.className=className; return node; };
-  function notice(message, active = false) { setText('request-status',message); el('request-status').classList.toggle('pending',active); }
+  function notice(message, active = false, waitingForState = false) { waitingForStateNotice=waitingForState;setText('request-status',message); el('request-status').classList.toggle('pending',active); }
   function gate(id, action, extraReason = '') {
     const p = permission(action), reason = extraReason || p.reason;
     el(id).disabled = !!reason || !p.allowed;
@@ -72,8 +88,11 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const holder = state?.runtime?.holder;
     const target = holder === context.business ? (context.business === 'calibration' ? 'collection' : 'calibration') : context.business;
     setText('handoff','交接给'+BUSINESS[target]); el('handoff').dataset.target = target;
-    gate('mesh','mesh'); gate('manual-preview','manual_preview',manualReady() ? '' : '尚无完整关节定义、限位与实测反馈');
-    const manualDisabled = el('manual-preview').disabled;
+    const preview=state?.preview,displayBusy=view=>displayRequests.has(view)||displayRequests.has('recovery');
+    gate('mesh',preview?'preview_mesh':'mesh',preview&&displayBusy('mesh')?'叠加设置正在更新':preview&&permission('preview_mesh').allowed&&!meshCandidate&&!preview.mesh?.requested?'请选择与相机匹配的标定候选':'');
+    gate('manual-preview','manual_preview',manualReady() ? '' : '尚无完整关节定义、限位与实测反馈');
+    gate('show-target','preview_target',displayBusy('target')?'目标图像请求正在处理':manualReady()?'':'尚无完整关节定义、限位与实测反馈');
+    const manualDisabled = el('manual-preview').disabled&&el('show-target').disabled;
     for(const input of el('joint-inputs').querySelectorAll('input')) input.disabled=manualDisabled;
     for(const id of ['jaw-left','jaw-right','jaw-speed','manual-speed','apply-manual-speed','use-feedback','zero-preview']) el(id).disabled=manualDisabled;
     const queue=state?.manual?.queue;
@@ -105,6 +124,11 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('calibration-kind').disabled=!permission('configure_calibration').allowed;
     el('calibration-head').disabled=!permission('configure_calibration').allowed;
     el('fit-source').disabled=!permission('fit_source').allowed;
+    gate('overview-reset','preview_overview',displayBusy('overview')?'视角正在更新':'');
+    for(const id of ['overview-preset','overview-zoom'])el(id).disabled=!permission('preview_overview').allowed||displayRequests.has('recovery');
+    for(const id of ['mesh-camera','mesh-candidate'])el(id).disabled=!permission('preview_mesh').allowed||displayBusy('mesh');
+    for(const button of planPreviewButtons)button.disabled=!permission('preview_target').allowed||displayBusy('target');
+    gate('preview-recover','preview_recover',!preview?.recovery?.allowed?(preview?.recovery?.reason||'当前没有后端允许的渲染恢复操作'):displayRequests.has('recovery')?'渲染服务恢复请求正在处理':'');
   }
   function manualReady() {
     const m=state?.manual;
@@ -128,6 +152,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   function editManual(){
     if(state?.workflow?.primary_action?.id==='manual_execute'&&state.workflow.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
+    if(state?.preview){previewErrors.set('target','人工姿态草稿已改变，请重新查看目标图像。');renderMedia();}
     clearReview();renderGates();
   }
   function renderQueue(){
@@ -172,12 +197,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('fit-source-state','当前求解来源：'+(tools?.fit_source_id||'尚未选择')+'。浏览结果与历史回放不会改变求解来源。');
     const waypoints=tools?.waypoints||[],capturing=waypoints.filter(row=>row.capture!==false),counts=tools?.counts||{};
     setText('calibration-plan-summary',`${waypoints.length} 个路径点 · ${capturing.length} 个采样点 · ${waypoints.length-capturing.length} 个过渡点；当前来源：${counts.captured??counts.frames??'未知'} 帧，求解有效 ${counts.valid??'未知'}，无效 ${counts.failed??'未知'}。`);
-    setText('calibration-preview-message',tools?.preview_message||'逐姿态图像预览尚未接入。');
+    setText('calibration-preview-message',state?.preview?(state.preview.connected===true?'可逐姿态查看目标图像；查看只改变显示，不执行采集或机器人动作。':state.preview.status==='unconfigured'?'当前环境尚未配置目标渲染服务，重连画面不能代替环境配置。':state.preview.error||'目标渲染服务尚未连接，可在设备诊断中查看图像恢复指引。'):tools?.preview_message||'逐姿态图像预览尚未接入。');
     const planKey=JSON.stringify([key(),waypoints]);
     if(planKey!==calibrationPlanKey){
-      calibrationPlanKey=planKey;const list=el('calibration-waypoints');list.replaceChildren();
+      calibrationPlanKey=planKey;const list=el('calibration-waypoints');list.replaceChildren();planPreviewButtons.length=0;
       for(const [index,row]of waypoints.entries()){
-        const li=make('li');li.append(make('strong',`${index+1}. ${row.capture===false?'仅过渡':'采样'} · ${row.name||row.id||row.kind||'姿态'}`),make('p',`关节 rad：${(row.q||[]).join(' / ')}；速度 rad/s：${(row.speeds||[]).join(' / ')}；夹爪 mm：${(row.jaw_gap_mm||[]).join(' / ')}`));list.append(li);
+        const li=make('li'),button=make('button','查看此姿态图像 · 不执行');button.addEventListener('click',()=>showTarget(row.q,row.jaw_gap_mm));planPreviewButtons.push(button);li.append(make('strong',`${index+1}. ${row.capture===false?'仅过渡':'采样'} · ${row.name||row.id||row.kind||'姿态'}`),make('p',`关节 rad：${(row.q||[]).join(' / ')}；速度 rad/s：${(row.speeds||[]).join(' / ')}；夹爪 mm：${(row.jaw_gap_mm||[]).join(' / ')}`),button);list.append(li);
       }
       const coverage=el('calibration-coverage');coverage.replaceChildren();
       for(let cell=0;cell<9;cell++){const count=capturing.filter(row=>Array.isArray(row.cell)&&row.cell[0]*3+row.cell[1]===cell).length;coverage.append(make('div',`视野 ${Math.floor(cell/3)+1}行 ${cell%3+1}列 · ${count} 点`));}
@@ -185,6 +210,32 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('calibration-coverage').hidden=tools?.workflow?.kind==='wrist'||!waypoints.some(row=>Array.isArray(row.cell));
   }
   function clearReview() { el('clearance').checked=false; }
+  function renderPreview(){
+    const preview=state?.preview,mesh=preview?.mesh||state?.mesh||{};
+    if(preview?.renderer_id!==previewRenderer){previewRenderer=preview?.renderer_id;previewFloors.clear();previewErrors.clear();}
+    const meshKey=JSON.stringify([key(),mesh.camera,mesh.candidate_id]);
+    if(meshKey!==meshStateKey&&!displayRequests.has('mesh')){meshStateKey=meshKey;meshCamera=mesh.camera||meshCamera;meshCandidate=mesh.candidate_id||'';}
+    el('preview-view').value=previewView;el('overview-controls').hidden=previewView!=='overview';
+    el('media-preview').classList.toggle('overview',previewView==='overview');
+    el('mesh-controls').hidden=!preview;el('media-mesh').hidden=!preview;
+    el('mesh-camera').value=meshCamera;
+    const choices=(state?.results||[]).filter(row=>row.kind===(meshCamera==='head'?'head':'wrist'));
+    const optionsKey=JSON.stringify([key(),meshCamera,meshCandidate,choices.map(row=>[row.id,row.label,row.status])]);
+    if(optionsKey!==meshOptionsKey){meshOptionsKey=optionsKey;const box=el('mesh-candidate');box.replaceChildren();for(const row of [{id:'',label:'选择标定候选'},...choices]){const option=make('option',row.label+(row.status?' · '+statusText(row.status):''));option.value=row.id;box.append(option);}box.value=choices.some(row=>row.id===meshCandidate)?meshCandidate:'';}
+    setText('mesh-state','请求：'+(mesh.requested===true?'开启':mesh.requested===false?'关闭':'未知')+' · 后端：'+(mesh.applied===true?'已开启':mesh.applied===false?'已关闭':'未知'));
+    el('mesh').checked=mesh.requested===true;
+    const protocol=state?.device?.id==='protocol-fake';
+    setText('preview-status',(protocol?'当前为协议 Fake（L1）：只验证控制协议与页面，不提供 PhysX 相机图像。完整 Fake 需要物理仿真、相机与渲染服务。 ':'')+(!preview||preview.status==='unconfigured'?'目标预览渲染服务尚未配置。':(preview.connected===true?'渲染服务已连接':preview.connected===false?'渲染服务未连接':'渲染连接尚未核验')+(preview.error?' · '+preview.error:'')));
+    const rows=[{label:'渲染连接',value:!preview||preview.status==='unconfigured'?'尚未配置':preview.connected===true?'已连接':preview.connected===false?'未连接':'未知'},
+      {label:'当前渲染原因',value:preview?.error||preview?.status||'尚无渲染状态回执'}];
+    if(protocol)rows.unshift({label:'设备资格',value:'协议 Fake（L1）不提供 PhysX 相机图像；缺少这类图像属于未配置完整仿真，不能通过重连浏览器补齐。'});
+    for(const media of state?.media||[])if(media.error||media.ready===false)rows.push({label:media.label||media.id||'图像通道',value:media.error||'当前画面尚未就绪'});
+    for(const [view,frame]of Object.entries(preview?.frames||{}))if(frame?.error)rows.push({label:{target:'目标姿态',overview:'整机视角',mesh:'Mesh 叠加'}[view]||view,value:frame.error});
+    if(preview?.recovery?.message)rows.push({label:'恢复指引',value:preview.recovery.message});
+    renderDetails('image-recovery-details',rows);
+    const commands=preview?.recovery?.commands;el('image-recovery-commands').hidden=!commands;
+    setText('image-recovery-commands',Array.isArray(commands)?commands.join('\n'):commands||'');
+  }
   function render() {
     const s=state, r=s?.runtime||{}, w=s?.workflow||{};
     setText('device-name',s?.device?.label||s?.device?.id||'机器人工作台');
@@ -222,9 +273,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       r.service_error?'设备服务异常：'+r.service_error:'',
       !online&&s?'状态连接中断；旧画面与状态仅作参考，等待重新核验。':s&&options().fresh===false?'状态已超过 3 秒未核验；操作已停用，停止请求仍独立可用。':''].filter(Boolean).join(' ');
     el('alert').hidden=!alert;setText('alert',alert);
-    setText('mesh-state','请求：'+(s?.mesh?.requested===true?'开启':s?.mesh?.requested===false?'关闭':'未知')+' · 后端：'+(s?.mesh?.applied===true?'已开启':s?.mesh?.applied===false?'已关闭':'未知'));
-    el('mesh').checked=s?.mesh?.requested===true;
-    renderManual();renderQueue();renderArrival();renderCalibration();renderResults();renderDetails('diagnostics-list',s?.diagnostics);
+    renderManual();renderQueue();renderArrival();renderCalibration();renderResults();renderPreview();renderDetails('diagnostics-list',s?.diagnostics);
     setText('stop-details',r.stop_receipt||'尚无停止回执；请求受理不代表停止已确认');setText('raw-state',s||'尚未核验');
     for(const id of ['results-context','diagnostics-context','footer-context'])setText(id,ENVIRONMENT[context.environment]+' · '+BUSINESS[context.business]);
     renderMedia();renderGates();renderAge();
@@ -238,7 +287,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function updateMediaLabel(slot) {
     const m=slot.media, age=frameAgeSeconds(m,state,clock.now()-receivedAt), stale=age===null||age>3||!online||!!slot.error;
     slot.card.classList.toggle('stale',stale);
-    slot.card.querySelector('.media-meta').textContent=[ENVIRONMENT[context.environment],{actual:'实际画面',target:'目标预览',replay:'录制回放'}[m?.kind]||'来源未知',age===null?'源时间未知':(age>3?'画面冻结 · ':'源帧龄 ')+age.toFixed(1)+' s',slot.error||m?.error].filter(Boolean).join(' · ');
+    slot.card.querySelector('.media-meta').textContent=[ENVIRONMENT[context.environment],{actual:'实际画面',target:'目标预览',overview:'整机视角',mesh:'实际图像上的 mesh',replay:'录制回放'}[m?.kind]||'来源未知',m?.preview_view==='mesh'&&m.candidate_id?'候选 '+m.candidate_id.slice(0,12):'',age===null?'源时间未知':(age>3?'画面冻结 · ':'源帧龄 ')+age.toFixed(1)+' s',slot.error||m?.error].filter(Boolean).join(' · ');
   }
   function cancelMediaRequest(slot) {
     slot.controller?.abort();slot.controller=null;slot.version++;
@@ -250,23 +299,39 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     slot.image.hidden=true;slot.image.removeAttribute('src');slot.empty.hidden=false;slot.error='';
   }
   function clearMedia() {for(const slot of mediaSlots.values())clearSlot(slot);}
+  function previewMedia(view){
+    const preview=state?.preview,frame=preview?.frames?.[view]||{},mesh=preview?.mesh||{},expected=preview?.revisions?.[view];
+    let error=previewErrors.get(view)||frame.error||preview?.error||'';
+    if(displayRequests.has(view)||displayRequests.has('recovery')||(previewFloors.has(view)&&expected<previewFloors.get(view)))error='等待本次只读预览的匹配画面';
+    if(view!=='mesh'&&(displayRequests.has('overview')||(previewFloors.has('overview')&&preview?.revisions?.overview<previewFloors.get('overview'))))error=previewErrors.get('overview')||'等待当前观察视角的匹配画面';
+    if(preview?.connected===false)error=preview.error||'渲染服务未连接，请查看设备诊断中的图像恢复指引';
+    if(preview?.status==='unconfigured')error='当前环境尚未配置目标渲染服务；重新连接画面不能代替环境配置。';
+    if(view==='mesh'&&!mesh.requested)error='实时 mesh 叠加已关闭；原始相机画面保持独立。';
+    if(view==='mesh'&&mesh.requested&&(mesh.camera!==meshCamera||mesh.candidate_id!==meshCandidate))error='等待当前相机与所选候选的匹配画面';
+    if(frame.revision!==undefined&&frame.revision!==expected)error='渲染结果仍属于旧修订，等待当前请求';
+    if(view!=='mesh'&&frame.view_revision!==undefined&&frame.view_revision!==preview?.revisions?.overview)error='观察视角已更新，等待匹配的新画面';
+    return {...frame,id:'preview-'+view,kind:view,preview_view:view,revision:expected,view_revision:preview?.revisions?.overview,renderer_id:preview?.renderer_id,
+      ...(view==='mesh'?{camera:mesh.camera,candidate_id:mesh.candidate_id}:{}),
+      ready:frame.ready===true&&Number.isInteger(expected)&&!error,error:error||(!frame.ready?'尚无此视图的画面，请先提交只读预览请求':''),poll_hz:frame.poll_hz||10};
+  }
   function renderMedia() {
     const actual=(state?.media||[]).filter(m=>m.kind==='actual'), used=new Set();
     const slots=[['head',['head','base_0']],['left',['left','left_wrist_0']],['right',['right','right_wrist_0']]];
     const named=new Set(slots.flatMap(([,aliases])=>aliases));
     for(const [id,aliases]of slots){const media=actual.find(m=>aliases.includes(m.id))||actual.find(m=>!named.has(m.id)&&!used.has(m.id));if(media)used.add(media.id);loadMedia(id,media);}
-    loadMedia('preview',(state?.media||[]).find(m=>m.kind==='target'));
+    loadMedia('preview',state?.preview?previewMedia(previewView):(state?.media||[]).find(m=>m.kind==='target'));
+    loadMedia('mesh',state?.preview?previewMedia('mesh'):null);
   }
   function loadMedia(id,m) {
     const card=el('media-'+id);
     let slot=mediaSlots.get(id);
     if(!slot){slot={card,image:card.querySelector('img'),empty:card.querySelector('.empty'),version:0};mediaSlots.set(id,slot);}
-    if(doc.hidden || !m){clearSlot(slot);slot.empty.textContent=doc.hidden?'页面后台，画面订阅已暂停':'尚无当前环境的可核验画面';updateMediaLabel(slot);return;}
+    if(doc.hidden || !m){clearSlot(slot);slot.empty.textContent=doc.hidden?'页面后台，画面订阅已暂停':state?.device?.id==='protocol-fake'?'协议 Fake（L1）不提供 PhysX 相机图像；完整 Fake 需要配置仿真与图像服务。':'尚无当前环境的可核验画面';updateMediaLabel(slot);return;}
     const url=safeMediaUrl(m.url,location.href);
-    const streamKey=JSON.stringify([key(),m.id,m.kind,m.candidate_revision??m.revision??null,url]);
+    const streamKey=JSON.stringify([key(),m.id,m.kind,m.candidate_revision??null,m.revision??null,m.view_revision??null,m.preview_view,m.renderer_id,m.camera,m.candidate_id,url]);
     if(slot.streamKey!==streamKey){clearSlot(slot);slot.streamKey=streamKey;slot.url=url;}
     slot.media={...m,...(slot.headerFrame!==null?{frame_id:slot.headerFrame}:{}),...(slot.headerSource!==null?{source_wall_ns:slot.headerSource}:{})};
-    if(!m.ready||!url){cancelMediaRequest(slot);slot.error=m.error||(!url?'尚无有效的同源画面地址':'画面尚未就绪');slot.empty.textContent=slot.error;if(!slot.blob){slot.image.hidden=true;slot.empty.hidden=false;}updateMediaLabel(slot);return;}
+    if(!m.ready||!url){cancelMediaRequest(slot);slot.error=m.error||(!url?'尚无有效的同源画面地址':'画面尚未就绪');slot.empty.textContent=slot.error;if(m.preview_view&&slot.blob){urls.revokeObjectURL(slot.blob);slot.blob=null;slot.image.removeAttribute('src');}if(!slot.blob){slot.image.hidden=true;slot.empty.hidden=false;}updateMediaLabel(slot);return;}
     updateMediaLabel(slot);
     if(!slot.controller&&!slot.timer)void nextMediaFrame(slot,slot.version);
   }
@@ -280,9 +345,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       if(version!==slot.version||at!==generation||controller.signal.aborted)return;
       if(response.status===304){slot.error='';return;}
       if(!response.ok)throw Error('画面接口 '+response.status);
+      const metadata=slot.media.preview_view?verifyPreviewFrame(slot.media,JSON.parse(response.headers?.get('X-Frame-Metadata')||'null'),context.environment):null;
       const blob=await response.blob();
       if(version!==slot.version||at!==generation||controller.signal.aborted)return;
-      const source=response.headers?.get('X-Source-Wall-Ns'),frame=response.headers?.get('X-Frame-Id');
+      const source=metadata?.source_wall_ns??response.headers?.get('X-Source-Wall-Ns'),frame=metadata?.frame_id??response.headers?.get('X-Frame-Id');
       const sourceNs=source===null||source===undefined||source===''?null:Number(source);
       blobUrl=urls.createObjectURL(blob);const decoded=make('img');decoded.src=blobUrl;
       if(decoded.decode)await decoded.decode();
@@ -356,13 +422,58 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       if(at!==generation||controller.signal.aborted)return;
       if(incoming.schema!=='robot-workbench-ui.v1'||!Number.isFinite(incoming.revision)||incoming.device?.environment!==context.environment)throw Error('状态契约或设备环境不匹配');
       if(incoming.revision<revision)return;
-      revision=incoming.revision;state=incoming;receivedAt=clock.now();online=true;render();
+      revision=incoming.revision;state=incoming;receivedAt=clock.now();online=true;
+      if(waitingForStateNotice)notice('设备与任务状态已更新。');
+      render();
     } catch(error) {if(at===generation&&!controller.signal.aborted){online=false;clearReview();notice('状态核验失败：'+error.message);render();}}
     finally{if(polling===controller)polling=null;}
   }
   function barrier() {
     generation++;polling?.abort();polling=null;clearReview();
     for(const slot of mediaSlots.values())cancelMediaRequest(slot);
+  }
+  async function sendDisplay(action,extra={}){
+    const allowed=permission(action),view={preview_target:'target',preview_overview:'overview',preview_mesh:'mesh',preview_recover:'recovery'}[action];
+    if(!allowed.allowed){notice(allowed.reason);return;}
+    if(displayRequests.has(view)||displayRequests.has('recovery'))return;
+    if(action==='preview_recover'&&state?.preview?.recovery?.allowed!==true){notice(state?.preview?.recovery?.reason||'当前后端未允许恢复渲染服务');return;}
+    const requestContext=key(),controller=new AbortController(),sequence=++requestSequence;
+    displayedRequest=sequence;displayRequests.set(view,controller);previewErrors.delete(view);
+    const affected=view==='recovery'?['target','overview','mesh']:[view];
+    for(const name of affected){const slot=mediaSlots.get(name==='mesh'?'mesh':'preview');if(slot)clearSlot(slot);if(view!=='recovery')previewFloors.set(name,(state.preview?.revisions?.[name]??0)+1);}
+    renderMedia();renderGates();notice(view==='recovery'?'已请求恢复本会话的渲染服务；机器人控制保持独立。':'正在提交只读显示请求，不执行机器人动作。',true);
+    try{
+      const response=await request('/api/actions/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
+        body:JSON.stringify({environment:context.environment,business:context.business,request_id:crypto.randomUUID(),...extra}),signal:controller.signal});
+      const result=await response.json();if(!response.ok)throw Error(result.error||result.message||'显示请求被拒绝');
+      if(requestContext!==key()||controller.signal.aborted)return;
+      if(view==='recovery'){previewFloors.clear();previewErrors.clear();}
+      else{if(!Number.isInteger(result.client_revision))throw Error('后端未返回可核验的预览修订');previewFloors.set(view,result.client_revision);}
+      if(displayedRequest===sequence)notice(result.message||'只读显示请求已受理，等待对应修订的画面。');
+    }catch(error){if(requestContext===key()&&!controller.signal.aborted){previewErrors.set(view,error.message);if(displayedRequest===sequence)notice('只读显示请求失败：'+error.message);}}
+    finally{if(displayRequests.get(view)===controller)displayRequests.delete(view);if(requestContext===key()){renderMedia();renderGates();void poll();}}
+  }
+  function showTarget(q12,jaw_gap_mm){
+    if(!Array.isArray(q12)||q12.length!==12||!q12.every(Number.isFinite)||!Array.isArray(jaw_gap_mm)||jaw_gap_mm.length!==2||!jaw_gap_mm.every(value=>Number.isFinite(value)&&value>=0&&value<=83)){notice('目标图像需要12个有效关节位置及0–83 mm夹爪开度');return;}
+    previewView='target';el('preview-view').value=previewView;el('overview-controls').hidden=true;
+    return sendDisplay('preview_target',{q12,jaw_gap_mm});
+  }
+  async function sendOverview(){
+    overviewDirty=true;if(overviewSending)return;overviewSending=true;
+    try{while(overviewDirty){overviewDirty=false;await sendDisplay('preview_overview',{...overview});}}
+    finally{overviewSending=false;}
+  }
+  function setOverviewPreset(){
+    Object.assign(overview,({front:{yaw:-Math.PI/2,pitch:.4},left:{yaw:-Math.PI/2-.7,pitch:.45},right:{yaw:-Math.PI/2+.7,pitch:.45},top:{yaw:-Math.PI/2,pitch:1.5}}[el('overview-preset').value]||{yaw:-Math.PI/2,pitch:.4}),{zoom:1,pan_y:0});
+    el('overview-zoom').value=1;void sendOverview();
+  }
+  function sendMesh(){
+    if(!state?.preview)return send('mesh',{enabled:el('mesh').checked});
+    if(el('mesh').checked&&!meshCandidate){notice('请选择与当前相机匹配的标定候选');el('mesh').checked=state.preview.mesh?.requested===true;renderGates();return;}
+    return sendDisplay('preview_mesh',{enabled:el('mesh').checked,camera:meshCamera,candidate_id:meshCandidate||null});
+  }
+  async function reconnectImages(){
+    clearMedia();await poll();renderMedia();notice(online?'已重新打开浏览器画面订阅；连接与源帧状态请查看图像诊断。':'状态连接仍未恢复，请按图像诊断中的后端指引检查。');
   }
   async function send(action,extra={}) {
     const allowed=permission(action);
@@ -389,12 +500,15 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function switchContext(next) {
     if(next.environment===context.environment&&next.business===context.business)return;
     barrier();for(const p of pending.values())p.controller.abort();pending.clear();clearMedia();
+    for(const controller of displayRequests.values())controller.abort();displayRequests.clear();previewFloors.clear();previewErrors.clear();
+    previewView='target';meshCamera='head';meshCandidate='';meshStateKey='';meshOptionsKey='';overviewDirty=false;overviewPointer=null;
     context=next;state=null;revision=-1;online=false;reviewKey='';manualKey='';manualQueueKey='';replayKey='';replayControlsKey='';el('supported').checked=false;
-    notice('正在核验'+ENVIRONMENT[context.environment]+' / '+BUSINESS[context.business]+'；浏览不会交接控制权。');render();void poll();
+    notice('正在核验'+ENVIRONMENT[context.environment]+' / '+BUSINESS[context.business]+'；浏览不会交接控制权。',false,true);render();void poll();
   }
   function selectTab(next) {
     tab=next;for(const button of doc.querySelectorAll('[data-tab]')){if(button.dataset.tab===next)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
     el('work-pane').hidden=!BUSINESS[next];el('results-pane').hidden=next!=='results';el('diagnostics-pane').hidden=next!=='diagnostics';
+    el('image-recovery').hidden=next!=='diagnostics';
     if(BUSINESS[next])switchContext({...context,business:next});
   }
   function manualPreview(queueAdd=false) {
@@ -432,7 +546,25 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('replay-camera').addEventListener('change',()=>{el('replay-overlay').checked=false;renderGates();});
     for(const action of ['stop','connect','cancel','recover'])el(action).addEventListener('click',()=>send(action));
     el('handoff').addEventListener('click',()=>send('handoff',{target_business:el('handoff').dataset.target}));
-    el('mesh').addEventListener('change',()=>send('mesh',{enabled:el('mesh').checked}));
+    el('preview-view').addEventListener('change',()=>{previewView=el('preview-view').value==='overview'?'overview':'target';renderPreview();renderMedia();renderGates();if(previewView==='overview'&&!state?.preview?.frames?.overview?.ready)void sendOverview();});
+    el('show-target').addEventListener('click',()=>{
+      const joints=jointInputs('position'),jaws=[el('jaw-left'),el('jaw-right')];
+      if([...joints,...jaws].some(input=>String(input.value).trim()==='')||joints.some(input=>Number(input.value)<Number(input.min)||Number(input.value)>Number(input.max))){notice('请填写限位内的完整目标姿态与夹爪开度');return;}
+      return showTarget(joints.map(input=>Number(input.value)),jaws.map(input=>Number(input.value)));
+    });
+    el('overview-preset').addEventListener('change',setOverviewPreset);
+    el('overview-reset').addEventListener('click',()=>{el('overview-preset').value='front';setOverviewPreset();});
+    el('overview-zoom').addEventListener('input',()=>{overview.zoom=Math.max(.4,Math.min(4,Number(el('overview-zoom').value)));void sendOverview();});
+    const overviewImage=el('media-preview').querySelector('img');
+    overviewImage.addEventListener('pointerdown',event=>{if(previewView!=='overview'||!permission('preview_overview').allowed)return;overviewPointer={x:event.clientX,y:event.clientY};overviewImage.setPointerCapture?.(event.pointerId);});
+    overviewImage.addEventListener('pointermove',event=>{if(!overviewPointer||previewView!=='overview')return;overview.yaw=((overview.yaw-(event.clientX-overviewPointer.x)*.006+3*Math.PI)%(2*Math.PI))-Math.PI;overview.pan_y=Math.max(-2,Math.min(2,overview.pan_y+(event.clientY-overviewPointer.y)/(overviewImage.clientHeight||240)));overviewPointer={x:event.clientX,y:event.clientY};void sendOverview();});
+    for(const event of ['pointerup','pointercancel'])overviewImage.addEventListener(event,()=>{overviewPointer=null;});
+    overviewImage.addEventListener('wheel',event=>{if(previewView!=='overview'||!permission('preview_overview').allowed)return;event.preventDefault();overview.zoom=Math.max(.4,Math.min(4,overview.zoom*Math.exp(-event.deltaY*.001)));el('overview-zoom').value=overview.zoom;void sendOverview();},{passive:false});
+    el('mesh-camera').addEventListener('change',()=>{meshCamera=el('mesh-camera').value;meshCandidate='';el('mesh').checked=false;renderPreview();el('mesh').checked=false;renderMedia();void sendMesh();});
+    el('mesh-candidate').addEventListener('change',()=>{meshCandidate=el('mesh-candidate').value;renderMedia();void sendMesh();});
+    el('mesh').addEventListener('change',sendMesh);
+    el('reconnect-images').addEventListener('click',reconnectImages);
+    el('preview-recover').addEventListener('click',()=>sendDisplay('preview_recover'));
     for(const id of ['clearance','supported'])el(id).addEventListener('change',renderGates);
     for(const id of ['jaw-left','jaw-right','jaw-speed'])el(id).addEventListener('input',editManual);
     el('manual-preview').addEventListener('click',()=>manualPreview());
@@ -445,7 +577,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     doc.addEventListener('visibilitychange',()=>{if(doc.hidden)clearMedia();else{renderMedia();void poll();}});
     render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250));
   }
-  function destroy(){stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();clearMedia();timers.forEach(clearInterval);}
+  function destroy(){stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}
   return {start,poll,send,switchContext,selectTab,destroy,get state(){return state;},get context(){return {...context};}};
 }
 

@@ -81,7 +81,7 @@ def inputs(root):
     return base,contract,str(directories['runtime']),dict(native=native,entry=entry,node=node,params=params,dep=dep,curobo=curobo,old=old,old_plan=old_plan,prompt=prompt)
 
 
-def main(a1):
+def main(a1,roles=4):
     with tempfile.TemporaryDirectory() as temp:
         root=Path(temp).resolve();capture,active,cconfig,installed,registration=fixture(root,Path(a1).resolve())
         base,contract,runtime_root,external=inputs(root)
@@ -101,6 +101,10 @@ def main(a1):
             execution=dict(TARGET,session_id='cpu-contract-fixture-only',max_processes=4,min_free_memory_mib=16384,
                 plant=dict(session_id='cpu-contract-fixture-only',pid=123,process_start_ticks='456',scope=str(root),
                     script=str(script),script_sha256=sha(script),argv=['python',str(script),'--output',str(root)],max_memory_mib=12288))
+            if roles==5:
+                from robot_workbench.preview_service import prepare_preview_roles
+                preview_contract=dict(resources={'max_workers':5},preview_setup=dict(port=19012,max_memory_mib=12288,auxiliary_max_memory_mib=16384))
+                execution.update(max_processes=5,roles=prepare_preview_roles(preview_contract,root,cconfig))
             template=ROOT/'configs/collection-profile-template.json'
             options=dict(run_root=root,calibration_config=root/'calibration-config.json',capture_root=capture,
                 expected_install=installed,registration=root/'registration.json',profile_template=template,
@@ -128,7 +132,8 @@ def main(a1):
             assert all(key not in setup['pipeline'] for key in ('observation_input_root','detection_input_root','planned_input_root',
                 'detector_service','planner_service','remote_run_root','contract_path'))
             assert setup['pipeline']['environment']=='fake' and setup['pipeline']['execution']==execution
-            assert setup['conversion']['argv'][-2:]==['--gpu','1']
+            assert setup['conversion']['argv'][setup['conversion']['argv'].index('--gpu')+1]=='1'
+            if roles==5:assert json.loads(setup['conversion']['argv'][-1])==execution
             assert setup['conversion']['env']['CUDA_VISIBLE_DEVICES']=='1'
             assert read(root/'collection-new/calibration/profile.json')['source']['kind']=='installed_fake_calibration'
             assert read(template)['source']['calibration_available'] is False
@@ -188,4 +193,5 @@ def main(a1):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--a1',type=Path,required=True)
-    main(parser.parse_args().a1)
+    parser.add_argument('--roles',type=int,choices=(4,5),default=4)
+    args=parser.parse_args();main(args.a1,args.roles)

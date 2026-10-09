@@ -725,6 +725,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
 
 
 def main(args):
+    from local_execution import register_auxiliary
+    register_auxiliary(args,__file__)
     args.output.mkdir(parents=True, exist_ok=False)
     started, updates = time.monotonic(), 0
     result = dict(status='failed', backend='curobo_motiongen', hardware_access=False)

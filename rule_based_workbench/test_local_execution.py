@@ -76,6 +76,7 @@ class LocalExecutionTest(unittest.TestCase):
         self.assertEqual(transport(legacy,'dsw-scene','command'),ssh('dsw-scene','command'))
         self.assertEqual(isaac_environment(legacy,'dsw-scene')['CUDA_VISIBLE_DEVICES'],'0')
         self.assertEqual(isaac_environment(self.config,'dsw-scene')['CUDA_VISIBLE_DEVICES'],'1')
+        self.assertEqual(isaac_environment(self.config,'dsw-scene')['ROBOT_WORKBENCH_SESSION_ID'],'cpu-session')
         cfg,contract,_=load_config(self.root/'config.json')
         stages=build_plan(cfg,contract)
         detection=next(stage for stage in stages if stage['name']=='detect')
@@ -246,6 +247,42 @@ class LocalExecutionTest(unittest.TestCase):
                 if not supervisor.stdin.closed:supervisor.stdin.close()
                 if supervisor.poll() is None:supervisor.terminate();supervisor.wait(25)
                 supervisor.stderr.close()
+
+    def test_five_roles_require_exact_preview_and_auxiliary_registration(self):
+        from local_execution import role_spec_digest
+        execution=deepcopy(self.execution);scope=self.root/'resident';scope.mkdir()
+        execution['plant']['scope']=str(scope);execution['plant']['argv'][3]=str(scope)
+        preview=scope/'preview';preview.mkdir();config=preview/'config.json';config.write_text('{}')
+        script=self.root/'joint_head_workbench_live.py';script.write_text('# renderer fixture\n')
+        auxiliary=self.root/'playground_sim.py';auxiliary.write_text('# auxiliary fixture\n')
+        digest=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+        execution.update(max_processes=5,roles=dict(preview=dict(root=str(preview),registration=str(scope/'preview.json'),
+            script=str(script),script_sha256=digest(script),config_path=str(config),config_sha256=digest(config),
+            token_file=str(preview/'token'),port=19001,max_memory_mib=8000),
+            auxiliary=dict(root=str(scope),registration=str(scope/'auxiliary.json'),entrypoints={str(auxiliary):digest(auxiliary)},max_memory_mib=9000)))
+        cfg=dict(self.config,execution=execution)
+        self.process(101,execution['plant']['argv'])
+        def register(role,pid,entry,options,instance=None):
+            spec=execution['roles'][role]
+            argv=['python3',str(entry),*options,'--execution-json',json.dumps(execution)]
+            self.process(pid,argv,session='cpu-session')
+            state=dict(role=role,session_id='cpu-session',spec_sha256=role_spec_digest(spec),pid=pid,
+                process_start_ticks='123',argv=argv,entrypoint=str(entry),entrypoint_sha256=digest(entry),
+                config_sha256=spec.get('config_sha256'),renderer_instance_id=instance,status='ready')
+            Path(spec['registration']).write_text(json.dumps(state));return state
+        state=register('preview',404,script,['--config',str(config),'--output',str(preview/'frames'),
+            '--token-file',str(preview/'token'),'--port','19001','--render-gpu','1','--duration-s','600','--display-only'],'f'*32)
+        register('auxiliary',405,auxiliary,['--output',str(scope/'replay'),'--gpu','1'])
+        result=gpu_check(cfg,require='preview',proc_root=self.proc,query=self.query((101,404,405)))
+        self.assertEqual({row['pid'] for row in result['processes']},{101,404,405})
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=self.query((101,404,405,999)))
+        self.process(404,state['argv'],session='foreign')
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=self.query((101,404,405)))
+        self.process(404,state['argv'],session='cpu-session')
+        config.write_text('{"changed":true}')
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=self.query((101,404,405)))
+        bad=deepcopy(execution);bad['max_processes']=4
+        with self.assertRaises(ValueError):validate({'execution':bad})
 
     def test_asset_conversion_uses_physical_gpu_one_with_logical_cuda_zero(self):
         from a1_isaac_assets import conversion_device,main

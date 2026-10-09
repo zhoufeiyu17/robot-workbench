@@ -85,6 +85,7 @@ def observed_mesh(client,inputs,candidate_id):
     return image,dict(schema='observed_candidate_mesh.v1',source='actual_frame_candidate_mesh',
         source_frame_id=frame_id,frame_id=frame_id+':'+hashlib.sha256(json.dumps(candidate,sort_keys=True,allow_nan=False).encode()).hexdigest(),
         source_jpeg_sha256=hashlib.sha256(raw).hexdigest(),source_time_ns=image_stamp[0],
+        source_wall_ns=meta['host_receive_ns'],
         source_clock_id=clock['source_clock_id'],clock_domain=clock['clock_domain'],environment=environment,
         candidate_id=candidate_id,source_age_s=age,observed_age_s=age+render_s,render_ms=render_s*1000,
         display_only=True,measurement_qualified=False)
@@ -104,7 +105,7 @@ class TargetPreview:
         self.threads=[];self.target=None;self.view=None;self.mirror=None
         self.revisions=dict(target=0,view=0,mirror=0,mesh=0)
         self.requested_wall_ns=dict(target=0,view=0)
-        self.frames={};self.error=None;self.mesh_error=None;self.last_health=0.
+        self.frames={};self.error=None;self.mesh_error=None;self.mirror_error=None;self.last_health=0.
         self.mesh_selection=dict(enabled=False,camera=None,candidate_id=None)
 
     def start(self):
@@ -128,7 +129,8 @@ class TargetPreview:
             self.view=dict(zip(('yaw','pitch','zoom','pan_y'),values));self.revisions['view']+=1
             self.requested_wall_ns['view']=time.time_ns()
             self.frames.pop('overview',None);self.frames.pop('target',None)
-        self.changed.set();return {'queued':True,'display_only':True}
+            revision=self.revisions['view']
+        self.changed.set();return {'queued':True,'display_only':True,'client_revision':revision}
 
     def mirror_feedback(self,body):
         # This only mirrors display kinematics; it never writes to the source plant.
@@ -144,13 +146,15 @@ class TargetPreview:
         with self.lock:
             self.mesh_selection=dict(enabled=enabled,camera=camera,candidate_id=candidate_id)
             self.revisions['mesh']+=1;self.frames.pop('mesh',None);self.mesh_error=None
-        return dict(enabled=enabled,warning='开启 mesh 叠加会降低姿态预览性能',display_only=True)
+            revision=self.revisions['mesh']
+        return dict(enabled=enabled,client_revision=revision,warning='开启 mesh 叠加会降低姿态预览性能',display_only=True)
 
     def state(self):
         with self.lock:
             return dict(renderer_instance_id=self.instance,connected=time.monotonic()-self.last_health<3,
-                error=self.error,mesh_error=self.mesh_error,mesh=deepcopy(self.mesh_selection),
-                revisions=dict(self.revisions),frames={key:deepcopy(value[1]) for key,value in self.frames.items()},
+                error=self.error,mesh_error=self.mesh_error,mirror_error=self.mirror_error,mesh=deepcopy(self.mesh_selection),
+                revisions=dict(self.revisions),frames={key:deepcopy(value[1]) for key,value in self.frames.items()
+                    if key!='mesh' or self.mesh_selection['enabled'] and value[1]['observed_age_s']+time.monotonic()-value[2]<2},
                 display_only=True,control_authority=False)
 
     def media(self,view):
@@ -192,7 +196,12 @@ class TargetPreview:
                     view_revision=max(remote.get('overview_revision',0)+1,(view_revision or 0)+1)
                     self.client.request('/overview-view',dict(view,revision=view_revision));sent['view']=current['view']
                 if mirror is not None and sent['mirror']!=current['mirror']:
-                    self.client.request('/mirror',mirror);sent['mirror']=current['mirror']
+                    try:
+                        self.client.request('/mirror',mirror)
+                        with self.lock:self.mirror_error=None
+                    except Exception as error:
+                        with self.lock:self.mirror_error=str(error)
+                    sent['mirror']=current['mirror']
                 for name,renderer_view in (('overview','actual'),('target','preview')):
                     if name=='target' and target_revision is None:continue
                     query=dict(view=renderer_view,renderer_instance_id=self.instance,
@@ -211,7 +220,7 @@ class TargetPreview:
                         if current['view']==self.revisions['view'] and (name=='overview' or current['target']==self.revisions['target']):
                             stamp=max(requested.values()) if name=='target' else requested['view']
                             timing=dict(client_requested_wall_ns=stamp,display_latency_ms=(metadata['source_timestamp_ns']-stamp)/1e6) if stamp else {}
-                            self.frames[name]=(raw,dict(metadata,client_revision=current['target'],**timing),time.monotonic())
+                            self.frames[name]=(raw,dict(metadata,client_revision=current['target'],client_view_revision=current['view'],**timing),time.monotonic())
                 with self.lock:self.last_health=time.monotonic();self.error=None
             except Exception as error:
                 with self.lock:self.error=str(error)
@@ -230,7 +239,7 @@ class TargetPreview:
                         raw,metadata=observed_mesh(self.client,inputs,selection['candidate_id'])
                         with self.lock:
                             if revision==self.revisions['mesh'] and self.mesh_selection['enabled']:
-                                self.frames['mesh']=(raw,metadata,time.monotonic());self.mesh_error=None
+                                self.frames['mesh']=(raw,dict(metadata,renderer_instance_id=self.instance,revision=revision,camera=selection['camera']),time.monotonic());self.mesh_error=None
                 except Exception as error:
                     with self.lock:
                         if revision==self.revisions['mesh']:self.mesh_error=str(error)

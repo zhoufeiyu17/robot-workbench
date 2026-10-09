@@ -9,7 +9,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit,urlencode
 from robot_workbench.workflows import CALIBRATION_TOOLS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,7 @@ class Device:
         self.closed = threading.Event()
         self.thread = None
         self.error = None
+        self.preview = None
         self.stop_latched = False
         self.connecting = False
 
@@ -101,6 +102,7 @@ class Application:
         self.csrf = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.revision = 0
+        self.display_actions=threading.Lock()
         self.jobs, self.requests, self.reviews = {}, OrderedDict(), {}
         self.manual_tasks = {}
         self.generations = {environment: 0 for environment in devices}
@@ -109,6 +111,38 @@ class Application:
         if environment not in self.devices:
             raise ValueError('该环境尚未配置，不能切换到另一个环境代替执行')
         return self.devices[environment]
+
+    def preview_state(self,device):
+        provider=device.preview
+        value=provider.state() if provider else dict(connected=False,status='unconfigured',error=None,
+            recovery=dict(allowed=False,message='当前环境尚未启用目标图像服务；实际相机画面不能代替目标姿态预览。'))
+        raw=value.get('revisions') or {};revisions=dict(target=raw.get('target',0),overview=raw.get('view',0),mesh=raw.get('mesh',0))
+        frames={}
+        for view in ('target','overview','mesh'):
+            meta=(value.get('frames') or {}).get(view) or {}
+            frames[view]=dict(ready=bool(meta and value.get('connected')),url='/api/preview-media?'+urlencode(dict(environment=device.environment,view=view)),
+                revision=revisions[view],view_revision=revisions['overview'],frame_id=meta.get('frame_id'),
+                source_wall_ns=meta.get('source_wall_ns',meta.get('source_timestamp_ns')),error=value.get('mesh_error') if view=='mesh' else value.get('error'))
+        selection=value.get('mesh') or {}
+        return dict(value,renderer_id=value.get('renderer_instance_id'),revisions=revisions,frames=frames,
+            mesh=dict(requested=selection.get('enabled',False),applied=bool(selection.get('enabled') and frames['mesh']['ready']),
+                      camera=selection.get('camera','head'),candidate_id=selection.get('candidate_id')))
+
+    def preview_media(self,environment,view):
+        device=self.device(environment)
+        if device.preview is None:raise ValueError('目标图像服务未配置')
+        raw,metadata=device.preview.media(view)
+        state=self.preview_state(device);frame=state['frames'][view]
+        if metadata.get('renderer_instance_id')!=state.get('renderer_id'):raise ValueError('renderer instance changed while reading display frame')
+        revision=metadata.get('client_revision') if view=='target' else metadata.get('client_view_revision') if view=='overview' else metadata.get('revision')
+        if revision!=state['revisions'][view] or view!='mesh' and metadata.get('client_view_revision')!=state['revisions']['overview']:
+            raise ValueError('display frame belongs to an older request')
+        selection=state['mesh']
+        if view=='mesh' and metadata.get('environment')!=environment:raise ValueError('mesh observation belongs to another device environment')
+        if view=='mesh' and (not selection['requested'] or metadata.get('candidate_id')!=selection['candidate_id'] or metadata.get('camera')!=selection['camera']):
+            raise ValueError('candidate mesh selection changed')
+        return raw,dict(metadata,revision=revision,view_revision=state['revisions']['overview'],view=view,environment=environment,
+            renderer_id=metadata['renderer_instance_id'],source_wall_ns=metadata.get('source_wall_ns',metadata.get('source_timestamp_ns')))
 
     def state(self, environment, business):
         if business not in BUSINESSES:
@@ -183,6 +217,11 @@ class Application:
             reason=allowed['confirm']['reason'] or (None if review else '请先生成并审阅人工姿态'))
         allowed['recover'] = dict(allowed=bool(runtime.get('recoverable_fault')) and holder==business,
             reason=None if runtime.get('recoverable_fault') and holder==business else '当前没有可确认恢复的故障；设备故障请查看诊断')
+        preview=self.preview_state(device)
+        for action in ('preview_target','preview_overview','preview_mesh'):
+            allowed[action]=dict(allowed=bool(preview.get('connected')),reason=None if preview.get('connected') else '目标图像服务尚未就绪，请查看画面恢复指引')
+        allowed['preview_recover']=dict(allowed=bool(device.preview and hasattr(device.preview,'recover') and preview.get('recovery',{}).get('allowed')),
+            reason=preview.get('recovery',{}).get('message'))
         for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS):
             allowed.setdefault(action,dict(allowed=False,reason='当前业务后端尚未配置'))
         if workflow:
@@ -213,7 +252,7 @@ class Application:
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
             results=workflow.results() if workflow else [],diagnostics=[{'label':'控制循环','value':device.error or '未报告错误'}],
             mesh=workflow.mesh() if workflow and hasattr(workflow,'mesh') else {'requested':False,'applied':False},manual=manual,
-            arrival_statistics=arrival)
+            arrival_statistics=arrival,preview=preview)
 
     def action(self, action, body):
         if not isinstance(body,dict) or body.get('business') not in BUSINESSES:
@@ -237,6 +276,29 @@ class Application:
             for workflow in device.workflows.values():
                 threading.Thread(target=workflow.cancel,daemon=True).start()
             return {**result,'message':'停止已受理；请查看控制器确认状态'}
+        if action in ('preview_target','preview_overview','preview_mesh','preview_recover'):
+            provider=device.preview
+            if provider is None:raise ValueError('目标图像服务未配置')
+            fields={'preview_target':{'q12','jaw_gap_mm'},'preview_overview':{'yaw','pitch','zoom','pan_y'},
+                    'preview_mesh':{'enabled','camera','candidate_id'},'preview_recover':set()}[action]
+            if set(body)-{'environment','business','request_id'}-fields:raise ValueError('unknown display action field')
+            # Serialize only these cache/queue writes. Owner stop/state never takes this lock.
+            with self.display_actions:
+                with self.lock:
+                    previous=self.requests.get(key)
+                    if previous:
+                        if previous['body']!=original_body or previous['action']!=action:raise ValueError('同一请求身份不可绑定不同操作')
+                        return previous['response']
+                if action=='preview_target':result=provider.target_pose(body['q12'],body['jaw_gap_mm'])
+                elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.))
+                elif action=='preview_mesh':result=provider.mesh(body['enabled'],camera=body.get('camera','head'),candidate_id=body.get('candidate_id'))
+                else:
+                    if not hasattr(provider,'recover') or not provider.state().get('recovery',{}).get('allowed'):raise ValueError('渲染器当前不可恢复')
+                    result=provider.recover()
+                with self.lock:
+                    self.requests[key]=dict(body=original_body,action=action,response=result)
+                    while len(self.requests)>256:self.requests.popitem(last=False)
+            return result
         if action=='handoff':
             runtime=device.runtime
             if runtime is None:raise ValueError('设备未连接')
@@ -438,6 +500,9 @@ def handler(app):
             try:
                 if path.path=='/api/state':
                     return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0]))
+                if path.path=='/api/preview-media':
+                    raw,meta=app.preview_media(query.get('environment',['fake'])[0],query.get('view',['target'])[0])
+                    return self.send(200,raw,'image/jpeg',{'X-Frame-Metadata':json.dumps(meta,allow_nan=False,separators=(',',':'))})
                 if path.path=='/api/calibration-file':
                     workflow=app.device(query.get('environment',['fake'])[0]).workflows.get('calibration')
                     if not workflow:raise ValueError('标定服务未配置')

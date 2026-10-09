@@ -4,7 +4,7 @@ import {webcrypto} from 'node:crypto';
 
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
-const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -19,7 +19,7 @@ class Element {
 }
 function documentStub(){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Element()]));
-  for(const id of ['head','left','right','preview']){const card=nodes.get('media-'+id),image=new Element('img'),empty=new Element('p'),meta=new Element('p');empty.className='empty';meta.className='media-meta';card.append(image,empty,meta);}
+  for(const id of ['head','left','right','preview','mesh']){const card=nodes.get('media-'+id),image=new Element('img'),empty=new Element('p'),meta=new Element('p');empty.className='empty';meta.className='media-meta';card.append(image,empty,meta);}
   const tabs=['calibration','collection','results','diagnostics'].map(tab=>{const button=new Element('button');button.dataset.tab=tab;return button;});
   return {hidden:false,nodes,tabs,events:{},getElementById(id){assert(nodes.has(id),'Missing UI node '+id);return nodes.get(id);},createElement(tag){return new Element(tag);},querySelectorAll(selector){return selector==='[data-tab]'?tabs:[];},addEventListener(name,callback){this.events[name]=callback;}};
 }
@@ -52,6 +52,17 @@ const review=snapshot({device:{environment:'physical'},workflow:{primary_action:
 assert.match(actionPermission(review,'execute').reason,/净空/);
 assert.equal(actionPermission(review,'execute',{clearance:true}).allowed,true);
 assert.equal(actionPermission(snapshot(),'stop',{pending:true,fresh:false}).allowed,true);
+
+{
+  const h=harness();h.get('request-status').textContent='正在读取设备与任务状态…';h.app.start();
+  h.reply(0,snapshot());await settle();assert.equal(h.get('request-status').textContent,'设备与任务状态已更新。');
+  const action=h.app.send('generate_plan');h.app.poll();h.reply(2,snapshot({revision:2}));await settle();
+  assert.match(h.get('request-status').textContent,/请求已发送/,'a state poll must preserve an in-flight action notice');
+  h.requests[1].resolve({ok:false,json:async()=>({error:'planner refused'})});await action;h.reply(3,snapshot({revision:3}));await settle();
+  assert.match(h.get('request-status').textContent,/planner refused/,'a state poll must preserve an explicit action failure');
+  h.app.selectTab('collection');h.reply(4,snapshot({revision:4}));await settle();
+  assert.equal(h.get('request-status').textContent,'设备与任务状态已更新。','context-loading notice also ends after its valid state');h.app.destroy();
+}
 
 {
   const h=harness();h.app.start();const value=snapshot();value.runtime.motion_status='no_automatic_task';
@@ -222,4 +233,81 @@ for(const [button,path,field,expected]of [['wrist-redo','generate_plan','mode','
   const h=harness();h.app.start();h.reply(0,snapshot({workflow:{status:'unconfigured'}}));await settle();
   assert.equal(h.get('task-status').textContent,'业务服务未配置');assert.doesNotMatch(html,/原 C|C 动作|C 后端/);h.app.destroy();
 }
-console.log('PASS unified web: stale/context revisions, truthful stages, stop, review gates, cameras, calibration tools, solver source, result details/export and mesh warning.');
+function previewSnapshot(){
+  const value=manualSnapshot();for(const action of ['preview_target','preview_overview','preview_mesh','preview_recover'])value.runtime.allowed_operations[action]={allowed:true};
+  value.preview={connected:true,renderer_id:'renderer-one',status:'ready',revisions:{target:7,overview:3,mesh:4},
+    frames:Object.fromEntries(['target','overview','mesh'].map(view=>[view,{ready:false,url:'/api/preview-media?environment=fake&view='+view,revision:{target:7,overview:3,mesh:4}[view]}])),
+    mesh:{requested:false,applied:false,camera:'head',candidate_id:null},recovery:{allowed:false,reason:'无需重启'}};
+  value.results=[{id:'poor-head',kind:'head',label:'未通过头部',status:'quality_failed'},{id:'other-head',kind:'head',label:'另一个头部',status:'quality_failed'},{id:'poor-wrist',kind:'wrist',label:'未通过双腕',status:'quality_failed'}];
+  return value;
+}
+const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringify({environment:'fake',view,revision,view_revision:3,renderer_id:'renderer-one',frame_id:'frame-'+revision,source_wall_ns:10e9,...extra})});
+{
+  const media={preview_view:'mesh',revision:3,renderer_id:'one',camera:'left',candidate_id:'poor'};
+  const meta={view:'mesh',revision:3,renderer_id:'one',environment:'fake',camera:'left',candidate_id:'poor',source_wall_ns:10e9};
+  assert.equal(verifyPreviewFrame(media,meta,'fake'),meta);
+  for(const change of [{revision:2},{view:'target'},{environment:'physical'},{renderer_id:'old'},{camera:'right'},{candidate_id:'other'},{source_wall_ns:null}])assert.throws(()=>verifyPreviewFrame(media,{...meta,...change},'fake'));
+  const target={...media,preview_view:'target',view_revision:9},targetMeta={...meta,view:'target',view_revision:9};
+  assert.equal(verifyPreviewFrame(target,targetMeta,'fake'),targetMeta);
+  assert.throws(()=>verifyPreviewFrame(target,{...targetMeta,view_revision:8},'fake'),/观察视角修订/);
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();
+  value.workflow.review={id:'approved-motion',summary:'already reviewed',physical_clearance_required:true};value.workflow.primary_action={id:'manual_execute',allowed:true};
+  h.reply(0,value);await settle();h.get('clearance').checked=true;
+  const request=h.get('show-target').events.click();assert.equal(h.requests[1].url,'/api/actions/preview_target');
+  assert.deepEqual(JSON.parse(h.requests[1].options.body).q12,Array(12).fill(.1));assert.equal(h.get('clearance').checked,true,'read-only display must not revoke a motion review');
+  h.reply(1,{client_revision:8,token:null});await request;await settle();
+  value.revision=2;value.preview.frames.target.ready=true;h.reply(2,value);await settle();
+  assert.equal(h.requests.length,3,'older state revision cannot start an image request for a newer target');
+  value.revision=3;value.preview.revisions.target=8;value.preview.frames.target.revision=8;h.app.poll();h.reply(3,value);await settle();
+  assert.match(h.requests[4].url,/view=target/);h.reply(4,{},previewHeaders('target',7));await settle();
+  assert.equal(h.get('media-preview').querySelector('img').hidden,true);assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/修订不匹配/);
+  h.nextFrame();h.reply(5,{},previewHeaders('target',8));await settle();assert.equal(h.get('media-preview').querySelector('img').hidden,false);
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1,'target image never invokes motion preview or confirm');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,previewSnapshot());await settle();
+  h.get('show-target').events.click();const stop=h.app.send('stop');
+  assert.equal(h.requests[1].url,'/api/actions/preview_target');assert.equal(h.requests[2].url,'/api/actions/stop','slow renderer must never delay the independent stop request');
+  h.reply(2,{message:'停止已受理，等待保持回执'});await stop;h.reply(1,{client_revision:8,message:'迟到的目标显示回执'});await settle();
+  assert.doesNotMatch(h.get('request-status').textContent,/迟到的目标/);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.mesh={requested:true,applied:true,camera:'head',candidate_id:'poor-head'};value.preview.frames.mesh.ready=true;
+  h.reply(0,value);await settle();const old=h.requests[1];
+  assert(h.get('mesh-candidate').children.some(row=>row.value==='poor-head'),'quality failed candidates remain selectable');
+  h.get('mesh-candidate').value='other-head';const change=h.get('mesh-candidate').events.change();assert.equal(h.requests[2].url,'/api/actions/preview_mesh');assert.equal(old.options.signal.aborted,true);
+  old.resolve(response({},previewHeaders('mesh',4,{camera:'head',candidate_id:'poor-head'})));await settle();assert.equal(h.get('media-mesh').querySelector('img').hidden,true,'late previous candidate never reappears');
+  h.reply(2,{client_revision:5});await change;await settle();value.revision=2;value.preview.mesh.candidate_id='other-head';value.preview.revisions.mesh=5;value.preview.frames.mesh.revision=5;h.reply(3,value);await settle();
+  h.reply(4,{},previewHeaders('mesh',5,{camera:'head',candidate_id:'poor-head'}));await settle();assert.equal(h.get('media-mesh').querySelector('img').hidden,true,'metadata candidate must match current selection');
+  h.nextFrame();h.reply(5,{},previewHeaders('mesh',5,{camera:'head',candidate_id:'other-head'}));await settle();assert.equal(h.get('media-mesh').querySelector('img').hidden,false);
+  h.get('mesh').checked=false;h.get('mesh').events.change();assert.equal(JSON.parse(h.requests[6].options.body).enabled,false);assert.equal(h.get('media-mesh').querySelector('img').hidden,true);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  h.get('preview-view').value='overview';h.get('preview-view').events.change();assert.equal(h.requests[1].url,'/api/actions/preview_overview');
+  h.get('overview-zoom').value=1.5;h.get('overview-zoom').events.input();h.get('overview-zoom').value=2;h.get('overview-zoom').events.input();assert.equal(h.requests.length,2,'overview requests are serialized and coalesced');
+  h.reply(1,{client_revision:4});await settle();assert.equal(h.requests[3].url,'/api/actions/preview_overview');assert.equal(JSON.parse(h.requests[3].options.body).zoom,2);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.connected=false;value.preview.error='renderer process unavailable';value.preview.recovery={allowed:false,reason:'后端未允许',message:'检查本会话渲染日志',commands:['review renderer.log']};
+  h.reply(0,value);await settle();h.app.selectTab('diagnostics');assert.equal(h.get('image-recovery').hidden,false);assert.equal(h.get('preview-recover').disabled,true);
+  await h.get('preview-recover').events.click();assert.equal(h.requests.length,1,'disabled recovery must not send a restart');
+  const reconnect=h.get('reconnect-images').events.click();assert.match(h.requests[1].url,/\/api\/state/);h.reply(1,{...value,revision:2});await reconnect;
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'browser recovery only rereads state and frames');
+  assert.equal(h.get('image-recovery-commands').textContent,'review renderer.log');
+  value.preview.recovery.allowed=true;value.revision=3;h.app.poll();h.reply(2,value);await settle();assert.equal(h.get('preview-recover').disabled,false);
+  h.get('preview-recover').events.click();assert.equal(h.requests[3].url,'/api/actions/preview_recover');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot({device:{id:'protocol-fake',environment:'fake'}}));await settle();
+  assert.match(h.get('preview-status').textContent,/协议 Fake（L1）/);assert.match(h.get('media-head').querySelector('.empty').textContent,/不提供 PhysX 相机图像/);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.results=[];value.preview.connected=false;
+  value.runtime.allowed_operations.preview_mesh={allowed:false,reason:'渲染服务尚未配置'};
+  h.reply(0,value);await settle();assert.equal(h.get('mesh').disabled,true);
+  assert.equal(h.get('mesh-reason').textContent,'渲染服务尚未配置');h.app.destroy();
+}
+console.log('PASS unified web: review/stop gates, calibration tools, target and mesh frame identities, display-only actions, coalesced overview, recovery isolation and truthful L1 availability.');

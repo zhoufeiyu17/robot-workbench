@@ -117,6 +117,7 @@ def geometry_stage(cfg,output,*,speed=.3,initial=None):
         args+=['--execution-json',json.dumps(cfg['execution'])]
     environment={'CUDA_VISIBLE_DEVICES':str(lane(cfg,'dsw-scene')['gpu']) if gpu else '', 'PYTHONNOUSERSITE':'1','PYTHONDONTWRITEBYTECODE':'1',
         'OMP_NUM_THREADS':'1','MKL_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','PYTHONPATH':cfg['deps']+':'+wb+':'+str(Path(wb).parent)}
+    if cfg.get('execution'):environment['ROBOT_WORKBENCH_SESSION_ID']=cfg['execution']['session_id']
     if gpu:
         install=cfg['curobo_root'];cache=root+'/cache/curobo'
         environment.update(PYTHONPATH=install+'/python:'+install+'/deps:'+environment['PYTHONPATH'],

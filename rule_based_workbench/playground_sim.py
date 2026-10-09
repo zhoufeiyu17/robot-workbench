@@ -388,6 +388,8 @@ def replay(args,source,plan,env,runtime,sensors,execution_timeline=None):
 
 
 def main(args):
+    from local_execution import register_auxiliary
+    register_auxiliary(args,__file__)
     started=time.monotonic()
     source=json.loads(args.source.read_text());suite=json.loads(args.suite.read_text())
     binding=json.loads(args.hardware_binding.read_text())

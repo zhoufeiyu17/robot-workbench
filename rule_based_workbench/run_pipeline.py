@@ -374,6 +374,7 @@ def isaac_environment(c,side):
         "PYTHONDONTWRITEBYTECODE": "1", "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4", "MAX_JOBS": "4",
         "ROBOT_SIM_ASSET_ROOT": c["assets"],
         "PYTHONPATH": f"{c['deps']}:/workspace/isaaclab/source/isaaclab:{c['native_code']}/source/robot_sim:{c['workbench_code']}:{PurePosixPath(c['workbench_code']).parent}"}
+    if c.get('execution'):settings['ROBOT_WORKBENCH_SESSION_ID']=c['execution']['session_id']
     if c.get('planning_backend')=='motiongen':
         install=c['curobo_root'];cache=c['remote_run_root']+'/cache/runtime-'+side
         settings.update(PYTHONPATH=install+'/python:'+install+'/deps:'+settings['PYTHONPATH'],

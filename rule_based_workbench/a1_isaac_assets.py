@@ -91,7 +91,10 @@ def main():
     for key in ('bundle','base-assets','output'):p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--prepare-only',action='store_true')
     p.add_argument('--gpu',type=int,choices=(0,1),default=0,help='physical CUDA mask and Vulkan adapter; logical CUDA device stays 0')
+    p.add_argument('--execution-json')
     args=p.parse_args()
+    from local_execution import register_auxiliary
+    register_auxiliary(args,__file__)
     binding=prepare(args.bundle,args.base_assets,args.output)
     if args.prepare_only:
         print(json.dumps(binding,indent=2));return

@@ -138,6 +138,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         env={'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':execution['session_id']},
         gpu_execution_required=True,executed=False,
         purpose='new planning/model assets only; fixed observation plant is never replaced')
+    if execution['max_processes']==5:conversion['argv']+=['--execution-json',json.dumps(execution)]
     pins[str(wb/'a1_isaac_assets.py')]=sha(wb/'a1_isaac_assets.py')
     setup=dict(schema_version='resident_collection_setup.v1',status='awaiting_native_asset_conversion',
         root=str(output),resident_root=str(root),calibration=bridge,calibration_clock=c['clock'],
@@ -196,6 +197,10 @@ def finalize_collection_setup(setup_path):
     code.update({str(path):sha(path) for path in sorted(Path(pipeline['workbench_code']).glob('*.py'))})
     code.update({str(path):sha(path) for path in sorted(Path(__file__).parent.glob('*.py'))})
     code[execution['plant']['script']]=execution['plant']['script_sha256']
+    if execution['max_processes']==5:
+        preview=execution['roles']['preview']
+        code[preview['script']]=preview['script_sha256']
+        inherited['input_sha256'][preview['config_path']]=preview['config_sha256']
     detector=Path(pipeline['detection_script'])
     for path in (detector,detector.with_name('isaac_detection_service.py'),
                  Path(pipeline['detection_runtime_root'])/'scripts'/'run_online_detection_episode.py'):
