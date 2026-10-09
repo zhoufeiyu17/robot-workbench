@@ -1,20 +1,28 @@
 {
   "status": "l1-qualified-full-l2-incomplete",
-  "updated_at": "2026-10-09T20:09:38.724052+00:00",
+  "updated_at": "2026-10-09T22:18:32.466163+00:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "623ab92",
-  "qualification_scope": "frozen evidence identifies tested source; subsequent worktree changes require their own relevant checks",
+  "candidate_commit_before_summary": "77f31cb",
+  "qualification_scope": "Core C reused. Frozen full-045936 completed same-plant fake calibration and installation. Fixed-runtime setup-only actual GPU conversion passed; no D execution/raw/replay or full L2 qualification. Latest UI/preparation CPU integration separately tracked.",
   "cpu": {
-    "calibration_tests": 468,
+    "calibration_tests": 469,
     "calibration_skipped": 4,
     "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
     "runtime_tests": 16,
-    "http_tests": 11,
-    "workflow_adapter_tests": 11,
-    "target_preview_tests": 3,
+    "http_tests": 13,
+    "workflow_adapter_tests": 14,
+    "target_preview_tests": 4,
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "d280f5a2ffaca5066e3813142278d0fe74ed0e156bbfecaa5509eb1bef73f2ee"
+    "full_check_log_sha256": "87ed22c9fdb8f18ea380c647bbcdec606fca92885aa205caffab4589226e9f29",
+    "preview_http_tests": 3,
+    "preview_lifecycle_tests": 3,
+    "collection_setup_role_variants": [
+      4,
+      5
+    ],
+    "collection_preparation_http_tests": 4,
+    "full_check_log": ".evidence/s2/preparation-recovery-cpu-check.log"
   },
   "l1": {
     "status": "passed",
@@ -22,10 +30,10 @@
     "matrix_passed": 27,
     "matrix_total": 27,
     "source_unchanged": true,
-    "receipt_sha256": "d4aef5adcd01854c44fa6c44d142a95c9083d145f8b6edb9647c4abf78718bb7",
+    "receipt_sha256": "044203c3059e8ff731245db5ab6a8a196138d8d7f50843f83449a7ec2a280c9d",
     "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 1.9955411553382874,
-    "stop_request_to_software_barrier_max_ms": 2.1687503904104233,
+    "stop_request_to_software_barrier_p95_ms": 1.1650407686829567,
+    "stop_request_to_software_barrier_max_ms": 1.19779072701931,
     "physical_stop_qualified": false
   },
   "l2_probe_historical": {
@@ -42,6 +50,37 @@
     "gpu_released": true
   },
   "l2_complete": {
+    "status": "running_not_qualified",
+    "normal_cases_passed": 0,
+    "required_normal_cases": 3,
+    "latest_run": "full-20261010-061606",
+    "frozen_implementation": "77f31cb",
+    "installation_completed": false,
+    "collection_started": false,
+    "gpu_released": false,
+    "source": "frozen full-061606 contract + remote full-driver.jsonl, runtime-status.json and final artifacts"
+  },
+  "browser": {
+    "four_tab_layout": "human_confirmed",
+    "protocol_fake_manual_preview_execute": "passed",
+    "explicit_handoff_keeps_connection_hold": "passed",
+    "tab_switch_does_not_handoff": "passed",
+    "full_business_and_preview_performance": "pending",
+    "initial_loading_clears": "passed after fix",
+    "image_recovery_and_l1_scope": "passed on real browser; protocol-only service",
+    "renderer_gpu_lifecycle": "pending",
+    "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
+    "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
+    "latest_scope_screenshot": ".evidence/s2/ui-current-l1-scope.jpg"
+  },
+  "remaining": [
+    "complete prior-feature parity through actual new entry",
+    "complete same-plant calibration/install/collection/raw/replay and three normal cases",
+    "GPU-qualify already wired target preview/mesh with explicit private process registry",
+    "physical SDK/stop/timing qualification and single-writer cutover"
+  ],
+  "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
+  "previous_full_attempt": {
     "status": "not_qualified",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
@@ -53,23 +92,58 @@
     "head_dependency_accepted": false,
     "installation_completed": false,
     "collection_started": false,
-    "regression_cause": "under_comparison",
+    "regression_cause": "coplanar simulated printed marker faces with camera housing; controlled startup A/B and subsequent complete calibration verify fixture fix",
     "owned_gpu_processes_exited": true,
     "gpu_released": true
   },
-  "browser": {
-    "four_tab_layout": "human_confirmed",
-    "protocol_fake_manual_preview_execute": "passed",
-    "explicit_handoff_keeps_connection_hold": "passed",
-    "tab_switch_does_not_handoff": "passed",
-    "full_business_and_preview_performance": "pending"
+  "printed_marker_diagnostic": {
+    "status": "two_pose_input_regression_passed",
+    "offset_m": 0.0001,
+    "baseline_expected_id_detection": [
+      0,
+      9
+    ],
+    "candidate_expected_id_detection": [
+      16,
+      16
+    ],
+    "frames_per_pose": 16,
+    "png_jpeg_agree": true,
+    "solver_and_thresholds_changed": false,
+    "summary_sha256": "46581e5823f270f1e97b9408ca0473d87361677987f6de5c2ac7d2ac3c559f85",
+    "full_calibration_qualified": false,
+    "subsequent_full_calibration_confirmation": "full-20261010-045936: C passed and installed; see last_installed_attempt"
   },
-  "remaining": [
-    "identify new head fit failure without changing acceptance",
-    "complete prior-feature parity through actual new entry",
-    "complete same-plant calibration/install/collection/raw/replay and three normal cases",
-    "wire and GPU-qualify target preview/mesh with explicit private process registry",
-    "physical SDK/stop/timing qualification and single-writer cutover"
-  ],
-  "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied"
+  "runtime_boundary_diagnostic": {
+    "run": "runtime-boundary-20261010-054145",
+    "status": "conversion_verified_workers_not_started",
+    "installed_group_from": "full-20261010-045936",
+    "parent_modified": false,
+    "motion_started": false,
+    "new_workers_started": false,
+    "urdf_usd_rig_binding_passed": true,
+    "full_l2_qualified": false,
+    "source": "remote full-045936/runtime-boundary-20261010-054145/conversion/result.json"
+  },
+  "last_installed_attempt": {
+    "status": "calibration_installed_collection_setup_failed",
+    "normal_cases_passed": 0,
+    "required_normal_cases": 3,
+    "latest_run": "full-20261010-045936",
+    "frozen_implementation": "57de48b",
+    "installation_completed": true,
+    "collection_started": false,
+    "gpu_released": true,
+    "source": "remote run/full-driver.jsonl and runtime-status.json; completion not inferred from startup",
+    "head_capture_count": 34,
+    "wrist_capture_count": 29,
+    "head_holdout_marker_rms_px": 1.086231107,
+    "head_holdout_mesh_mean_px": 3.255099022,
+    "head_holdout_mesh_coverage": 0.92625,
+    "left_wrist_holdout_rms_px": 1.351877679,
+    "right_wrist_holdout_rms_px": 1.107719203,
+    "active_manifest_sha256": "85ffd4fd904042520490bc73b35ac731e701d7c916deaaae0658fcc6020afc00",
+    "collection_failure": "SRE module mismatch: system supervisor inherited Isaac Python standard library paths",
+    "teardown_evidence": ".evidence/s2/full-20261010-045936-teardown.json"
+  }
 }
