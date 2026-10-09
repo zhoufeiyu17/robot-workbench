@@ -5,15 +5,28 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'scripts')]
-from serve_physx_device import configure_calibration,nominal_inputs
+from serve_physx_device import configure_calibration,nominal_inputs,printed_marker_fixture
 from robot_workbench.physx_camera import camera_intrinsics,CAMERAS
 from robot_workbench.sample_clock import clock_spec
 
 
 class ResidentConfigurationTest(unittest.TestCase):
+    def test_printed_face_is_outside_housing_without_changing_estimator_mount(self):
+        candidate={'T_link6_marker':{'24':[[0,0,1,.1],[1,0,0,.2],[0,1,0,.3],[0,0,0,1]],
+                                     '30':[[1,0,0,.4],[0,1,0,.5],[0,0,1,.6],[0,0,0,1]]}}
+        before=deepcopy(candidate);markers=printed_marker_fixture(candidate)
+        self.assertEqual(candidate,before)
+        self.assertAlmostEqual(markers[0]['T_link_marker'][0][3],.0999)
+        self.assertAlmostEqual(markers[1]['T_link_marker'][2][3],.5999)
+        for marker in markers:
+            original=candidate['T_link6_marker'][str(marker['id'])]
+            for axis in range(3):self.assertEqual(marker['T_link_marker'][axis][:3],original[axis][:3])
+            self.assertEqual(marker['print_surface_offset_m'],.0001)
+
     def test_nominal_files_are_sealed_and_generated_calibration_root_is_empty(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);assets=root/'nominal';assets.mkdir();output=root/'run';output.mkdir()

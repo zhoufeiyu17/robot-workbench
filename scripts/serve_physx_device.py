@@ -49,6 +49,20 @@ def nominal_inputs(path):
     return config
 
 
+def printed_marker_fixture(candidate):
+    """The printed face sits 0.1 mm outside its housing, not on the same plane.
+
+    This is plant geometry only. The estimator keeps the sealed nominal mounts.
+    """
+    markers=[]
+    for ident,link in ((24,'left_link6'),(30,'right_link16')):
+        transform=deepcopy(candidate['T_link6_marker'][str(ident)])
+        for axis in range(3):transform[axis][3]-=.0001*transform[axis][2]
+        markers.append(dict(id=ident,link=link,size_m=.015,T_link_marker=transform,
+                            print_surface_offset_m=.0001))
+    return markers
+
+
 def configure_calibration(nominal, output, intrinsics, ports, gateway_port, token_file, *, source_clock, auto_confirm=False):
     from robot_workbench.physx_camera import CAMERAS
     keys=('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','model_family',
@@ -159,12 +173,11 @@ def run(args, base, nominal):
             T_environment_calibration_world=registration.tolist(),
             source='fixed plant base_link mount; not an estimated camera transform'))
         candidate=json.loads(Path(nominal['candidate']).read_text())
-        markers=[dict(id=ident,link=link,size_m=.015,T_link_marker=candidate['T_link6_marker'][str(ident)])
-                 for ident,link in ((24,'left_link6'),(30,'right_link16'))]
+        markers=printed_marker_fixture(candidate)
         create_markers(sim_utils.get_current_stage(),markers)
         for _ in range(4):env._m2_runtime._render()
         save(args.output/'truth-fixture.json',dict(markers=markers,
-            marker_basis='frozen nominal fixture independent of fitted/install outputs',
+            marker_basis='sealed nominal fixture plus 0.1mm printed-face offset along marker -Z; independent of fitted/install outputs',
             nominal_candidate_sha256=hashlib.sha256(Path(nominal['candidate']).read_bytes()).hexdigest(),
             plant_base_case=base['case_id'],estimator_reads_this_file=False))
         plant=IsaacPlant(env);clock=SimulationClock()
