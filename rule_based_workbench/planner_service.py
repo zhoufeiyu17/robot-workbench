@@ -42,6 +42,17 @@ def load_private_spec(path,expected_sha256):
     return spec
 
 
+def local_read_directories(config,authorized_roots):
+    """IPC accepts directories; never promote an authorized file to its parent."""
+    directories=[str(path) for value in authorized_roots if (path:=Path(value)).is_absolute()
+        and path.is_dir() and path.resolve()==path]
+    for key in ('native_code','assets'):
+        path=Path(config[key])
+        if not path.is_dir() or not any(path.resolve().is_relative_to(Path(root)) for root in directories):
+            raise ValueError('local planner '+key+' requires an authorized canonical existing directory')
+    return list(dict.fromkeys(directories))
+
+
 def startup_config(template,directory,*,shared_config=None):
     """Freeze one private worker and jobs scope for this application lifetime."""
     from run_pipeline import digest,pinned_files,load_config
@@ -72,9 +83,11 @@ def startup_config(template,directory,*,shared_config=None):
         decode_private_spec(payload,spec['spec_sha256'])
     else:
         spec=None
+    read_roots=(local_read_directories(base,contract['filesystem']['readonly_roots']) if local
+                else contract['filesystem']['readonly_roots'])
     private=dict(root=root,socket=root+'/p',owner_token=uuid4().hex,session_id=session,
         identity=digest(json.dumps(pinned_files(contract),sort_keys=True).encode()),
-        allowed_read_roots=[*contract['filesystem']['readonly_roots'],jobs],allowed_output_root=jobs,
+        allowed_read_roots=[*read_roots,jobs],allowed_output_root=jobs,
         max_memory_mib=12288,min_free_memory_mib=16384,
         max_lifetime_seconds=int(contract['resources'].get('service_lifetime_seconds',contract['resources']['max_wall_time_minutes']*60)))
     if local:
@@ -160,6 +173,13 @@ def validate_config(config,contract):
         raise ValueError('planner must read current task outputs')
     if any(p!=spec['allowed_output_root'] and not any(below(p,r) for r in fs['readonly_roots']) for p in spec['allowed_read_roots']):
         raise ValueError('planner read root not authorized')
+    if config.get('execution'):
+        reads=[path for path in spec['allowed_read_roots'] if path!=spec['allowed_output_root']]
+        if local_read_directories(config,reads)!=reads:
+            raise ValueError('local planner IPC read roots must be canonical existing directories')
+        output=Path(spec['allowed_output_root'])
+        if output.resolve()!=output or output.exists() and not output.is_dir():
+            raise ValueError('local planner jobs must be a canonical directory; startup preflight creates it')
     pins=pinned_files(contract)
     if config.get('execution'):
         actual={k:v for group in pins for k,v in group.items()}

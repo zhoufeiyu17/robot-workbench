@@ -23,7 +23,7 @@ from robot_workbench.bridges import start_control_gateway
 from a1_isaac_assets import prepare as prepare_assets
 from a1_asset_validation import validate_assets
 from run_pipeline import load_config,pinned_files,transport
-from planner_service import decode_private_spec
+from planner_service import decode_private_spec,startup_config,validate_config as validate_planner_config
 from launch_environment import clean_command
 from real_acquisition import validate_config as validate_acquisition
 
@@ -169,6 +169,23 @@ def main(a1,roles=4):
             spec=cfg['planner_service'];private=Path(configured['pipeline_config']).parent/'planner-spec.json'
             decoded=decode_private_spec(private.read_bytes(),spec['spec_sha256'])
             assert decoded['session_id']==execution['session_id'] and 'owner_token' not in spec
+            # Contract pins can authorize individual files. Worker IPC roots
+            # must remain directories; file authority is never widened.
+            exact_files=[path for path in frozen['filesystem']['readonly_roots'] if Path(path).is_file()]
+            assert exact_files,'fixture must exercise the actual file-root failure'
+            detector_roots=cfg['detector_service']['allowed_read_roots']
+            assert detector_roots==[str(output/'sealed-observations'),str(output/'jobs')]
+            assert all(Path(path).is_dir() and Path(path).resolve()==Path(path) for path in detector_roots)
+            planner_reads=[path for path in spec['allowed_read_roots'] if path!=spec['allowed_output_root']]
+            assert all(Path(path).is_dir() and Path(path).resolve()==Path(path) for path in planner_reads)
+            assert not set(exact_files)&set(spec['allowed_read_roots'])
+            assert all(any(Path(path).is_relative_to(Path(root)) for root in frozen['filesystem']['readonly_roots']) for path in planner_reads)
+            assert not Path(spec['allowed_output_root']).exists(),'private jobs creation remains in original startup preflight'
+            # Share/recovery load the same validated directory-only private scope.
+            shared=startup_config(output/'pipeline-template.json',output/'shared',shared_config=configured['pipeline_config'])
+            shared_cfg,shared_contract,_=load_config(shared)
+            assert shared_cfg['planner_service']==spec
+            validate_planner_config(shared_cfg,shared_contract)
             assert len(spec['socket'].encode())<104 and len(cfg['detector_service']['socket'].encode())<104
             assert transport(cfg,'dsw-scene','true')==clean_command(['bash','-c','true'])
             bridge=read(configured['collection_config']);validate_acquisition(bridge['preparation'])

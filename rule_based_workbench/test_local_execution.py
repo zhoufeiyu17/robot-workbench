@@ -49,6 +49,8 @@ class LocalExecutionTest(unittest.TestCase):
             opening_mm=83.,finger_envelope_sha256='a'*64)
         self.contract['resources']['resident_deadline_wall_ns']=self.config['resident_deadline_wall_ns']
         self.config['detection_runtime_root']='/remote/input/detector-runtime'
+        for key in ('native_code','assets'):
+            directory=self.root/key;directory.mkdir();self.config[key]=str(directory)
         self.contract['provenance']['code_sha256'].update({self.config['detection_runtime_root']+p:'d'*64 for p in
             ('/scripts/run_online_detection_episode.py','/ros2/online_detection_ros/fixture.py')})
         self.save()
@@ -160,6 +162,25 @@ class LocalExecutionTest(unittest.TestCase):
         self.assertEqual(old['planner_service']['identity'],digest(json.dumps(pinned_files(self.contract),sort_keys=True).encode()))
         self.assertNotIn('input_pins_sha256',old['planner_service'])
         self.assertNotIn('compute_resource',old['planner_service'])
+
+    def test_local_planner_file_authority_is_not_expanded_into_an_ipc_directory(self):
+        with TemporaryDirectory() as external:
+            directory=Path(external).resolve();file=directory/'one-authorized-file.json';file.write_text('{}')
+            self.contract['filesystem']['readonly_roots'].append(str(file))
+            self.contract['provenance']['input_sha256']={str(file):hashlib.sha256(file.read_bytes()).hexdigest()}
+            self.save();prepared=startup_config(self.root/'config.json',self.root/'file-roots')
+            cfg,contract,_=load_config(prepared);roots=cfg['planner_service']['allowed_read_roots']
+            self.assertIn(str(file),contract['filesystem']['readonly_roots'])
+            self.assertIn(str(file),contract['planner_inputs'])
+            self.assertNotIn(str(file),roots);self.assertNotIn(str(directory),roots)
+            # Reused/recovered private scopes receive the same local validation.
+            bad=deepcopy(cfg);bad_contract=deepcopy(contract)
+            bad['planner_service']['allowed_read_roots'].append(str(file))
+            bad_contract['planner_service']=deepcopy(bad['planner_service'])
+            with self.assertRaisesRegex(ValueError,'canonical existing directories'):validate_config(bad,bad_contract)
+            self.config['native_code']=str(directory);self.save()
+            with self.assertRaisesRegex(ValueError,'native_code requires an authorized canonical existing directory'):
+                startup_config(self.root/'config.json',self.root/'missing-directory-authority')
 
     def test_only_verified_private_worker_peers_are_allowed(self):
         cfg=deepcopy(self.config)

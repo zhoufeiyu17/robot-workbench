@@ -243,7 +243,9 @@ def finalize_collection_setup(setup_path):
         identity={key:'sha256:'+sha(path) for key,path in {'adapter_sha256':detector,
             'service_sha256':detector.with_name('isaac_detection_service.py'),
             'node_config_sha256':Path(pipeline['detection_node_config'])}.items()},
-        allowed_read_roots=[*read_roots,str(jobs)],allowed_output_root=str(jobs),
+        # IPC requests read only the sealed capture/manifest and imported job
+        # frames. Code/model/config file pins stay in the experiment contract.
+        allowed_read_roots=[str(capture),str(jobs)],allowed_output_root=str(jobs),
         max_memory_mib=12288,min_free_memory_mib=execution['min_free_memory_mib'],
         max_lifetime_seconds=resources['service_lifetime_seconds'])
     pipeline['detector_service']=service;contract['detector_service']=deepcopy(service)
