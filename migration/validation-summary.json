@@ -1,21 +1,34 @@
 {
-  "status": "s0-partial-s1-s2-candidate",
-  "date": "2026-10-09T16:19:46.891897+00:00",
+  "status": "l1-qualified-full-l2-incomplete",
+  "updated_at": "2026-10-09T20:09:38.724052+00:00",
+  "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
+  "candidate_commit_before_summary": "623ab92",
+  "qualification_scope": "frozen evidence identifies tested source; subsequent worktree changes require their own relevant checks",
   "cpu": {
-    "calibration_tests": 454,
+    "calibration_tests": 468,
     "calibration_skipped": 4,
-    "skip_reason": "three sealed native-asset fixtures and one local mesh fixture absent; no implicit GPU fixture",
-    "clock_tests": 8,
-    "physx_boundary_tests": 3,
-    "unified_runtime_tests": 7,
-    "fixed_race_schedules": 100,
-    "playground_entry_tests": 8,
-    "related_prepare_scripts": 10,
-    "all_checks_exit_code": 0,
-    "log_sha256": "b283ac3de2b9ca8f217f739cc51e77af35976ebe4e447ea106ce297d080803ac"
+    "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
+    "runtime_tests": 16,
+    "http_tests": 11,
+    "workflow_adapter_tests": 11,
+    "target_preview_tests": 3,
+    "full_check_exit_code": 0,
+    "full_check_log_sha256": "d280f5a2ffaca5066e3813142278d0fe74ed0e156bbfecaa5509eb1bef73f2ee"
   },
-  "l2_probe": {
+  "l1": {
+    "status": "passed",
+    "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
+    "matrix_passed": 27,
+    "matrix_total": 27,
+    "source_unchanged": true,
+    "receipt_sha256": "d4aef5adcd01854c44fa6c44d142a95c9083d145f8b6edb9647c4abf78718bb7",
+    "stop_normal_sdk_samples": 30,
+    "stop_request_to_software_barrier_p95_ms": 1.9955411553382874,
+    "stop_request_to_software_barrier_max_ms": 2.1687503904104233,
+    "physical_stop_qualified": false
+  },
+  "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
     "attempts_preserved": 6,
     "last_attempt": "s0-20261009-234300-r6",
@@ -28,12 +41,35 @@
     "hardware_qualified": false,
     "gpu_released": true
   },
+  "l2_complete": {
+    "status": "not_qualified",
+    "normal_cases_passed": 0,
+    "required_normal_cases": 3,
+    "latest_run": "full-20261010-033728",
+    "head_capture_count": 34,
+    "head_holdout_marker_rms_px": 6.892047762365878,
+    "head_holdout_mesh_mean_px": 11.083747082411415,
+    "head_holdout_mesh_coverage": 0.59625,
+    "head_dependency_accepted": false,
+    "installation_completed": false,
+    "collection_started": false,
+    "regression_cause": "under_comparison",
+    "owned_gpu_processes_exited": true,
+    "gpu_released": true
+  },
+  "browser": {
+    "four_tab_layout": "human_confirmed",
+    "protocol_fake_manual_preview_execute": "passed",
+    "explicit_handoff_keeps_connection_hold": "passed",
+    "tab_switch_does_not_handoff": "passed",
+    "full_business_and_preview_performance": "pending"
+  },
   "remaining": [
-    "L2 collection and complete calibration/data workflows",
-    "shared runtime HTTP/UI/media integration",
-    "recording and camera lifecycle/load isolation",
-    "approved normal/fault/performance matrix",
-    "single-writer deployment cutover"
+    "identify new head fit failure without changing acceptance",
+    "complete prior-feature parity through actual new entry",
+    "complete same-plant calibration/install/collection/raw/replay and three normal cases",
+    "wire and GPU-qualify target preview/mesh with explicit private process registry",
+    "physical SDK/stop/timing qualification and single-writer cutover"
   ],
-  "versioning": "current Git branch identifies implementation; no deployment implied"
+  "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied"
 }
