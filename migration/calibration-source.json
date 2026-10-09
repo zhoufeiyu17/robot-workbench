@@ -1,0 +1,629 @@
+{
+  "schema": "workbench_source_freeze.v1",
+  "frozen_at": "2026-10-09T15:19:11.025326+00:00",
+  "source": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/joint-head-calibration",
+  "head": "6990f324bf4131b1b562adfee91509ac07aaebb5",
+  "qualification": "historical tests only; new unified runtime not qualified",
+  "files": {
+    "calibration/configs/ac-one-a1-parking-support.json": {
+      "source": "configs/ac-one-a1-parking-support.json",
+      "sha256": "9ebc85357b32c20127dbfadd7774a6a1bc44da11944997a7dbd198a207acf63e",
+      "bytes": 822
+    },
+    "calibration/configs/batch04.example.json": {
+      "source": "configs/batch04.example.json",
+      "sha256": "6bbac426d07bc9a72234334aad3e361d922eb6b00b17ccb1db6920f1944c3c3c",
+      "bytes": 12654
+    },
+    "calibration/configs/dsw.example.json": {
+      "source": "configs/dsw.example.json",
+      "sha256": "87c0ee2bc3bd60277c6d729ed7ea6e8a163bafdc30da6fcc8e978d9f772f41e0",
+      "bytes": 393
+    },
+    "calibration/configs/fake-hardware.example.json": {
+      "source": "configs/fake-hardware.example.json",
+      "sha256": "f1921603d66c00c34af27de0aae9a267a5f652a89af24f6f23b92165576c9c90",
+      "bytes": 3620
+    },
+    "calibration/configs/two-sticker-plane.example.json": {
+      "source": "configs/two-sticker-plane.example.json",
+      "sha256": "f3dda450f7bea1500f3c60c72c2fb0e096d1fe5d8c4e39051a244cdd1f6f5794",
+      "bytes": 17298
+    },
+    "calibration/configs/two-sticker.example.json": {
+      "source": "configs/two-sticker.example.json",
+      "sha256": "d14098488b333c810e510d05a59b7ce86be9d7a15cd333a2468abf7d37183b0b",
+      "bytes": 15663
+    },
+    "calibration/configs/workbench.example.json": {
+      "source": "configs/workbench.example.json",
+      "sha256": "4d6bbd78987d11938d6237f631cb060cc35fae7152787e1c74a4a7c4ef90f8ed",
+      "bytes": 717
+    },
+    "calibration/configs/wrist-motion-seed-a1-fake-v1.json": {
+      "source": "configs/wrist-motion-seed-a1-fake-v1.json",
+      "sha256": "df86f0c53eb5ae6c0d4ca596f9fea8264f40296d7cec02de3d5df20afbd57d95",
+      "bytes": 20258
+    },
+    "calibration/configs/wrist-motion-seed-v3.json": {
+      "source": "configs/wrist-motion-seed-v3.json",
+      "sha256": "4f3832ba6b9a46204e5ee93e97391cec6b90291a6a476010370d7b8625766db2",
+      "bytes": 26486
+    },
+    "calibration/configs/wrist-motion-seed-v4.json": {
+      "source": "configs/wrist-motion-seed-v4.json",
+      "sha256": "0abdcd0a86ba2bc7d77769ab40179188bcadd7c58fec4e256d594cf27c858193",
+      "bytes": 16854
+    },
+    "calibration/configs/wrist-motion-seed-v5.json": {
+      "source": "configs/wrist-motion-seed-v5.json",
+      "sha256": "2945c39bf372d6186fc9400fc6d593fabe155737eaa1e89f914350ba0eb7c1a4",
+      "bytes": 14848
+    },
+    "calibration/configs/wrist-motion-seed-v6.json": {
+      "source": "configs/wrist-motion-seed-v6.json",
+      "sha256": "de084769791d0771b9ef6c38470573139908d281c7b7e3a41e45618887f4927b",
+      "bytes": 16556
+    },
+    "calibration/configs/wrist-motion-seed-v7.json": {
+      "source": "configs/wrist-motion-seed-v7.json",
+      "sha256": "f4aaffe85ca1926800c9d4f21b97f0800e29b1e889044617046669943d50cd6f",
+      "bytes": 20729
+    },
+    "calibration/examples/scripts/debug/compare_wrist_objectives.py": {
+      "source": "examples/scripts/debug/compare_wrist_objectives.py",
+      "sha256": "8017680dab2c1d7d04204661c4be647ab56b6ffc3fa5462119a297b15849e193",
+      "bytes": 3841
+    },
+    "calibration/examples/scripts/debug/export_markerless_mesh.py": {
+      "source": "examples/scripts/debug/export_markerless_mesh.py",
+      "sha256": "bcb5f9984a4b5a592d2141204e9bf8f3999eceee990d1498e5d194bc040f667c",
+      "bytes": 2650
+    },
+    "calibration/examples/scripts/debug/joint_head_camera_mast_mesh.py": {
+      "source": "examples/scripts/debug/joint_head_camera_mast_mesh.py",
+      "sha256": "a1a61d590b0731656d5aa5ddca367b6e3d0cc2c6e7f7710a5c7c5ee756e43515",
+      "bytes": 6726
+    },
+    "calibration/examples/scripts/debug/joint_head_fake_hardware.py": {
+      "source": "examples/scripts/debug/joint_head_fake_hardware.py",
+      "sha256": "3891767d29ab7916c48231b6f0a22933d37a594401e61b47e4c41703cf24e614",
+      "bytes": 12594
+    },
+    "calibration/examples/scripts/debug/joint_head_isaac_capture.py": {
+      "source": "examples/scripts/debug/joint_head_isaac_capture.py",
+      "sha256": "f49a836220351c979aba30cf5bc672ad5fa89873661ac6f105e91a0ad4b44a93",
+      "bytes": 19172
+    },
+    "calibration/examples/scripts/debug/joint_head_isaac_dsw.py": {
+      "source": "examples/scripts/debug/joint_head_isaac_dsw.py",
+      "sha256": "f3570d8b83f4913fccdd8d8008935b8ace17065630c231baf60ff172723518b2",
+      "bytes": 5471
+    },
+    "calibration/examples/scripts/debug/joint_head_isaac_harness.py": {
+      "source": "examples/scripts/debug/joint_head_isaac_harness.py",
+      "sha256": "6f3a4731bd25f945912b5ae3e717786137725ff5d7d5480e46ea3bf9294a3127",
+      "bytes": 18159
+    },
+    "calibration/examples/scripts/debug/joint_head_isaac_review.html": {
+      "source": "examples/scripts/debug/joint_head_isaac_review.html",
+      "sha256": "ddc6a305eed736f8a23cccb76d615bd061d36ddf9c1f3b99095709f05a30f3cd",
+      "bytes": 16426
+    },
+    "calibration/examples/scripts/debug/joint_head_isaac_review.py": {
+      "source": "examples/scripts/debug/joint_head_isaac_review.py",
+      "sha256": "17ea7566dd17b64559d85ff39ba6eec47bef6c654d422e011f44915b575cfe61",
+      "bytes": 8216
+    },
+    "calibration/examples/scripts/debug/joint_head_marker_identifiability.py": {
+      "source": "examples/scripts/debug/joint_head_marker_identifiability.py",
+      "sha256": "07def7096055ee7722dcbaae9de2eedb69d4efbc998d8c279e5ac24c4d8a9608",
+      "bytes": 20729
+    },
+    "calibration/examples/scripts/debug/joint_head_plan_screen.py": {
+      "source": "examples/scripts/debug/joint_head_plan_screen.py",
+      "sha256": "1d952459812375f6bd4e98b9072aa388f0ddf941c03abe749fc4b2e856e80eab",
+      "bytes": 6347
+    },
+    "calibration/examples/scripts/debug/joint_head_real_control.html": {
+      "source": "examples/scripts/debug/joint_head_real_control.html",
+      "sha256": "364e6b7a8c1c3f6e4a1c336d252f19f8bfd94ecabad4d8afea00fc73180eb2ad",
+      "bytes": 15167
+    },
+    "calibration/examples/scripts/debug/joint_head_real_control.py": {
+      "source": "examples/scripts/debug/joint_head_real_control.py",
+      "sha256": "f61ee0695e8fd280b00ca288a8bbf29faa913257b7ab85f8b59fa77a83c00dd9",
+      "bytes": 16908
+    },
+    "calibration/examples/scripts/debug/joint_head_real_fit.py": {
+      "source": "examples/scripts/debug/joint_head_real_fit.py",
+      "sha256": "bf129d39afa5af79c80e6ebd5f60aad6c9862ed944edd73b6ecdc7208d842f22",
+      "bytes": 31015
+    },
+    "calibration/examples/scripts/debug/joint_head_real_overlay.py": {
+      "source": "examples/scripts/debug/joint_head_real_overlay.py",
+      "sha256": "1a963a8dc3283371f3f627ab330313801b23d66146120b2d905cdc992a768839",
+      "bytes": 7671
+    },
+    "calibration/examples/scripts/debug/joint_head_real_owner.py": {
+      "source": "examples/scripts/debug/joint_head_real_owner.py",
+      "sha256": "4c35e8bd658f3bf3e662e042d8f2043bfefc4d3ea497a2757d1727cc00c86d68",
+      "bytes": 53317
+    },
+    "calibration/examples/scripts/debug/joint_head_real_preview.py": {
+      "source": "examples/scripts/debug/joint_head_real_preview.py",
+      "sha256": "d42db79699234e1edaa43304ba69943b247a33193cb6e641a827316bf57469cb",
+      "bytes": 10720
+    },
+    "calibration/examples/scripts/debug/joint_head_renderer_service.py": {
+      "source": "examples/scripts/debug/joint_head_renderer_service.py",
+      "sha256": "d6da6f248091f1d7f8b5e1a6165a8ec8a163fe5807fe1e0e7c05a7bd91cdba93",
+      "bytes": 3675
+    },
+    "calibration/examples/scripts/debug/joint_head_status_gateway.py": {
+      "source": "examples/scripts/debug/joint_head_status_gateway.py",
+      "sha256": "0a7bbe6005396a48db2c03c4e9fc57e307882b45300f324a96ccb2f690c7ca64",
+      "bytes": 1870
+    },
+    "calibration/examples/scripts/debug/joint_head_workbench.html": {
+      "source": "examples/scripts/debug/joint_head_workbench.html",
+      "sha256": "46d5e8297fca450a060a8f0bff49200f9970d4b03604603e121418dbe0a1fee5",
+      "bytes": 150111
+    },
+    "calibration/examples/scripts/debug/joint_head_workbench.py": {
+      "source": "examples/scripts/debug/joint_head_workbench.py",
+      "sha256": "b007d1edd48b2b467dbd8d00ab7dc36c84dba6535875faed7962e1eb2398fb3a",
+      "bytes": 258735
+    },
+    "calibration/examples/scripts/debug/joint_head_workbench_dsw.py": {
+      "source": "examples/scripts/debug/joint_head_workbench_dsw.py",
+      "sha256": "56a0c4982298659ecbe516ad96c36db50759cd33cdb405f854a8ecd257b36159",
+      "bytes": 10463
+    },
+    "calibration/examples/scripts/debug/joint_head_workbench_dsw_worker.py": {
+      "source": "examples/scripts/debug/joint_head_workbench_dsw_worker.py",
+      "sha256": "93dbf306d8ee16f836ee9840a285fbc6914f3736d6ac7c48c3d682209f7fb059",
+      "bytes": 5550
+    },
+    "calibration/examples/scripts/debug/joint_head_workbench_live.py": {
+      "source": "examples/scripts/debug/joint_head_workbench_live.py",
+      "sha256": "047ebb5f9b35770e74eeeb508365a277f5eaff4d64049e846a663a2f9dce6201",
+      "bytes": 77367
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_clearance.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_clearance.py",
+      "sha256": "28cda445fedab14c3610607a752ef943f6cc411314c9f036324ed3ebc1fd6397",
+      "bytes": 5919
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_fixture_bringup.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_fixture_bringup.py",
+      "sha256": "be18ac8c210f99230fcb739c0649229695fa489e96d6fe49fd5e4007d8ae3e72",
+      "bytes": 8321
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_plan.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_plan.py",
+      "sha256": "82fdb543380d97f6fc2fb0a82cb87503205953cbf4a4b4ce28c85d9a665e5fbe",
+      "bytes": 18117
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_seed_from_ik.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_seed_from_ik.py",
+      "sha256": "f20756b8376cf1b789210b0b9d49c7567f60d555a84cf4a899bdc020ca3466b3",
+      "bytes": 10647
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_seed_geometry.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_seed_geometry.py",
+      "sha256": "a223769a62eaac279543eada8ef41a4fdaf3cbce0e470fe7efead157dc17266d",
+      "bytes": 10318
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_seed_search.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_seed_search.py",
+      "sha256": "a9aaba93c63b1d33ef660882e6aa46ba23abc098d5049d59de693088a2ed5e08",
+      "bytes": 11950
+    },
+    "calibration/examples/scripts/debug/joint_head_wrist_simulation.py": {
+      "source": "examples/scripts/debug/joint_head_wrist_simulation.py",
+      "sha256": "832abf4b51f9687781481e043c56056ea9bf3e3a7f813a8899a887490cafc313",
+      "bytes": 3118
+    },
+    "calibration/examples/scripts/debug/prepare_a1_workbench.py": {
+      "source": "examples/scripts/debug/prepare_a1_workbench.py",
+      "sha256": "48ac33b2bf7f24545708aa37941b8bfe74d91ac1cd9276bac987e96e5bd92a55",
+      "bytes": 3447
+    },
+    "calibration/infra/arx_env/__init__.py": {
+      "source": "infra/arx_env/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "calibration/infra/arx_env/joint_head_ac_one_geometry.py": {
+      "source": "infra/arx_env/joint_head_ac_one_geometry.py",
+      "sha256": "39e7f3f5691b9fa8fb3990c9ad4e02bca73671639c2eedd073d4f51632161e1f",
+      "bytes": 16349
+    },
+    "calibration/infra/arx_env/joint_head_accuracy.py": {
+      "source": "infra/arx_env/joint_head_accuracy.py",
+      "sha256": "b87c851cfcac4ce602d8f6fdcc0a08cd1a717b0af57380cbe317e3b8d7980077",
+      "bytes": 4851
+    },
+    "calibration/infra/arx_env/joint_head_arrival_stats.py": {
+      "source": "infra/arx_env/joint_head_arrival_stats.py",
+      "sha256": "69ca91bc16666e3aeefa246a201a69cbbc2dad0d0233811f51b2d7734506bceb",
+      "bytes": 8409
+    },
+    "calibration/infra/arx_env/joint_head_calibration_store.py": {
+      "source": "infra/arx_env/joint_head_calibration_store.py",
+      "sha256": "5fa2513e3d7414923e8b78587424b8986afcbb48d61509bbafb3ab17e5ea9bf3",
+      "bytes": 17905
+    },
+    "calibration/infra/arx_env/joint_head_gpu_overlay.py": {
+      "source": "infra/arx_env/joint_head_gpu_overlay.py",
+      "sha256": "bf15c206a108a6b25d750bf40e997579d9d34021710332cbd974643f1cfd517d",
+      "bytes": 8444
+    },
+    "calibration/infra/arx_env/joint_head_hybrid.py": {
+      "source": "infra/arx_env/joint_head_hybrid.py",
+      "sha256": "e3fa70a1d00378e4eb15d2ea6e4f6366e00fe2da4c92f568cfefab8b5c4c23cd",
+      "bytes": 22703
+    },
+    "calibration/infra/arx_env/joint_head_isaac_fit.py": {
+      "source": "infra/arx_env/joint_head_isaac_fit.py",
+      "sha256": "c56fedf553d9b58f303d29f531313872defe22adbddfb87d7da4d296fa0f9868",
+      "bytes": 23790
+    },
+    "calibration/infra/arx_env/joint_head_isaac_plan.py": {
+      "source": "infra/arx_env/joint_head_isaac_plan.py",
+      "sha256": "bc4b9054cecdc54dc4a75830d24f783344b3719ff5dc91ce6190121d55a36a72",
+      "bytes": 7090
+    },
+    "calibration/infra/arx_env/joint_head_jaw_mapping.py": {
+      "source": "infra/arx_env/joint_head_jaw_mapping.py",
+      "sha256": "001879befb3f804977d1300bea7379ada08d5991bc92355c4b20a12b2e6e3256",
+      "bytes": 5206
+    },
+    "calibration/infra/arx_env/joint_head_markerless.py": {
+      "source": "infra/arx_env/joint_head_markerless.py",
+      "sha256": "0d6b1359f12dabb0360cde2eb0ee520d2397e827f28818502065f22dbe3b6674",
+      "bytes": 25015
+    },
+    "calibration/infra/arx_env/joint_head_real_motion.py": {
+      "source": "infra/arx_env/joint_head_real_motion.py",
+      "sha256": "5d56817ebff039d98aa909ebec5ac702cd6627c15f3b945b5e413d0bb221e03c",
+      "bytes": 26160
+    },
+    "calibration/infra/arx_env/joint_head_support_contact.py": {
+      "source": "infra/arx_env/joint_head_support_contact.py",
+      "sha256": "aed87bfebdcfeb656d61952064662d386c2eadd3b63c49b3dd99b1ccde0a7938",
+      "bytes": 9353
+    },
+    "calibration/infra/arx_env/joint_head_workbench_capture.py": {
+      "source": "infra/arx_env/joint_head_workbench_capture.py",
+      "sha256": "446200dd29770a38335d5bf0116029a429d554a4b92339ee7aba4cc3782ac8cb",
+      "bytes": 12530
+    },
+    "calibration/infra/arx_env/joint_head_workbench_control.py": {
+      "source": "infra/arx_env/joint_head_workbench_control.py",
+      "sha256": "903bbd4e3eb2fe6378d82838ce3971bda483484c2c1c1a636f46eae9b8a69cf9",
+      "bytes": 24563
+    },
+    "calibration/infra/arx_env/joint_head_workbench_geometry.py": {
+      "source": "infra/arx_env/joint_head_workbench_geometry.py",
+      "sha256": "3ea25d30877abc22eaf043204203952d064268411592909ccc6bbbee11b98e7b",
+      "bytes": 40212
+    },
+    "calibration/infra/arx_env/joint_head_workbench_hardware.py": {
+      "source": "infra/arx_env/joint_head_workbench_hardware.py",
+      "sha256": "4bfa51a515b93c93d06dceae14dffa42f432cff80f3f82a83e34a7d26ac4a3a0",
+      "bytes": 20339
+    },
+    "calibration/infra/arx_env/joint_head_workbench_overlay.py": {
+      "source": "infra/arx_env/joint_head_workbench_overlay.py",
+      "sha256": "849d226742e7583296f2f2882bce3819e873e1fd35a7a908fa10e4167dec9790",
+      "bytes": 8452
+    },
+    "calibration/infra/arx_env/joint_head_wrist_calibration.py": {
+      "source": "infra/arx_env/joint_head_wrist_calibration.py",
+      "sha256": "942aa89b34188e991472d988852414d1e01e9c36908baa38d4b47602cf8a33ff",
+      "bytes": 33337
+    },
+    "calibration/infra/arx_env/joint_head_x5_hybrid.py": {
+      "source": "infra/arx_env/joint_head_x5_hybrid.py",
+      "sha256": "48ac0aeb95d5ad68248b80f3aede4957b8c796cc372ee16ef4cd6c1009159ebb",
+      "bytes": 26251
+    },
+    "calibration/infra/arx_env/urdf_mesh.py": {
+      "source": "infra/arx_env/urdf_mesh.py",
+      "sha256": "13f1e243b0fdae476a180228611e3eb4fad4b8ea6c89dab0a0492003f721fca4",
+      "bytes": 1232
+    },
+    "calibration/provenance.json": {
+      "source": "provenance.json",
+      "sha256": "92a3ef0cd7d6b05f33f5493ea1212d10b4ce23947ba7dadf655e04bdacc549bd",
+      "bytes": 1785
+    },
+    "calibration/requirements.txt": {
+      "source": "requirements.txt",
+      "sha256": "73e82d1829f91f127505815c0059e78d9728ee8d706937c564471b09e4bc0c18",
+      "bytes": 82
+    },
+    "calibration/scripts/check.sh": {
+      "source": "scripts/check.sh",
+      "sha256": "adf55c8ffe66a3183b7c8c88521a6a22c9b3c83876c01ed1b4ba1c4e97558471",
+      "bytes": 316
+    },
+    "calibration/scripts/workbench-preflight.py": {
+      "source": "scripts/workbench-preflight.py",
+      "sha256": "5ff6d2053b0c518e682da00bc297c05bede7f9f295267bd0468bfbe26bfee7ca",
+      "bytes": 1331
+    },
+    "calibration/standard_head_motion_seed.json": {
+      "source": "standard_head_motion_seed.json",
+      "sha256": "ca06b4bcaae4613cdfdb79f203921a6fb2fb48168a53a74df995f8c204dfabe4",
+      "bytes": 8960
+    },
+    "calibration/standard_head_motion_seed_a1_fake_v2.json": {
+      "source": "standard_head_motion_seed_a1_fake_v2.json",
+      "sha256": "6ac5bf707cc32877869d1908059a762df600648083f4840270e74de6d68b0b1d",
+      "bytes": 7446
+    },
+    "calibration/standard_head_motion_seed_v2.json": {
+      "source": "standard_head_motion_seed_v2.json",
+      "sha256": "d768e49b507ac3fd27426a4b7862a68f00a2b8df0c5917205e42f8a0cf352d85",
+      "bytes": 7386
+    },
+    "calibration/tests/test_joint_head_a1_provenance.py": {
+      "source": "tests/test_joint_head_a1_provenance.py",
+      "sha256": "9094a5dcc407d4e78664c3f5aec817a243fd1fcb7a325dae2d445b900e67c711",
+      "bytes": 4691
+    },
+    "calibration/tests/test_joint_head_ac_one_geometry.py": {
+      "source": "tests/test_joint_head_ac_one_geometry.py",
+      "sha256": "09058ea79fa73d34ddb7dddcee14845039365f439f81ffa0ebc1594d0d087a82",
+      "bytes": 9094
+    },
+    "calibration/tests/test_joint_head_accuracy.py": {
+      "source": "tests/test_joint_head_accuracy.py",
+      "sha256": "a0bd2985ed084d47ebf4316adb69c5ab4e592c533993493e01bee42e33205c73",
+      "bytes": 2753
+    },
+    "calibration/tests/test_joint_head_arrival_stats.py": {
+      "source": "tests/test_joint_head_arrival_stats.py",
+      "sha256": "84421ca8d3cf82dacd2257445f316c1c8cb57796ae2dd72854b5cf203043d25c",
+      "bytes": 5688
+    },
+    "calibration/tests/test_joint_head_calibration_store.py": {
+      "source": "tests/test_joint_head_calibration_store.py",
+      "sha256": "c1c6668a302ffb399c6617744c68c06d6ab2923cbf75df98ca6a8468adcf2e48",
+      "bytes": 5146
+    },
+    "calibration/tests/test_joint_head_calibration_store_install.py": {
+      "source": "tests/test_joint_head_calibration_store_install.py",
+      "sha256": "41320d9fe9f096313ebc01d604df986022f0a5d05442b8ad35fe746f8cd1b1e7",
+      "bytes": 8861
+    },
+    "calibration/tests/test_joint_head_camera_mast_mesh.py": {
+      "source": "tests/test_joint_head_camera_mast_mesh.py",
+      "sha256": "e632ca2286aaf3111c49b181519dc4f638270925c71d623bebc99ff21d49e48a",
+      "bytes": 4968
+    },
+    "calibration/tests/test_joint_head_fake_hardware.py": {
+      "source": "tests/test_joint_head_fake_hardware.py",
+      "sha256": "e2601b87d08eb01d0f5573e4b59b9ecae174a894558e568c470f547a4e445478",
+      "bytes": 4721
+    },
+    "calibration/tests/test_joint_head_feedback_lock.py": {
+      "source": "tests/test_joint_head_feedback_lock.py",
+      "sha256": "ceb6b693e774849fee8b67457a9baaa5aa73689182313f6e79d08dcf51a7d44e",
+      "bytes": 1710
+    },
+    "calibration/tests/test_joint_head_hybrid.py": {
+      "source": "tests/test_joint_head_hybrid.py",
+      "sha256": "fcce9c2c49f5ca5481cc250feba8929ebbbd89cbe67e8ee0753947818d9dc95f",
+      "bytes": 14324
+    },
+    "calibration/tests/test_joint_head_isaac_dsw.py": {
+      "source": "tests/test_joint_head_isaac_dsw.py",
+      "sha256": "db6aa8e62626a9c25ba4b9260ebdaafd4c7dd29c82ebef0b73d02d48ae0714ef",
+      "bytes": 1960
+    },
+    "calibration/tests/test_joint_head_isaac_fit.py": {
+      "source": "tests/test_joint_head_isaac_fit.py",
+      "sha256": "16a7481d288448fae429c6b469c38a2691d4230d09ecc84e11ef45c4b5c27798",
+      "bytes": 8739
+    },
+    "calibration/tests/test_joint_head_isaac_harness.py": {
+      "source": "tests/test_joint_head_isaac_harness.py",
+      "sha256": "1ec9ba87079e081564e97c5cb729a0ffe713dfc674796005a6498aadc7176f21",
+      "bytes": 6803
+    },
+    "calibration/tests/test_joint_head_isaac_plan.py": {
+      "source": "tests/test_joint_head_isaac_plan.py",
+      "sha256": "f020928be0dcd6d5463d96714f4f201839993d29c6ca2290c6af5c49243416e1",
+      "bytes": 3964
+    },
+    "calibration/tests/test_joint_head_jaw_mapping.py": {
+      "source": "tests/test_joint_head_jaw_mapping.py",
+      "sha256": "608dcbd63e555b9b8424e1b85f5e25dda4d1ab0fe8f0ab413ff21754844ac3f6",
+      "bytes": 3618
+    },
+    "calibration/tests/test_joint_head_marker_identifiability.py": {
+      "source": "tests/test_joint_head_marker_identifiability.py",
+      "sha256": "d9b004bd7b2f10218ed9cd780e0aaf1e8fcd416a69fe9a825d25ed6a3e2b1806",
+      "bytes": 7451
+    },
+    "calibration/tests/test_joint_head_marker_mounts.py": {
+      "source": "tests/test_joint_head_marker_mounts.py",
+      "sha256": "8776ee7c3006e91a0c9ef02e63185dc24b1eef5a4d32ff6196fd8a444306e4a3",
+      "bytes": 1338
+    },
+    "calibration/tests/test_joint_head_markerless.py": {
+      "source": "tests/test_joint_head_markerless.py",
+      "sha256": "47373198eb0d3b46bf1ebde0dfb31cff22efa8ec02be34e3cd60ccc0fb47d54f",
+      "bytes": 6516
+    },
+    "calibration/tests/test_joint_head_markerless_export.py": {
+      "source": "tests/test_joint_head_markerless_export.py",
+      "sha256": "6a57432fd882a81fc6ecb3e6123a506e3a79f911de4021868f41141082b5a4b2",
+      "bytes": 1960
+    },
+    "calibration/tests/test_joint_head_plan_screen.py": {
+      "source": "tests/test_joint_head_plan_screen.py",
+      "sha256": "e452fa17d94429807620abb319cf41381e11edb0b6be29a0a5f6de17ef8dbbd6",
+      "bytes": 3322
+    },
+    "calibration/tests/test_joint_head_preflight_races.py": {
+      "source": "tests/test_joint_head_preflight_races.py",
+      "sha256": "5fa317b87387400f689fada6dcb78838c60a9db5bb013b061c2f6dd1752ad507",
+      "bytes": 22245
+    },
+    "calibration/tests/test_joint_head_preview_responsiveness.py": {
+      "source": "tests/test_joint_head_preview_responsiveness.py",
+      "sha256": "3a8d6e13812a0d7547e2fa6afe9f5b53b9e52d765051e21fbe4cf4fac6bd2480",
+      "bytes": 13658
+    },
+    "calibration/tests/test_joint_head_provisional_install.py": {
+      "source": "tests/test_joint_head_provisional_install.py",
+      "sha256": "edfbaf19d72cefaead7765eb10883229761ebca0b9e10620760c0980097ede09",
+      "bytes": 6028
+    },
+    "calibration/tests/test_joint_head_real_control.py": {
+      "source": "tests/test_joint_head_real_control.py",
+      "sha256": "bd8d202ba58eb968e7d9023aff879715b86163ffac06a366008f18a98ea46bc9",
+      "bytes": 11786
+    },
+    "calibration/tests/test_joint_head_real_mesh_overlay.py": {
+      "source": "tests/test_joint_head_real_mesh_overlay.py",
+      "sha256": "6053171f5a0c97fa1248caf55a1e6e5f518e6f29195c5a2e4b3d7da90ee48451",
+      "bytes": 4900
+    },
+    "calibration/tests/test_joint_head_real_motion.py": {
+      "source": "tests/test_joint_head_real_motion.py",
+      "sha256": "6cc8c923fb84a8c5c8fb37f6f432fb0a6481a83591f6c1d502319fb2fdd891d5",
+      "bytes": 26432
+    },
+    "calibration/tests/test_joint_head_real_owner.py": {
+      "source": "tests/test_joint_head_real_owner.py",
+      "sha256": "344469da9d1a9094380d2a8027cc9061e3a187560add15a9f6d7fc8321a2e5c6",
+      "bytes": 38971
+    },
+    "calibration/tests/test_joint_head_real_preview.py": {
+      "source": "tests/test_joint_head_real_preview.py",
+      "sha256": "19dc5c508b37f901a3009317791510e85ea916b156656fdcff51158842306d8f",
+      "bytes": 3485
+    },
+    "calibration/tests/test_joint_head_renderer_service.py": {
+      "source": "tests/test_joint_head_renderer_service.py",
+      "sha256": "fd435faf46beee524ff729b809ea02a73c02d47d059c779fcc9564a10a94b51e",
+      "bytes": 2235
+    },
+    "calibration/tests/test_joint_head_runtime_state.py": {
+      "source": "tests/test_joint_head_runtime_state.py",
+      "sha256": "28b418407df6c16d57c388537d9532f73a47f85dd6220cc2622ca1691db16e7e",
+      "bytes": 5084
+    },
+    "calibration/tests/test_joint_head_support_contact.py": {
+      "source": "tests/test_joint_head_support_contact.py",
+      "sha256": "fd0b3514bf67307ed7f4d4c3a250c05b29a2b499c34f8519c522160d5395040d",
+      "bytes": 3980
+    },
+    "calibration/tests/test_joint_head_support_control.py": {
+      "source": "tests/test_joint_head_support_control.py",
+      "sha256": "4396ac2576ef79b23badfb97e9a18738b6332d4307ee313204481af905bcc53e",
+      "bytes": 3418
+    },
+    "calibration/tests/test_joint_head_workbench.py": {
+      "source": "tests/test_joint_head_workbench.py",
+      "sha256": "136b054369a6bc5d4ef75052e9121da7cf4078e939b4f14115d9d989f44eb1a4",
+      "bytes": 8067
+    },
+    "calibration/tests/test_joint_head_workbench_arrivals.py": {
+      "source": "tests/test_joint_head_workbench_arrivals.py",
+      "sha256": "2cbfbf29fd8410e9bce628387de6bad57b3688b5c7c4067ee889b20aa5cf455d",
+      "bytes": 1159
+    },
+    "calibration/tests/test_joint_head_workbench_capture.py": {
+      "source": "tests/test_joint_head_workbench_capture.py",
+      "sha256": "fcf9f268dbd7d1c596b9dc2181134cecc5d3ff23bbc27cdc3328b33caedd6553",
+      "bytes": 7656
+    },
+    "calibration/tests/test_joint_head_workbench_capture_flow.py": {
+      "source": "tests/test_joint_head_workbench_capture_flow.py",
+      "sha256": "d4141f9844258cd7e092238f000a539daa361e366638bc626823653a438e069d",
+      "bytes": 21792
+    },
+    "calibration/tests/test_joint_head_workbench_control.py": {
+      "source": "tests/test_joint_head_workbench_control.py",
+      "sha256": "b1d4656ffae89df70c7390e3e513fc7d3b1fd1ae52b0d537e6f353c836133e19",
+      "bytes": 17628
+    },
+    "calibration/tests/test_joint_head_workbench_fault_recovery.py": {
+      "source": "tests/test_joint_head_workbench_fault_recovery.py",
+      "sha256": "c342024cb7b15d1d84e1a4b6447a4d0bd2371e1eb9ec986bc8a03a1158540275",
+      "bytes": 7541
+    },
+    "calibration/tests/test_joint_head_workbench_geometry.py": {
+      "source": "tests/test_joint_head_workbench_geometry.py",
+      "sha256": "437f9ae02389b928ee8218258b20f37c28a61a0414152ec4219b2688a12b784e",
+      "bytes": 21941
+    },
+    "calibration/tests/test_joint_head_workbench_hardware.py": {
+      "source": "tests/test_joint_head_workbench_hardware.py",
+      "sha256": "3ca621da9732d19b762ed062bce1b2adff1cfc6e0b2636f9b55480382c42318b",
+      "bytes": 16267
+    },
+    "calibration/tests/test_joint_head_workbench_library.py": {
+      "source": "tests/test_joint_head_workbench_library.py",
+      "sha256": "f1905e57c862eb94ad026aa0bb47668ba6110ad409a0f8475285205cb2c629c9",
+      "bytes": 38595
+    },
+    "calibration/tests/test_joint_head_workbench_live.py": {
+      "source": "tests/test_joint_head_workbench_live.py",
+      "sha256": "5c65d3dcc4fe7f36ce14b7516f6d433f5b48ab2eea18de25fb96550c38253380",
+      "bytes": 24203
+    },
+    "calibration/tests/test_joint_head_workbench_live_bridge.py": {
+      "source": "tests/test_joint_head_workbench_live_bridge.py",
+      "sha256": "9fb18e9dedd3ce2e82fdeb31a476739e2c68a4adaf2760d41796951087b0e5c7",
+      "bytes": 43985
+    },
+    "calibration/tests/test_joint_head_workbench_pipeline.py": {
+      "source": "tests/test_joint_head_workbench_pipeline.py",
+      "sha256": "5fca38492a898ae050591e0c9be29fba3936fb597323593b300f8cd443d7fc5d",
+      "bytes": 25907
+    },
+    "calibration/tests/test_joint_head_workbench_routing.py": {
+      "source": "tests/test_joint_head_workbench_routing.py",
+      "sha256": "01aba27abb326d8f240bcfd86829babd3963bb7380f50671eee5a47511cbb671",
+      "bytes": 12336
+    },
+    "calibration/tests/test_joint_head_workbench_ui.js": {
+      "source": "tests/test_joint_head_workbench_ui.js",
+      "sha256": "de91de70390f3308ee5e830159e9edfd6f06d4a4e0360867e3c4a6c0d7125b3b",
+      "bytes": 75942
+    },
+    "calibration/tests/test_joint_head_wrist_calibration.py": {
+      "source": "tests/test_joint_head_wrist_calibration.py",
+      "sha256": "1a0f6be5d0fa862fabf154c03574f0ea7e1255cf2ea91d2973492718907bc1ee",
+      "bytes": 46088
+    },
+    "calibration/tests/test_joint_head_wrist_clearance.py": {
+      "source": "tests/test_joint_head_wrist_clearance.py",
+      "sha256": "54dd761181bc1e1e897d629bd5425a7442787f0e523b9ed3d2b8446b282fad70",
+      "bytes": 9873
+    },
+    "calibration/tests/test_joint_head_wrist_live.py": {
+      "source": "tests/test_joint_head_wrist_live.py",
+      "sha256": "f83c9ecdf95d6818eac3b7d135c78a8df24264a3d202bc3855fae530fee67b5c",
+      "bytes": 25283
+    },
+    "calibration/tests/test_joint_head_wrist_seed.py": {
+      "source": "tests/test_joint_head_wrist_seed.py",
+      "sha256": "08587f537109a5fe66988ae8356140dd6f71f194096533665e71bd30bb191a86",
+      "bytes": 7725
+    },
+    "calibration/tests/test_joint_head_x5_hybrid.py": {
+      "source": "tests/test_joint_head_x5_hybrid.py",
+      "sha256": "fb21cbfad5d3324458f358c10938c5aba4896021f05ee26b166fcb7b84be04b0",
+      "bytes": 11279
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "urdf": "/absolute/path/to/X5/model.urdf",
+  "mesh_manifest": "/absolute/path/to/X5/dataset.json",
+  "scene_seed": "/absolute/path/to/scene-seed.json",
+  "wrist_seed_file": "configs/wrist-motion-seed-v3.json",
+  "candidate": "/absolute/path/to/recommended-candidate.json",
+  "camera": "/absolute/path/to/camera.json",
+  "camera_seed": "/absolute/path/to/camera-seed.json",
+  "gap_m": {"left": 0.083, "right": 0.083},
+  "simulation_speed_limit_rad_s": 1.0,
+  "initial_q": [0,0,0,0,0,0,0,0,0,0,0,0],
+  "wrist_seed_file": "configs/wrist-motion-seed-v3.json",
+  "capture_command": ["/absolute/path/to/python", "/absolute/path/to/joint_head_workbench_dsw_worker.py", "--config", "/absolute/path/to/deployment.json"]
+}

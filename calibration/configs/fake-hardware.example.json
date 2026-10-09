@@ -1,0 +1,80 @@
+{
+  "_comment": [
+    "假真机（joint_head_fake_hardware.py）与假工作台（joint_head_workbench.py --port 18300）共用的一份配置。",
+    "本文件是字段模板：所有 <...> 占位符必须在部署主机上替换为真实绝对路径，不得提交真实 token。",
+    "启动前 joint_head_fake_hardware.py 会硬校验：robot_id 以 'fake-' 开头、calibration_root 位于 output.parent 之下、output 目录不存在。",
+    "reference_run: fake-hardware-20260921-2330（已跑通控制与采集链路，见 docs/workbench-architecture.md §2.6）"
+  ],
+
+  "robot_id": "fake-dsw-arx6-<YYYYMMDD>",
+  "calibration_root": "<RUN_ROOT>/calibrations",
+  "simulation_only": true,
+  "evidence_source": "fake_hardware_dsw_rtx",
+
+  "urdf": "<ASSETS>/urdf.urdf",
+  "mesh_manifest": "<ASSETS>/mesh_manifest.json",
+  "scene_seed": "<ASSETS>/scene_seed.json",
+  "candidate": "<ASSETS>/candidate.json",
+  "camera": "<ASSETS>/camera.json",
+  "camera_seed": "<ASSETS>/camera_seed.json",
+  "chassis_mesh": "<ASSETS>/chassis-extended.STL",
+  "chassis_scale": [1, 1, 1],
+  "chassis_T_world_mesh": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+  "static_boxes": [],
+
+  "initial_q": [
+    -0.4716949462890625, 0.10814857482910156, 0.046349525451660156,
+    0.058938026428222656, -0.037575721740722656, -0.02613067626953125,
+    0.5579080581665039, 0.08449649810791016, 0.057793617248535156,
+    0.02193450927734375, 0.01201629638671875, -0.02994537353515625
+  ],
+  "head_motion_seed": "<CODE>/standard_head_motion_seed_a1_fake_v2.json",
+  "wrist_seed_file": "configs/wrist-motion-seed-a1-fake-v1.json",
+
+  "live_backend": {
+    "url": "http://127.0.0.1:8118",
+    "token_file": "<RUN_PARENT>/dsw-token"
+  },
+  "hardware_control": {
+    "port": 18302,
+    "token_file": "<GATEWAY_STATE>/auth-token"
+  },
+  "hardware_status_owner_port": 18301,
+  "hardware_camera_port": 18303,
+  "hardware_wrist_camera_ports": { "left": 18304, "right": 18305 },
+  "hardware_camera_serials": { "head": "fake-head", "left": "fake-left", "right": "fake-right" },
+
+  "bind_host": "127.0.0.1",
+  "allowed_hosts": ["127.0.0.1:18300"],
+
+  "wrist_nominal_mounts": {
+    "left": [[0, -0.5, 0.8660254037844386, 0.06582531754730549], [-1, 0, 0, 0], [0, -0.8660254037844386, -0.5, 0.05875], [0, 0, 0, 1]],
+    "right": [[0, -0.5, 0.8660254037844386, 0.06582531754730549], [-1, 0, 0, 0], [0, -0.8660254037844386, -0.5, 0.05875], [0, 0, 0, 1]]
+  },
+  "wrist_camera_housings": {},
+  "wrist_support_proxy": { "shell_size_m": [0.025, 0.025, 0.012], "bracket_thickness_m": 0.006 },
+  "hardware_wrist_camera_files": {
+    "left": "<WRIST_ASSETS>/left/camera.json",
+    "right": "<WRIST_ASSETS>/right/camera.json"
+  },
+  "wrist_simulation_cameras": {
+    "left": {
+      "serial": "fake-left", "width": 640, "height": 480,
+      "fx": 394.482177734375, "fy": 393.95550537109375,
+      "cx": 317.9473571777344, "cy": 236.87979125976562,
+      "distortion_model": "distortion.inverse_brown_conrady",
+      "coefficients": [0, 0, 0, 0, 0], "rectified": true,
+      "left_id": 24, "right_id": 30, "dictionary": "DICT_4X4_50", "black_size_m": 0.015,
+      "joint_feedback_available": false
+    },
+    "right": {
+      "serial": "fake-right", "width": 640, "height": 480,
+      "fx": 394.482177734375, "fy": 393.95550537109375,
+      "cx": 317.9473571777344, "cy": 236.87979125976562,
+      "distortion_model": "distortion.inverse_brown_conrady",
+      "coefficients": [0, 0, 0, 0, 0], "rectified": true,
+      "left_id": 24, "right_id": 30, "dictionary": "DICT_4X4_50", "black_size_m": 0.015,
+      "joint_feedback_available": false
+    }
+  }
+}

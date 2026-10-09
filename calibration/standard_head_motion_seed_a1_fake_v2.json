@@ -1,0 +1,448 @@
+{
+  "id": "x5-head-a1-fake-v2-independent-left-holdout",
+  "mirror_mapping": [
+    -1,
+    1,
+    1,
+    1,
+    -1,
+    -1
+  ],
+  "right_waypoints": [
+    {
+      "arm": "right",
+      "cell": [
+        1,
+        1
+      ],
+      "kind": "center",
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "target_uv": [
+        338,
+        240
+      ],
+      "inset_scale": 1.0
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 2,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        0.1178707556,
+        -0.1268649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 3,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        -0.0834751353,
+        -0.0021292444,
+        -0.1268649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 4,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        -0.0834751353,
+        -0.0021292444,
+        -0.3668649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 5,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.6601584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.1268649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 6,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.1278238111,
+        0.7801584984,
+        0.1565248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 1,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        -0.0834751353,
+        0.1178707556,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 2,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.6601584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.3668649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 3,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.6601584984,
+        0.1565248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 4,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.4068649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 5,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.0868649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 6,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        -0.1234751353,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 1,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        0.1178707556,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 2,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.6601584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 3,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0878238111,
+        0.7801584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 4,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.0365248647,
+        -0.0021292444,
+        -0.3268649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    },
+    {
+      "arm": "right",
+      "kind": "joint_diversity",
+      "joint": 5,
+      "capture": true,
+      "transition": false,
+      "q": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.8225099543,
+        1.0078238111,
+        0.7801584984,
+        0.1165248647,
+        -0.0021292444,
+        -0.2468649478
+      ],
+      "cell": [
+        1,
+        1
+      ]
+    }
+  ],
+  "source": "DSW RTX pose observation + geometry visibility search; candidate seed, not physical validation",
+  "validation_note": "Search-selected on current DSW scene: each right pose and its deterministic mirror were geometry-visible, collision-free, and projected marker area >=280 px^2. Candidate seed; final RGB ArUco validation remains required.",
+  "left_holdout_indices": [
+    2,
+    16
+  ]
+}

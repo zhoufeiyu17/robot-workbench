@@ -1,0 +1,12 @@
+{
+  "host": "user@simulation.example.com",
+  "port": 22,
+  "ssh_key": "~/.ssh/simulation_key",
+  "root": "/srv/calibration/task",
+  "source": "/srv/robot_sim",
+  "assets": "/srv/robot_assets",
+  "python_exe": "/srv/robot_sim_venv/bin/python",
+  "isaac_python": "/srv/isaac/python.sh",
+  "runner": "/srv/calibration/task/capture.py",
+  "runner_sha256": "REPLACE_WITH_DEPLOYED_CAPTURE_SHA256"
+}

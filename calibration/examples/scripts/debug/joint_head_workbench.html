@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>标定工作台</title>
+<style>
+[hidden]{display:none!important}:root{color-scheme:dark;--bg:#10161d;--panel:#18212b;--line:#2c3947;--text:#e8edf2;--muted:#93a4b6;--accent:#72ddc0;--orange:#f3b77f}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,sans-serif}button,input,select{font:inherit}button,select{background:#243240;border:1px solid #3b4e60;color:var(--text);border-radius:7px;padding:9px 13px;cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.4;cursor:not-allowed}button.primary{background:var(--accent);border-color:var(--accent);color:#112a24;font-weight:700}button.stop{background:#8c303d;border-color:#b84b59;font-weight:700}input[type=number]{background:#111a23;color:var(--text);border:1px solid var(--line);border-radius:5px;padding:7px;width:78px}input[type=range]{accent-color:var(--accent);width:100%}header{display:flex;align-items:center;gap:16px;padding:18px 24px;border-bottom:1px solid var(--line)}h1{font-size:20px;letter-spacing:.02em;margin:0}h2{font-size:17px;margin:0 0 14px}h3{font-size:14px;margin:18px 0 10px}p{line-height:1.65;margin:10px 0}.muted,small{color:var(--muted)}.badge{display:inline-block;padding:5px 9px;border:1px solid #387361;color:var(--accent);border-radius:5px;font-size:12px}.spacer{flex:1}.status{font-size:12px;color:var(--muted)}main{display:grid;align-items:start;grid-template-columns:minmax(0,1.35fr) minmax(420px,1fr);gap:20px;padding:20px 24px;max-width:none;margin:auto}.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}.panelhead{display:flex;align-items:center;gap:10px;padding:14px 17px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.panelhead>label,.panelhead>strong,.panelhead>select,.panelhead>small,.panelhead>span{white-space:nowrap;flex:0 0 auto}.panelhead strong{font-size:14px}.viewport{position:relative;height:440px;background:radial-gradient(ellipse at 50% 70%,#24323d,#121c25 75%)}canvas{display:block;width:100%;height:100%;touch-action:none}.viewport>img{width:100%;height:100%;object-fit:contain}.legend{position:absolute;left:16px;top:15px;font-size:12px;color:var(--muted);pointer-events:none}.legend span{margin-right:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:5px}.orange{background:var(--orange)}.gray{background:#94a4b5}.footer{padding:11px 17px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}.row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.views{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}.camera{height:235px;background:#101820}.camera img{width:100%;height:100%;object-fit:contain}.tabs{display:flex;flex-wrap:wrap;gap:2px;padding:8px;border-bottom:1px solid var(--line)}.tabs button{padding:9px 8px;flex:1;border:0;background:transparent;white-space:nowrap}.tabs button[aria-selected=true]{background:#2b4050;color:var(--accent)}.content{padding:17px;overflow:visible}.mode{width:100%}#manual .arms{grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}@media(max-width:1350px){#manual .arms{grid-template-columns:1fr}}.mode[hidden]{display:none}.joint{display:grid;grid-template-columns:25px 1fr 76px;gap:9px;align-items:center;margin:9px 0}.joint label{color:var(--muted);font-size:12px}.joint input[type=number]{width:76px}.arms{display:grid;grid-template-columns:1fr;gap:4px}.divider{border:0;border-top:1px solid var(--line);margin:16px 0}.hint{border-left:2px solid #4c6b81;padding-left:10px;font-size:12px;color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.actions button{flex:1;white-space:nowrap}.notice{padding:12px 16px;background:#352b22;border:1px solid #67503a;border-radius:8px;margin-bottom:16px;display:flex;gap:12px;align-items:center}.notice[hidden]{display:none}.notice p{margin:0;flex:1}.notice button{white-space:nowrap}.grid9{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.cell{padding:14px 7px;border:1px solid var(--line);border-radius:6px;text-align:center;color:var(--muted);font-size:12px}.cell.done{border-color:#409783;background:#203e37;color:var(--accent)}.cell.planned{border-color:#687c91;color:var(--text)}ol{padding-left:23px;line-height:1.8}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px ui-monospace;line-height:1.6;max-height:260px;overflow:auto}details{margin:12px 0}summary{cursor:pointer;color:var(--muted)}.speedrow{display:grid;grid-template-columns:1fr 85px;gap:9px;align-items:center;margin:7px 0}.framebar{padding:12px;display:flex;gap:8px;align-items:center}.framebar select{min-width:0;flex:1}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.metric{background:#111b24;border-radius:6px;padding:11px;font-size:12px;color:var(--muted)}.metric b{display:block;font-size:20px;color:var(--text);margin-bottom:3px}a{color:var(--accent)}@media(max-width:1000px){main{grid-template-columns:1fr}.content{max-height:none}.arms{grid-template-columns:1fr 1fr;gap:20px}header{flex-wrap:wrap}.viewport{height:390px}}@media(max-width:600px){main{padding:12px;gap:12px}.views,.arms{grid-template-columns:1fr}.viewport{height:300px}.status{width:100%}header{padding:15px}.notice{align-items:flex-start;flex-direction:column}}
+#cameraCompare,#overlayPanel,#cleanupPanel,#hardwarePanel,#notice{grid-column:1/-1}.hardwareGrid{display:grid;grid-template-columns:minmax(0,2fr) minmax(250px,1fr);gap:28px}@media(max-width:1000px){.hardwareGrid{display:block}}
+aside.panel{align-self:stretch;min-height:calc(100vh - 160px)}#hw-joints td,#hw-joints th{padding:6px 18px;text-align:left}#hw-joints{width:100%}dialog{background:var(--panel);color:var(--text);max-width:560px} main>div,aside{min-width:0}@media(max-width:1000px){aside.panel{align-self:stretch;min-height:0}}
+.versionCard{padding:14px 0;border-bottom:1px solid var(--line)}.versionCard pre{max-height:130px}#libraryArchive{margin:14px 0 0;border-top:1px solid var(--line)}#libraryArchive>summary{display:flex;gap:9px;align-items:baseline;padding:11px 0;list-style:none;cursor:pointer}#libraryArchive>summary::-webkit-details-marker{display:none}#libraryArchive>summary::before{content:"\25b8";color:var(--muted);font-size:12px}#libraryArchive[open]>summary::before{content:"\25be"}#libraryArchive>summary strong{color:var(--text);font-size:13px}#libraryArchive>summary span{font-size:12px;color:var(--muted)}#libraryVersions{max-height:52vh;overflow:auto}#libraryVersions .versionCard:last-child{border-bottom:0}.versionCard h3{font-size:13px;margin:0 0 6px}.versionLine{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;font-size:12px;margin:6px 0}.versionLine span{color:var(--muted)}.versionLine strong{color:var(--text)}.versionLine details{margin:0}.versionLine summary{font-size:12px}#groupHint:empty{display:none}#deleteHistoryDialog{border:1px solid var(--line);border-radius:10px}#collection select,#pipeline select,#library select{max-width:100%}#libraryRoot{overflow-wrap:anywhere}#replayDetails{padding:0 16px}#headDependency{margin:12px 0}
+.statbar{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 0}
+.sbar-cell{display:inline-flex;align-items:baseline;gap:5px;padding:3px 8px;border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:11px;line-height:1.35;white-space:nowrap}
+.sbar-cell b{font-weight:600;color:var(--muted)}
+.sbar-cell i{font-style:normal;color:var(--text)}
+.sbar-cell.ok i{color:var(--accent)}
+.sbar-cell.warn i{color:var(--orange)}
+.sbar-cell.off{border-color:#7a3f3b}
+.sbar-cell.off i{color:#e2776f}
+.meshSwitch{display:inline-flex;gap:4px;vertical-align:middle;flex:0 0 auto}
+.meshSwitch button{padding:3px 9px;font-size:12px;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:6px;cursor:pointer;white-space:nowrap;flex:0 0 auto}
+#meshViewHint{white-space:nowrap}
+.meshSwitch button[aria-pressed="true"]{background:var(--accent);color:#0d1117;border-color:var(--accent)}
+#executionAlert{position:sticky;top:0;z-index:50;max-height:45vh;overflow:auto;margin:14px 24px 0;padding:12px 16px;border:1px solid #9a6144;border-radius:8px;background:#352b22;display:flex;gap:12px;align-items:center;flex-wrap:wrap}#executionAlert strong{color:#ffd5b0}#executionAlert p{margin:0;flex:1 1 450px}#executionAlert details{width:100%;margin:0}#executionAlert button{white-space:nowrap}@media(max-width:600px){#executionAlert{margin:12px 12px 0}}
+/* Overlay panes are shown one environment at a time; the default (no attribute
+   or simulation) hides the hardware pane so a newly created row is never double. */
+.views[data-camera]:not([data-mesh-mode="hardware"]) section[data-mesh="hardware"]{display:none}
+.views[data-mesh-mode="hardware"] section[data-mesh="simulation"]{display:none}</style></head><body>
+<header><h1><span id="modelName">机械臂</span> <span class="muted">/</span> 标定工作台</h1><label for="controlMode">控制模式</label><select id="controlMode" disabled><option value="fake">Fake 真机 · 开发模式</option><option value="physical" selected>物理真机</option></select><span class="badge" id="modeBadge">等待连接</span><span class="status" id="health" role="status">读取设备状态…</span><span class="spacer"></span><button class="stop" id="stop">■ 停止仿真动作</button></header>
+<div class="statbar" id="statusBar" role="status" aria-label="工作台状态"></div>
+<p id="motionPreflight" class="hint" role="status" aria-live="polite" hidden></p>
+<div id="executionAlert" role="alert" hidden><strong id="executionAlertTitle"></strong><p id="executionAlertReason"></p><button id="executionAlertAction" hidden></button><details id="executionAlertDetails" hidden><summary>查看故障详情</summary><pre id="executionAlertDetail"></pre></details></div>
+<main><div class="notice" id="notice" hidden role="status"><p id="message"></p><button id="ack">已读并重新规划</button></div>
+<section class="panel" id="hardwarePanel"><div class="panelhead"><strong>真机接入与控制</strong><span class="badge" id="hwSourceBadge">来源未知</span></div><details open style="margin:14px 17px"><summary>真机连接与运行状态</summary><p class="hint">接管会自动启动缺失的头部相机进程，并加载 ROS 2 环境启动独占 SDK 控制器。当前不另启 ROS 控制节点。顶部控制模式提供 Fake 真机开发模式和物理真机。DSW 仅提供渲染与叠加。Fake 与物理真机使用独立的相机、数据和标定库；切换不会连接或断开物理控制器，执行或采集期间禁止切换。当前页面的控制与图像仅对应所选环境。DSW 断线不影响真机，真机断开后保留所选模式与失联原因，禁止执行；相机只读监控不依赖控制权。</p><div class="hardwareGrid"><section><strong id="hw-health" role="status">正在读取控制器…</strong><p id="hw-reason"></p><button id="hw-acquire" disabled>一键接入真机与相机</button><button id="hw-recover" disabled>确认故障并重新开放预览</button><button id="hw-emergency" hidden disabled>退出 SDK emergency</button><button id="hw-release" disabled>断开控制器（撤掉保持）…</button><p class="muted">停止请求不等于已停止；需确认下方反馈。网络失联或 SDK 阻塞时网页不能保证停止，现场应继续可靠支撑双臂。关闭网页不会停止控制器。</p><p id="hw-action" role="status"></p><p id="hw-pedal" role="status">踏板状态未确认</p><p class="muted">踏板 4：第一次停止并保留阻尼；松开后再踩进入手动接管，不恢复自动动作。属于软件停止，不能清除 SDK emergency，不能保证中断阻塞的 SDK 调用。</p></section>
+<section><h2>原始关节反馈</h2><p id="hw-fresh"></p><table><thead><tr><th>关节</th><th>左</th><th>右</th></tr></thead><tbody id="hw-joints"></tbody></table><p class="muted">J1–J6 单位 °；夹爪显示映射后的实际开度 mm 与原始 SDK 值。</p></section></div>
+<p id="hw-motionStatus"></p><section><details><summary>控制器完整状态与历史故障</summary><pre id="hw-state"></pre></details></section><dialog id="hw-confirm"><h2>断开双臂控制器（撤掉保持）</h2><p>这将撤掉软件保持／补偿，双臂可能下落。不会自动重启。</p><p id="hw-preview"></p><label><input id="hw-supported" type="checkbox"> 我已可靠托扶双臂，确认现在释放</label><button id="hw-execute" disabled>确认断开并撤掉保持</button><button id="hw-cancel">取消</button></dialog>
+</details></section>
+<section class="panel" id="cameraCompare" style="margin-top:16px"><div class="panelhead"><strong>DSW／真机相机对照</strong><select id="cameraView" aria-label="相机对照显示模式"><option value="head">头部</option><option value="left">左腕</option><option value="right">右腕</option><option value="all">同时显示</option></select></div><div class="views" data-camera="head"><section class="panel"><div class="panelhead"><strong id="cameraTitle">头部相机投影</strong><span class="spacer"></span><small id="visibility">标签 24 / 30</small></div><div class="camera"><img id="liveActual" alt="DSW 实际姿态 RTX 画面" hidden><canvas id="camera" aria-label="相机视野中的目标 mesh"></canvas></div><div class="footer" id="dswFeedback">DSW 仿真状态读取中</div><div class="footer" id="cameraFooter">简化表面仅供交互预览；标定渲染使用完整 mesh。</div></section><section class="panel"><div class="panelhead"><strong>真机头部相机 · 只读</strong><small id="hardwareCameraHealth">未连接</small></div><div class="camera"><img id="hardwareImage" alt="真机相机原始画面，仅在已验证读取成功时显示" hidden><p id="hardwarePlaceholder" class="muted" style="padding:22px">真机相机未连接；DSW 仿真画面保持独立。</p></div><div class="footer" id="hardwareCameraInfo">连续视频目标 30 Hz；等待实测帧率。</div><div class="footer" id="hardwareFeedback">真机关节反馈未连接；DSW 独立仿真。</div></section></div></section><div id="previewColumn"><section class="panel" id="previewPanel"><div class="panelhead"><strong>姿态预览</strong><span class="spacer"></span><button id="resetView">重置视角</button><label><input type="checkbox" id="ghost" checked> 实际姿态</label></div><div class="viewport"><img id="livePreview" alt="DSW 目标姿态 RTX 预览（不执行）" hidden><canvas id="scene" aria-label="双臂实际与目标 mesh，拖动旋转视角，滚轮缩放"></canvas><div class="legend"><span><i class="dot"></i>左臂目标</span><span><i class="dot orange"></i>右臂目标</span><span><i class="dot gray"></i>实际姿态</span></div></div><div class="footer" id="previewInfo">拖动关节只修改目标预览；点击执行后才运动。拖动视图旋转 · 滚轮缩放</div></section>
+<section class="panel" id="actualPosePanel" hidden style="margin-top:16px"><div class="panelhead"><strong>DSW 实际整机姿态</strong><select id="overviewMode" aria-label="整机浏览模式"><option value="fixed">固定视角</option><option value="drag">拖动浏览</option></select><select id="overviewPreset" aria-label="整机固定视角"><option value="front">正面</option><option value="left">左前</option><option value="right">右前</option><option value="top">俯视</option></select><button id="overviewZoomIn" aria-label="放大整机">＋</button><button id="overviewZoomOut" aria-label="缩小整机">−</button><button id="overviewReset">重置</button></div><div class="viewport"><img id="liveActualPose" alt="DSW 当前双臂整机姿态及头部投影"></div><div class="footer">整机独立视图；拖动模式：左右拖动环绕，上拖画面向上，滚轮或 ＋／− 缩放。头部相机见下方。</div></section></div>
+<aside class="panel"><nav class="tabs" aria-label="工作模式"><button data-tab="manual" aria-selected="true">人工规划</button><button data-tab="pipeline" aria-selected="false">一键标定</button><button data-tab="collection" aria-selected="false">采集与求解</button><button data-tab="library" aria-selected="false">标定文件</button><button data-tab="arrival" aria-selected="false">到位误差</button><button data-tab="diagnostics" aria-selected="false">设备诊断</button></nav><div class="content">
+<section class="mode" id="manual"><h2>规划一个目标姿态</h2><p class="muted">角度单位 °；目标和实际反馈分别显示。</p><div class="row"><label for="uniformSpeed">统一速度 rad/s</label><input id="uniformSpeed" type="number" min="0.001" step="0.01" value="0.2"><button id="applySpeed">应用到全部</button></div><details><summary>逐关节速度</summary><div id="speeds"></div><p class="hint">速度为可调目标值；真机由 SDK／硬件约束，仿真由对应后端处理。</p></details><div class="arms" id="joints"></div><div class="actions"><button id="useActual">使用实际姿态</button><button id="home">预览零位</button></div><h3>夹爪开度 · 金属内间距 mm</h3><div id="jaws"></div><div class="row"><label for="jawSpeed">夹爪速度 mm/s</label><input id="jawSpeed" type="number" min="0.001" step="1" value="10"></div><p class="hint">双臂与夹爪共享下方执行按钮；加入队列会一并保存开度与速度。</p><p id="realJawFeedback" class="hint">等待真机反馈</p><p class="hint">左右独立映射，范围 0–83 mm；SDK 0 = 实际 0，其间分段插值。尺量的 2 mm 修正已计入，无需再次加减。</p><div class="actions"><button id="addQueue">加入动作队列</button><button id="execute" class="primary" aria-describedby="executeBlockReason" disabled>执行预览动作</button></div><p class="hint" id="executeBlockReason" role="status" hidden></p><details open><summary id="queueTitle">动作队列 · 0 个路径点</summary><ol id="queue"></ol></details><div class="actions"><button id="runQueue" aria-describedby="queueBlockReason">执行当前队列</button><button id="clearQueue">清空队列</button></div><p class="hint" id="queueBlockReason" role="status" hidden></p></section>
+<section class="mode" id="pipeline" hidden><h2>一键标定</h2><p>头部与双腕：生成计划 → 审阅确认 → 执行采集 → 求解 → 验收 → 安装</p><p class="hint">新标定计划：左右夹爪目标固定为 80 mm，采样点与过渡点一致；求解仍使用每帧实测开度。物理真机头部 mesh 留出：误差 ≤ 10 px，匹配覆盖率 ≥ 60%；Fake／仿真仍为 7 px、70%。新双腕计划仅用对侧贴纸求解，固定头部贴纸安装，贴纸留出 RMS ≤ 3 px。</p><div class="row"><button id="runPipeline">① 启动标定并生成计划</button><button id="reviewPipeline" class="primary" aria-describedby="pipelineBlockReason pipelineReviewHint" disabled>② 审阅本批并确认执行</button><button id="stopPipeline">停止标定流程</button></div><p class="hint" id="pipelineBlockReason" role="status" hidden></p><p class="hint">物理真机：第①步生成计划，等待审阅，不执行采集轨迹；第②步审阅本批轨迹并确认净空后，才开始本批采集。头部求解完成后会生成双腕计划，再次等待第②步确认。</p><p id="pipelineReviewHint" class="hint"></p><p id="pipelineStatus" class="hint"></p><div id="pipelineProgressPanel"><label id="pipelineProgressLabel" for="pipelineProgress">整体进度 · 0/7 阶段</label><progress id="pipelineProgress" max="7" value="0" style="width:100%;height:18px;accent-color:#79bbb0" aria-describedby="pipelineProgressHint"></progress><p id="pipelineSubprogressLabel" class="hint"></p><progress id="pipelineSubprogress" max="1" value="0" style="width:100%;height:8px;accent-color:#79bbb0" aria-labelledby="pipelineSubprogressLabel"></progress><ol id="pipelineMilestones" class="hint" style="display:flex;flex-wrap:wrap;gap:8px 18px;padding-left:20px"></ol><p id="pipelineProgressHint" class="hint" role="status"></p></div><div id="pipelineSteps"></div><p class="hint"><b>完整标定</b>：头部（按当前点位规划 → 审阅并采集 → mesh＋贴纸求解）→ 腕半场（以头部结果为依赖规划 → 审阅并采集 → 仅对侧贴纸求解）→ 双腕成对通过留出后发布并安装一组。不需要预先准备任何批次；头部使用 mesh＋贴纸，双腕使用对侧贴纸，留出 RMS 门槛为 3 px。</p><p class="hint">真机每批采集前会暂停，请审阅轨迹并确认现场净空；预览 30 秒内有效，过期须重新审阅。只有明确为假真机的环境可开启自动确认和采集重试。</p></section>
+<section class="mode" id="collection" hidden><h2>采集与求解</h2><h3>1. 上游：标定类型与头标定依赖</h3><div class="row"><label for="workflowKind">标定类型</label><select id="workflowKind"><option value="head">头部相机</option><option value="wrist">双腕相机</option></select></div><div id="headDependency" hidden><p class="hint">双腕固定所选头标定的外参、关节零偏与贴纸安装。左腕观察右贴纸 30，右腕观察左贴纸 24。</p><label for="workflowHead">依赖的头标定版本</label><select id="workflowHead"><option value="">明确选择完整头标定</option></select></div><p id="workflowStatus" role="status"></p><h3>2. 当前：规划与采集</h3><div class="grid9" id="coverage"></div><div class="actions"><button id="autoPlan" class="primary">生成并预览整批计划</button></div><p class="hint" id="autoPlanReady" role="status"></p><p class="hint">规划检查标签及爪体视野、自体碰撞。标签丢失时有界地向可见姿态回退，失败记录缺口，不无限重试。</p><div id="planBrowse" hidden><div class="actions"><button id="planPrev">上一姿态</button><select id="planSelect" aria-label="计划姿态"></select><button id="planNext">下一姿态</button></div><canvas id="planImage" width="640" height="480" style="width:100%;background:#10171d" aria-label="当前计划相机图像"></canvas><p id="planCaption"></p><p class="hint">即时 mesh 投影预览，非 Isaac 实拍渲染。安装模型的来源与限制见下方逐姿态说明；简化支架不等于实物 CAD 或实测安装。</p></div><pre id="planInfo">尚未生成计划。</pre><button id="runBatch" class="primary">执行已规划批次</button><p class="hint" id="runBatchReady" role="status"></p><div class="metrics"><div class="metric"><b id="captured">0</b>采集帧</div><div class="metric"><b id="queued">0</b>采样点</div><div class="metric"><b id="transitions">0</b>过渡点（不采集）</div><div class="metric"><b id="validFrames">0</b>可用于求解（帧）</div><div class="metric"><b id="failedFrames">0</b>不可用于求解（帧）</div><div class="metric"><b id="batchState">—</b>批次状态</div></div><p class="hint">采样点与过渡点属于当前队列；帧数属于当前求解来源。队列自动保存，重启后需明确点击执行。拟合与留出姿态在采集前划分。</p><hr class="divider"><h3>3. 产出：求解与独立验证</h3><div class="row"><label for="fitSource">求解来源批次</label><select id="fitSource"></select><button id="applyFitSource">设为求解来源</button><button id="clearFitSource">清空求解来源</button></div><p id="fitSourceStatus" class="hint">明确选择数据来源；浏览历史不改变求解来源。</p><button id="fitButton" class="primary">对已采集数据求解</button><p class="hint" id="fitReady" role="status"></p><p id="evaluationSummary" class="hint" hidden></p><pre id="fitResult">尚未求解。</pre><p class="hint">贴纸像素误差与 mesh 贴合分别报告。低重投影误差不等同于毫米级物理精度；候选不会自动写入真机。</p></section>
+<section class="mode" id="library" hidden><h2>标定文件与版本</h2><div class="row"><label for="libraryEnvironment">标定来源</label><select id="libraryEnvironment"><option value="hardware">真机标定</option><option value="simulation">仿真标定</option></select></div><p id="libraryRoot" class="hint"></p><div class="row"><label for="installResult">已验证结果</label><select id="installResult"></select><button id="installCalibration">安装为当前有效标定</button></div><p id="activeCalibration" class="hint"></p><p class="hint">可安装的单位是<b>一组</b>：一个头部 ＋ 与之匹配的双腕。安装会把这一组写进该来源下的 <code>active/</code> 目录——<b>那个目录里永远只有一组</b>，是后续流程与对外唯一的标定读取路径；本栏的“已登记版本”只是历史版本库，求解本身就会把头部登记进去，所以保存不应该是你要做的决定。缺匹配双腕（或腕结果与当前几何不符）的头部保留可见但<b>不能安装</b>，原因写在选项与下方提示里。</p><p id="groupHint" class="hint"></p><div class="row"><label for="markerPrior">标识先验</label><select id="markerPrior"></select><button id="setMarkerPrior">按所选腕结果固定贴纸安装</button></div><p id="markerPriorInfo" class="hint"></p><p class="hint">头部求解要把<b>相机、12 个关节零偏、mesh 和两个贴纸安装</b>一起解出来，贴纸是它最弱的那几个未知量；腕半场只用六个自由度看同一张贴纸，所以让腕半场量、再让头部沿用，是更划算的分工。设了先验之后，头部求解会<b>冻结</b>这些贴纸安装、只解相机与零偏（<code>/api/fit</code> 会带上 <code>--marker-mounts</code>）；先验的来源始终是一个腕结果，而不是手填的数值——提示里会写出它的来源与改动量。</p><p class="hint">版本保存在机器人本地公共目录。永久删除本工作台历史原始采集时保留标定版本及依赖信息；删除范围以确认窗口为准。</p><details id="libraryArchive"><summary><strong>已登记版本</strong><span id="libraryVersionCount"></span></summary><div id="libraryVersions"></div><p id="libraryEmpty" class="muted">尚无登记版本。</p></details></section>
+<section class="mode" id="arrival" hidden><h2>关节到位误差</h2><p class="hint">实际反馈 − 本次目标。每个标定路径点只计一次；正负均值表示方向偏差。仅统计到位并稳定后的反馈；中途停止、未到位失败不计入。不能把到位误差直接当作几何零偏补偿。</p><p id="arrivalInfo" role="status"></p><div style="overflow-x:auto"><table><thead><tr><th>关节</th><th>样本数</th><th>均值 °</th><th>标准差 °</th><th>RMS °</th><th>|误差| P95 °</th><th>|误差| 最大 °</th></tr></thead><tbody id="arrivalRows"></tbody></table></div><p id="arrivalPath" class="hint" style="overflow-wrap:anywhere"></p><p class="hint">原始目标、实测关节和误差以 rad 保存；独立于采集图像，删除图像批次仍保留。用于 real2sim 时需结合姿态、运动方向和负载分析，汇总值不代表所有工况。</p></section>
+<section class="mode" id="diagnostics" hidden><h2>环境与反馈检查</h2><h3>DSW 画面恢复</h3><p id="dswRecoveryStatus" class="hint">读取渲染连接…</p><button id="reconnectDsw">重新连接画面</button><p class="muted">此按钮重新打开浏览器画面连接，不重启机器人控制器、不执行动作。渲染进程异常由后台有限重试；恢复后不会自动继续采集。</p><details><summary>画面仍不可用：恢复指引</summary><ol><li>先看上方 DSW 状态。已连接但无图时，点击「重新连接画面」。</li><li>DSW 陈旧或断开时，检查下方隧道与渲染服务；等待初始化完成。GPU 被其他任务占用时需等待资源释放，不要反复重启。</li><li>连续失败或内存超限锁定时，先按服务日志处理原因，再执行对应环境的恢复命令。</li></ol><pre id="dswRecoveryCommands">当前部署未提供恢复命令。</pre><p class="muted">恢复渲染无需断开双臂。不要为修复图像点击真机释放、接管或运动审批。</p></details><p class="muted">缺失反馈显示无效，不以默认零值代替。硬件故障不能用“已读”清除。</p><button id="refresh">刷新检查结果</button><p id="connectionDiagnostics" class="hint"></p><pre id="cameraProcessDiagnostics"></pre><pre id="diagnosticResult">等待状态…</pre><details><summary>完整后端状态</summary><pre id="rawState"></pre></details></section>
+</div></aside><section id="overlayPanel" class="panel" style="margin-top:16px"><div class="panelhead"><strong>叠加与回放</strong><span class="spacer"></span><small id="frameCount">0 帧</small></div><section class="panel"><div class="panelhead"><strong>标定 mesh 实时叠加</strong><select id="overlayView" aria-label="标定叠加显示模式"><option value="head">头部</option><option value="left">左腕</option><option value="right">右腕</option><option value="all">同时显示</option></select><select id="calibrationCandidate" aria-label="实时叠加标定参数"><option value="">明确选择候选</option><option value="joint_candidate">联合关节零偏解</option><option value="fixed_joint_baseline">固定关节零偏基线</option></select><label for="wristResult">腕标定</label><select id="wristResult" aria-label="实时腕标定版本"><option value="">选择腕标定</option></select><label><input id="calibrationShow" type="checkbox" aria-describedby="meshPerformanceHint"> 启用实时 mesh 叠加</label></div><p id="meshPerformanceHint" class="hint" role="status">开启会占用渲染资源，降低姿态预览流畅度；关闭可优先保障姿态预览。仅影响实时叠加，不影响采集、求解和历史回放。</p><div class="row" id="meshViewRow"><strong>叠加环境</strong><span class="meshSwitch" role="group" aria-label="标定叠加环境"><button id="meshViewSimulation" aria-pressed="false" title="只显示 DSW 仿真候选；用于验证 seed 设计与仿真姿态是否合理">DSW 仿真候选</button><button id="meshViewHardware" aria-pressed="false" title="只显示真机标定候选；纯只读浏览，不需要真机控制权，也不会改变任何动作状态">真机候选</button></span><span class="hint" id="meshViewHint"></span></div><div class="views" id="headOverlayPair" data-camera="head" style="margin:0"><section data-mesh="simulation"><div class="panelhead"><strong>DSW · 标定叠加</strong></div><div class="camera"><img id="calibrationImage" alt="DSW 原图与所选标定 mesh" hidden><p id="dswOverlayPlaceholder" class="muted" style="padding:16px">等待 DSW 叠加画面</p></div></section><section data-mesh="hardware"><div class="panelhead"><strong>真机 · 标定叠加</strong></div><div class="camera"><img id="realCalibrationImage" alt="真实头部图像与对应时刻真机关节投影 mesh" hidden><p id="realOverlayPlaceholder" class="muted" style="padding:16px">真机未接入或未选择参数</p></div><div class="footer" id="realOverlayTiming">图像与关节时间差：待配对</div></section></div><div class="footer" id="wristInfo" role="status"></div><div class="footer" id="calibrationSource">尚未选择候选；视觉叠加不修改执行目标，也不证明物理精度。</div></section><p class="hint" id="simulationBoundary">仿真工作台，不连接真机。运动学投影与物理仿真验收分开记录；未取得 PhysX 结果时，不宣称已完成物理验证。</p><div class="camera"><img id="frameImage" alt="采集图像与标定叠加，尚无图像" hidden><p id="noFrames" class="muted" style="padding:22px">完成采集后，在这里浏览逐帧图像。</p></div><div class="framebar"><select id="historySelect" aria-label="选择历史采集批次"><option value="">尚无历史批次</option></select><button id="loadHistory">查看批次</button></div><div class="footer" id="reviewLabel">未选择批次；历史回放不会执行动作。</div><div class="framebar"><label for="replayCamera">相机</label><select id="replayCamera"><option value="head">头部</option><option value="left">左腕</option><option value="right">右腕</option></select><select id="frameSelect" aria-label="选择采集图像"><option>尚无采集</option></select><label><input type="checkbox" id="overlay" checked> 显示所选标定叠加</label></div><div class="framebar"><select id="historicalCandidate" aria-label="历史回放标定参数"><option value="">选择回放参数</option></select><button id="historicalMesh">当前帧 mesh</button></div><pre id="replayDetails"></pre></section><section id="cleanupPanel" class="panel" style="margin-top:16px"><div class="panelhead"><strong>数据清理</strong><span class="spacer"></span><small id="cleanupHint"></small></div><div class="framebar"><label for="deleteBatchSelect">删除目标批次</label><select id="deleteBatchSelect" aria-label="选择要删除的批次"><option value="">选择要删除的批次</option></select><button id="deleteHistory">永久删除该批次…</button><button id="deleteAllHistory">删除所有批次…</button></div><div class="footer" id="cleanupScope">删除不可恢复；已注册标定版本、标定库、seed 与运行日志保留。删除目标与回放浏览相互独立，改动回放不会改变这里的选择。</div></section><dialog id="deleteHistoryDialog"><h2>永久删除原始采集</h2><p id="deleteHistorySummary"></p><p>删除后无法恢复原始图像与采集记录；保留的标定版本仍可使用。</p><div class="actions"><button id="cancelHistoryDelete">取消</button><button id="confirmHistoryDelete" class="stop">永久删除所列原始采集</button></div></dialog><dialog id="deleteAllDialog"><h2>删除所有批次</h2><p id="deleteAllSummary"></p><pre id="deleteAllList"></pre><p>将<strong>永久删除</strong>上列全部原始采集批次，无法恢复。</p><p>保留：已注册标定版本、标定库、seed 与运行日志、config.json。<br>清空：所选求解批次、实时叠加选择。<br>当前求解结果保留，但会标记为 <code>stale</code>（原始批次已删除）。</p><div class="actions"><button id="cancelDeleteAll">取消</button><button id="confirmDeleteAll" class="stop">永久删除全部原始采集</button></div></dialog></main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), labels=Array.from({length:12},(_,i)=>(i<6?'左':'右')+' J'+(i%6+1));
+let hardwareBusy=false,hardwareURL=null,hardwareLastFrame=null,hardwareLastAt=0;
+let meshToggleBusy=false;
+let frameBusy=false,frameURLs={},previewBusy=false,calibrationSignature='',historicalMesh=null,calibrationEpoch=0;
+let realtimeOptionsSignature='',headSelectionBusy=false,wristSelectionBusy=false;
+let replay={id:null,kind:null,frames:[],results:[]},replayRequest=0,replayMeshRequest=0,replayOptionsSignature='',deletePreview=null;
+let workflowSignature='',workflowDirty=false,workflowBusy=false,fitSourceSignature='',librarySignature='';
+let planSignature='',historySignature='',frameSignature='',frameBatch=null,planRequest=0;
+let jawDraft=[83,83],jawSpeed=10;
+let state=null,draft=Array(12).fill(0),speeds=Array(12).fill(.2),preview=null,token=null,revision=0,timer=null,frames=[],initialized=false,pollBusy=false,online=false,modeSwitchBusy=false,modeEpoch=0;
+const orbit={yaw:-.8,pitch:.36,zoom:1.35}, defaultOrbit={...orbit};
+let runtimeSnapshot=null,detailsBusy=false,motionRequestEpoch=0,executionPreviewBusy=false;
+let noticeUntil=0;
+function tell(message){noticeUntil=Date.now()+6000;$('message').textContent=message;$('notice').hidden=!message;}
+// Poll-driven status must not clobber what a user action just reported: the outcome
+// of an irreversible action (a wipe, a delete) has to stay readable for a few
+// seconds instead of being replaced by the next status poll 700 ms later.
+function tellStatus(message){if(Date.now()<noticeUntil)return;$('message').textContent=message;$('notice').hidden=!message;}
+function runtimeContext(){return state?.runtime||window.__WORKBENCH_RUNTIME__;}
+function selectedControlMode(){const r=runtimeContext();return r?.available?.includes('fake')?r.name:(state?.control_mode||'hardware_sync');}
+function refreshModeSelector(){const el=$('controlMode'),r=runtimeContext();if(r?.available?.includes('fake')&&el.dataset.unified!=='1'){el.replaceChildren();for(const [value,label] of [['fake','Fake 真机 · 开发模式'],['physical','物理真机']]){const opt=document.createElement('option');opt.value=value;opt.textContent=label;el.append(opt);}el.dataset.unified='1';}else if(!r?.available?.includes('fake')&&el.dataset.unified!=='0'){el.replaceChildren();for(const [value,label] of [['simulation','纯 DSW 仿真'],['hardware_sync','真机同步模式']]){const opt=document.createElement('option');opt.value=value;opt.textContent=label;el.append(opt);}el.dataset.unified='0';}if(!modeSwitchBusy)el.value=selectedControlMode();}
+function refreshDswRecovery(){const s=state||{};const details=[s.render_connection_error,s.display_restore_error?'叠加恢复异常（原始画面连接独立）：'+s.display_restore_error:'',failureText(s.render_last_disconnect,'上次 DSW 连接异常')].filter(Boolean);$('dswRecoveryStatus').textContent=(s.dsw_connection==='connected'?'DSW 已连接':s.dsw_connection==='stale'?'DSW 连接陈旧':'DSW 未连接')+(details.length?' · '+details.join('；'):'');if(s.dsw_recovery_guide)$('dswRecoveryCommands').textContent=s.dsw_recovery_guide;}
+
+async function reconnectDswFrames(){for(const id of ['livePreview','liveActualPose','liveActual'])$(id).removeAttribute('src');await poll(true);if(state?.backend_connected!==false){ensureStreams();tell('已重新打开 DSW 画面连接。');}else tell('DSW 服务仍未连接，请按设备诊断中的恢复指引检查隧道与渲染器。');}
+async function api(path,body){const options=body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state?.csrf_token||'__CSRF__'},body:JSON.stringify(body)};const response=await fetch(path,options);const result=await response.json();if(!response.ok)throw Error(result.error||result.reason||response.statusText);return result;}
+function failureText(f,label='上次失联'){if(!f?.reason)return '';const ms=f.at_s!==undefined?Number(f.at_s)*1000:Number(f.at_ns)/1e6;return label+'：'+f.reason+(Number.isFinite(ms)&&ms>0?'（'+new Date(ms).toLocaleString()+'）':'');}
+function hardwareConnectionText(){return [state?.hardware_error,state?.control_error,failureText(state?.hardware_last_disconnect,'反馈上次失联'),failureText(state?.control_last_disconnect,'控制上次失联')].filter(Boolean).join(' · ');}
+function blockerReason(S){const b=S?.execution_blocker;return b&&b.code!=='ready'?[b.title,b.reason].filter(Boolean).join('：'):'';}
+let shownBlockerCode=null,shownBlockerText='',recoveryBusy=false,recoveryError='';
+function refreshExecutionAlert(S){
+const b=S?.execution_blocker||{},active=!!b.code&&b.code!=='ready',code=active?b.code:'ready';
+if(shownBlockerCode&&shownBlockerCode!=='ready'&&code==='ready'){invalidate();preview=null;tell('执行条件已恢复。旧动作不会继续，请重新预览并审阅后执行。');}
+if(shownBlockerCode==='ready'&&active)invalidate();
+shownBlockerCode=code;
+const alert=$('executionAlert');alert.hidden=!active;
+for(const id of ['executeBlockReason','queueBlockReason','pipelineBlockReason']){$(id).hidden=!active;if(active){const message='执行已锁定：'+blockerReason(S);if($(id).textContent!==message)$(id).textContent=message;}}
+if(!active){shownBlockerText='';recoveryError='';return;}
+const guidance=code==='owner_fault_physical'?'请现场可靠支撑双臂并检查踏板；排查后由现场人员断开并重新接入控制器。网页不会自动重启物理真机。':'';
+const reason=[b.reason,guidance,recoveryError].filter(Boolean).join(' '),signature=[b.title,reason,b.detail,b.since_ns].join('|');
+if(signature!==shownBlockerText){$('executionAlertTitle').textContent=b.title||'执行不可用';$('executionAlertReason').textContent=reason;shownBlockerText=signature;}
+const detail=[b.since_ns?'发生时间：'+new Date(Number(b.since_ns)/1e6).toLocaleString():'',typeof b.detail==='string'?b.detail:b.detail?JSON.stringify(b.detail,null,2):''].filter(Boolean).join('\n');
+const details=$('executionAlertDetails');details.hidden=!detail;if(detail)$('executionAlertDetail').textContent=detail;
+const action=$('executionAlertAction'),labels={restart_fake:'重启 Fake 控制器',recover:'确认故障并重新预览',reconnect_dsw:'重新连接 DSW 画面'};
+const offered=!!labels[b.action]&&(b.action!=='restart_fake'||runtimeContext()?.name==='fake');action.hidden=!offered;action.disabled=!offered||recoveryBusy;if(offered)action.textContent=labels[b.action];
+}
+async function restartFakeController(){
+if(runtimeContext()?.name!=='fake'||state?.execution_blocker?.action!=='restart_fake')return;
+if(recoveryBusy)return;recoveryBusy=true;recoveryError='';
+const button=$('executionAlertAction');button.disabled=true;
+try{const p=await api('/api/fake-controller-restart-preview',{});
+if(!window.confirm('重启 Fake 控制器？\n'+(p.effect||'旧轨迹和预览作废；已保存图像、标定与队列保留。')+'\n重启后不会自动继续动作。'))return;
+invalidate();preview=null;tell('Fake 控制器正在重启；等待新 owner 与新鲜反馈。');
+const reply=await api('/api/fake-controller-restart-confirm',{token:p.token,owner_pid:p.owner_pid,command_epoch:p.command_epoch});
+tell(reply.message||'Fake 控制器已恢复；请重新预览并审阅后执行。');await poll(true);
+}catch(e){recoveryError='Fake 控制器恢复失败：'+e.message;tell(recoveryError);}finally{recoveryBusy=false;refreshExecutionAlert(state);}}
+async function recoverOwnerFault(){
+if(state?.execution_blocker?.action!=='recover'&&!window.__ctrl?.owner?.recoverable_fault)return;
+try{const d=await api('/api/control/state'),o=d.owner||{};
+if(!window.confirm('确认已排查动作故障并重新开放规划？旧轨迹不会恢复，请重新预览。'))return;
+await api('/api/control/recover',{confirmation:'ACKNOWLEDGE_MOTION_FAULT',owner_pid:o.pid,command_epoch:o.command_epoch});invalidate();preview=null;tell('已确认故障，等待控制器回读；恢复后请重新预览。');await poll(true);
+}catch(e){tell('故障确认失败：'+e.message);}}
+$('executionAlertAction').onclick=()=>{const action=state?.execution_blocker?.action;if(action==='restart_fake')return restartFakeController();if(action==='recover')return recoverOwnerFault();if(action==='reconnect_dsw')return reconnectDswFrames();};
+function cameraStatusText(m,last){return [m?.error,failureText(m?.last_failure||m?.last_disconnect||last,'画面接口上次失联')].filter(Boolean).join(' · ');}
+function cameraProcessText(info){if(!info)return '相机进程观察：状态未知';const processes=(info.processes||[]).map(p=>'PID '+p.pid+' '+p.comm+(p.serial_match?.length?' · 序列号 '+p.serial_match.join(','):' · 尚未关联相机序列号'));const cameras=Object.entries(info.cameras||{}).map(([serial,c])=>serial+'：'+(c.process_alive===true?'已观察到关联进程':'进程状态未知')+'；画面可用性以各相机接口为准');return ['只读进程观察：'+(info.scan_complete?'扫描完成':'扫描未完成'),info.error,...processes,...cameras].filter(Boolean).join('\n');}
+function refreshConnectionDiagnostics(){$('connectionDiagnostics').textContent=hardwareConnectionText()||'暂无失联记录';$('cameraProcessDiagnostics').textContent=cameraProcessText(state?.camera_processes)+'\n'+Object.entries(state?.camera_health||{}).map(([side,m])=>({head:'头部',left:'左腕',right:'右腕'}[side]||side)+'画面接口：'+(m.ready&&m.frame_readable!==false?'可用':'状态未知 / 不可用')+(cameraStatusText(m)?' · '+cameraStatusText(m):'')).join('\n');for(const side of ['left','right']){const m=state?.camera_health?.[side];if(!m)continue;const f=wristFrames[side]||(wristFrames[side]={busy:false,url:null});f.lastFailure=m.last_failure||m.last_disconnect||f.lastFailure;const detail=cameraStatusText(m,f.lastFailure);$('wristStatus-'+side).hidden=false;$('wristStatus-'+side).textContent=(m.ready&&m.frame_readable!==false?'画面接口可用':'画面接口不可用 / 进程状态未知')+(detail?' · '+detail:'');}}
+let calibrationRunBusy=false,deleteBusy=false;
+async function executeCalibrationBatch(){if(modeSwitchBusy||calibrationRunBusy||executionPreviewBusy)return;if(state?.control_mode!=='hardware_sync')return action('/api/run-batch',{},'已启动仿真采集批次。');if(!state.hardware_sync_active||!state.hardware_control_connected)return tell('真机采集不可用：'+(state.control_error||state.hardware_error||'控制或新鲜反馈未连接')+'；未切换为仿真。');const at=modeEpoch,motionAt=motionRequestEpoch;calibrationRunBusy=true;executionPreviewBusy=true;tell('正在生成标定执行预览；尚未执行，可以随时停止。');refreshMotionPreflight();applyControlState(state,window.__ctrl);try{const plan=await api('/api/calibration-preview',{});if(motionAt!==motionRequestEpoch||state?.status==='STOPPED'||(plan.review_generation!==undefined&&plan.review_generation!==(state?.review_generation??0))||at!==modeEpoch||modeSwitchBusy||state?.control_mode!=='hardware_sync'||!state.hardware_sync_active||!state.hardware_control_connected)return;if(!window.confirm('执行'+(plan.kind==='wrist'?'双腕':'头部')+'真机标定：'+plan.samples+' 个采样点，约 '+Number(plan.total_motion_duration_s).toFixed(1)+' 秒。确认已审阅完整轨迹、现场净空且急停就绪？预览 30 秒有效；过期请重新审阅。'))return;await action('/api/calibration-confirm',{token:plan.token,confirmation:'START_REVIEWED_SINGLE_ARM',physical_clearance:true},'已确认本批轨迹与现场净空，开始采集。');}catch(e){if(at===modeEpoch&&motionAt===motionRequestEpoch)tell(e.message);}finally{if(motionAt===motionRequestEpoch){calibrationRunBusy=false;executionPreviewBusy=false;refreshMotionPreflight();applyControlState(state,window.__ctrl);}}}
+function executionBlocked(){if(modeSwitchBusy||blockerReason(state))return true;if(state?.hardware_sync_active)return state.hardware_control_connected!==true;return state?.live_backend&&(state.backend_connected===false||state.status!=='READY');}
+// ---- Unified control availability -------------------------------------------
+// Single source of truth for disabled controls. Every greyed control must be
+// able to say why, so the condition and its reason are derived in one place.
+// Do not inline `.disabled=` conditions anywhere else in this file.
+// Which environment's candidates and overlays are on screen. This is the explicit
+// mesh_view_mode; the operating mode is only the fallback until it is chosen, so
+// browsing hardware candidates never depends on the robot being controllable.
+function overlayEnvironment(S){
+const source=S||state,mode=source?.mesh_view_mode;
+if(mode==='hardware'||mode==='simulation')return mode;
+return (source?.operating_mode==='hardware_sync'||source?.control_mode==='hardware_sync')?'hardware':'simulation';
+}
+function controlGate(st,ctrl){
+const S=st||{},C=ctrl||{},owner=C.owner||{};
+const operatingMode=S.operating_mode||S.control_mode||'simulation';
+const hardware=operatingMode!=='simulation';
+const queue=S.queue||[],flow=S.workflow||{kind:'head',head_result_id:null};
+const busy=!!S.pipeline?.running||/RUNNING|PLANNING|CAPTURING|FITTING|VALIDATING|EXECUTING|SETTLING/i.test(S.status||'');
+const preflight=executionPreviewBusy||S.motion_preflight?.status==='checking';
+const anyBusy=busy||preflight||modeSwitchBusy||workflowBusy;
+const planBlocked=!standardMotionSeedActive()&&(!!S.plan_stale||S.plan?.plan_complete===false);
+const dswDown=!S.hardware_sync_active&&S.backend_connected===false;
+const overlayEnv=overlayEnvironment(S);
+const heads=(S.calibration?.results||[]).filter(r=>(r.environment||'simulation')===overlayEnv&&(r.snapshot_complete===true||r.parameters?.snapshot_complete===true)&&(r.objective||r.parameters?.objective)==='sticker_corners_plus_mesh'&&(r.head_dependency_eligible===true||((r.acceptance||r.parameters?.acceptance)?.image_passed===true)));
+const disabled={},reason={},touched=new Set();
+const off=(id,why)=>{disabled[id]=true;if(why)reason[id]=why;touched.add(id);};
+const checked=id=>{const el=document.getElementById(id);return !!(el&&el.checked);};
+const busyText=preflight?'正在检查路径／生成执行预览；可随时停止':'当前任务正在执行，请先等待完成或停止';
+const live=id=>{const el=document.getElementById(id);return el?el.value:'';};
+if(anyBusy)off('controlMode',modeSwitchBusy?'正在切换控制模式，请稍候':busyText);
+// Motion and execution need ownership plus fresh feedback in hardware mode,
+// and a live backend plus a valid preview token in simulation mode.
+let why=null;
+if(modeSwitchBusy)why='正在切换控制模式，请稍候';
+else if(blockerReason(S))why=blockerReason(S);
+else if(anyBusy)why=busyText;
+else if(!online)why='工作台后端连接中断';
+else if(hardware){
+if(S.robot_control==='unavailable')why='真机控制网关不可达，无法下发动作';
+else if(S.robot_control!=='owned_by_workbench')why='真机控制权不在本工作台（当前由其他进程持有）';
+else if(S.robot_feedback!=='fresh')why='真机反馈不新鲜，无法执行动作';
+else if(!initialized)why='等待首次状态同步';
+}else if(S.dsw_connection!=='connected')why='DSW 未连接，无法执行仿真动作';
+else if(!token)why='请先生成预览目标';
+else if(preview&&preview.collision_free===false)why='路径碰撞检查未通过';
+else if(executionBlocked())why='DSW 未就绪，暂不能执行仿真动作';
+if(why)off('execute',why);
+if(S.hardware_sync_active&&S.hardware_fault)off('ack','检测到真机故障，请先恢复');
+if(dswDown)off('addQueue','DSW 未连接，无法加入队列');
+let runWhy=null;
+if(blockerReason(S))runWhy=blockerReason(S);
+else if(anyBusy)runWhy=busyText;
+else if(!queue.length)runWhy='动作队列为空，请先生成计划';
+else if(planBlocked)runWhy='计划已过期或未完成，请重新生成后执行';
+else if(dswDown)runWhy='DSW 未连接';
+else if(executionBlocked())runWhy='执行前置条件未满足：'+(hardware?(S.robot_control==='unavailable'?'真机控制网关不可达':S.robot_control!=='owned_by_workbench'?'真机控制权不在本工作台':'真机反馈不新鲜'):'DSW 未就绪');
+if(runWhy){off('runBatch',runWhy);off('runQueue',runWhy);}
+let planWhy=null;
+if(anyBusy)planWhy=busyText;
+else if(workflowDirty)planWhy='标定类型或依赖尚未应用';
+else if(flow.kind==='wrist'&&!heads.some(r=>r.id===flow.head_result_id))planWhy='双腕标定需要先选择通过留出检查的头标定版本';
+else if(dswDown)planWhy='DSW 未连接';
+if(planWhy)off('autoPlan',planWhy);
+let fitWhy=null;
+if(anyBusy)fitWhy=busyText;
+else if(workflowDirty)fitWhy='标定类型或依赖尚未应用';
+else if(!(S.history||[]).some(r=>r.id===(S.fit_source_id||S.selected_batch)&&(r.kind||'head')===flow.kind))fitWhy='请先选择本类型的求解来源批次';
+if(fitWhy)off('fitButton',fitWhy);
+if(anyBusy)for(const id of ['workflowKind','workflowHead','applyFitSource','clearFitSource'])off(id,busyText);
+if(!live('deleteBatchSelect'))off('deleteHistory','请先在“数据清理”中选择要删除的批次');
+if(deleteBusy)off('confirmHistoryDelete','正在删除…');
+// A wipe touches every batch, so it follows the same idle gate as the flows that
+// produce them: never delete frames out from under a running job.
+if(S.task_state&&S.task_state!=='idle')off('deleteAllHistory','当前任务正在执行（'+(TASK_LABELS[S.task_state]||S.task_state)+'），禁止删除');
+else if(!(S.history||[]).length)off('deleteAllHistory','当前没有可删除的批次');
+if(deleteBusy)off('confirmDeleteAll','正在删除…');
+if(!live('historicalCandidate'))off('historicalMesh','请先选择此相机的回放标定');
+else if(!frames.length)off('historicalMesh','请先加载该批次的帧');
+if(headSelectionBusy)off('calibrationCandidate','正在应用标定选择');
+if(wristSelectionBusy)off('wristResult','正在应用腕标定选择');
+else if(anyBusy)off('wristResult',busyText);
+else if(!(S.calibration?.wrist_options||[]).length)off('wristResult','当前环境下没有腕标定版本（腕半场尚未求解过）');
+if(live('overviewMode')==='drag')off('overviewPreset','拖拽模式下由鼠标设定视角');
+if(!live('installResult'))off('installCalibration','请先选择一组已验证的标定结果');
+if(!live('markerPrior'))off('setMarkerPrior','请先选择一个腕结果作为标识先验来源');
+if(blockerReason(S))off('runPipeline',blockerReason(S));
+else if(state?.status!=='READY'||S.pipeline?.running)off('runPipeline','流水线需要空闲状态（READY）才能启动');
+if(ctrl){
+const emergency=/(^|_)EMERGENCY$/.test(String(S.controller_state||owner.state||'').toUpperCase());
+const hardwareControls=[['hw-acquire',!C.acquire_available,C.reachable?'当前不可接管真机（控制权已在本工作台或无接管权限）':'真机控制网关不可达，无法接管'],['hw-release',!C.reachable,'真机控制网关不可达'],['hw-recover',!owner.recoverable_fault,'当前没有可清除的动作故障'],['hw-emergency',!(C.reachable&&emergency),'仅在 SDK emergency 状态可用'],['hw-execute',!checked('hw-supported'),'请先勾选"双臂已支撑"']];
+for(const [id,bad,msg] of hardwareControls){touched.add(id);if(bad)off(id,msg);}
+}
+// These carry static `disabled` markup so the page is inert before the first
+// state arrives; the gate now owns them, including restoring them.
+for(const id of ['controlMode','execute'])touched.add(id);
+return {disabled,reason,touched};
+}
+let gatedIds=new Set();
+function applyControlState(st,ctrl){
+const gate=controlGate(st,ctrl);
+const emergency=/(^|_)EMERGENCY$/.test(String(st?.controller_state||ctrl?.owner?.state||'').toUpperCase());
+$('hw-emergency').hidden=!emergency;
+const set=(el,gone,why)=>{el.dataset.gate='1';el.disabled=gone;if(gone){el.setAttribute('aria-disabled','true');el.title=why||'当前不可用';el.dataset.gateTitle='1';}else{el.removeAttribute('aria-disabled');if(el.dataset.gateTitle==='1'){el.removeAttribute('title');delete el.dataset.gateTitle;}}};
+// Every primary action states its precondition in plain text, from the same gate
+// that decides availability - so the button and its explanation cannot drift.
+for(const [action,line] of [['autoPlan','autoPlanReady'],['runBatch','runBatchReady'],['fitButton','fitReady']]){const el=document.getElementById(line);if(el)el.textContent=gate.disabled[action]?('未就绪：'+(gate.reason[action]||'条件不满足')):'就绪，可以执行。';}
+for(const id of gate.touched){const el=document.getElementById(id);if(el)set(el,!!gate.disabled[id],gate.reason[id]);gatedIds.add(id);}
+// Controls that were gated before but are available again must be restored,
+// otherwise a stale disabled state would outlive the condition that caused it.
+for(const id of [...gatedIds])if(!gate.touched.has(id)&&!gate.disabled[id]){const el=document.getElementById(id);if(el)set(el,false,null);gatedIds.delete(id);}
+}
+function standardMotionSeedActive(){return state?.plan?.motion_seed==='x5-standard-head-motion-seed-v1';}
+// ---- Top status bar: one cell per dimension, so "who is connected", "who can
+// see the robot" and "who may move it" stop collapsing into one word. --------
+const TASK_LABELS={idle:'空闲',planning:'规划中',previewed:'已预览',awaiting_confirmation:'待确认',executing:'执行中',capturing:'采集中',fitting:'求解中',fault:'故障',stopped:'已停止'};
+function refreshStatusBar(st){
+const S=st||{},el=document.getElementById('statusBar');
+if(!el)return;
+const owner=((S.hardware_feedback||{}).owner)||{},age=Number((S.hardware_feedback||{}).source_age_s);
+const simulated=owner.simulation_only===true,hasOwner=owner.pid!==undefined&&owner.pid!==null;
+const evidence=String(owner.evidence_source||'—');
+const srcBadge=document.getElementById('hwSourceBadge');
+if(srcBadge){
+srcBadge.textContent=!hasOwner?'真机未接入':(simulated?'仿真真机（未连接物理硬件）':'物理真机');
+srcBadge.title=!hasOwner?'尚未收到真机反馈；此时控制类按钮全部灰化':(simulated?('证据来源 '+evidence+'；该 owner 不连接 CAN / SDK / 物理相机 / 踏板'):('证据来源 '+evidence+'；物理硬件反馈，请确认现场占用状态'));
+srcBadge.style.color=simulated?'var(--orange)':'var(--text)';
+}
+const mode=S.operating_mode||S.control_mode||'simulation';
+const dsw=S.dsw_connection||((S.live_backend)?(S.backend_connected?'connected':'stale'):'disconnected');
+const fb=S.robot_feedback||(S.hardware_connected?'fresh':'unavailable');
+const ctl=S.robot_control||(S.hardware_control_connected?'owned_by_workbench':'unavailable');
+const fault=String(S.execution_blocker?.code||'').startsWith('owner_fault');
+const task=S.task_state||(S.status==='READY'?'idle':'fault');
+const mesh=S.mesh_view_mode||(mode==='hardware_sync'?'hardware':'simulation');
+const cells=[
+['模式',mode==='hardware_sync'?(simulated?'Fake 真机':'物理真机'):'纯仿真',mode==='hardware_sync'?'warn':'ok','顶层模式；切换入口是顶部“控制模式”下拉，各模式分别维护队列，fake 与物理真机的数据和标定产物隔离'],
+['DSW',dsw==='connected'?'已连接':dsw==='stale'?'陈旧':'断开',dsw==='connected'?'ok':dsw==='stale'?'warn':'off','远端状态 '+String(S.status||'—')+' · '+String(S.simulation_backend||'—')],
+['真机反馈',fb==='fresh'?'新鲜':fb==='stale'?'陈旧':'不可用',fb==='fresh'?'ok':fb==='stale'?'warn':'off',fb==='fresh'?('反馈年龄 '+(Number.isFinite(age)?age.toFixed(2):'—')+' s · owner PID '+(owner.pid??'—')):('未收到新鲜真机反馈：'+String(S.hardware_error||'不可用'))],
+['真机控制权',(fault?'控制器故障锁定':ctl==='owned_by_workbench'?'本工作台持有':ctl==='owned_by_other'?'其他进程持有':'不可用')+(simulated?' · 仿真真机':''),fault?'off':ctl==='owned_by_workbench'?'ok':ctl==='owned_by_other'?'warn':'off',fault?blockerReason(S):ctl==='owned_by_workbench'?('控制网关 owner PID '+(owner.pid??'—')+(simulated?('；证据来源 '+evidence+'，未连接物理硬件'):'；物理真机')):ctl==='owned_by_other'?'控制权不在本工作台，当前仅可观察':'真机控制网关不可达'],
+['执行',blockerReason(S)?'已锁定':'可用',blockerReason(S)?'off':'ok',blockerReason(S)||'执行条件由控制器和工作台状态共同确认'],
+['任务',S.motion_preflight?.status==='checking'||executionPreviewBusy?'执行预检中':TASK_LABELS[task]||task,task==='idle'?'ok':task==='fault'?'off':'warn','任务阶段：'+task],
+['叠加环境',mesh==='hardware'?'真机候选':'仿真候选','ok','叠加环境与运行模式解耦；切换入口在“标定叠加”栏目内']
+];
+el.replaceChildren(...cells.map(([label,value,tone,title])=>{const box=document.createElement('span');box.className='sbar-cell '+tone;box.title=title;const b=document.createElement('b');b.textContent=label;const i=document.createElement('i');i.textContent=value;box.append(b,i);return box;}));
+}
+function refreshRealJaws(){const j=online&&state?.hardware_jaw;$('realJawFeedback').textContent=j?'实测映射：左 '+Number(j.gap_mm[0]).toFixed(1)+' mm / 右 '+Number(j.gap_mm[1]).toFixed(1)+' mm · SDK '+j.sdk.map(v=>Number(v).toFixed(6)).join(' / '):'真机未接入或反馈已过期';}
+function commandJaws(values){return values.map(v=>Math.max(0,Math.min(83,v)));}
+function currentWaypoint(){return {q:draft.slice(),jaw_gap_mm:jawDraft.slice(),speeds:speeds.slice(),jaw_speed_mm_s:jawSpeed};}
+function validateMotionRows(rows){if(!rows?.length)throw Error('队列为空');for(const w of rows){if(!Array.isArray(w.speeds)||w.speeds.length!==12||w.speeds.some(v=>!Number.isFinite(v)||v<=0)||!Number.isFinite(w.jaw_speed_mm_s??10)||(w.jaw_speed_mm_s??10)<=0)throw Error('关节与夹爪速度必须是正数');if(w.jaw_gap_mm!==undefined&&(!Array.isArray(w.jaw_gap_mm)||w.jaw_gap_mm.length!==2||w.jaw_gap_mm.some(v=>!Number.isFinite(v)||v<0||v>83)))throw Error('左右夹爪实际开度必须为 0–83 mm');}}
+$('jawSpeed').onchange=()=>{jawSpeed=Number($('jawSpeed').value);edit();if(!Number.isFinite(jawSpeed)||jawSpeed<=0)tell('夹爪速度必须是正数');};
+function invalidate(targetChanged=true){token=null;if(targetChanged)revision++;applyControlState(state,window.__ctrl);}
+function edit(){invalidate();if(!timer)timer=setTimeout(()=>{timer=null;loadPreview();},33);}
+function syncInputs(){jawDraft.forEach((v,i)=>{if($('jaw'+i)){$('jaw'+i).value=v;$('jawNumber'+i).value=v;}});draft.forEach((q,i)=>{$('q'+i).value=(q*180/Math.PI).toFixed(2);$('s'+i).value=q*180/Math.PI;$('v'+i).value=speeds[i];});}
+function buildJoints(){for(let side=0;side<2;side++){const wrap=document.createElement('div');wrap.innerHTML='<h3>'+['左臂','右臂'][side]+' <small id="actual'+side+'"></small></h3>';$('joints').append(wrap);for(let j=0;j<6;j++){const i=side*6+j,lim=j===0?[-100*Math.PI/180,100*Math.PI/180]:(state.limits?.[i]||[-Math.PI,Math.PI]),row=document.createElement('div');row.className='joint';row.innerHTML='<label for="s'+i+'">J'+(j+1)+'</label><input type="range" id="s'+i+'" min="'+(lim[0]*180/Math.PI)+'" max="'+(lim[1]*180/Math.PI)+'" step="0.1" aria-label="'+labels[i]+' 目标角度"><input type="number" id="q'+i+'" min="'+(lim[0]*180/Math.PI)+'" max="'+(lim[1]*180/Math.PI)+'" step="0.1" aria-label="'+labels[i]+' 目标角度数值">';wrap.append(row);for(const id of ['s'+i,'q'+i])$(id).oninput=()=>{const value=Number($(id).value);if(!Number.isFinite(value)||value<lim[0]*180/Math.PI||value>lim[1]*180/Math.PI){invalidate();tell(labels[i]+' 超出角度范围');return;}draft[i]=value*Math.PI/180;$('s'+i).value=value;$('q'+i).value=value;edit();};const speedRow=document.createElement('div');speedRow.className='speedrow';speedRow.innerHTML='<label for="v'+i+'">'+labels[i]+' <small>rad/s</small></label><input type="number" id="v'+i+'" min="0.001" step="0.01">';$('speeds').append(speedRow);$('v'+i).onchange=()=>{speeds[i]=Number($('v'+i).value);edit();if(!Number.isFinite(speeds[i])||speeds[i]<=0)tell('速度必须是正数');};}}for(let i=0;i<2;i++){const row=document.createElement('div');row.className='joint';row.innerHTML='<label for="jaw'+i+'">'+['左','右'][i]+'</label><input type="range" id="jaw'+i+'" min="0" max="83" step="0.5" aria-label="'+['左','右'][i]+'夹爪金属内间距 mm"><input type="number" id="jawNumber'+i+'" min="0" max="83" step="0.5" aria-label="'+['左','右'][i]+'夹爪金属内间距数值 mm">';$('jaws').append(row);for(const id of ['jaw'+i,'jawNumber'+i])$(id).oninput=()=>{const v=Number($(id).value);if(!Number.isFinite(v)||v<0||v>83){invalidate();tell('夹爪金属内间距必须为 0–83 mm');return;}jawDraft[i]=v;syncInputs();edit();};}syncInputs();}
+async function previewTarget(body){if(!state?.live_backend)return api('/api/preview',body);await api('/api/preview-target',body);if(state?.control_mode==='hardware_sync')return {live:true,display_only:true,token:null,revision:body.revision};while(body.revision===revision&&!modeSwitchBusy){const r=await api('/api/preview-result');if(r.client_revision===body.revision){if(r.error)throw Error(r.error);return r;}await new Promise(resolve=>setTimeout(resolve,50));}return null;}
+async function loadPreview(){if(!initialized||previewBusy||modeSwitchBusy||state?.pipeline?.running)return;previewBusy=true;const at=revision;try{const result=await previewTarget({...currentWaypoint(),revision:at});if(at!==revision||!result)return;preview=result;token=result.token;if(result.live){previewStreamRevision=result.revision;ensureStreams();}$('previewInfo').textContent=(result.live?'DSW 目标预览（不执行）· ':'')+'预计 '+Number(result.duration_s||0).toFixed(2)+' 秒 · '+(result.collision_free===false?'未通过路径碰撞检查，不能执行':result.collision_free===true?'路径碰撞检查通过':'拖动只预览，未检查路径');$('visibility').textContent='可见标签：'+(result.visible_ids||[]).join(' / ');render();}catch(e){if(at===revision){token=null;tell(e.message);}}finally{previewBusy=false;if(at!==revision)loadPreview();}}
+async function executeHardware(rows){
+if(modeSwitchBusy||executionPreviewBusy||!state?.hardware_sync_active)return;
+const at=modeEpoch,motionAt=motionRequestEpoch;executionPreviewBusy=true;
+tell('正在检查路径／生成执行预览；尚未执行，可以随时停止。');refreshMotionPreflight();applyControlState(state,window.__ctrl);
+try{rows=(rows||[]).map(w=>({...w,speeds:w.speeds??speeds.slice()}));validateMotionRows(rows);
+const plan=await api('/api/hardware-trajectory-preview',{waypoints:rows.map(w=>({q:w.q,speeds:w.speeds,jaw_gap_mm:w.jaw_gap_mm,jaw_speed_mm_s:w.jaw_speed_mm_s??10}))});
+if(at!==modeEpoch||motionAt!==motionRequestEpoch||modeSwitchBusy||!state?.hardware_sync_active||state?.status==='STOPPED'||(plan.review_generation!==undefined&&plan.review_generation!==(state?.review_generation??0)))return;
+if(!window.confirm('执行真机轨迹：'+rows.length+' 个路径点，约 '+Number(plan.total_motion_duration_s).toFixed(1)+' 秒。双臂与夹爪按各路径点目标执行。确认已审阅目标及全程净空？（规划器给出的轨迹已通过模型路径检查，手动目标会先做检查）'))return;
+await action('/api/control/motion-confirm',{token:plan.token,confirmation:'START_REVIEWED_SINGLE_ARM',physical_clearance:true},'真机轨迹已提交；DSW 跟随实测反馈。');
+}catch(e){if(at===modeEpoch&&motionAt===motionRequestEpoch)tell(e.message);}
+finally{if(motionAt===motionRequestEpoch){executionPreviewBusy=false;refreshMotionPreflight();applyControlState(state,window.__ctrl);}}}
+
+async function action(path,body={},message='操作已提交'){invalidate();try{const result=await api(path,body);tell(result.message||message);await poll(true);return result;}catch(e){tell(e.message);return null;}}
+function refreshEvaluation(){const e=state.evaluation;$('evaluationSummary').hidden=!e;if(!e)return;const m=e.candidates?.[e.selected_candidate]?.metrics_rectified_px||{};$('evaluationSummary').textContent='冻结候选的独立测试（本批未重新拟合） · '+e.selected_candidate+' · 平均 '+Number(m.mean_px).toFixed(3)+' px / RMS '+Number(m.rms_px).toFixed(3)+' px / P95 '+Number(m.p95_px).toFixed(3)+' px · '+(m.corners??0)+' 个角点。物理精度未验证。';if(!state.fit_result)$('fitResult').textContent=JSON.stringify({status:e.status,optimization_performed:e.optimization_performed,selected_candidate:e.selected_candidate,coverage:e.coverage,candidates:e.candidates},null,2);}
+function option(select,value,label,disabled=false){const o=document.createElement('option');o.value=value;o.textContent=label;o.disabled=disabled;select.append(o);}
+function resultKind(r){return r.kind||r.observer||'head';}
+function shortVersion(r){const kind={head:'头部',wrist:'双腕',left:'左腕（历史单侧）',right:'右腕（历史单侧）'}[resultKind(r)]||'标定',n=String(r.version||'').replace(/^v/i,'');return (n&&/^\d+$/.test(n)?'v'+n.padStart(6,'0'):r.version||'未登记')+' · '+kind+(!r.version&&r.label?' · '+r.label:'');}
+function versionOption(select,r,note,label){const o=document.createElement('option');o.value=r.id;o.textContent=(label||resultLabel(r))+(note?' · '+note:'');if(note){o.disabled=true;o.title=note;}o.dataset.full=o.textContent;o.dataset.short=shortVersion(r);o.label=o.dataset.short;o.title=o.dataset.full;select.append(o);if(select.dataset.versionSelect)return;select.dataset.versionSelect='true';const expand=()=>{for(const item of select.options||[])if(item.dataset.full)item.label=item.dataset.full;};const collapse=()=>{for(const item of select.options||[])if(item.dataset.short)item.label=item.dataset.short;const selected=Array.from(select.options||[]).find(item=>item.value===select.value);select.title=selected?.dataset.full||'';};select.addEventListener('pointerdown',expand);select.addEventListener('focus',expand);select.addEventListener('keydown',event=>{if(['ArrowDown','ArrowUp',' ','Enter','F4','Home','End'].includes(event.key))expand();if(event.key==='Escape')collapse();});select.addEventListener('change',collapse);select.addEventListener('blur',collapse);}
+// Three environments, not two: pure simulation, the hardware link driven by a
+// simulated robot, and real metal. Records that predate robot_source fall back to
+// the current owner so simulated-robot data is never read as physical.
+function environmentLabel(r,st){
+const env=r.environment||'simulation';
+if(env!=='hardware')return '仿真';
+const explicit=(r.robot_source==='simulated'||r.robot_source==='physical')?r.robot_source:null;
+const owner=(((st||state)?.hardware_feedback||{}).owner)||{};
+const simulated=explicit?explicit==='simulated':owner.simulation_only===true;
+return simulated?'仿真真机':'真机';
+}
+function resultLabel(r){return [environmentLabel(r),r.version||null,{head:'头部',wrist:'双腕',left:'左腕',right:'右腕'}[resultKind(r)],r.deployment_status==='user_accepted_provisional'?'用户接受的临时标定（未通过正常验收）':null,r.label||r.source_batch||r.batch||r.file||r.id,(r.objective||r.result?.objective)==='sticker_corners_plus_mesh'?((r.accepted===true||r.head_dependency_eligible===true||r.acceptance?.image_passed===true||r.result?.accepted===true)?'联合 · 留出通过':'联合 · 待通过留出'):null].filter(Boolean).join(' · ');}
+function refreshHistory(){const rows=state?.history||[],signature=JSON.stringify(rows);if(signature!==historySignature){historySignature=signature;const chosen=$('historySelect').value,purge=$('deleteBatchSelect').value;$('historySelect').replaceChildren();option($('historySelect'),'','选择历史采集');$('deleteBatchSelect').replaceChildren();option($('deleteBatchSelect'),'','选择要删除的批次');rows.forEach(row=>{const c=row.completion,label=row.id+' · '+(row.kind==='wrist'?'双腕':'头部')+(c?' · '+c.captured+' 帧 / 可用于求解 '+c.accepted+' / 不可用于求解 '+c.failed+(Number.isInteger(c.marker_detected)?' · 检出贴纸 '+c.marker_detected+'/'+c.captured+' 帧':''):' · 未完成');option($('historySelect'),row.id,label);option($('deleteBatchSelect'),row.id,label);});$('historySelect').value=rows.some(r=>r.id===chosen)?chosen:'';$('deleteBatchSelect').value=rows.some(r=>r.id===purge)?purge:'';}
+// The destructive target has its own selector: browsing a batch for replay must never
+// decide what gets deleted.
+$('cleanupHint').textContent=(rows.length?rows.length+' 个批次可删除':'当前没有可删除的批次');$('reviewLabel').textContent='回放批次：'+(replay.id||'尚未选择')+' · 仅浏览，不恢复执行，不改变求解来源';}
+$('historySelect').onchange=()=>{applyControlState(state,window.__ctrl);};
+$('loadHistory').onclick=async()=>{const id=$('historySelect').value;if(!id)return;const request=++replayRequest;try{const result=await api('/api/history-select',{id});if(request!==replayRequest)return;replay={id:result.id||id,kind:result.kind,frames:result.frames||[],results:result.results||[]};historicalMesh=null;frameSignature='';replayOptionsSignature='';refreshHistory();refreshFrames();}catch(e){tell(e.message);}};
+function refreshReplayResults(){const camera=$('replayCamera').value||'head',results=(replay.results||[]).filter(r=>resultKind(r)===camera||(resultKind(r)==='wrist'&&['left','right'].includes(camera))),signature=JSON.stringify([replay.id,camera,results]);if(signature!==replayOptionsSignature){replayOptionsSignature=signature;const chosen=$('historicalCandidate').value;$('historicalCandidate').replaceChildren();option($('historicalCandidate'),'',!replay.id?'请先选择采集批次并点击「查看批次」':results.length?'选择此相机的回放标定':'此批次尚无该相机的标定结果');for(const r of results)versionOption($('historicalCandidate'),r);$('historicalCandidate').value=results.some(r=>r.id===chosen)?chosen:'';}}
+function refreshFrames(){const chosen=$('frameSelect').value;frames=replay.frames||[];const signature=JSON.stringify([replay.id,frames.map(f=>[f.id,f.name,f.split,f.valid_for_fit])]);$('frameCount').textContent=frames.length+' 帧';if(signature!==frameSignature){const sameBatch=frameBatch===replay.id;frameSignature=signature;frameBatch=replay.id;$('frameSelect').replaceChildren();frames.forEach((f,i)=>option($('frameSelect'),String(i),(f.name||f.id||'帧 '+(i+1))+' · '+(f.split||'未分组')+' · '+(f.valid_for_fit===true?'可用于求解':f.valid_for_fit===false?'不可用于求解':'未分类')));$('frameSelect').value=sameBatch&&chosen&&Number(chosen)<frames.length?chosen:frames.length?'0':'';}refreshReplayResults();showFrame();}
+function showFrame(){const camera=$('replayCamera').value||'head',index=Number($('frameSelect').value),f=frames[index];const mesh=$('overlay').checked&&historicalMesh&&historicalMesh.batch_id===replay.id&&historicalMesh.frame_index===index&&historicalMesh.camera===camera&&historicalMesh.result_id===$('historicalCandidate').value?historicalMesh.image_url:null;const url=mesh||f&&(f.image_urls?.[camera]||(camera==='head'?(f.image_url||f.url):null));$('frameImage').hidden=!url;$('noFrames').hidden=!!url;$('noFrames').textContent=replay.id?'本帧没有所选相机图像。':'选择历史批次查看；求解来源保持独立。';if(url&&$('frameImage').getAttribute('src')!==url)$('frameImage').src=url;$('replayDetails').textContent=f?JSON.stringify({batch:replay.id,frame:f.id,split:f.split,camera,detections:f.detections_by_camera?.[camera]||f.camera_detections?.[camera]||(camera==='head'?f.detections:null)},null,2):'';}
+$('replayCamera').onchange=()=>{replayMeshRequest++;historicalMesh=null;refreshReplayResults();showFrame();};
+$('deleteHistory').onclick=async()=>{const id=$('deleteBatchSelect').value;if(!id)return;try{deletePreview=await api('/api/history-delete-preview',{id});$('deleteHistorySummary').textContent='批次 '+deletePreview.id+' · '+deletePreview.files+' 个文件 · '+Number(deletePreview.bytes/1048576).toFixed(2)+' MiB。范围：'+(deletePreview.detail||'当前工作台本地批次')+'。保留版本：'+JSON.stringify(deletePreview.preserved_versions||[]);$('deleteHistoryDialog').showModal();}catch(e){deletePreview=null;tell(e.message);}};
+$('cancelHistoryDelete').onclick=()=>{deletePreview=null;$('deleteHistoryDialog').close();};
+$('deleteHistoryDialog').oncancel=$('deleteHistoryDialog').onclose=()=>{deletePreview=null;};
+$('deleteAllHistory').onclick=async()=>{try{const p=await api('/api/history-delete-preview',{scope:'all'});deletePreview=p;$('deleteAllSummary').textContent='共 '+p.batches.length+' 个批次 · '+p.files+' 个文件 · '+Number(p.bytes/1048576).toFixed(2)+' MiB。范围：'+(p.detail||'');$('deleteAllList').textContent=p.batches.join('\n')+((p.preserved_versions||[]).length?'\n\n将保留的标定版本：'+p.preserved_versions.join(', '):'\n\n尚无已注册标定版本');$('deleteAllDialog').showModal();}catch(e){deletePreview=null;tell(e.message);}};
+$('cancelDeleteAll').onclick=()=>{deletePreview=null;$('deleteAllDialog').close();};
+$('deleteAllDialog').oncancel=$('deleteAllDialog').onclose=()=>{deletePreview=null;};
+$('confirmDeleteAll').onclick=async()=>{if(!deletePreview)return;const preview=deletePreview;deletePreview=null;deleteBusy=true;try{const result=await api('/api/history-delete',{scope:'all',token:preview.token});replayRequest++;replayMeshRequest++;replay={id:null,frames:[],results:[]};historicalMesh=null;refreshFrames();$('deleteAllDialog').close();tell(result.message+(result.overlay_error?'（渲染端叠加清除未完成：'+result.overlay_error+'）':''));await poll(true);}catch(e){$('deleteAllDialog').close();tell(e.message);}finally{deleteBusy=false;}};
+$('confirmHistoryDelete').onclick=async()=>{if(!deletePreview)return;const selected=deletePreview;deletePreview=null;deleteBusy=true;try{await api('/api/history-delete',{id:selected.id,token:selected.token});replayRequest++;replayMeshRequest++;if(replay.id===selected.id){replayRequest++;replayMeshRequest++;replay={id:null,frames:[],results:[]};historicalMesh=null;refreshFrames();}$('deleteBatchSelect').value='';$('deleteHistoryDialog').close();tell('原始采集已永久删除；标定版本已保留。');await poll(true);}catch(e){$('deleteHistoryDialog').close();tell(e.message);}finally{deleteBusy=false;}};
+function refreshWorkflow(){const w=state?.workflow||{kind:'head',head_result_id:null},env=overlayEnvironment(),heads=(state?.calibration?.results||[]).filter(r=>(r.environment||'simulation')===env&&(r.snapshot_complete===true||r.parameters?.snapshot_complete===true)&&(r.objective||r.parameters?.objective)==='sticker_corners_plus_mesh'&&(r.head_dependency_eligible===true||((r.acceptance||r.parameters?.acceptance)?.image_passed===true))),signature=JSON.stringify([w,heads,env]);if(signature!==workflowSignature&&!workflowDirty){workflowSignature=signature;$('workflowKind').value=w.kind;$('workflowHead').replaceChildren();option($('workflowHead'),'','选择通过留出检查的联合头标定');for(const r of heads)versionOption($('workflowHead'),{...r,kind:'head'});$('workflowHead').value=w.head_result_id||'';}$('headDependency').hidden=$('workflowKind').value!=='wrist';const source=(state?.history||[]).find(r=>r.id===(state?.fit_source_id||state?.selected_batch));if(source&&(source.kind||'head')!==w.kind)$('fitResult').textContent='当前求解来源属于'+(source.kind==='wrist'?'双腕':'头部')+'；请选择本类型的采集批次。';const busy=workflowBusy||modeSwitchBusy||/RUNNING|PLANNING|CAPTURING|FITTING|VALIDATING|EXECUTING|SETTLING/i.test(state?.status||'');$('workflowStatus').textContent=(env==='hardware'?'真机':'仿真')+' · '+(w.kind==='wrist'?'双腕；头标定 '+(w.head_result_id||'尚未选择'):'头部相机')+' · 标定来源已隔离';$('coverage').hidden=w.kind==='wrist';$('autoPlan').textContent=w.kind==='wrist'?'生成双腕互看计划':'生成头部标定计划';$('fitButton').textContent=w.kind==='wrist'?'求解双腕并验证留出':'求解头部并验证留出';const rows=(state?.history||[]).filter(r=>(r.kind||'head')===w.kind),fs=JSON.stringify([rows,state?.fit_source_id,state?.selected_batch,w.kind]);if(fs!==fitSourceSignature){fitSourceSignature=fs;const selected=$('fitSource').value;$('fitSource').replaceChildren();option($('fitSource'),'','选择本类型的采集批次');for(const r of rows)option($('fitSource'),r.id,r.id+' · '+(r.completion?.captured??0)+' 帧');$('fitSource').value=rows.some(r=>r.id===selected)?selected:(state?.fit_source_id||state?.selected_batch||'');}const fitSource=state?.fit_source_id||state?.selected_batch||'',fitRow=(state?.history||[]).find(r=>r.id===fitSource);
+$('fitSourceStatus').textContent='当前求解来源：'+(fitSource||'尚未选择')+(fitRow?' · 环境 '+(fitRow.environment||'simulation')+' · '+(fitRow.kind==='wrist'?'双腕':'头部')+(fitRow.robot_source?' · 来源 '+fitRow.robot_source:''):'')+'；回放不会修改此选择。';applyControlState(state,window.__ctrl);}
+async function applyWorkflowSelection(){if(workflowBusy||modeSwitchBusy)return;const kind=$('workflowKind').value,head_result_id=kind==='wrist'?($('workflowHead').value||null):null;workflowDirty=true;workflowBusy=true;modeEpoch++;cancelExecutionPreview();invalidate();refreshWorkflow();try{const result=await api('/api/workflow',{kind,head_result_id});state={...state,workflow:result.workflow||{kind,head_result_id},queue:[],plan:null};workflowDirty=false;workflowSignature='';}catch(e){workflowDirty=false;workflowSignature='';tell(e.message);}finally{workflowBusy=false;refreshWorkflow();await poll(true);}}
+$('workflowKind').onchange=applyWorkflowSelection;$('workflowHead').onchange=applyWorkflowSelection;
+$('applyFitSource').onclick=async()=>{const id=$('fitSource').value;if(id)await action('/api/fit-source',{id},'求解来源已明确设置。');};
+$('clearFitSource').onclick=()=>action('/api/fit-source',{id:null},'求解来源已清空；历史回放保持不变。');
+// One group = one head plus the wrist result solved against it. Unsaved and half
+// groups share the list: the ones that cannot be saved stay visible and disabled,
+// carrying the reason, because "why is there nothing to save" is the question this
+// list exists to answer.
+function groupLabel(g){
+  const head=g.head||{},wrist=g.wrist,headPart='头部 '+(head.version||'未登记');
+  const pair=' ＋ 双腕 '+((wrist&&wrist.version)||'未登记');
+  if(g.installed)return headPart+pair+' · 当前有效';
+  if(g.installable)return headPart+pair+' · 可安装';
+  if(g.registered)return headPart+pair+' · 已登记，未安装';
+  return headPart+' · 不可安装（'+(g.reason_short||'原因见提示')+'）';
+}
+function groupOption(select,g){
+  const o=document.createElement('option');o.value=g.id;o.textContent=groupLabel(g);
+  o.title=g.reason||o.textContent;
+  if(!g.installable)o.disabled=true;
+  o.dataset.full=o.textContent;select.append(o);
+}
+function markerPriorOption(select,row){
+  const o=document.createElement('option');o.value=row.id;
+  const markers=Object.keys(row.marker_mounts||{}).sort();
+  const deltas=markers.map(m=>{const d=(row.marker_mount_deltas||{})[m];
+    return '标识 '+m+(d?('（改 '+(+d.translation_mm).toFixed(2)+' mm / '+(+d.rotation_deg).toFixed(2)+'°）'):'');}).join('、');
+  o.textContent=(row.batch||'批次')+' · '+markers.length+' 个标识安装 · '+deltas;
+  o.title='用这一组的贴纸安装作为头部求解的先验：'+markers.join('、');
+  if(row.pair_status!=='complete'){o.disabled=true;o.textContent+=' · 双腕未成对（'+row.pair_status+'）';}
+  select.append(o);
+}
+function pipelineRow(step){
+  const m=step.metrics||{};
+  if(step.step==='plan')return '规划 · '+(step.half||'')+'：'+step.waypoints+' 个航点（'+step.capture_points+' 个采样点）';
+  if(step.step==='capture'){const c=step.counts||{};
+    return '采集 · '+(step.half||'')+'：批次 '+String(step.batch||'').replace('/capture','')+' · 有效 '+(c.valid===undefined?'—':c.valid)+'/'+(c.captured===undefined?'—':c.captured)+(c.failed?('（失败 '+c.failed+'）'):'');}
+  if(step.step==='head'||(step.step==='solve'&&step.half==='head')){
+    const frozen=(m.marker_mounts_frozen||[]);
+    return (step.reused?'复用头部结果：':step.step==='solve'?'头部求解：':'头部 · 第 '+step.round+' 次求解：')+'留出贴纸 '+(m.holdout_marker_rms_px===null||m.holdout_marker_rms_px===undefined?'—':(+m.holdout_marker_rms_px).toFixed(3)+' px')
+      +' · mesh 覆盖 '+(m.holdout_mesh_coverage===null||m.holdout_mesh_coverage===undefined?'—':(+m.holdout_mesh_coverage).toFixed(3))
+      +' / '+(m.holdout_mesh_px===null||m.holdout_mesh_px===undefined?'—':(+m.holdout_mesh_px).toFixed(2)+' px')
+      +' · 贴纸安装 '+(frozen.length?('冻结 '+frozen.map(v=>'标识 '+v).join('、')):'自由估计')
+      +(step.marker_prior?'（先验来自腕结果 '+String(step.marker_prior).slice(0,12)+'）':'')
+      +(step.adopted===false?' · 先验未通过：留出变差，已停止迭代':(step.adopted===true?' · 先验通过':''));
+
+  }
+  const side=(name)=>{const s=m[name]||{};const d=s.marker_mount_delta;
+    return name+' 留出 '+(s.holdout_rms_px===null||s.holdout_rms_px===undefined?'—':(+s.holdout_rms_px).toFixed(3)+' px')
+      +(d?('（安装改 '+(+d.translation_mm).toFixed(2)+' mm / '+(+d.rotation_deg).toFixed(2)+'°）'):'');};
+  return '腕半场 · 第 '+step.round+' 轮：'+side('left')+'；'+side('right')+' · 成对状态 '+(step.pair_status||'—');
+}
+function refreshArrival(){
+  const report=state?.arrival_statistics||{};
+  $('arrivalInfo').textContent=report.error||((report.robot_source==='physical'?'物理真机':report.robot_source==='simulated'?'模拟设备':'来源未确认')+' · '+'到位样本 '+(report.total_count||0)+' 个路径点'+(report.recording_supported===false?' · 当前控制器尚未提供到位事件，新记录未启用':''));
+  $('arrivalPath').textContent=report.path?'机器人本地保存目录：'+report.path:'';
+  const body=$('arrivalRows');body.replaceChildren();
+  for(const side of ['left','right'])for(let i=0;i<6;i++){
+    const stat=report.joints?.[side]?.[i]||{},row=document.createElement('tr');
+    const values=[(side==='left'?'左':'右')+' J'+(i+1),stat.count||0,...['mean_rad','std_rad','rms_rad','abs_p95_rad','abs_max_rad'].map(k=>Number.isFinite(stat[k])?(stat[k]*180/Math.PI).toFixed(3):'—')];
+    for(const value of values){const cell=document.createElement('td');cell.textContent=String(value);row.append(cell);}body.append(row);
+  }
+}
+const pipelineMilestones=['头部规划','头部采集','头部求解验收','双腕规划','双腕采集','双腕求解验收','安装有效标定'];
+function pipelineCompletion(report){
+  if(report.installed)return 7;
+  if(report.capture_only&&report.capture_completed)return 5;
+  const steps=report.steps||[],phase=report.phase||report.failed_phase||'';
+  let done=0;
+  for(const step of steps){
+    if(step.half==='head')done=Math.max(done,({plan:1,capture:2,solve:3})[step.step]||0);
+    if(step.step==='wrist'&&step.pair_status==='complete')done=Math.max(done,6);
+  }
+  if(phase.includes('发布并安装'))done=Math.max(done,6);
+  else if(phase.startsWith('腕半场'))done=Math.max(done,phase.includes('求解')?5:(phase.includes('采集')||phase.includes('审阅'))?4:3);
+  else if(phase.startsWith('头部'))done=Math.max(done,phase.includes('求解')?2:(phase.includes('采集')||phase.includes('审阅'))?1:0);
+  return done;
+}
+function pipelineWorkLabel(label){
+  const names={head_loading:'读取头部数据',head_initialization:'头部初始化',head_rgb_masks:'提取头部图像轮廓',head_optimizer:'头部优化迭代',head_validation:'头部验收',head_solver_complete:'头部求解完成',head_result_saved:'头部结果已保存',wrist_rgb_evidence:'准备双腕图像'};
+  for(const side of ['left','right'])for(const [key,name] of Object.entries({optimizer:'优化迭代',validation:'验收',side_complete:'单侧完成'}))names[side+'_wrist_'+key]=(side==='left'?'左腕':'右腕')+name;
+  return names[label]||label;
+}
+function refreshPipelineProgress(report){
+  $('pipelineProgressPanel').hidden=report.mode==='refit';
+  const done=pipelineCompletion(report),running=!!report.running,waiting=running&&!!report.review,ended=!running&&(report.aborted||report.stopped);
+  const sub=report.subprogress,measured=!waiting&&sub?.stage===done&&Number.isFinite(sub.fraction);
+  const fraction=measured?Math.max(0,Math.min(.99,sub.fraction)):0;
+  $('pipelineProgress').value=done+fraction;
+  $('pipelineProgressLabel').textContent='整体进度 · '+((done+fraction)/7*100).toFixed(1)+'% · '+done+'/7 阶段完成';
+  $('pipelineSubprogress').hidden=done===7||(!running&&!measured);
+  if(running&&!waiting&&!measured)$('pipelineSubprogress').removeAttribute('value');
+  else $('pipelineSubprogress').value=fraction;
+  const units=measured&&Number.isFinite(sub.completed)&&Number.isFinite(sub.total)?' · '+sub.completed+'/'+sub.total:'';
+  $('pipelineSubprogressLabel').textContent=done===7?'':ended?(report.stopped?'已停止：':'已中断：')+(report.failed_phase||pipelineMilestones[done])+(measured?'；最后进度：'+pipelineWorkLabel(sub.label)+units:''):waiting?'当前阶段：等待现场审批':measured?'当前阶段：'+pipelineWorkLabel(sub.label)+units+'（'+(fraction*100).toFixed(1)+'%）':running?'当前阶段：'+pipelineMilestones[done]+'，正在处理，暂未提供可计数进度':'';
+  const list=$('pipelineMilestones');list.replaceChildren();
+  pipelineMilestones.forEach((name,i)=>{const item=document.createElement('li');item.textContent=(i<done?'✓ ':i===done&&running?(waiting?'待审阅 · ':'进行中 · '):i===done&&(report.aborted||report.stopped)?'未完成 · ':'')+name;item.style.color=i<done?'#79bbb0':i===done&&running?'#fff':'';list.append(item);});
+  const status=report.capture_only&&report.capture_completed?'本轮双腕采集完成，未复现采集中断；已保留数据，等待下一轮现场审阅，不求解或安装。':report.installed?'头部与双腕均已完成，已安装有效标定。':report.stopped?'已停止，保留已完成进度。':report.aborted?'中断原因：'+report.aborted+'。进度已冻结，不再采集。':waiting?'等待你审阅'+(report.review.kind==='wrist'?'双腕':'头部')+'批次，审批前进度暂停。':running?'当前：'+(report.phase||pipelineMilestones[done])+'。':'等待启动完整标定。';
+  $('pipelineProgressHint').textContent=status+(done<7?' 整体按7个阶段等权计算，阶段内按实际采集帧数、规划检查和求解工作量推进，不代表剩余时间。头部34帧求解近期约6–7分钟；双腕尚无真机耗时基线，总剩余时间暂不能可靠估计，人工审批等待另计。':'');
+}
+function refreshPipeline(){
+  const report=state?.pipeline||{};
+  refreshPipelineProgress(report);
+  const running=!!report.running||state?.status==='PIPELINE';
+  $('reviewPipeline').hidden=false;
+  $('reviewPipeline').disabled=calibrationRunBusy||!(running&&report.review)||!!blockerReason(state);
+  $('reviewPipeline').title=blockerReason(state)||'';
+  $('pipelineReviewHint').textContent=running&&report.review?'当前批次等待审阅：请检查轨迹和现场净空，再点击「审阅本批并确认执行」。':running?'当前没有待审批批次；流水线到达下一个审阅点后，此按钮会启用。':'当前没有待审批批次。请先点击「启动标定并生成计划」，再点击「审阅本批并确认执行」；物理真机在审批前不会执行采集轨迹。';
+  const steps=report.steps||[];
+  const phase=report.phase;
+  const mode=report.capture_only?'双腕采集复现':report.mode==='full'?'完整标定':'重解迭代';
+  $('pipelineStatus').textContent=running
+    ?('流水线运行中（'+mode+'）'+(phase?('：'+phase):'')+(steps.length?(' · 已完成 '+steps.length+' 步'):''))
+    :(report.aborted?('流水线结束但未发布：'+report.aborted)
+      :(report.message?('流水线完成：'+report.message)
+        :(steps.length?('上次'+mode+'记录 '+steps.length+' 步。'):'尚未运行一键标定。')));
+  const box=$('pipelineSteps');
+  box.replaceChildren();
+  for(const step of steps){const p=document.createElement('p');p.className='hint';p.textContent=pipelineRow(step);box.append(p);}
+}
+function refreshMarkerPrior(){
+  const prior=state?.marker_prior||null;
+  const rows=(state?.wrist?.results||[]).filter(r=>r.marker_mounts&&Object.keys(r.marker_mounts).length);
+  const selected=$('markerPrior').value;
+  $('markerPrior').replaceChildren();
+  option($('markerPrior'),'','不设先验：头部自行估计贴纸安装');
+  for(const row of rows)markerPriorOption($('markerPrior'),row);
+  $('markerPrior').value=prior&&rows.some(r=>r.id===prior.source_result_id)?prior.source_result_id:'';
+  if(prior&&prior.error)$('markerPriorInfo').textContent='⚠ 标识先验不可用：'+prior.error;
+  else if(prior)$('markerPriorInfo').textContent='当前先验：'+Object.keys(prior.mounts).sort().map(m=>{
+      const d=(prior.deltas||{})[m];
+      return '标识 '+m+(d?(' 相对头快照改 '+(+d.translation_mm).toFixed(2)+' mm / '+(+d.rotation_deg).toFixed(2)+'°'):'');}).join('；')
+    +' · 来源腕结果 '+String(prior.source_result_id).slice(0,12)+'（'+(prior.batch||'')+'）'
+    +' · 头部求解将冻结这些安装，只解相机与关节零偏';
+  else $('markerPriorInfo').textContent=rows.length
+    ?('尚未设置标识先验：头部求解会自己估两个贴纸安装。可选来源 '+rows.length+' 个腕结果。')
+    :'尚无带标识估计的腕结果：腕计划开启标识估计后重跑一次腕半场，这里才会出现可选来源。';
+}
+function groupHint(groups){
+  if(!groups.length)return '当前来源没有已验证的头部结果；先完成头部求解。';
+  const installed=groups.filter(g=>g.installed);
+  const pending=groups.filter(g=>!g.installed&&g.installable);
+  const blocked=groups.filter(g=>!g.installed&&!g.installable);
+  let text='共 '+groups.length+' 组：'+pending.length+' 组可安装';
+  if(installed.length)text+='，当前有效 '+installed.length+' 组';
+  if(blocked.length)text+='，'+blocked.length+' 组不可安装（'+blocked.slice(0,3).map(g=>((g.head||{}).version||'头部')+' '+g.reason_short).join('；')+(blocked.length>3?' 等':'')+'）';
+  return text;
+}
+// Registered versions read as groups too: a head version and the wrist versions that
+// depend on it are one calibration, so they are shown as one card.
+function libraryCards(versions){
+  const heads=versions.filter(v=>resultKind(v)==='head'),bound=new Map(),loose=[];
+  for(const v of versions){
+    if(resultKind(v)==='head')continue;
+    const dependency=v.dependency_id;
+    if(dependency&&heads.some(h=>h.id===dependency)){
+      if(!bound.has(dependency))bound.set(dependency,[]);
+      bound.get(dependency).push(v);
+    }else loose.push(v);
+  }
+  return [...heads.map(h=>({head:h,wrist:bound.get(h.id)||[]})),...loose.map(v=>({head:null,wrist:[v]}))];
+}
+function libraryVersionRow(v){
+  const row=document.createElement('p');row.className='versionLine';
+  const label=document.createElement('strong');label.textContent=shortVersion(v);
+  const detail=document.createElement('span');
+  detail.textContent='创建 '+(v.created_at||'未知')+' · 来源 '+(v.source_batch||'未知')+(v.stale?' · ⚠ 原始批次已删除（stale）':'');
+  const link=document.createElement('a');link.href='/api/calibration-file?id='+encodeURIComponent(v.id);link.textContent='下载 JSON';link.download='';
+  const more=document.createElement('details'),summary=document.createElement('summary'),pre=document.createElement('pre');
+  summary.textContent='校验信息';pre.textContent=JSON.stringify(v.validation||{},null,2);more.append(summary,pre);
+  row.append(label,detail,link,more);
+  return row;
+}
+function libraryCard(card){
+  const section=document.createElement('section');section.className='versionCard';
+  const title=document.createElement('h3');
+  const pairedWrist=card.wrist.filter(v=>resultKind(v)==='wrist'),singles=card.wrist.length-pairedWrist.length;
+  if(card.head&&pairedWrist.length)title.textContent='头部 '+(card.head.version||'未登记')+' ＋ 双腕 '+pairedWrist.map(v=>v.version||'未登记').join('、')+(singles?'（另有 '+singles+' 个历史单侧记录）':'');
+  else if(card.head&&singles)title.textContent='头部 '+(card.head.version||'未登记')+' ＋ 无成对双腕（'+singles+' 个历史单侧记录）';
+  else if(card.head)title.textContent='头部 '+(card.head.version||'未登记')+' · 未与双腕成组';
+  else title.textContent='未成组记录 · '+(card.wrist[0].version||'未登记');
+  const active=(state?.calibration?.install||null);
+  if(active&&card.head&&active.head_version===card.head.version
+     &&pairedWrist.some(v=>v.version===active.wrist_version))title.textContent+=' · 当前有效（active/）';
+  section.append(title);
+  if(card.head){
+    const note=document.createElement('p');note.className='muted';
+    note.textContent=card.wrist.length?'头外参、关节零偏与双腕外参属于同一组，取用时按组取。':'未与任何双腕版本成组（历史回填或腕半场尚未完成），不能作为最终可用的标定组。';
+    section.append(note);
+  }
+  for(const v of (card.head?[card.head,...card.wrist]:card.wrist))section.append(libraryVersionRow(v));
+  return section;
+}
+function refreshLibrary(){
+  refreshPipeline();
+  refreshArrival();
+  const library=state?.library||{},env=$('libraryEnvironment').value||'hardware';
+  const versions=(library.versions||[]).filter(r=>r.environment===env);
+  const groups=(state?.calibration?.groups||[]).filter(g=>(g.environment||'simulation')===env);
+  const signature=JSON.stringify([library,groups,env,state?.calibration?.install]);
+  if(signature===librarySignature)return;
+  librarySignature=signature;
+  $('libraryRoot').textContent='机器人：'+(library.robot_id||'未配置')+' · 公共目录：'+(library.by_environment?.[env]||library.root||'未配置')+' · '+(env==='hardware'?'真机标定':'仿真标定（不可用于真机）');
+  const installed=(state?.calibration?.install||null)&&(state?.calibration?.install||{}).environment===env?state.calibration.install:null;
+  $('activeCalibration').textContent=installed
+    ?((installed.acceptance?.status==='user_accepted_provisional'?'已安装临时标定 · 用户接受误差，未通过正常验收（':'当前有效标定（')+env+'）：头部 '+(installed.head_version||'?')+' ＋ 双腕 '+(installed.wrist_version||'?')+' · 安装于 '+String(installed.installed_at||'').slice(0,16).replace('T',' ')+' · '+(installed.verified?'文件与库一致':'⚠ '+(installed.problems||[]).join('；'))+' · 读取路径 '+installed.path)
+    :('当前有效标定（'+env+'）：尚未安装任何一组；对外读取路径 '+(library.by_environment?.[env]||library.root||'未配置')+'/active/');
+  const selected=$('installResult').value;
+  $('installResult').replaceChildren();
+  option($('installResult'),'','选择一组已验证的标定结果');
+  for(const g of groups)groupOption($('installResult'),g);
+  $('installResult').value=groups.some(g=>g.installable&&g.id===selected)?selected:'';
+  refreshMarkerPrior();
+  $('groupHint').textContent=groupHint(groups);
+  $('libraryVersions').replaceChildren();
+  $('libraryEmpty').hidden=versions.length>0;
+  const cards=libraryCards(versions),paired=cards.filter(card=>card.head&&card.wrist.length).length;
+  const stamps=versions.map(v=>v.created_at||'').filter(Boolean).sort(),newest=stamps[stamps.length-1];
+  $('libraryVersionCount').textContent=versions.length
+    ?(versions.length+' 个版本 · '+paired+' 组已配对 · 最近 '+(newest?newest.slice(0,16).replace('T',' '):'时间未知'))
+    :'暂无已登记版本';
+  for(const card of cards)$('libraryVersions').append(libraryCard(card));
+}
+$('libraryEnvironment').onchange=()=>{librarySignature='';refreshLibrary();};
+$('reviewPipeline').onclick=()=>executeCalibrationBatch();
+$('runPipeline').onclick=async()=>{await action('/api/calibration-pipeline',{mode:'full'},'标定流程已启动；物理真机每批生成计划后等待审阅，确认后才执行采集。头部与双腕求解、验收通过后安装一组。');};
+$('stopPipeline').onclick=async()=>{await action('/api/calibration-pipeline',{stop:true},'已请求停止流水线。');};
+$('setMarkerPrior').onclick=async()=>{const source=$('markerPrior').value;if(!source){await action('/api/marker-prior',{clear:true},'已清除标识先验：头部求解会重新自由估计贴纸安装。');return;}await action('/api/marker-prior',{source},'已把该腕结果估计的贴纸安装设为头部求解的先验。');};
+$('installCalibration').onclick=async()=>{const head_result_id=$('installResult').value,group=(state?.calibration?.groups||[]).find(g=>g.id===head_result_id);if(!group){tell('请选择一组已验证的标定结果：一个头部 ＋ 与之匹配的双腕');return;}if(!group.installable||!group.wrist){tell(group.reason||'该组当前不能安装');return;}await action('/api/calibration-install',{head_result_id,wrist_result_id:group.wrist.id},'已安装为当前有效标定：头部 ＋ 双腕一组。');};
+function planSamplingText(plan,points){if(state?.workflow?.kind==='wrist')return (plan.motion_seed?'姿态 seed：'+plan.motion_seed+'（按当前机器重新校验）\n':'')+(plan.wrist_contract?.acceptance?.max_holdout_rms_px?'留出门槛：'+plan.wrist_contract.acceptance.max_holdout_rms_px+' px（契约声明，随批次冻结）\n':'')+'采样：'+['left','right'].map(side=>(side==='left'?'左腕观察':'右腕观察')+' '+points.filter(p=>p.observer===side&&p.capture!==false).length).join('；')+'\n非采集过渡：'+points.filter(p=>p.capture===false).length+'（不按观察腕归类）';const sideName={left:'左臂',right:'右臂'};return ['左臂路径点 '+points.filter(p=>p.arm==='left').length+' / 右臂 '+points.filter(p=>p.arm==='right').length,'采样 / 过渡：'+['left','right'].map(side=>sideName[side]+' '+points.filter(p=>p.arm===side&&p.capture!==false).length+' / '+points.filter(p=>p.arm===side&&p.capture===false).length).join('；'),...Object.entries(plan.coverage||{}).filter(([,c])=>c&&c.unique_samples!==undefined).map(([side,c])=>sideName[side]+' 最低采样合同：'+c.unique_samples+'/6 个不同姿态，关节变化秩 '+c.joint_pose_rank+'/3 · '+(c.sufficient?'通过':'不足')),...(plan.deficiencies||[]),...(plan.unreachable||[]).map(r=>(sideName[r.arm]||'起点')+(r.cell?' 九宫格['+r.cell.join(',')+']':'')+'：'+(r.reason||'未找到路径'))].join('\n');}
+function workbenchStatusText(s, now=new Date()){
+  const phase=(s.motion_preflight?.status==='checking'?(s.motion_preflight.stage||'正在检查路径／生成执行预览'):executionPreviewBusy?'正在检查路径／生成执行预览':null)||s.pipeline?.phase||({FITTING:'求解中',PLANNING:'规划中',CAPTURING:'采集中',READY:'就绪',REJECTED:'失败',STOPPED:'已停止'}[s.status])||s.status||'已连接';
+  return phase+' · 更新 '+now.toLocaleTimeString('zh-CN',{hour12:false});
+}
+function refreshMotionPreflight(){
+const p=state?.motion_preflight||{},active=executionPreviewBusy||p.status==='checking';
+$('motionPreflight').hidden=!active;
+$('motionPreflight').textContent=active?((p.status==='checking'&&p.stage)||'正在检查路径／生成执行预览')+'；尚未执行，可以随时停止。':'';
+}
+function cancelExecutionPreview(){motionRequestEpoch++;executionPreviewBusy=false;calibrationRunBusy=false;refreshMotionPreflight();}
+function renderState(next,details=false){if(state?.backend_connected===false&&next.backend_connected!==false)for(const id of ['livePreview','liveActualPose','liveActual'])$(id).removeAttribute('src');if(state&&JSON.stringify([state.qpos,state.jaw_gap_mm])!==JSON.stringify([next.qpos,next.jaw_gap_mm]))invalidate(false);if(state&&(state.control_mode!==next.control_mode||(next.review_generation??0)!==(state.review_generation??0)||(state.status!=='STOPPED'&&next.status==='STOPPED'))){cancelExecutionPreview();invalidate();preview=null;}state=next;window.__state=state;$('modelName').textContent=state.model_family==='ac_one'?'AC-One A1':'X5';refreshRealJaws();refreshConnectionDiagnostics();refreshModeSelector();refreshDswRecovery();refreshExecutionAlert(state);$('modeBadge').textContent=(runtimeContext()?.name==='fake'?'Fake 真机 · 开发模式':state.hardware_sync_active?'物理真机':'物理真机 · 连接不可用')+' · '+(state.simulation_backend||state.backend||'运动学');refreshStatusBar(state);refreshMeshRendering();$('health').textContent=state.status||'已连接';if(details){$('diagnosticResult').textContent=JSON.stringify(state.diagnostics||{},null,2);$('rawState').textContent=JSON.stringify({...state,actual_parts:(state.actual_parts||[]).map(p=>({side:p.side,link:p.link,vertices:p.vertices.length,faces:p.faces.length})),batch:state.batch?{...state.batch,waypoints:(state.batch.waypoints||[]).length}:null},null,2);}if(!initialized&&(state.backend_connected!==false||state.hardware_sync_active)){draft=(state.qpos||draft).slice();jawDraft=commandJaws(state.jaw_gap_mm||jawDraft);initialized=true;buildJoints();loadPreview();}const queue=state.queue||[];if(details){refreshPlanBrowser(queue);$('queueTitle').textContent='动作队列 · '+queue.length+' 个路径点';refreshHistory();}$('captured').textContent=state.counts?.captured??0;const counts=state.counts||{};$('queued').textContent=counts.capture_points??0;$('transitions').textContent=counts.transition_points??0;$('validFrames').textContent=counts.valid??0;$('failedFrames').textContent=counts.failed??0;if(details){$('queue').replaceChildren();queue.forEach((item,i)=>{const li=document.createElement('li');li.textContent=(item.name||item.label||'姿态 '+(i+1))+(item.jaw_gap_mm?' · 左/右开度 '+item.jaw_gap_mm.join(' / ')+' mm':'');const remove=document.createElement('button');remove.textContent='移除';remove.style.cssText='margin-left:8px;padding:3px 6px;font-size:12px';remove.onclick=()=>action('/api/queue-remove',{index:i},'已移除姿态');li.append(remove);$('queue').append(li);});$('batchState').textContent=state.batch_status||state.status||'—';{const b=state.plan||{},points=queue,c=state.counts||{};$('planInfo').textContent=(state.plan_stale?'历史计划的几何已变化或未经核验；请重新生成后执行。\n':'')+'当前队列 '+(c.waypoints??points.length)+' 个路径点 = '+(c.capture_points??0)+' 个采样点 + '+(c.transition_points??0)+' 个过渡点\n所选批次 '+(state.selected_batch||'无')+'：已采集 '+(c.captured??0)+' 帧 · 可用于求解 '+(c.valid??0)+' · 不可用于求解 '+(c.failed??0)+(c.unclassified?' · 未分类 '+c.unclassified:'')+'\n'+planSamplingText(b,points)+'\n'+(b.collision_method||'')+'\n'+(b.visibility_scope||'');document.querySelectorAll('.cell').forEach((cell,i)=>{const covered=points.filter(x=>x.capture!==false&&Array.isArray(x.cell)&&x.cell[0]*3+x.cell[1]===i);cell.classList.toggle('planned',covered.length>0);cell.title='左 '+covered.filter(x=>x.arm==='left').length+' / 右 '+covered.filter(x=>x.arm==='right').length;});}}$('batchState').style.fontSize='12px';const busy=!!state?.pipeline?.running||/RUNNING|PLANNING|CAPTURING|FITTING|VALIDATING|EXECUTING|SETTLING/i.test(state.status||'');if(busy||(state.hardware_sync_active&&state.hardware_fault)||executionBlocked())invalidate(false);for(let side=0;side<2;side++)if($('actual'+side))$('actual'+side).textContent=(state.hardware_sync_active?'真机实测 ':state.backend_connected===false?'过期反馈 ':state.live_backend?'DSW 实际 ':'实际 ')+(state.qpos||[]).slice(side*6,side*6+6).map(q=>(q*180/Math.PI).toFixed(1)).join(' / ')+'° · '+(state.hardware_sync_active?'爪 '+(state.hardware_jaw?Number(state.hardware_jaw.gap_mm[side]).toFixed(1):'未知')+' mm':'爪 '+(state.jaw_gap_mm?.[side]??'未知')+' mm');if(details)refreshFrames();if(state.status==='STOPPED')tellStatus('当前已停止锁定：请先点击「已读并重新规划」解除锁定，再预览零位并执行。预览不会自动解除停止。');else if(state.reason)tellStatus(state.reason);else if($('message').textContent==='real feedback unavailable; independent simulation'||String($('message').textContent||'').startsWith('DSW unavailable:'))tellStatus('');if(details){$('fitResult').textContent=state.fit_result?JSON.stringify(state.fit_result,null,2):'当前批次尚未求解。';refreshEvaluation();refreshCalibration();refreshLibrary();refreshWristPipeline();}else refreshPipeline();refreshWorkflow();if(state.live_backend){$('cameraTitle').textContent='DSW 当前头部相机';if(!preview)$('previewInfo').textContent='DSW 目标渲染：拖动关节仅更新预览；左侧全景，右侧头部相机。执行后查看下方实际画面。';document.querySelector('.legend').hidden=true;$('livePreview').style.opacity=state.backend_connected===false?'.35':'1';$('liveActual').style.opacity=state.backend_connected===false?'.35':'1';$('cameraFooter').textContent=(state.hardware_sync_active?'DSW 以真机实测关节渲染':'独立 DSW 运动学仿真')+' · 实际渲染 '+Number(state.remote?.render?.actual?.fps||0).toFixed(1)+' Hz · '+Number(state.remote?.render?.actual?.last_duration_ms||0).toFixed(1)+' ms/帧';$('simulationBoundary').textContent=state.control_mode==='hardware_sync'?(state.hardware_sync_active?'真机状态已接入：DSW 跟随实测反馈；执行另需控制网关可用。':'真机模式连接不可用：保留模式、禁止执行。'+hardwareConnectionText()):'独立仿真：执行仅作用于 DSW。';$('stop').textContent=runtimeContext()?.name==='fake'?'■ 停止 Fake 真机动作':'■ 停止真机动作 · 保留阻尼';const q=state.qpos||[];$('dswFeedback').textContent='DSW 源时间戳 '+Number(state.remote?.frame_timestamp_s?.actual??state.remote?.timestamp_s??0).toFixed(3)+' s · 关节 ° '+q.map(v=>(v*180/Math.PI).toFixed(1)).join(' / ');refreshLiveFrames();}refreshMotionPreflight();applyControlState(state,window.__ctrl);refreshMeshRendering();render();$('health').textContent=workbenchStatusText(state);if(String($('message').textContent||'').startsWith('无法读取状态：'))tellStatus('');}
+async function poll(refreshDetails=false){
+if(pollBusy)return;pollBusy=true;const epoch=modeEpoch,motionAt=motionRequestEpoch;
+try{const next=await api('/api/runtime-state');if(epoch!==modeEpoch||motionAt!==motionRequestEpoch||modeSwitchBusy||workflowBusy)return;
+online=true;runtimeSnapshot=next;renderState({...state,...next});
+if(refreshDetails===true)void pollDetails();
+}catch(e){if(epoch!==modeEpoch||motionAt!==motionRequestEpoch)return;online=false;cancelExecutionPreview();invalidate();refreshRealJaws();$('livePreview').style.opacity='.35';$('liveActual').style.opacity='.35';$('health').textContent='连接中断';refreshExecutionAlert({execution_blocker:{code:'owner_unavailable',title:'工作台状态失联',reason:'无法读取状态：'+e.message,action:null}});tell('无法读取状态：'+e.message);
+}finally{pollBusy=false;}}
+async function pollDetails(){
+if(detailsBusy)return;detailsBusy=true;const epoch=modeEpoch;
+try{const next=await api('/api/state');if(epoch!==modeEpoch||modeSwitchBusy||workflowBusy)return;
+// Catalog work may finish after STOPPED or a new mode; it never owns runtime fields.
+if(runtimeSnapshot&&online)renderState({...next,...runtimeSnapshot},true);
+}catch(e){$('diagnosticResult').textContent='列表刷新失败（实时状态仍独立刷新）：'+e.message;
+}finally{detailsBusy=false;}}
+
+for(const button of document.querySelectorAll('[data-tab]'))button.onclick=()=>{for(const b of document.querySelectorAll('[data-tab]'))b.setAttribute('aria-selected',String(b===button));for(const section of document.querySelectorAll('.mode'))section.hidden=section.id!==button.dataset.tab;document.querySelector('.content').scrollTop=0;};
+$('reconnectDsw').onclick=reconnectDswFrames;
+$('controlMode').onchange=async()=>{if(workflowBusy)return;const mode=$('controlMode').value;modeSwitchBusy=true;modeEpoch++;cancelExecutionPreview();runtimeSnapshot=null;applyControlState(state,window.__ctrl);invalidate();preview=null;try{if(runtimeContext()?.available?.includes('fake')){const result=await api('/api/runtime-switch',{runtime:mode,mode:'hardware_sync'});window.location.assign(result.url);return;}const result=await api('/api/control-mode',{mode});state={...state,...result};tell(mode==='simulation'?'已切换纯仿真：执行仅作用于仿真，真机连接与画面保留。':'已切换真机同步：接入时以真机反馈驱动 DSW。');}catch(e){tell('模式切换失败：'+e.message);}finally{modeSwitchBusy=false;applyControlState(state,window.__ctrl);$('controlMode').value=selectedControlMode();await poll(true);loadPreview();}};
+$('applySpeed').onclick=()=>{const value=Number($('uniformSpeed').value);if(!Number.isFinite(value)||value<=0)return tell('速度必须是正数');speeds=speeds.map(()=>value);syncInputs();edit();};
+$('useActual').onclick=()=>{draft=(state?.qpos||draft).slice();jawDraft=commandJaws(state?.jaw_gap_mm||jawDraft);syncInputs();edit();};$('home').onclick=()=>{draft=Array(12).fill(0);jawDraft=[83,83];syncInputs();edit();};
+$('execute').onclick=()=>{if(modeSwitchBusy)return;if(state?.hardware_sync_active)return executeHardware([currentWaypoint()]);const approved=token;if(!approved)return tell('当前目标未通过路径检查或预览已失效；请重新预览，通过检查后再执行。');action('/api/execute',{token:approved},'动作已提交；查看实际状态。');};
+$('stop').onclick=()=>{cancelExecutionPreview();invalidate();preview=null;tell('正在请求停止；旧执行预览已作废。');return action('/api/stop',{},'已请求停止；以反馈状态为准。');};$('ack').onclick=async()=>{const result=await action('/api/ack',{},'已读；重新规划，不恢复旧动作。');if(result)loadPreview();};
+$('clearQueue').onclick=()=>action('/api/queue-clear',{},'队列已清空。');
+$('addQueue').onclick=()=>{const row=currentWaypoint();try{validateMotionRows([row]);return action('/api/queue',row,'目标已加入队列。');}catch(e){tell(e.message);}};
+$('autoPlan').onclick=async()=>{if(workflowBusy||workflowDirty||modeSwitchBusy)return tell('标定类型或依赖正在更新。');const result=await action(state?.workflow?.kind==='wrist'?'/api/wrist-plan':'/api/auto-plan',{},'整批计划已生成，请查看覆盖与计划。');if(result){$('planInfo').textContent=JSON.stringify(result,null,2);const points=result.waypoints||[];document.querySelectorAll('.cell').forEach((c,i)=>c.classList.toggle('planned',points.some(x=>x.capture!==false&&Array.isArray(x.cell)&&x.cell[0]*3+x.cell[1]===i)));}};
+for(const id of ['runBatch','runQueue'])$(id).onclick=()=>{if(modeSwitchBusy)return;if(id==='runBatch'&&workflowBusy)return tell('标定类型或依赖正在更新。');if(id==='runBatch')return executeCalibrationBatch();return state?.hardware_sync_active?executeHardware(state.queue):action('/api/run-batch',{},'已启动批次。');};$('fitButton').onclick=async()=>{if(workflowBusy||workflowDirty||modeSwitchBusy)return tell('标定类型或依赖正在更新。');const result=await action(state?.workflow?.kind==='wrist'?'/api/wrist-fit':'/api/fit',{},'求解请求已提交。');if(result)$('fitResult').textContent=JSON.stringify(result,null,2);};$('refresh').onclick=()=>poll(true);$('frameSelect').onchange=showFrame;$('overlay').onchange=()=>{if(!$('overlay').checked)historicalMesh=null;showFrame();};
+['左上','中上','右上','左中','中心','右中','左下','中下','右下'].forEach(name=>{const e=document.createElement('div');e.className='cell';e.textContent=name;$('coverage').append(e);});
+function canvasSize(canvas){const r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);const context=canvas.getContext('2d');context.setTransform(dpr,0,0,dpr,0,0);context.clearRect(0,0,r.width,r.height);return [context,r.width,r.height];}
+function drawParts(context,parts,project,ghost=false){const triangles=[];for(const part of parts||[]){const vertices=(part.vertices||[]).map(project);for(const face of part.faces||[]){const pts=face.map(i=>vertices[i]);if(pts.some(p=>!p))continue;triangles.push({pts,z:pts.reduce((s,p)=>s+p[2],0)/3,color:part.marker_id?'#ffffff':ghost?'#a1b4c5':part.side==='right'?'#f3b77f':'#72ddc0'});}}triangles.sort((a,b)=>b.z-a.z);context.globalAlpha=ghost?.18:.72;for(const t of triangles){context.beginPath();t.pts.forEach((p,i)=>i?context.lineTo(p[0],p[1]):context.moveTo(p[0],p[1]));context.closePath();context.fillStyle=t.color;context.fill();context.strokeStyle=ghost?'#a1b4c5':'#182d35';context.lineWidth=.25;context.stroke();}context.globalAlpha=1;}
+function inverseRigid(T){return [0,1,2].map(i=>[T[0][i],T[1][i],T[2][i],-(T[0][i]*T[0][3]+T[1][i]*T[1][3]+T[2][i]*T[2][3])]).concat([[0,0,0,1]]);}
+function render(){if(state?.live_backend){$('actualPosePanel').hidden=false;$('liveActualPose').style.opacity=state.backend_connected===false?'.35':'1';$('scene').hidden=true;$('camera').hidden=true;$('resetView').hidden=true;$('ghost').parentElement.hidden=true;$('livePreview').hidden=false;$('liveActual').hidden=false;return;}const [ctx,w,h]=canvasSize($('scene')),parts=preview?.parts||state?.actual_parts||[],all=parts.flatMap(p=>p.vertices||[]);if(!all.length){ctx.fillStyle='#93a4b6';ctx.textAlign='center';ctx.fillText('等待机器人 mesh…',w/2,h/2);return;}const min=[0,1,2].map(i=>all.reduce((m,v)=>Math.min(m,v[i]),Infinity)),max=[0,1,2].map(i=>all.reduce((m,v)=>Math.max(m,v[i]),-Infinity)),center=min.map((v,i)=>(v+max[i])/2),extent=Math.max(...max.map((v,i)=>v-min[i]),.1),scale=Math.min(w,h)*.73/extent*orbit.zoom;const project=v=>{const x=v[0]-center[0],y=v[1]-center[1],z=v[2]-center[2],u=Math.cos(orbit.yaw)*x-Math.sin(orbit.yaw)*y,d=Math.sin(orbit.yaw)*x+Math.cos(orbit.yaw)*y,yy=Math.cos(orbit.pitch)*z-Math.sin(orbit.pitch)*d,depth=Math.sin(orbit.pitch)*z+Math.cos(orbit.pitch)*d;return [w/2+u*scale,h/2-yy*scale,depth];};ctx.strokeStyle='#2a3b47';ctx.lineWidth=1;for(let i=-5;i<=5;i++){const a=project([center[0]+i*extent/10,center[1]-extent/2,min[2]]),b=project([center[0]+i*extent/10,center[1]+extent/2,min[2]]);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();}if($('ghost').checked)drawParts(ctx,state?.actual_parts,project,true);drawParts(ctx,parts,project);const [cc,cw,ch]=canvasSize($('camera')),camera=preview?.camera||state?.camera;if((camera?.T||camera?.T_world_optical)&&camera?.K){const T=camera.T||inverseRigid(camera.T_world_optical),K=camera.K,iw=camera.width||640,ih=camera.height||480,s=Math.min(cw/iw,ch/ih),ox=(cw-iw*s)/2,oy=(ch-ih*s)/2;drawParts(cc,parts,v=>{const xyz=T.slice(0,3).map(row=>row[0]*v[0]+row[1]*v[1]+row[2]*v[2]+row[3]);if(xyz[2]<=.001)return null;return [ox+s*(K[0][0]*xyz[0]/xyz[2]+K[0][2]),oy+s*(K[1][1]*xyz[1]/xyz[2]+K[1][2]),xyz[2]];});cc.strokeStyle='#456272';cc.strokeRect(ox,oy,iw*s,ih*s);}else{cc.fillStyle='#93a4b6';cc.textAlign='center';cc.fillText('等待相机投影参数',cw/2,ch/2);}}
+
+function refreshPlanBrowser(queue){const signature=JSON.stringify(queue.map(w=>[w.q,w.jaw_gap_mm]));if(signature===planSignature)return;planSignature=signature;$('planBrowse').hidden=!queue.length;$('planSelect').replaceChildren();queue.forEach((w,i)=>$('planSelect').add(new Option((i+1)+' / '+queue.length+' · '+(w.name||w.kind||'手动姿态')+(w.capture===false?' · 仅过渡':''),i)));if(queue.length)showPlan(0);}
+async function showPlan(index){const count=state?.queue?.length||0;if(!count)return;index=Math.max(0,Math.min(count-1,index));$('planSelect').value=index;const request=++planRequest;invalidate();try{const p=await api('/api/plan-preview',{index,revision:++revision});if(request!==planRequest)return;preview=p;render();if(p.live){previewStreamRevision=p.revision;ensureStreams();$('planImage').hidden=true;$('planCaption').textContent='姿态 '+(index+1)+' / '+count+' · DSW 目标画面见左侧；浏览不执行动作';$('previewInfo').textContent='正在浏览计划姿态 '+(index+1)+'；浏览不执行动作';refreshLiveFrames();return;}const canvas=$('planImage'),ctx=canvas.getContext('2d'),camera=p.camera,T=inverseRigid(camera.T_world_optical),K=camera.K;ctx.clearRect(0,0,640,480);const project=v=>{const xyz=T.slice(0,3).map(row=>row[0]*v[0]+row[1]*v[1]+row[2]*v[2]+row[3]);return xyz[2]>.001?[K[0][0]*xyz[0]/xyz[2]+K[0][2],K[1][1]*xyz[1]/xyz[2]+K[1][2],xyz[2]]:null;};drawParts(ctx,p.parts,project);for(const m of p.markers||[]){ctx.strokeStyle=m.visible?'#5ee3a0':'#ff7373';ctx.lineWidth=2;ctx.beginPath();m.corners_uv.forEach((v,i)=>i?ctx.lineTo(...v):ctx.moveTo(...v));ctx.closePath();ctx.stroke();ctx.fillStyle=ctx.strokeStyle;ctx.font='16px sans-serif';ctx.fillText(String(m.id),m.center_uv[0]+10,m.center_uv[1]);}$('planCaption').textContent='姿态 '+(index+1)+' / '+count+' · 几何可见标签 '+p.visible_ids.join('、')+' · '+p.mount_status;$('previewInfo').textContent='正在浏览计划姿态 '+(index+1)+'；浏览不执行动作';}catch(e){tell(e.message);}}
+$('planSelect').onchange=()=>showPlan(+$('planSelect').value);$('planPrev').onclick=()=>showPlan(+$('planSelect').value-1);$('planNext').onclick=()=>showPlan(+$('planSelect').value+1);
+
+function refreshCalibration(){const c=state.calibration||{},available=c.available||[],results=(c.results||[]).filter(r=>(r.environment||'simulation')===overlayEnvironment());const selected=c.selected;const rs=JSON.stringify(results);if(rs!==realtimeOptionsSignature){realtimeOptionsSignature=rs;const select=$('calibrationCandidate'),previous=select.value;select.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent=results.length?'选择标定参数':'尚无参数有效的标定结果';select.append(empty);for(const r of results){versionOption(select,{...r,kind:'head'});}select.value=results.some(r=>r.id===previous)?previous:(selected?.id||'');}$('calibrationSource').textContent=selected?'候选：'+selected.candidate+' · 来源：'+selected.batch+(c.ready?' · 配对源帧 '+c.frame_sequence+' · 时间戳 '+Number(c.source_timestamp_s).toFixed(3)+' s（异步，可能落后当前姿态）':' · '+(c.error||'等待渲染/连接'))+'；不修改执行目标，不证明精度。':'尚未启用实时候选；选择结果后查看，历史回放独立控制。';applyMeshViewMode(state.mesh_view_mode);
+if(!c.ready||state.backend_connected===false)$('calibrationImage').hidden=true;$('dswOverlayPlaceholder').hidden=!$('calibrationImage').hidden;if(!selected||!state.hardware_connected){$('realCalibrationImage').hidden=true;$('realOverlayPlaceholder').hidden=false;$('realOverlayPlaceholder').textContent=selected?'真机未接入或反馈已过期':'请选择实时叠加参数';}}
+$('historicalCandidate').onchange=()=>{historicalMesh=null;showFrame();refreshCalibration();};$('calibrationCandidate').onchange=async()=>{if(headSelectionBusy)return;const result_id=$('calibrationCandidate').value;if(!result_id)return;headSelectionBusy=true;calibrationEpoch++;$('calibrationImage').hidden=true;$('realCalibrationImage').hidden=true;try{const result=await action('/api/calibration',{result_id},'已切换头部标定叠加');if(!result)$('calibrationCandidate').value=state?.calibration?.selected?.id||'';}finally{headSelectionBusy=false;}};$('calibrationShow').onchange=async()=>{if(meshToggleBusy)return;const enabled=$('calibrationShow').checked;meshToggleBusy=true;$('calibrationShow').disabled=true;calibrationEpoch++;
+try{const result=await api('/api/overlay-rendering',{enabled});state={...state,mesh_rendering_enabled:result.enabled};tell(result.applied?(enabled?'已开启实时 mesh 叠加；姿态预览性能会降低。':'已关闭实时 mesh 叠加，后台不再持续计算。'):'设置已保存，等待渲染器重新连接后生效。');}catch(e){tell('设置叠加开关失败：'+e.message);}finally{meshToggleBusy=false;$('calibrationShow').disabled=false;refreshMeshRendering();}};$('historicalMesh').onclick=async()=>{const batch_id=replay.id,frame_index=Number($('frameSelect').value),camera=$('replayCamera').value||'head',result_id=$('historicalCandidate').value,request=++replayMeshRequest;if(!batch_id||!result_id)return;try{const result=await api('/api/calibration-historical',{batch_id,frame_index,camera,result_id});if(request===replayMeshRequest&&batch_id===replay.id&&frame_index===Number($('frameSelect').value)&&camera===($('replayCamera').value||'head')&&result_id===$('historicalCandidate').value){historicalMesh={...result,batch_id,frame_index,camera,result_id};$('overlay').checked=true;showFrame();}}catch(e){tell(e.message);}};
+function refreshMeshRendering(){
+ if(!meshToggleBusy)$('calibrationShow').checked=state?.mesh_rendering_enabled===true;
+ if(state?.mesh_rendering_enabled===false){
+  for(const id of ['calibrationImage','realCalibrationImage','wristOverlay-left','wristOverlay-right','wristRealOverlay-left','wristRealOverlay-right'])$(id).hidden=true;
+  for(const id of ['dswOverlayPlaceholder','realOverlayPlaceholder','wristOverlayStatus-left','wristOverlayStatus-right','wristRealOverlayStatus-left','wristRealOverlayStatus-right']){$(id).hidden=false;$(id).textContent='实时 mesh 叠加已关闭，姿态预览优先；可勾选上方开关开启。';}
+ }
+}
+async function refreshLiveFrames(){if(state?.mesh_rendering_enabled===false)return;if(frameBusy||!state?.live_backend||state.backend_connected===false)return;frameBusy=true;try{const epoch=calibrationEpoch,selectedId=state.calibration?.selected?.id;ensureStreams();const views=[];if(state.calibration?.ready)views.push($('calibrationShow').checked?'calibration':'calibration-original');await Promise.all(views.map(async view=>{const response=await fetch('/api/live-frame?view='+view);if(!response.ok)return;const blob=await response.blob(),isOverlay=view==='calibration'||view==='calibration-original';if(isOverlay&&(epoch!==calibrationEpoch||selectedId!==state.calibration?.selected?.id||!state.calibration?.ready||state.backend_connected===false))return;const url=URL.createObjectURL(blob),id=isOverlay?'calibrationImage':view==='preview'?'livePreview':'liveActualPose';$(id).src=url;if(isOverlay){$(id).hidden=false;$('dswOverlayPlaceholder').hidden=true;}if(frameURLs[view])URL.revokeObjectURL(frameURLs[view]);frameURLs[view]=url;}));}catch(e){$('health').textContent=e.message;}finally{frameBusy=false;}}
+let realOverlayBusy=false,realOverlayURL=null,realOverlayExpires=0;
+async function refreshRealOverlay(){if(state?.mesh_rendering_enabled===false)return;if(realOverlayExpires&&performance.now()>realOverlayExpires){$('realCalibrationImage').hidden=true;$('realOverlayPlaceholder').hidden=false;$('realOverlayPlaceholder').textContent='上一帧观测已超过 2 s，等待新帧';}if(realOverlayBusy)return;const selected=state?.calibration?.selected;if(!selected||!state.hardware_connected)return;realOverlayBusy=true;const epoch=calibrationEpoch,show=$('calibrationShow').checked;try{const r=await fetch('/api/hardware-overlay?mesh='+(show?'1':'0'));if(!r.ok){const e=await r.json();throw Error(e.error||'真机叠加不可用');}const m=JSON.parse(r.headers.get('X-Frame-Metadata')),blob=await r.blob();if(epoch!==calibrationEpoch||selected.id!==state?.calibration?.selected?.id||m.candidate_id!==selected.id||!state.hardware_connected)return;const served=Number.isFinite(m.observed_age_s)?m.observed_age_s:m.image_age_s;if(!Number.isFinite(served)||served>=2)throw Error('叠加源图像已过期');realOverlayExpires=performance.now()+2000-served*1000;const url=URL.createObjectURL(blob);$('realCalibrationImage').src=url;$('realCalibrationImage').hidden=false;$('realOverlayPlaceholder').hidden=true;if(realOverlayURL)URL.revokeObjectURL(realOverlayURL);realOverlayURL=url;$('realOverlayTiming').textContent='关节 − 图像：'+(m.image_joint_delta_ms>=0?'+':'')+m.image_joint_delta_ms.toFixed(1)+' ms · 源图龄 '+m.image_age_s.toFixed(2)+' s · 观测龄 '+served.toFixed(2)+' s（渲染 '+Number(m.render_ms||0).toFixed(0)+' ms）· '+m.timestamp_basis+'；夹爪使用左右独立的 SDK→实际开度映射。';}catch(e){if(epoch===calibrationEpoch&&(performance.now()>=realOverlayExpires||!state.hardware_connected||$('realCalibrationImage').hidden)){$('realCalibrationImage').hidden=true;$('realOverlayPlaceholder').hidden=false;$('realOverlayPlaceholder').textContent=e.message;$('realOverlayTiming').textContent='未显示过期或无法配对的叠加';}}finally{realOverlayBusy=false;}}
+setInterval(refreshRealOverlay,200);
+setInterval(refreshLiveFrames,200);
+let cameraReconnectAt=-Infinity,previewStreamRevision=0;
+function setStream(id,url){const e=$(id);if(e.getAttribute('src')!==url)e.src=url;e.onerror=()=>{e.removeAttribute('src');};}
+function recoverCameraStream(m){if(!m.ready&&performance.now()-cameraReconnectAt>=3000){cameraReconnectAt=performance.now();$('hardwareImage').removeAttribute('src');setStream('hardwareImage','/api/hardware-stream');}}
+$('wristResult').onchange=async()=>{if(wristSelectionBusy)return;const result_id=$('wristResult').value;if(!result_id)return;wristSelectionBusy=true;calibrationEpoch++;try{const result=await action('/api/wrist-select',{result_id},'已切换腕标定叠加');if(!result)$('wristResult').value='';}finally{wristSelectionBusy=false;refreshWristPipeline();}};
+let wristOptions='';function pairDraftNote(r){
+const why=[];
+if(!((r.left||{}).accepted))why.push('左腕未通过（'+((((r.left||{}).reasons||[])[0])||'原因未知')+'）');
+if(!((r.right||{}).accepted))why.push('右腕未通过（'+((((r.right||{}).reasons||[])[0])||'原因未知')+'）');
+return '不完整：'+(why.join('；')||'未通过留出检查')+'；不可用于叠加';
+}
+// Every wrist-side version of this environment is listed, including the ones that
+// cannot be drawn: a greyed row that says why is the answer to "why can I not select my
+// wrist calibration", and an empty list only says that something is missing. Each row
+// names the head version it was solved against, because that pairing is what makes it
+// a calibration.
+function wristOptionLabel(o){
+  const kind={wrist:'双腕',left:'左腕（历史单侧）',right:'右腕（历史单侧）'}[o.kind]||'腕标定';
+  return (o.version||'未登记')+' · '+kind+(o.label?' · '+o.label:'')+' · 头部 '+(o.head_version||'未登记');
+}
+function wristBlockedText(options){
+  return options.slice(0,3).map(o=>(o.version||'未登记')+' '+(o.reason||'不可选')).join('；')+(options.length>3?' 等':'');
+}
+function refreshWristPipeline(){
+  const w=state?.wrist||{},env=overlayEnvironment(),rows=w.results||[];
+  const head=(state?.calibration||{}).selected||{},headId=head.id;
+  const all=(state?.calibration?.wrist_options||[]).filter(o=>(o.environment||'simulation')===env);
+  // The list follows the head the overlay is drawing: that pairing is the calibration.
+  // Whatever is currently drawn stays visible even if it belongs to another head, so the
+  // row is never hidden from the selector that put it on screen.
+  const options=headId?all.filter(o=>o.head_id===headId||o.id===(w.selected||{}).id):all;
+  const signature=JSON.stringify([headId,options]);
+  if(signature!==wristOptions){
+    wristOptions=signature;
+    const current=$('wristResult').value,saved=(w.selected||{}).id;
+    const selected=options.some(o=>o.id===current)?current:(options.some(o=>o.id===saved)?saved:'');
+    $('wristResult').replaceChildren();
+    option($('wristResult'),'','选择双腕标定版本');
+    for(const o of options){
+      const draft=rows.find(r=>r.id===o.id);
+      const note=o.selectable?null:(o.reason||'参数不可绘制');
+      versionOption($('wristResult'),{...o,kind:o.kind==='head'?'wrist':o.kind},note,
+                    wristOptionLabel(o)+(o.deployment_status==='user_accepted_provisional'?' · 用户接受的临时标定':o.accepted===false?' · 未通过验收，仅供查看':'')+(o.selectable?'':' · 不可选'));
+    }
+    $('wristResult').value=options.some(o=>o.id===selected)?selected:'';
+  }
+  const selectable=options.filter(o=>o.selectable),blocked=options.filter(o=>!o.selectable);
+  // The coarse-calibration note belongs to the case where this environment has no wrist
+  // record at all. When records exist but cannot be drawn, say which one and why.
+  $('wristInfo').textContent=w.planning?(w.planning.observer==='left'?'左腕':'右腕')+'规划：已找到 '+w.planning.accepted+'/'+w.planning.target+' 姿态 · 尝试 '+w.planning.attempt+' 次'
+    :(selectable.length?(selectable.length+' 个成对版本可用'+(blocked.length?' · '+blocked.length+' 个不可选（'+wristBlockedText(blocked)+'）':'')+'；选择同时作用于左右腕，环境与验证信息见标定文件。')
+      :(blocked.length?((head.version?'当前头部 '+head.version+' 没有可用的腕标定：':'当前没有可用的腕标定：')+wristBlockedText(blocked)+'。')
+        :'当前没有腕标定结果。请先在一键标定中完成双腕采集与求解，再选择结果查看腕部叠加。'));
+  applyControlState(state,window.__ctrl);}
+const wristFrames={};
+for(const side of ['left','right']){const label=side==='left'?'左腕':'右腕';const row=document.createElement('div');row.className='views';row.dataset.camera=side;row.hidden=true;row.innerHTML='<section><div class="panelhead">DSW · '+label+'</div><div class="camera"><img id="wristSim-'+side+'" hidden alt="'+label+'仿真相机"><p id="wristSimStatus-'+side+'" class="hint">完成双腕规划并启动采集后显示仿真腕图。</p></div></section><section><div class="panelhead">真机 · '+label+'</div><div class="camera"><img id="wristRaw-'+side+'" hidden alt="'+label+'原始相机"><p id="wristStatus-'+side+'" class="hint">等待相机</p></div></section>';$('cameraCompare').append(row);const overlay=document.createElement('div');overlay.className='views';overlay.dataset.camera=side;overlay.hidden=true;overlay.innerHTML='<section data-mesh="simulation"><div class="panelhead">DSW · '+label+' 标定叠加</div><div class="camera"><img id="wristOverlay-'+side+'" hidden alt="'+label+'仿真标定叠加"><p id="wristOverlayStatus-'+side+'" class="hint">请选择参数有效的'+label+'结果。</p></div></section><section data-mesh="hardware"><div class="panelhead">真机 · '+label+' 标定叠加</div><div class="camera"><img id="wristRealOverlay-'+side+'" hidden alt="'+label+'真实图像上的仿真标定预览"><p id="wristRealOverlayStatus-'+side+'" class="hint">选择腕结果后显示；仿真解不是物理标定验收。</p></div></section>';overlayRowsRoot().insertBefore(overlay,$('calibrationSource'));}
+// The overlay rows (head pair + per-wrist) all live in the same overlay container;
+// anchor on the element they are inserted next to, never on an unrelated panel's parent.
+function overlayRowsRoot(){return $('calibrationSource').parentElement;}
+function selectCameraRows(root,value){for(const row of root.querySelectorAll('[data-camera]'))row.hidden=value!=='all'&&row.dataset.camera!==value;}
+$('cameraView').onchange=()=>selectCameraRows($('cameraCompare'),$('cameraView').value);
+$('overlayView').onchange=()=>selectCameraRows(overlayRowsRoot(),$('overlayView').value);
+// Overlay environment: one authority, inside the overlay panel itself. The top
+// status bar only mirrors it. Browsing is read-only and needs no robot control.
+function applyMeshViewMode(mode){
+const current=mode==='hardware'?'hardware':'simulation';
+for(const row of document.querySelectorAll('.views[data-camera]'))row.dataset.meshMode=current;
+const sim=document.getElementById('meshViewSimulation'),hardware=document.getElementById('meshViewHardware'),hint=document.getElementById('meshViewHint');
+if(sim)sim.setAttribute('aria-pressed',String(current==='simulation'));
+if(hardware)hardware.setAttribute('aria-pressed',String(current==='hardware'));
+if(hint)hint.textContent=current==='hardware'?'当前：仅真机候选（只读）':'当前：仅 DSW 仿真候选';
+}
+async function requestMeshViewMode(mode){
+applyMeshViewMode(mode);
+try{await api('/api/mesh-view-mode',{mode});tell('叠加环境已切换为'+(mode==='hardware'?'真机候选（只读）':'DSW 仿真候选'));await poll(true);}catch(e){tell('切换叠加环境失败：'+e.message);}
+}
+$('meshViewSimulation').onclick=()=>requestMeshViewMode('simulation');
+$('meshViewHardware').onclick=()=>requestMeshViewMode('hardware');
+async function refreshWrists(){const tasks=[];for(const side of ['left','right']){if(!['all',side].includes($('cameraView').value))continue;const f=wristFrames[side]||(wristFrames[side]={busy:false,url:null});if(f.busy)continue;f.busy=true;tasks.push((async()=>{const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);try{const r=await fetch('/api/wrist-frame?camera='+side,{cache:'no-store',signal:controller.signal});if(!r.ok){const m=await r.json();f.lastFailure=m.last_failure||m.last_disconnect||{reason:m.error||'画面接口返回 '+r.status,at_s:Date.now()/1000};throw Error(m.error||'画面接口不可用');}const header=r.headers?.get('X-Frame-Metadata'),m=header?JSON.parse(header):{};f.lastFailure=m.last_failure||m.last_disconnect||f.lastFailure;const url=URL.createObjectURL(await r.blob());$('wristRaw-'+side).src=url;$('wristRaw-'+side).hidden=false;$('wristStatus-'+side).hidden=false;$('wristStatus-'+side).textContent='画面接口可用'+(cameraStatusText(m,f.lastFailure)?' · '+cameraStatusText(m,f.lastFailure):'');if(f.url)URL.revokeObjectURL(f.url);f.url=url;}catch(e){if(!f.lastFailure)f.lastFailure={reason:e.message,at_s:Date.now()/1000};$('wristRaw-'+side).hidden=true;$('wristStatus-'+side).hidden=false;$('wristStatus-'+side).textContent='画面接口不可用 / 进程状态未知：'+e.message+' · '+failureText(f.lastFailure);}finally{clearTimeout(timeout);f.busy=false;}})());}await Promise.all(tasks);}
+setInterval(refreshWrists,100);
+const wristSimFrames={};
+async function refreshWristSim(){
+ for(const side of ['left','right'])for(const overlay of [false,true]){
+  if(overlay&&state?.mesh_rendering_enabled===false)continue;
+  const id=(overlay?'wristOverlay-':'wristSim-')+side,status=(overlay?'wristOverlayStatus-':'wristSimStatus-')+side;
+  const selectedId=state?.wrist?.selected?.id,epoch=calibrationEpoch,show=$('calibrationShow').checked;
+  const f=wristSimFrames[id]||(wristSimFrames[id]={busy:false});
+  if(f.expires&&performance.now()>=f.expires||state?.backend_connected===false||overlay&&!selectedId||f.selectedId!==selectedId||f.epoch!==epoch){$(id).hidden=true;$(status).hidden=false;}
+  if(!(overlay?['all',side].includes($('overlayView').value):['all',side].includes($('cameraView').value))||state?.backend_connected===false||overlay&&!selectedId||f.busy)continue;
+  f.busy=true;const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);
+  const view=side+(overlay?(show?'-calibration':'-calibration-original'):'');
+  try{
+   const r=await fetch('/api/live-frame?view='+view+(overlay?'&candidate_id='+encodeURIComponent(selectedId):''),{signal:controller.signal,cache:'no-store'});
+   if(!r.ok)throw Error('等待腕相机或有效标定结果');
+   const m=JSON.parse(r.headers.get('X-Frame-Metadata')),blob=await r.blob();
+   if(epoch!==calibrationEpoch||selectedId!==state?.wrist?.selected?.id||state?.backend_connected===false)continue;
+   if(!Number.isFinite(m.image_age_s)||m.image_age_s>=2||overlay&&m.candidate_id!==selectedId)throw Error('腕图像已过期或候选已变化');
+   const url=URL.createObjectURL(blob);$(id).src=url;$(id).hidden=false;$(status).hidden=true;
+   if(f.url)URL.revokeObjectURL(f.url);Object.assign(f,{url,epoch,selectedId,expires:performance.now()+2000-m.image_age_s*1000});
+  }catch(e){if(epoch===calibrationEpoch){$(id).hidden=true;$(status).hidden=false;$(status).textContent=e.message;}}
+  finally{clearTimeout(timeout);f.busy=false;}
+ }
+}
+setInterval(refreshWristSim,200);
+const wristRealFrames={};
+async function refreshWristRealOverlay(){
+ if(state?.mesh_rendering_enabled===false)return;
+ for(const side of ['left','right']){
+  const id='wristRealOverlay-'+side,status='wristRealOverlayStatus-'+side,f=wristRealFrames[side]||(wristRealFrames[side]={busy:false});
+  const selectedId=state?.wrist?.selected?.id,epoch=calibrationEpoch,show=$('calibrationShow').checked;
+  if(f.expires&&performance.now()>=f.expires||!state?.hardware_connected||!selectedId||f.selectedId!==selectedId||f.epoch!==epoch){$(id).hidden=true;$(status).hidden=false;}
+  if(!['all',side].includes($('overlayView').value)||!selectedId||!state?.hardware_connected||f.busy)continue;
+  f.busy=true;const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);
+  try{
+   const r=await fetch('/api/wrist-overlay?camera='+side+'&mesh='+(show?'1':'0'),{signal:controller.signal,cache:'no-store'});
+   if(!r.ok)throw Error((await r.json()).error);
+   const m=JSON.parse(r.headers.get('X-Frame-Metadata')),blob=await r.blob();
+   if(epoch!==calibrationEpoch||selectedId!==state?.wrist?.selected?.id||!state?.hardware_connected)continue;
+   const served=Number.isFinite(m.observed_age_s)?m.observed_age_s:m.image_age_s;
+   if(m.candidate_id!==selectedId||!Number.isFinite(served)||served>=2)throw Error('腕叠加已过期或候选已变化');
+   const url=URL.createObjectURL(blob);$(id).src=url;$(id).hidden=false;$(status).hidden=false;
+   $(status).textContent='所选标定在真机图像上的预览；可视化不代表验收通过。源图龄 '+m.image_age_s.toFixed(2)+' s · 渲染 '+Number(m.render_ms||0).toFixed(0)+' ms';
+   if(f.url)URL.revokeObjectURL(f.url);Object.assign(f,{url,epoch,selectedId,expires:performance.now()+2000-served*1000});
+  }catch(e){if(epoch===calibrationEpoch){$(id).hidden=true;$(status).hidden=false;$(status).textContent=e.message;}}
+  finally{clearTimeout(timeout);f.busy=false;}
+ }
+}
+setInterval(refreshWristRealOverlay,250);
+const overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0};
+let overviewBusy=false,overviewDirty=false,overviewPointer=null;
+async function sendOverview(){overviewDirty=true;if(overviewBusy)return;overviewBusy=true;try{while(overviewDirty){overviewDirty=false;await api('/api/overview-view',{...overview});}}catch(e){tell(e.message);}finally{overviewBusy=false;}}
+$('overviewPreset').onchange=()=>{Object.assign(overview,{front:{yaw:-Math.PI/2,pitch:.4},left:{yaw:-Math.PI/2-.7,pitch:.45},right:{yaw:-Math.PI/2+.7,pitch:.45},top:{yaw:-Math.PI/2,pitch:1.5}}[$('overviewPreset').value],{zoom:1,pan_y:0});sendOverview();};
+$('overviewMode').onchange=()=>{applyControlState(state,window.__ctrl);$('liveActualPose').style.cursor=$('overviewMode').value==='drag'?'grab':'default';};
+function zoomOverview(factor){overview.zoom=Math.max(.4,Math.min(4,overview.zoom*factor));sendOverview();}
+$('overviewZoomIn').onclick=()=>zoomOverview(1.2);$('overviewZoomOut').onclick=()=>zoomOverview(1/1.2);$('overviewReset').onclick=()=>{$('overviewPreset').value='front';$('overviewPreset').onchange();};
+const overviewImage=$('liveActualPose');overviewImage.style.touchAction='none';overviewImage.draggable=false;
+overviewImage.onpointerdown=e=>{if($('overviewMode').value!=='drag')return;overviewPointer={x:e.clientX,y:e.clientY};overviewImage.setPointerCapture(e.pointerId);};
+overviewImage.onpointermove=e=>{if(!overviewPointer)return;overview.yaw=((overview.yaw-(e.clientX-overviewPointer.x)*.006+3*Math.PI)%(2*Math.PI))-Math.PI;overview.pan_y=Math.max(-2,Math.min(2,overview.pan_y+(e.clientY-overviewPointer.y)/overviewImage.clientHeight));overviewPointer={x:e.clientX,y:e.clientY};sendOverview();};
+overviewImage.onpointerup=overviewImage.onpointercancel=()=>{overviewPointer=null;};
+overviewImage.addEventListener('wheel',e=>{if($('overviewMode').value!=='drag')return;e.preventDefault();zoomOverview(Math.exp(-e.deltaY*.001));},{passive:false});
+const dswFrames={};
+async function refreshDswFrame(view,id){
+ const f=dswFrames[view]||(dswFrames[view]={busy:false,last:0,url:null});
+ const e=$(id);e.style.opacity=f.last&&performance.now()-f.last<3000?'1':'.35';
+ e.title=f.last?'距最后成功获取画面 '+((performance.now()-f.last)/1000).toFixed(1)+' 秒':'等待画面';
+ if(f.busy||!state?.live_backend||state.backend_connected===false)return;
+ f.busy=true;const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);
+ try{const r=await fetch('/api/live-frame?view='+view,{signal:controller.signal,cache:'no-store',headers:f.etag?{'If-None-Match':f.etag}:{}});if(r.status===304){f.last=performance.now();return;}if(!r.ok)throw Error('frame '+r.status);f.etag=r.headers?.get('ETag');const blob=await r.blob();const url=URL.createObjectURL(blob);const probe=new Image();probe.src=url;try{await probe.decode();}catch(err){URL.revokeObjectURL(url);throw err;}e.src=url;if(f.url)URL.revokeObjectURL(f.url);f.url=url;f.last=performance.now();e.style.opacity='1';e.title='画面已获取；源帧时间见下方';}
+ catch(err){e.title='画面获取失败，自动重试：'+err.message;}
+ finally{clearTimeout(timeout);f.busy=false;}
+}
+function ensureStreams(){for(const [view,id] of [['preview','livePreview'],['actual','liveActualPose'],['head','liveActual']])refreshDswFrame(view,id);setStream('hardwareImage','/api/hardware-stream');}
+setInterval(()=>refreshDswFrame('preview','livePreview'),33);
+setInterval(ensureStreams,100);
+
+let headCameraLastFailure=null;
+async function refreshComparison(){if(hardwareBusy)return;hardwareBusy=true;try{ensureStreams();const r=await fetch('/api/hardware-camera-state'),m=await r.json();headCameraLastFailure=m.last_failure||m.last_disconnect||headCameraLastFailure;if(!r.ok)throw Error(m.error||'画面状态接口不可用');recoverCameraStream(m);$('hardwareImage').hidden=!m.ready;$('hardwarePlaceholder').hidden=!!m.ready;const detail=cameraStatusText(m,headCameraLastFailure);$('hardwarePlaceholder').textContent='画面接口不可用 / 进程状态未知'+(detail?'：'+detail:'；等待状态证据');$('hardwareCameraHealth').textContent=m.ready?'已连接 · 连续图像流':'画面接口不可用 / 状态未知';$('hardwareCameraInfo').textContent='源交付 '+Number(m.delivered_fps||0).toFixed(1)+' Hz · 目标 30 Hz · 帧龄 '+Number(m.age_s||0).toFixed(3)+' s'+(detail?' · '+detail:'');}catch(e){headCameraLastFailure=headCameraLastFailure||{reason:e.message,at_s:Date.now()/1000};$('hardwareImage').hidden=true;$('hardwarePlaceholder').hidden=false;$('hardwarePlaceholder').textContent='画面接口不可用 / 进程状态未知：'+e.message;$('hardwareCameraInfo').textContent=failureText(headCameraLastFailure);}finally{$('hardwareFeedback').textContent=(state?.hardware_connected?(state.hardware_sync_active?'真机反馈已接入；DSW 跟随两臂实际关节。':'真机反馈已接入；纯仿真模式下 DSW 独立控制。'):'真机反馈接口不可用；当前控制模式保持。')+(hardwareConnectionText()?' · '+hardwareConnectionText():'');hardwareBusy=false;}}
+setInterval(refreshComparison,500);
+let drag=null;$('scene').onpointerdown=e=>{drag=[e.clientX,e.clientY];$('scene').setPointerCapture(e.pointerId);};$('scene').onpointermove=e=>{if(!drag)return;orbit.yaw+=(e.clientX-drag[0])*.008;orbit.pitch=Math.max(-1.4,Math.min(1.4,orbit.pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];render();};$('scene').onpointerup=$('scene').onpointercancel=()=>{drag=null;};$('scene').addEventListener('wheel',e=>{e.preventDefault();orbit.zoom=Math.max(.3,Math.min(4,orbit.zoom*Math.exp(-e.deltaY*.001)));render();},{passive:false});$('resetView').onclick=()=>{Object.assign(orbit,defaultOrbit);render();};$('ghost').onchange=render;window.addEventListener('resize',render);poll(true);setInterval(poll,1000);setInterval(pollDetails,10000);
+</script><script>(()=>{
+const $=id=>document.getElementById('hw-'+id);let releaseToken=null;
+const post=(action,body={})=>api('/api/control/'+action,body);
+const show=x=>$('action').textContent=x;
+$('acquire').onclick=async()=>{ $('acquire').disabled=true;try{const p=await post('takeover-preview');const names=p.processes.map(v=>'PID '+v.pid+' · '+(v.name||v.command||'控制进程')).join('\n');if(!window.confirm('确认接管真机？\n'+(names||'未发现其他控制进程')+'\n将终止列出的控制进程，检查相机环境并启动本工作台控制器。确认即表示现场环境安全。'))return;show('正在接管并检查相机…');const r=await post('takeover-confirm',{token:p.token,confirmation:'TAKE_OVER_CONTROL'});show(JSON.stringify(r));}catch(e){show(e.message);}finally{$('acquire').disabled=false;}};
+$('emergency').onclick=async()=>{try{const p=await post('takeover-preview');if(window.confirm('退出 SDK emergency 需要重启控制器，期间会撤掉保持力，请支撑双臂。将停止以下已识别控制进程：\n'+p.processes.map(v=>'PID '+v.pid+' · '+v.name).join('\n')+'\n重启后不恢复旧轨迹。确认继续？')){show('正在退出 SDK emergency…');show(JSON.stringify(await post('takeover-confirm',{token:p.token,confirmation:'TAKE_OVER_CONTROL'})));}}catch(e){show(e.message);}};
+$('recover').onclick=recoverOwnerFault;
+$('release').onclick=async()=>{try{const p=await post('release-preview');releaseToken=p.token;$('preview').textContent=JSON.stringify(p.owner_identity);$('supported').checked=false;$('execute').disabled=true;$('confirm').showModal();}catch(e){show(e.message);}};
+$('supported').onchange=()=>{$('execute').disabled=!$('supported').checked;};$('cancel').onclick=()=>{releaseToken=null;$('confirm').close();};$('execute').onclick=async()=>{const token=releaseToken;releaseToken=null;$('confirm').close();try{show(JSON.stringify(await post('release-confirm',{token,confirmation:'ARMS_SUPPORTED_RELEASE'})));}catch(e){show(e.message);}};
+async function poll(){try{const d=await api('/api/control/state'),o=d.owner||{},f=o.calibration_feedback;window.__ctrl=d;$('health').textContent=d.reachable?'控制器：'+o.state:'控制器未连接';$('acquire').textContent=d.reachable?'重新接管真机':'一键接入真机与相机'; $('reason').textContent=[o.reason,d.error,hardwareConnectionText()].filter(Boolean).join(' · ');$('pedal').textContent='踏板：'+(o.pedal?.input_healthy?'在线':'未确认');$('fresh').textContent=d.host_sample_recent?'新鲜实测反馈':'反馈过期或不可用';$('motionStatus').textContent='轨迹：'+(o.motion?.status||'空闲');$('state').textContent=JSON.stringify(d,null,2);$('joints').replaceChildren();for(let j=0;j<7;j++){const tr=document.createElement('tr');for(const v of [j<6?'J'+(j+1):'夹爪',...[j,j+7].map(k=>Number.isFinite(f?.qpos?.[k])?(j<6?(f.qpos[k]*180/Math.PI).toFixed(2):(state?.hardware_jaw?Number(state.hardware_jaw.gap_mm[k===6?0:1]).toFixed(1)+' mm':'映射反馈不可用')+' · SDK '+f.qpos[k].toFixed(6)):'—')]){const td=document.createElement('td');td.textContent=v;tr.append(td);}$('joints').append(tr);}}catch(e){$('health').textContent=e.message;}finally{applyControlState(window.__state,window.__ctrl);setTimeout(poll,700);}}poll();})();</script></body></html>

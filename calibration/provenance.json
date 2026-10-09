@@ -1,0 +1,24 @@
+{
+  "source_base_commit": "de36c131b644e9d06e223b5fd65576bc700b64c2",
+  "source_files_were_uncommitted": true,
+  "original_file_sha256": {
+    "examples/scripts/debug/joint_head_isaac_harness.py": "6f3a4731bd25f945912b5ae3e717786137725ff5d7d5480e46ea3bf9294a3127",
+    "examples/scripts/debug/joint_head_isaac_dsw.py": "d28ee9039baa69a43d46efb17d4851304f0f4795bb42a7d48b7e0bff833bde1a",
+    "examples/scripts/debug/joint_head_isaac_review.py": "17ea7566dd17b64559d85ff39ba6eec47bef6c654d422e011f44915b575cfe61",
+    "examples/scripts/debug/joint_head_isaac_capture.py": "3284b8f776c4697918da26d93dfac685f396d2ab68a205e4e4b2ddb27a4cdc05",
+    "examples/scripts/debug/joint_head_isaac_review.html": "ddc6a305eed736f8a23cccb76d615bd061d36ddf9c1f3b99095709f05a30f3cd",
+    "infra/arx_env/joint_head_isaac_plan.py": "e868da1019ceb1c773405728cc768b7323fec97562472af95b731591ab4e888f",
+    "infra/arx_env/joint_head_isaac_fit.py": "c544adfa0e499804b0e9c24bb969bd35fd0f6da9b5e453bcd7ec74c9f3b13d21",
+    "tests/test_joint_head_isaac_fit.py": "16a7481d288448fae429c6b469c38a2691d4230d09ecc84e11ef45c4b5c27798",
+    "tests/test_joint_head_isaac_plan.py": "56587a15738e6b26d517d06a59ed2b93602ac5dceb6c1411b850f13b844c2dd1",
+    "tests/test_joint_head_isaac_harness.py": "1ec9ba87079e081564e97c5cb729a0ffe713dfc674796005a6498aadc7176f21",
+    "infra/arx_env/urdf_mesh.py": "c9a6094987f4224be23c21c9d795f53d8b438f46b1c6ad4b17f236d9745ceebc"
+  },
+  "export_changes": [
+    "Remove workstation and DSW-specific configuration",
+    "Keep only URDF transform/path helpers required by fitter",
+    "Inline two small planner validation helpers instead of importing fake harness",
+    "Sanitize example serial and source paths",
+    "Export historical numerical summary without raw captures/assets"
+  ]
+}

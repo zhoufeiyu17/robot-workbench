@@ -1,0 +1,30 @@
+{
+  "asset_geometry_id": "44c6160a0a33a78710c228c5af2b1f9e364d8dc808f3330500830b79a2dc3b16",
+  "max_interference_m": 0.0012,
+  "separation_direction_link2": [
+    0.0,
+    0.0,
+    1.0
+  ],
+  "front_support_x_min_m": -0.1,
+  "claw_support_component_seed_faces": {
+    "link2": 37470,
+    "link5": 14791
+  },
+  "authorization": "Operator approved a permanent 1.2 mm limit at both support regions, including leaving, returning home and recontact. 2026-09-23.",
+  "scope": "Both arms; link2/link3 front support and link2/link5 support components only. Directional separation along link2 +Z; no posture/history exemption.",
+  "reference_q_rad": [
+    -0.102045,
+    0.00248,
+    0.001335,
+    -0.027657,
+    -0.001335,
+    -0.053597,
+    -0.006294,
+    0.000954,
+    0.000954,
+    -0.032998,
+    -0.00248,
+    -0.090219
+  ]
+}

@@ -1,0 +1,279 @@
+{
+  "schema_version": "a1_support_domain.v1",
+  "urdf_sha256": "7bf205b7252905c55a4857a749f727756bf00be736811c047cdf8b8fd70759ff",
+  "support_identity": {
+    "sidecar_sha256": "bec9bf556942bf5097a3ecce7b3b45fe0cc4a69f7abf65f747ad223773401019",
+    "sidecar_path": "/mnt/data/feiyu.zhou/runs/robot_sim/physical-a1cal-long-20260923-2300/camera-fixed-assets-20260924-v1/assets/robots/arx_ac_one/v1/source/acone/urdf/a1_support_contact.json",
+    "asset_geometry_id": "44c6160a0a33a78710c228c5af2b1f9e364d8dc808f3330500830b79a2dc3b16",
+    "urdf_sha256": "7bf205b7252905c55a4857a749f727756bf00be736811c047cdf8b8fd70759ff",
+    "mesh_sha256": {
+      "left_link2": "1a4940e4de344255e428c9165a2aaf045c9c27d4cb122e63dbdcff346806e524",
+      "left_link3": "bb2741365d19ac2b78101e9b42f0e1f4a5732b0ee01ff8dde1b790e477693bb2",
+      "left_link5": "f057278ec9a588101252dfa2b2a9259627bf574fdaeeaf7e71101c707f220bb2",
+      "right_link12": "1c0dadff532927fc0026e137f8752ae7615233d5278cdad3e71055b7bba3aeb9",
+      "right_link13": "a2db5968c4b2e6ebc80b259ab91a7a708dcbc3cd1dd85c2e4bd6c9ad8511defb",
+      "right_link15": "2f7ec100946115452f5454c1b1ffe8b9c56ac2ad1ba3572ca341ba66c0fb0581"
+    },
+    "algorithm_sha256": {
+      "a1_support_contact.py": "8d194b22882c1808008d41cfa894d46e869ff4bc0363701a958a8231f8c1d54c",
+      "a1_support_kernel.py": "c3ccbb5e17ffed665cf7fddb87999b3ea80104ffc4851e6f7daac027a18a661b",
+      "a1_support_triangles.py": "2469dfb75377ca3ee66e74a953d8b888ac81d69756de99e8242087e566d25373",
+      "a1_support_surface_bvh.py": "ac7fa791e95e7826ef11590119930d15d7494546390e080557a5423c7fb5e92e"
+    },
+    "policy": {
+      "asset_geometry_id": "44c6160a0a33a78710c228c5af2b1f9e364d8dc808f3330500830b79a2dc3b16",
+      "max_interference_m": 0.0012,
+      "separation_direction_link2": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "front_support_x_min_m": -0.1,
+      "claw_support_component_seed_faces": {
+        "link2": 37470,
+        "link5": 14791
+      },
+      "authorization": "Operator approved a permanent 1.2 mm limit at both support regions, including leaving, returning home and recontact. 2026-09-23.",
+      "scope": "Both arms; link2/link3 front support and link2/link5 support components only. Directional separation along link2 +Z; no posture/history exemption.",
+      "reference_q_rad": [
+        -0.102045,
+        0.00248,
+        0.001335,
+        -0.027657,
+        -0.001335,
+        -0.053597,
+        -0.006294,
+        0.000954,
+        0.000954,
+        -0.032998,
+        -0.00248,
+        -0.090219
+      ]
+    }
+  },
+  "checks": [
+    {
+      "pair": [
+        "left_link2",
+        "left_link3"
+      ],
+      "diagnostic": [
+        {
+          "label": "home",
+          "native": {
+            "pair": [
+              "left_link2",
+              "left_link3"
+            ],
+            "ok": true,
+            "contact": false,
+            "over_limit": false,
+            "outside_support": false,
+            "limit_m": 0.0012,
+            "metric": "separation_along_link2_positive_z"
+          }
+        },
+        {
+          "label": "unresolved_midpoint",
+          "native": {
+            "pair": [
+              "left_link2",
+              "left_link3"
+            ],
+            "ok": true,
+            "contact": false,
+            "over_limit": false,
+            "outside_support": false,
+            "limit_m": 0.0012,
+            "metric": "separation_along_link2_positive_z"
+          }
+        }
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 77,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint3"
+      ],
+      "minimum_separation_lower_bound_m": 2.4733996924465596e-05
+    },
+    {
+      "pair": [
+        "right_link12",
+        "right_link13"
+      ],
+      "diagnostic": [
+        {
+          "label": "home",
+          "native": {
+            "pair": [
+              "right_link12",
+              "right_link13"
+            ],
+            "ok": true,
+            "contact": false,
+            "over_limit": false,
+            "outside_support": false,
+            "limit_m": 0.0012,
+            "metric": "separation_along_link2_positive_z"
+          }
+        },
+        {
+          "label": "unresolved_midpoint",
+          "native": {
+            "pair": [
+              "right_link12",
+              "right_link13"
+            ],
+            "ok": true,
+            "contact": false,
+            "over_limit": false,
+            "outside_support": false,
+            "limit_m": 0.0012,
+            "metric": "separation_along_link2_positive_z"
+          }
+        }
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 77,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "right_joint13"
+      ],
+      "minimum_separation_lower_bound_m": 2.4733996924469065e-05
+    }
+  ],
+  "scope": "link2/link3 front ROI translated 1.2mm along link2 +Z; link2/link5 not certified"
+}

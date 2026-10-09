@@ -1,0 +1,13 @@
+.evidence/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+node_modules/
+*.local.json
+.env
+*.pem
+*.key
+calibration/runs/
+calibration/results/
+rule_based_workbench/runs/

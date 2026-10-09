@@ -1,0 +1,1318 @@
+{
+  "passed": true,
+  "hardware_access": false,
+  "gpu_used": false,
+  "urdf_sha256": "7bf205b7252905c55a4857a749f727756bf00be736811c047cdf8b8fd70759ff",
+  "source_parts_sha256": "c00f4285d0381e8b7fc9188016074cb878ccc6a9e8fc349af276e0e4efa86818",
+  "checks": [
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_16"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 255,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0010050041333115973
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_18"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 1023,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.00030016721396909076
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_10"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_17"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0034101970333159986
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_13"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_12"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_15"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0034101970333159986
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_9"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_14"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 63,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.004621895244752762
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_8"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_11"
+      ],
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 127,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1"
+      ],
+      "minimum_separation_lower_bound_m": 0.0017943151134551588
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_6"
+      ],
+      "numerical_distance_reserve_m": 1e-05,
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 111129,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1",
+        "left_joint2"
+      ],
+      "minimum_separation_lower_bound_m": 1.1350104151734795e-07
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_7"
+      ],
+      "numerical_distance_reserve_m": 1e-05,
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 35727,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1",
+        "left_joint2"
+      ],
+      "minimum_separation_lower_bound_m": 1.6138363694538638e-07
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_15"
+      ],
+      "numerical_distance_reserve_m": 1e-05,
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 17151,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1",
+        "left_joint2"
+      ],
+      "minimum_separation_lower_bound_m": 0.0005082817263525989
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_16"
+      ],
+      "numerical_distance_reserve_m": 1e-05,
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 17151,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1",
+        "left_joint2"
+      ],
+      "minimum_separation_lower_bound_m": 0.00010867690863164414
+    },
+    {
+      "parts": [
+        "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh",
+        "base_link/chassis_0/component_17"
+      ],
+      "numerical_distance_reserve_m": 1e-05,
+      "certified": true,
+      "reason": "continuous_interval_separation",
+      "cells": 16639,
+      "joint_domain": {
+        "left_joint1": [
+          -2.094,
+          3.1416
+        ],
+        "left_joint2": [
+          0.0,
+          3.665
+        ],
+        "left_joint3": [
+          0.0,
+          3.24
+        ],
+        "left_joint4": [
+          -1.671,
+          1.671
+        ],
+        "left_joint5": [
+          -1.671,
+          1.671
+        ],
+        "left_joint6": [
+          -2.094,
+          2.094
+        ],
+        "left_joint7": [
+          0.0,
+          0.041496000000000005
+        ],
+        "left_joint8": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint11": [
+          -2.094,
+          3.1416
+        ],
+        "right_joint12": [
+          0.0,
+          3.665
+        ],
+        "right_joint13": [
+          0.0,
+          3.24
+        ],
+        "right_joint14": [
+          -1.671,
+          1.671
+        ],
+        "right_joint15": [
+          -1.671,
+          1.671
+        ],
+        "right_joint16": [
+          -2.094,
+          2.094
+        ],
+        "right_joint17": [
+          0.0,
+          0.041496000000000005
+        ],
+        "right_joint18": [
+          0.0,
+          0.041496000000000005
+        ]
+      },
+      "relative_joints": [
+        "left_joint1",
+        "left_joint2"
+      ],
+      "minimum_separation_lower_bound_m": 0.0009049009284055956
+    }
+  ],
+  "scope": "offline continuous full-URDF-domain mount separation; only explicit listed part pairs",
+  "generator_code_sha256": "96bf669d070e42a9c1bad12d9ca7d6a524af58aac2d29dc2dd76bc0b00419b38",
+  "preparation_runs": [
+    "region-motiongen-20260929-000149/mount-domain-v1",
+    "cup-contact-20260929-034000/domain6-v2",
+    "cup-contact-20260929-034000/domain7-v2",
+    "cup-contact-20260929-034000/domain15-v2",
+    "cup-contact-20260929-034000/domain16-v2",
+    "cup-contact-20260929-034000/domain17-v2"
+  ],
+  "verified_model_rebinding": {
+    "parent_artifact_sha256": "1129df8f94cf52f0bf1804931f5d2f38e02047add6a9c1bc0507748a3a761210",
+    "parent_source_parts_sha256": "1e9f38b937ab554dc4531edcbd84cfbdc15b8cd7cf6613e7ade5fe80ac089fe0",
+    "urdf_unchanged": true,
+    "unchanged_referenced_part_sha256": {
+      "/ac_one_A1_pending_calibration_r2/left_link1/collisions/left_link1/node_STL_BINARY_/mesh": "c1a291098d1eeaa1c86678d00eae717fb3b82c8762dcddad420f4283a409f270",
+      "/ac_one_A1_pending_calibration_r2/left_link2/collisions/left_link2/node_STL_BINARY_/mesh": "7c31ac4d4281cfa71807b4ff9462db21e36eda93c80be72e07a40abccf02df70",
+      "base_link/chassis_0/component_10": "a6c62a079159948a457a0f692d62bace75841187ac7e008c4ca09acdc692c8f3",
+      "base_link/chassis_0/component_11": "85b573293e5cfdaf4074878b2147a5a5c1fa24c6950795c3ac3b07fa1c38108a",
+      "base_link/chassis_0/component_12": "a8ed5941fc0dc2b91836bf83bcc33c3b73979d814157f45347ec37d80c452e2a",
+      "base_link/chassis_0/component_13": "f152d7387d8a3cc07d5c9a285f520bcccd31adfde0dcc7d01b81d9bb6648afe8",
+      "base_link/chassis_0/component_14": "9a8544dd51b0e5c26f22894f5838c743214e64f2dfa1459b9d516236e14b82c8",
+      "base_link/chassis_0/component_15": "fa24a2cce2ea54b27eded355eb1b21ac9a26bea52ebaa7dab451b3e80b1ad5bf",
+      "base_link/chassis_0/component_16": "8246bafee8ab2ba4a8b623a26fbd31098d3d2fd33b33f75bb8d4bfc405ffcf75",
+      "base_link/chassis_0/component_17": "57036eed324863f9f1ef7e5744800e5b5f76df17f4348a94e1026711c269a61d",
+      "base_link/chassis_0/component_18": "ffaf31e3d80a293064b645ea6a699bedfbcb807b1f3db7d822ba4e4dea3ef051",
+      "base_link/chassis_0/component_6": "c5186d676a027a9cc097d8ec79bc0df75217fc0f000373212dc991d9ea2612f2",
+      "base_link/chassis_0/component_7": "38809d96015898bc9b8312a897da5941bb98ec0a05f29af50bb038578ce5c154",
+      "base_link/chassis_0/component_8": "9e7f018d49dfce16935026b1d5f79eb8dcdaa3cdab85d53de71994ca62029012",
+      "base_link/chassis_0/component_9": "1430ae20fc71ad5b4ef90d6fa65f50a1d3f002d952db551ff3a2fb028fd7dd56"
+    },
+    "finger_geometry_recomputed_by_native_model_builder": true,
+    "proof_values_unchanged": true,
+    "dropped_changed_finger_cell_refinements": []
+  }
+}

@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数采工作台</title>
+<style>
+:root{color-scheme:dark;--bg:#0a1017;--panel:#111c27;--line:#263543;--text:#e9eff4;--muted:#93a6b6;--mint:#87dfbe;--amber:#efc582;--red:#f0949d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;background:#223c39;color:var(--mint);border:1px solid #456c60;border-radius:7px;padding:9px 13px}button:hover{background:#304c45}button:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--mint);outline-offset:3px}button:disabled{opacity:.5;cursor:wait}h1,h2,h3,p{margin:0}h1{font-size:21px;letter-spacing:.02em}h2{font-size:15px;font-weight:600}h3{font-size:14px}small,.muted{color:var(--muted)}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:23px 32px;border-bottom:1px solid var(--line);background:#0e1822}.brand{display:flex;align-items:center;gap:14px}.mark{display:grid;place-items:center;width:38px;height:38px;background:#25433c;color:var(--mint);border:1px solid #40695c;border-radius:9px;font-weight:700;font-size:16px}.eyebrow{font-size:10px;letter-spacing:.17em;color:var(--mint);margin-bottom:3px}.topmeta{display:flex;gap:14px;align-items:center;font-size:12px}.tag{display:inline-flex;align-items:center;gap:6px;border:1px solid #384a58;background:#172632;color:#c8d5de;border-radius:5px;padding:4px 8px;font-size:11px;white-space:nowrap}.tag.good{color:var(--mint);border-color:#3c6659;background:#172f2a}.tag.warn{color:var(--amber);border-color:#67573e;background:#2b261e}.tag.bad{color:var(--red);border-color:#74424a;background:#322027}.wrap{max-width:1600px;margin:auto;padding:24px 32px 32px}.intro{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:19px}.intro p{color:var(--muted);font-size:12px;margin-top:5px}.intro h2{font-size:18px}.stages{display:grid;grid-template-columns:repeat(5,1fr);padding:0;margin:0 0 22px;list-style:none;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#101a25}.stage{padding:15px 18px;border-right:1px solid var(--line);display:flex;gap:12px;align-items:center}.stage:last-child{border:0}.step{width:27px;height:27px;border:1px solid #415261;border-radius:50%;display:grid;place-items:center;font:12px ui-monospace,monospace;color:var(--muted);flex-shrink:0}.stage b{display:block;font-size:12px;font-weight:500}.stage small{font-size:11px}.stage.done .step{color:var(--mint);border-color:#568b75;background:#1e3930}.stage.active{background:#172731}.stage.active .step{border-color:var(--amber);color:var(--amber)}.trajectory{margin-top:18px}.trajectory .panel-head{flex-wrap:wrap}.trajectory-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.trajectory-toolbar select{font:inherit;background:#142534;color:var(--text);border:1px solid #405565;border-radius:6px;padding:7px 10px}.trajectory [hidden]{display:none}.stage-buttons{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 18px}.stage-buttons button{font:10px/1.5 ui-monospace,monospace;padding:5px 9px;background:#132330;color:#a4bdcf;border-color:#304554;text-align:left}.stage-buttons button[aria-current="step"]{color:var(--mint);border-color:#598f79;background:#1b342b}.plot{width:100%;height:auto;display:block;background:#0b151e;border:1px solid #253c4c;border-radius:7px}.plot-label{display:flex;justify-content:space-between;gap:10px;margin:12px 0 7px;font-size:11px;color:var(--muted)}.legend{display:flex;flex-wrap:wrap;gap:12px;font:10px ui-monospace,monospace}.legend span:before{content:"";display:inline-block;width:12px;height:2px;background:currentColor;vertical-align:middle;margin-right:5px}.scrub{margin:17px 0 9px}.scrub-head{display:flex;justify-content:space-between;gap:10px;font-size:12px}.scrub input{accent-color:var(--mint);padding:0;border:0;margin-top:12px;width:100%}.target-table td,.target-table th{text-align:right;white-space:nowrap}.target-table td:first-child,.target-table th:first-child{text-align:left}.target-table td{font:11px ui-monospace,monospace}.progress-panel{margin-bottom:18px}.progress-body{display:flex;align-items:baseline;gap:16px}.progress-body strong{font-size:13px;min-width:100px}.progress-body p{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.attempts summary{padding-top:0}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 295px;gap:18px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 18px;border-bottom:1px solid var(--line)}.panel-head small{font-size:11px}.views{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}.lane{background:var(--panel);min-width:0}.lane-heading{padding:14px 16px;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}.lane-label{font-size:10px;letter-spacing:.07em;color:var(--muted);margin-bottom:4px}.lane-heading h3{font-weight:600}.lane-id{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--muted);overflow-wrap:anywhere;padding:0 16px 12px}.viewport{aspect-ratio:4/3;position:relative;background:#090f16;display:grid;place-items:center;overflow:hidden}.viewport img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.viewport [hidden]{display:none}.empty{text-align:center;padding:30px;color:var(--muted);font-size:12px}.empty strong{display:block;font-size:14px;color:#c5d3dd;font-weight:500;margin-bottom:8px}.empty-icon{font-size:24px;color:#577185;margin-bottom:12px;line-height:1}.evidence-label{position:absolute;bottom:10px;left:12px;font-size:10px;padding:3px 7px;color:#ccd8e0;background:#0b141edb;border:1px solid #354653;border-radius:4px}.lane-foot{padding:12px 16px;display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--muted)}.caption{padding:12px 18px;font-size:11px;color:var(--muted);border-top:1px solid var(--line)}.sidebar{display:grid;gap:14px;align-content:start}.body{padding:16px 18px}.signal{font-size:25px;line-height:1.3;font-weight:600;margin:7px 0 8px;letter-spacing:-.03em}.small-copy{font-size:12px;color:var(--muted);line-height:1.75}.divider{height:1px;background:var(--line);margin:16px 0}.stats{display:grid;grid-template-columns:1fr 1fr;gap:12px}.stat{font-size:11px;color:var(--muted)}.stat strong{display:block;font:22px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--text)}.detail-list{display:grid;gap:12px;margin:0}.detail-list div{display:flex;justify-content:space-between;gap:14px;align-items:baseline}.detail-list dt{font-size:11px;color:var(--muted)}.detail-list dd{margin:0;text-align:right;font-size:12px;overflow-wrap:anywhere}.notice{font-size:11px;color:var(--amber);line-height:1.7;padding:12px 14px;background:#24221d;border:1px solid #4e4736;border-radius:8px}.lower{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.hashes{padding:4px 18px 16px}.hash-row{margin-top:14px}.hash-row label{display:block;color:var(--muted);font-size:11px;margin-bottom:5px}.hash{display:block;overflow-wrap:anywhere;font:11px/1.6 ui-monospace,SFMono-Regular,monospace;color:#b7cbd9}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:11px}th{font-weight:500;color:var(--muted);padding:11px 16px;background:#101a24}td{padding:12px 16px;border-top:1px solid var(--line);vertical-align:top}td code{display:block;font-size:10px;color:var(--muted);overflow-wrap:anywhere;margin-top:3px}.advanced{margin-top:20px;border:1px solid var(--line);border-radius:9px;background:#101923}summary{cursor:pointer;padding:15px 18px;font-size:12px;color:#bdceda}summary small{margin-left:10px}.advanced-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:4px 18px 20px}.advanced h3{margin-bottom:8px}.advanced p{font-size:11px;color:var(--muted);margin-bottom:12px}label{font-size:11px;color:var(--muted)}input,textarea{width:100%;background:#09131c;color:var(--text);border:1px solid #334957;border-radius:6px;padding:9px;margin:5px 0 10px}textarea{font:11px/1.6 ui-monospace,monospace;resize:vertical}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.feedback{font-size:11px;display:block;margin:8px 0;min-height:17px;overflow-wrap:anywhere}.ok{color:var(--mint)}.err{color:var(--red)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09131c;padding:12px;font:11px/1.6 ui-monospace,monospace;border-radius:6px;max-height:250px;overflow:auto}.debug{padding:0 18px 18px}.footer{display:flex;justify-content:space-between;gap:15px;color:#718696;font-size:10px;margin-top:18px}.offline{opacity:.55}@media(max-width:1150px){.workspace{grid-template-columns:1fr}.sidebar{grid-template-columns:1fr 1fr}.sidebar .notice{grid-column:1/-1}.stage{padding:12px;gap:8px}.topbar,.wrap{padding-left:20px;padding-right:20px}}@media(max-width:720px){.topbar{align-items:flex-start;padding:18px 16px}.topmeta{flex-direction:column;align-items:flex-end;gap:7px}.topmeta .subtle{display:none}h1{font-size:17px}.mark{display:none}.wrap{padding:18px 12px}.intro{display:block}.intro>.tag{margin-top:10px}.stages{grid-template-columns:1fr}.stage{padding:8px 12px;border-right:0;border-bottom:1px solid var(--line)}.stage>div:last-child{display:flex;justify-content:space-between;gap:14px;flex:1}.views,.lower,.advanced-grid,.sidebar{grid-template-columns:1fr}.panel-head{padding:13px}.lane-id{font-size:10px}.footer{flex-direction:column}.fields{grid-template-columns:1fr}.advanced summary small{display:block;margin:5px 0 0}}
+[hidden]{display:none!important}.mode-switch{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 32px;border-bottom:1px solid var(--line)}.mode-switch select{font:inherit;background:var(--panel);color:var(--text);padding:8px;border:1px solid var(--line);border-radius:6px}.real-controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.support-label{display:flex;gap:8px;align-items:center;font-size:13px;margin:12px 0}.support-label input{width:auto;margin:0}.real-cameras{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.stop-button{background:#602c34;color:#fff;border-color:#bf646d}.real-feedback{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 ui-monospace,monospace}.real-blockers{color:var(--amber);padding-left:20px}@media(max-width:720px){.real-cameras{grid-template-columns:1fr}.mode-switch{padding:12px}}
+</style>
+<style>
+.playground{margin:0 0 24px}.playground>summary{font-size:18px;font-weight:600}.playground>summary small{font-size:12px;font-weight:400}.pg-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0}.pg-actions button{text-align:left}.pg-actions small{display:block;color:inherit;opacity:.8;font-size:11px;margin-top:4px}.pg-speed{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.pg-speed input{width:220px;margin:0;accent-color:var(--mint)}.pg-checks{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.pg-views{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}.pg-view{border:1px solid var(--line);border-radius:8px;overflow:hidden}.pg-view h3{padding:10px 12px;font-size:12px;font-weight:500}.pg-view .viewport{aspect-ratio:4/3}.pg-videos{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.pg-videos video{width:100%;max-height:420px;background:#090f16}.pg-videos figcaption{padding:8px 0}.pg-progress{width:100%;height:18px;margin:12px 0;accent-color:var(--mint)}@media(max-width:720px){.pg-actions,.pg-views,.pg-videos{grid-template-columns:1fr}.pg-speed input{width:100%}}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="brand"><div class="mark" aria-hidden="true">↔</div><div><div class="eyebrow">SIM TO REAL / COLLECTION</div><h1 id="workbench-title">数采工作台</h1></div></div><div class="topmeta"><span class="subtle muted">Rule Based · physical14</span><span class="tag" id="connection" role="status">连接中</span><span class="muted" id="updated">尚未刷新</span></div></header>
+<div class="mode-switch"><label for="workbench-mode">工作模式</label><select id="workbench-mode" disabled><option value="dual_dsw">双 DSW · 功能开发</option><option value="real">真机接入 · 实际采集</option></select><span id="mode-message" role="status" class="muted">正在核验工作模式…</span></div>
+<main class="wrap">
+<details class="panel playground" id="playground-pane" open>
+<summary>Playground <small>场景规划与真机采集</small></summary>
+<div class="body">
+<p class="small-copy">先准备环境，再重建与规划。执行时展示真机实时画面与仿真场景首帧；视频完成后独立回放。</p>
+<div class="pg-actions"><button id="pg-prepare" disabled>1. 环境准备<small>DSW · 检测器 · 仿真 · 真机控制与相机</small></button><button id="pg-plan" disabled>2. 场景重建及规划<small>5 秒有效观测 · 路径碰撞检查 · 静态首帧</small></button><button id="pg-execute" disabled>3. action 真机执行<small>点击执行本轮轨迹，同时启动两侧录制</small></button><button id="pg-interrupt" disabled>中断当前阶段<small>停止本阶段，返回环境已准备</small></button></div>
+<div class="pg-speed"><label for="pg-speed">运动速度</label><input id="pg-speed" type="range" min="10" max="100" step="1" value="30"><output id="pg-speed-value" for="pg-speed">30%</output><span class="small-copy">两侧共用插值时间线 · 静止等待不缩放 · 闭爪保持 0.6 秒</span></div>
+<label class="support-label" id="pg-support-label"><input type="checkbox" id="pg-supported">双臂已受支撑，允许环境准备时初始化接入控制</label>
+<div id="pg-checks" class="pg-checks" aria-label="环境准备状态"><span class="tag">尚未核验环境</span></div>
+<p id="pg-message" role="status">正在读取 Playground 状态；尚未发起操作。</p><p id="pg-error" class="err" role="alert" hidden></p>
+<progress id="pg-progress" class="pg-progress" max="100" aria-label="当前步骤预估进度"></progress><p id="pg-timing" class="small-copy">预计与实际耗时：等待运行记录</p>
+<p id="pg-plan-summary" class="small-copy" style="margin-top:8px">尚无通过验证的计划。夹杯目标：62 mm 胶面净距（65 mm 金属净距）。</p>
+<details style="margin-top:8px"><summary>分段耗时</summary><div class="table-wrap"><table><thead><tr><th>过程</th><th>状态</th><th>预计</th><th>实际 / 已用</th></tr></thead><tbody id="pg-stages"><tr><td colspan="4">尚无运行记录</td></tr></tbody></table></div></details>
+<div class="pg-views">
+<article class="pg-view"><h3>真机 · 顶部相机 · 实时去畸变</h3><div class="viewport"><img id="pg-base_0" alt="真机顶部相机实时画面" hidden><div class="empty" id="pg-base_0-empty">等待顶部相机接入</div></div></article>
+<article class="pg-view"><h3>仿真 · 顶部相机 · 规划场景静态首帧</h3><div class="viewport"><img id="pg-sim" alt="仿真重建场景的顶部相机静态首帧" hidden><div class="empty" id="pg-sim-empty">场景重建完成后显示首帧</div></div></article>
+<article class="pg-view"><h3>真机 · 左腕相机 · 实时去畸变</h3><div class="viewport"><img id="pg-left_wrist_0" alt="真机左腕相机实时画面" hidden><div class="empty" id="pg-left_wrist_0-empty">等待左腕相机接入</div></div></article>
+<article class="pg-view"><h3>真机 · 右腕相机 · 实时去畸变</h3><div class="viewport"><img id="pg-right_wrist_0" alt="真机右腕相机实时画面" hidden><div class="empty" id="pg-right_wrist_0-empty">等待右腕相机接入</div></div></article>
+</div>
+<div class="divider"></div><h3>本轮视频</h3><p id="pg-video-status" class="small-copy">执行完成后自动保存，视频就绪后显示。中止与失败记录会保留原始结果。</p><div id="pg-videos" class="pg-videos"></div>
+</div></details>
+<section id="real-pane" hidden aria-label="真机接入与控制">
+<div class="intro"><div><h2>ARX 真机接入与控制</h2><p>独立数采控制服务 · RGB-D 观测 · 真机与仿真使用同一份冻结指令，视频可独立刷新。</p></div><span class="tag" id="real-identity">等待硬件身份</span></div>
+<section class="panel"><div class="panel-head"><h2>连接与控制</h2><span class="tag" id="real-connection">未连接</span></div><div class="body">
+<p id="real-status" role="status">正在读取数采专用服务状态。</p>
+<label class="support-label"><input type="checkbox" id="real-supported">我已实际托稳双臂，可接入或释放控制</label>
+<div class="real-controls"><button id="real-acquire" disabled>接入真机控制</button><button id="real-stop" class="stop-button" disabled>停止运动</button><button id="real-recover" disabled>恢复就绪</button><button id="real-release" disabled>释放控制</button></div>
+<p class="small-copy" style="margin-top:12px">切换模式不会接管或启动机器人。恢复就绪不会自动续跑；开始轨迹前需单独预览并确认。</p><p id="real-action-result" role="status" class="feedback"></p>
+<details><summary>硬件实测状态</summary><p id="real-feedback" class="real-feedback">等待反馈</p></details>
+<div class="divider"></div><h3>采集就绪检查</h3><ul class="real-blockers" id="real-blockers"><li>等待状态核验</li></ul><p class="small-copy" id="real-readiness"></p>
+
+</div></section>
+
+</section>
+<div id="workflow-pane" hidden>
+<div class="intro"><div><h2>从场景观测，到同一条执行轨迹</h2><p id="workflow-description">源端观测，目标端复现现场并规划；两侧执行同一份冻结轨迹。</p></div><span class="tag" id="workflow-identity">等待模式</span></div>
+<ol class="stages" aria-label="数采进度"><li class="stage" id="stage-profile"><span class="step">01</span><div><b>标定版本</b><small id="step-profile">等待 profile</small></div></li><li class="stage" id="stage-source"><span class="step">02</span><div><b>5 秒观测</b><small id="step-source">等待源端</small></div></li><li class="stage" id="stage-scene"><span class="step">03</span><div><b>场景重建</b><small id="step-scene">等待场景</small></div></li><li class="stage" id="stage-plan"><span class="step">04</span><div><b>轨迹冻结</b><small id="step-plan">等待规划</small></div></li><li class="stage" id="stage-execution"><span class="step">05</span><div><b>双侧执行</b><small id="step-execution">等待回执</small></div></li></ol>
+<section class="panel progress-panel" aria-labelledby="initialization-title"><div class="panel-head"><h2 id="initialization-title">工作台启动准备</h2><span class="tag warn" id="initialization-status">正在获取初始化状态</span></div><div class="body"><p id="initialization-message" role="status">正在连接工作台，检查检测器初始化进度；准备完成后可开始采集。</p><progress id="initialization-progress" max="100" aria-label="检测器初始化进度" style="width:100%;height:16px;margin:12px 0;accent-color:var(--mint)"></progress><p id="initialization-time" class="small-copy">预计剩余时间：等待初始化状态</p><p id="initialization-error" class="err" role="alert" hidden></p></div></section>
+<section class="panel progress-panel" aria-labelledby="progress-title"><div class="panel-head"><h2 id="progress-title">运行进度</h2><span style="display:flex;gap:8px;flex-wrap:wrap"><button id="start-pipeline" disabled>开始本轮采集</button><button id="force-diagnostic" disabled>强制采集（仿真诊断）</button></span><span class="tag" id="evidence-status">等待运行证据</span></div><div class="body progress-body"><strong id="evidence-phase">尚未开始</strong><p id="evidence-message">等待远端报告当前阶段与执行结果。</p></div><div class="body" id="runtime-panel" hidden><p id="runtime-current" role="status"></p><progress id="runtime-bar" max="100" value="0" aria-label="本轮采集预估进度" style="width:100%;height:18px;margin:12px 0;accent-color:var(--mint)"></progress><p id="runtime-time" class="small-copy"></p><p id="runtime-next" class="small-copy"></p><details open><summary>各阶段耗时 · 预估 / 实际</summary><div class="table-wrap" style="max-height:300px;overflow:auto"><table><thead><tr><th>过程</th><th>状态</th><th>预估</th><th>实际 / 已用</th></tr></thead><tbody id="runtime-rows"></tbody></table></div></details></div><div class="caption" id="job-status" role="status">等待运行配置。启动将依次执行观测、视觉检测、规划与双侧执行与录制。</div><details class="attempts" id="evidence-attempts"><summary id="attempts-summary">尝试记录 · 0 条</summary><div class="table-wrap"><table><thead><tr><th scope="col">运行 / 尝试</th><th scope="col">阶段</th><th scope="col">状态</th><th scope="col">说明</th></tr></thead><tbody id="attempts-body"><tr><td colspan="4">尚无运行尝试记录</td></tr></tbody></table></div></details></section>
+<div class="workspace"><section class="panel" aria-labelledby="comparison-title"><div class="panel-head"><h2 id="comparison-title">执行画面对照</h2><span class="tag" id="alignment">尚未对齐</span></div><div class="views">
+<article class="lane"><div class="lane-heading"><div><div class="lane-label" id="source-label">SOURCE / 模拟真机</div><h3 id="source-name">zfy-zj · GPU 0</h3></div><span class="tag" id="source-status">等待观测</span></div><label style="display:block;padding:0 16px 10px">相机 <select id="source-camera"><option value="base_0">顶部相机</option><option value="left_wrist_0">左腕相机</option><option value="right_wrist_0">右腕相机</option></select></label><div class="lane-id" id="source-instance">dsw-nygxkzfd5znx4if0t2</div><div class="viewport"><img id="source-image" alt="源端仿真相机的实际采集画面" hidden><div class="empty" id="source-empty"><div class="empty-icon" aria-hidden="true">▧</div><strong>等待源端图像证据</strong><span>收到所选相机画面后显示</span></div><span class="evidence-label" id="source-image-label" hidden>执行画面预览 · 实测 FPS</span></div><div class="lane-foot"><span>相机观测 → online detection</span><span id="source-image-status">无图像证据</span></div></article>
+<article class="lane"><div class="lane-heading"><div><div class="lane-label">TARGET / 规划场景</div><h3>上海 DSW · GPU 0</h3></div><span class="tag" id="target-status">等待场景</span></div><label style="display:block;padding:0 16px 10px">相机 <select id="target-camera"><option value="base_0">顶部相机</option><option value="left_wrist_0">左腕相机</option><option value="right_wrist_0">右腕相机</option></select></label><div class="lane-id" id="target-instance">dsw-xs4hu2jkqj2igqaoul</div><div class="viewport"><img id="target-image" alt="目标端复现后的实际仿真场景画面" hidden><div class="empty" id="target-empty"><div class="empty-icon" aria-hidden="true">▧</div><strong>等待目标端图像证据</strong><span>收到 DSW 场景渲染结果后显示</span></div><span class="evidence-label" id="target-image-label" hidden>执行画面预览 · 实测 FPS</span></div><div class="lane-foot"><span>场景复现 → EpisodePlanner</span><span id="target-image-status">无图像证据</span></div></article>
+</div><div class="caption" id="comparison-caption">两侧使用同一份冻结控制指令，视频独立刷新。</div></section>
+<aside class="sidebar"><section class="panel"><div class="body"><div class="lane-label">EXECUTION / 当前状态</div><div class="signal" id="execution-status">等待运行</div><p class="small-copy" id="execution-detail">先接收源端观测，再由目标端生成冻结轨迹。</p><div class="divider"></div><div class="stats"><div class="stat">冻结轨迹 ticks<strong id="tick-count">—</strong></div><div class="stat">完整执行回执<strong id="lane-count">0 / 2</strong></div></div><div class="divider"></div><dl class="detail-list"><div><dt>轨迹规划</dt><dd>EpisodePlanner</dd></div><div><dt>数采策略</dt><dd>RuleCoffeePolicy</dd></div><div><dt>状态 / 动作</dt><dd>physical14 · absolute</dd></div></dl></div></section>
+<section class="panel"><div class="panel-head"><h2>实测对照</h2><span class="tag" id="timing-status">待验证</span></div><div class="body"><dl class="detail-list"><div><dt>两侧开始时差</dt><dd id="start-skew">—</dd></div><div><dt>最大逐 tick 时差¹</dt><dd id="max-skew">—</dd></div><div><dt>轨迹调度误差¹</dt><dd id="schedule-error">—</dd></div><div><dt>最大关节差异</dt><dd id="joint-error">—</dd></div><div><dt>最大夹爪差异</dt><dd id="gripper-error">—</dd></div></dl><p class="small-copy" style="margin-top:14px" id="measurement-note">尚无实测对照。¹ 时差指标包含时钟不确定度。</p></div></section><div class="notice" id="detection-note">FoundationPose 已完成 7 秒连续有效窗口（9 帧含 1 帧 warmup）；规划已导出，双侧执行在 source tick 766 因 grasp_lost 失败。raw 未封存。</div></aside></div>
+<section class="panel trajectory" aria-labelledby="playback-title"><div class="panel-head"><h2 id="playback-title">采集视频并排回放</h2><span class="tag">采集时间轴 · 录制视频对比</span></div><div class="body"><p id="playback-status" class="small-copy" role="status">回放未就绪：等待本地视频。</p><div class="trajectory-toolbar"><label>相机 <select id="playback-camera"><option value="base_0">主相机</option><option value="left_wrist_0">左腕相机</option><option value="right_wrist_0">右腕相机</option></select></label><label>倍速 <select id="playback-speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label><button id="playback-toggle" disabled>播放两侧</button></div><div class="views"><article class="lane"><div class="lane-heading" id="playback-source-label">SOURCE / 模拟真机</div><video id="playback-source" muted playsinline preload="metadata" style="width:100%;background:#090f16" aria-label="源端采集视频"></video></article><article class="lane"><div class="lane-heading">TARGET / 仿真场景</div><video id="playback-target" muted playsinline preload="metadata" style="width:100%;background:#090f16" aria-label="仿真场景采集视频"></video></article></div><div class="scrub"><div class="scrub-head"><label for="playback-time">两侧共同采集时间</label><output id="playback-clock">0.00 / — s</output></div><input id="playback-time" type="range" min="0" max="0" value="0" step="0.01" disabled></div><p class="small-copy">从各自首帧开始对齐；较短视频结束后保留末帧。视频可用于过程检查，不代表碰撞验收通过。</p></div></section>
+<section class="panel trajectory" aria-labelledby="trajectory-title"><div class="panel-head"><h2 id="trajectory-title">冻结轨迹预览</h2><span class="tag">Commanded target · 非实测状态</span></div><div class="body"><p class="small-copy" id="plan-preview-status" role="status">等待目标端生成冻结轨迹。</p><div id="physical-confirmation" hidden><div class="divider"></div><h3>冻结轨迹预览与执行</h3><button id="real-preview" disabled>预览真机冻结轨迹</button><pre id="real-plan-summary">等待真实观测、标定和冻结轨迹就绪</pre><label class="support-label"><input type="checkbox" id="real-clearance" disabled>我已检查本条轨迹与物理空间，确认可以开始执行</label><button id="real-confirm" disabled>确认执行已预览轨迹</button></div><button id="plan-retry" hidden>重新加载轨迹</button><div id="plan-preview" hidden><div class="trajectory-toolbar"><span class="small-copy" id="plan-preview-meta"></span><label for="trajectory-arm">关节曲线 <select id="trajectory-arm"><option value="left">左臂 · 6 轴</option><option value="right">右臂 · 6 轴</option></select></label></div><div class="stage-buttons" id="trajectory-stages" aria-label="轨迹阶段，点击定位起始 tick"></div><div class="plot-label"><span>关节绝对目标 · rad</span><div class="legend" id="joint-legend"></div></div><svg class="plot" id="joint-plot" viewBox="0 0 900 220" role="img" aria-label="所选机械臂六关节的冻结目标随时间变化"></svg><div class="plot-label"><span>夹爪总开口目标 · mm</span><div class="legend"><span style="color:#87dfbe">左夹爪</span><span style="color:#efc582">右夹爪</span></div></div><svg class="plot" id="gripper-plot" viewBox="0 0 900 145" role="img" aria-label="左右夹爪的冻结开口目标随时间变化"></svg><div class="scrub"><div class="scrub-head"><label for="trajectory-tick">检查某一 tick 的绝对目标</label><output id="trajectory-selection" for="trajectory-tick"></output></div><input type="range" id="trajectory-tick" min="0" max="0" value="0" step="1"></div><div class="table-wrap"><table class="target-table"><thead><tr><th scope="col">目标</th><th scope="col">J1 · rad</th><th scope="col">J2 · rad</th><th scope="col">J3 · rad</th><th scope="col">J4 · rad</th><th scope="col">J5 · rad</th><th scope="col">J6 · rad</th><th scope="col">夹爪 · mm</th></tr></thead><tbody id="trajectory-values"></tbody></table></div><p class="small-copy" style="margin-top:12px">横轴为冻结计划的 time_s；拖动只检查命令目标，不控制机器人，也不代表实际执行进度。实测差异见上方对照。</p></div></div></section>
+<section class="panel trajectory" aria-labelledby="grasp-title"><div class="panel-head"><h2 id="grasp-title">抓取过程遥测</h2><span class="tag" id="telemetry-status">等待遥测</span></div><div class="body"><div class="stats"><div class="stat">源端当前 tick<strong id="telemetry-source-tick">—</strong></div><div class="stat">目标端当前 tick<strong id="telemetry-target-tick">—</strong></div><div class="stat">源端夹爪 / 状态<strong id="telemetry-source-state">—</strong></div><div class="stat">目标端夹爪 / 状态<strong id="telemetry-target-state">—</strong></div></div><p class="small-copy" id="telemetry-failure" style="margin-top:12px">逐 tick 遥测会在 双侧执行与录制时刷新；明确显示实际事件，不用成功回执替代失败证据。</p><div class="plot-label"><span>实测夹爪开度 · mm</span><div class="legend"><span style="color:#f0949d">source</span><span style="color:#efc582">target</span></div></div><svg class="plot" id="telemetry-plot" viewBox="0 0 900 170" role="img" aria-label="双侧执行实测夹爪开度与失败 tick"></svg><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th scope="col">侧</th><th scope="col">tick</th><th scope="col">阶段</th><th scope="col">夹爪开度</th><th scope="col">grasp</th><th scope="col">事件 / 子步</th></tr></thead><tbody id="telemetry-rows"><tr><td colspan="6">暂无逐 tick 遥测</td></tr></tbody></table></div><p class="small-copy" style="margin-top:12px">`grasp_lost` 保留为失败事件；开爪阶段也会标记为 release_transition，便于区分“主动释放”与“提前失抓”。支持力和接触数由仿真 runtime 提供时同步显示，缺失值保持为 —。</p></div></section>
+<div class="lower"><section class="panel"><div class="panel-head"><h2>场景与轨迹版本</h2><span class="tag good" id="detection-source">FoundationPose · 已接入</span></div><div class="hashes"><div class="hash-row"><label>Scene digest · 检测场景传递身份</label><code class="hash" id="scene-digest">尚未生成</code></div><div class="hash-row"><label>Timeline digest · 唯一冻结执行序列</label><code class="hash" id="timeline-digest">尚未生成</code></div><div class="hash-row"><label>Calibration profile · 相机 / 关节 / 夹爪</label><code class="hash" id="profile-id">尚未加载</code></div></div></section>
+<section class="panel"><div class="panel-head"><h2>执行场景对照</h2><small id="scene-audit-status">待回执</small></div><div class="body"><dl class="detail-list"><div><dt>咖啡机位置差</dt><dd id="machine-position-error">—</dd></div><div><dt>咖啡机姿态角差</dt><dd id="machine-rotation-error">—</dd></div><div><dt>纸杯位置差</dt><dd id="cup-position-error">—</dd></div></dl><p class="small-copy" style="margin-top:12px"><span id="scene-audit-note">等待场景回执。</span></p></div></section></div><div class="lower"><section class="panel"><div class="panel-head"><h2>当前运行记录</h2><small>依据接收回执</small></div><div class="table-wrap"><table><thead><tr><th scope="col">环节</th><th scope="col">运行标识</th><th scope="col">结果</th></tr></thead><tbody><tr><td>源端观测</td><td id="source-run">等待记录</td><td id="source-record">未接收</td></tr><tr><td>目标端规划</td><td id="target-run">等待记录</td><td id="plan-record">未接收</td></tr><tr><td>双侧执行</td><td id="execution-run">等待记录</td><td id="execution-record">0 / 2</td></tr></tbody></table></div><div class="caption" id="run-note">收到完整两侧回执表示同轨迹执行完成；同时执行须另行满足时间偏差门限。</div></section><section class="panel"><div class="panel-head"><h2>原生数据录制</h2><small>任务成功与采集完整性分别验收</small></div><div class="body"><dl class="detail-list"><div><dt id="source-recording-label">源端 · 模拟真机</dt><dd id="source-recording">待验证</dd></div><div><dt>规划侧 · DSW</dt><dd id="target-recording">待验证</dd></div></dl><p class="small-copy" style="margin-top:12px">完整 raw 包含三路 RGB 视频、连续物理状态、命令区间与 manifest 校验；只有轨迹回执时不能作为完整训练数据。</p></div></section></div>
+<details class="advanced" id="advanced"><summary>高级操作 <small>标定 profile · 检测帧接入 · dry-run 动作 · 原始回执</small></summary><div class="advanced-grid"><section><h3>版本化标定 profile</h3><p>从标定工作台导入已测量的相机位姿、关节零位与符号、夹爪开度和误差阈值。下方模板不能替代真实标定。</p><label for="profile">calibration_profile.v1</label><textarea id="profile" rows="11" spellcheck="false"></textarea><button id="calibrationCheck">加载并校验 profile</button><pre id="calibrationResult" role="status">尚未加载</pre><h3>检测帧接入</h3><label for="snapshot">FoundationPose snapshot · 5 秒静止观测窗口</label><textarea id="snapshot" rows="5" spellcheck="false" placeholder='{"mode":"live","source_stamp_ns":...,"frame_id":"...","tracks":[...]}'></textarea><button id="ingest">接收检测帧</button><span id="ingestResult" class="feedback" role="status"></span></section><section><h3>physical14 dry-run</h3><p>只验证绝对目标并更新工作台 dry-run 状态，不发送真机控制命令。</p><div class="fields"><label for="left">左臂 6 关节 · rad<input id="left" value="0,0,0,0,0,0"></label><label for="right">右臂 6 关节 · rad<input id="right" value="0,0,0,0,0,0"></label></div><div class="fields"><label for="lg">左夹爪开度 · mm<input id="lg" type="number" min="0" step="any" value="38"></label><label for="rg">右夹爪开度 · mm<input id="rg" type="number" min="0" step="any" value="38"></label></div><button id="send">验证 dry-run 动作</button><span id="result" class="feedback" role="status"></span><details><summary>physical14 数据契约</summary><pre id="contract"></pre></details></section></div><details class="debug"><summary>原始 pipeline 与服务状态</summary><pre id="pipeline"></pre><pre id="state"></pre></details></details>
+<footer class="footer"><span>仿真执行与真机控制共用冻结轨迹；硬件接入需使用已标定的控制 adapter。</span><span id="footer-status">等待本地工作台服务</span></footer>
+</div>
+</main>
+<script>
+let realCameraTimer=null,realCameraRequest=null,realCameraGeneration=0,realCameraKey=null,realCameraBlob=null,realCameraPaused=false;
+let workbenchMode=null,modeCsrf='',modeBusy=false,realSnapshot=null,realRequest=false,modePolling=false,realPolling=false,realPreview=null;
+const $=s=>document.querySelector(s), text=(id,value)=>{$('#'+id).textContent=value};
+const contract={schema_version:'physical14.v1',encoding:'absolute',units:{joints:'rad',grippers:'mm'},left_arm_joints:[0,0,0,0,0,0],right_arm_joints:[0,0,0,0,0,0],left_gripper:38,right_gripper:38};
+text('contract',JSON.stringify(contract,null,2));
+$('#profile').value=JSON.stringify({schema_version:'calibration_profile.v1',profile_id:'replace-with-measured-profile',source:{camera:'D405',joints:'ARX'},camera:{xyz_m:[0,0,0],rpy_rad:[0,0,0]},joints:{zero_offsets_rad:Array(12).fill(0),signs:Array(12).fill(1)},gripper:{mapping:'total_opening_mm',max_opening_mm:null},frames:{environment_from_camera:{position:[0,0,0],orientation_wxyz:[1,0,0,0]}},divergence_thresholds:{joint_rad:null,gripper_mm:null,timing_s:null}},null,2);
+function tag(id,label,tone=''){const e=$('#'+id);e.textContent=label;e.className='tag'+(tone?' '+tone:'');}
+function metric(value,unit,scale=1){return typeof value==='number'&&Number.isFinite(value)?(value*scale).toFixed(2)+' '+unit:'—';}
+function stage(id,complete,active,label){$('#stage-'+id).className='stage'+(complete?' done':active?' active':'');text('step-'+id,label);}
+async function post(path,payload){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Workbench-CSRF':modeCsrf},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'请求失败');return data;}
+function arr(id){const items=$('#'+id).value.split(',');const a=items.map(Number);if(a.length!==6||items.some(v=>!v.trim())||a.some(v=>!Number.isFinite(v)))throw Error('需要 6 个逗号分隔的有限数字');return a;}
+async function action(button,result,task){button.disabled=true;try{const value=await task();$('#'+result).className='feedback ok';text(result,typeof value==='string'?value:JSON.stringify(value,null,2));}catch(e){$('#'+result).className='feedback err';text(result,e.message);}finally{button.disabled=false;await refresh();}}
+$('#send').onclick=function(){action(this,'result',async()=>{const left=Number($('#lg').value),right=Number($('#rg').value);if(!$('#lg').value.trim()||!$('#rg').value.trim()||!Number.isFinite(left)||!Number.isFinite(right))throw Error('请输入有效夹爪开度');await post('/api/command',{action:{...contract,left_arm_joints:arr('left'),right_arm_joints:arr('right'),left_gripper:left,right_gripper:right},dry_run:true});return 'physical14 校验通过，已更新 dry-run 状态。';});};
+$('#start-pipeline').onclick=function(){action(this,'job-status',async()=>{const mode=workbenchMode,result=await post('/api/pipeline/run',{mode});if(mode!==workbenchMode)return '模式已改变，请查看当前状态。';if(mode==='real'&&result.status==='awaiting-physical-confirmation'){acceptRealPreview(result);return '真机冻结轨迹已预览，请在轨迹区域检查并确认执行。';}return '采集已启动，阶段状态会自动更新。';});};
+$('#force-diagnostic').onclick=function(){if(!confirm('仅在双侧 Isaac 仿真中强制执行当前失败轨迹，记录碰撞并继续；不会接入真实机器人。'))return;action(this,'job-status',async()=>{await post('/api/pipeline/diagnostic',{});return '强制仿真诊断已启动；碰撞事件和后续问题会逐 tick 记录。';});};
+$('#calibrationCheck').onclick=function(){action(this,'calibrationResult',()=>post('/api/calibration',{profile:JSON.parse($('#profile').value)}));};
+$('#ingest').onclick=function(){action(this,'ingestResult',async()=>{const r=await post('/api/online-detection',{snapshot:JSON.parse($('#snapshot').value)});return r.reobserve_required?`纸杯位移 ${metric(r.reobserve_event&&r.reobserve_event.displacement_m,'m')} 超过阈值，旧场景/轨迹已废弃，请重新观测 5 s`:`已接收 ${r.frame_count} 帧 · ${r.span_s} s · ${r.ready?'窗口完整':'继续等待'}`;});};
+for(const side of ['source','target']){const img=$('#'+side+'-image');img.onload=()=>{if(!img.getAttribute('src')||img.dataset.mode!==workbenchMode||img.dataset.camera!==$('#'+side+'-camera').value)return;img.dataset.loading='';img.hidden=false;$('#'+side+'-empty').hidden=true;$('#'+side+'-image-label').hidden=false;};img.onerror=()=>{img.dataset.loading='';img.removeAttribute('src');delete liveSequences[side];img.hidden=true;$('#'+side+'-empty').hidden=false;$('#'+side+'-image-label').hidden=true;};$('#'+side+'-camera').onchange=()=>{clearComparisonImage(side);if(side==='source'&&workbenchMode==='real')updateRealCamera();else refreshLive();};}
+function clearComparisonImage(side){if(side==='source')stopRealCamera();const img=$('#'+side+'-image');img.hidden=true;img.removeAttribute('src');img.dataset.loading='';delete liveSequences[side];$('#'+side+'-empty').hidden=false;$('#'+side+'-image-label').hidden=true;text(side+'-image-status','等待所选相机画面');}
+
+let previewPlan=null, requestedDigest;
+const jointColors=['#87dfbe','#efc582','#8dbdf2','#dba2db','#f4969d','#becb7e'];
+const stageLabels={initial_hold:'实测起点',initial_open:'准备 · 原位开爪',approach_pre:'移动至抓取准备位',approach:'接近杯子',preclose_settle:'抓取前保持',close_and_hold:'闭爪保持',lift:'抬升',lift_hold:'抬升保持',raise:'提起',transport:'搬运',lower:'下降',support_settle:'落杯保持',open:'开爪',separate:'分离',release_hold:'释放保持',retreat:'后退',clear_hold:'避让保持',home:'返回起始姿态',home_gripper_restore:'恢复起始夹距',home_hold:'回位保持'};
+function svgElement(tagName,attributes,content){const element=document.createElementNS('http://www.w3.org/2000/svg',tagName);for(const [key,value] of Object.entries(attributes))element.setAttribute(key,value);if(content!==undefined)element.textContent=content;return element;}
+function plotX(time){const ticks=previewPlan.ticks,start=ticks[0].time_s,end=ticks[ticks.length-1].time_s;return 52+(time-start)/Math.max(end-start,1e-9)*830;}
+function drawPlot(id,series,height,stepped=false){
+ const svg=$('#'+id);svg.replaceChildren();let low=Infinity,high=-Infinity;
+ for(const item of series)for(const value of item.values){low=Math.min(low,value);high=Math.max(high,value);}
+ const pad=Math.max((high-low)*0.08,stepped?1:0.05);low=stepped?0:low-pad;high+=pad;
+ const top=15,bottom=height-29,y=value=>bottom-(value-low)/(high-low)*(bottom-top);
+ for(let i=0;i<=4;i++){const value=low+(high-low)*i/4,py=y(value);svg.append(svgElement('line',{x1:52,x2:882,y1:py,y2:py,stroke:'#233748'}));svg.append(svgElement('text',{x:45,y:py+3,'text-anchor':'end',fill:'#93a6b6','font-size':10},value.toFixed(stepped?0:2)));}
+ const ticks=previewPlan.ticks;
+ for(let i=0;i<=4;i++){const time=ticks[0].time_s+(ticks[ticks.length-1].time_s-ticks[0].time_s)*i/4;svg.append(svgElement('text',{x:plotX(time),y:height-8,'text-anchor':i===4?'end':i===0?'start':'middle',fill:'#93a6b6','font-size':10},time.toFixed(1)+' s'));}
+ for(const item of series){const path=item.values.map((value,i)=>i===0?`M${plotX(ticks[i].time_s).toFixed(2)},${y(value).toFixed(2)}`:stepped?`H${plotX(ticks[i].time_s).toFixed(2)}V${y(value).toFixed(2)}`:`L${plotX(ticks[i].time_s).toFixed(2)},${y(value).toFixed(2)}`).join('');svg.append(svgElement('path',{d:path,fill:'none',stroke:item.color,'stroke-width':1.5,'vector-effect':'non-scaling-stroke'}));}
+ svg.append(svgElement('line',{id:id+'-cursor',x1:52,x2:52,y1:top,y2:bottom,stroke:'#e9eff4','stroke-width':1,'stroke-dasharray':'4 3'}));
+}
+function telemetryValue(value,digits=1){return typeof value==='number'&&Number.isFinite(value)?value.toFixed(digits):'—';}
+function telemetryRows(tel,side){return tel&&tel[side]&&Array.isArray(tel[side].rows)?tel[side].rows:[];}
+function drawTelemetryPlot(tel){
+ const svg=$('#telemetry-plot');svg.replaceChildren();const source=telemetryRows(tel,'source'),target=telemetryRows(tel,'target');
+ const rows=[...source,...target];if(!rows.length)return;
+ const ticks=rows.map(r=>r.tick),low=0,high=Math.max(88,...rows.flatMap(r=>[r.jaw_opening_mm&&r.jaw_opening_mm.left,r.jaw_opening_mm&&r.jaw_opening_mm.right].filter(Number.isFinite)))+4;
+ const minTick=Math.min(...ticks),maxTick=Math.max(...ticks),x=t=>52+(t-minTick)/Math.max(1,maxTick-minTick)*830,y=v=>140-(v-low)/(high-low)*105;
+ for(let i=0;i<=4;i++){const v=low+(high-low)*i/4,py=y(v);svg.append(svgElement('line',{x1:52,x2:882,y1:py,y2:py,stroke:'#233748'}));svg.append(svgElement('text',{x:45,y:py+3,'text-anchor':'end',fill:'#93a6b6','font-size':10},v.toFixed(0)));}
+ for(let i=0;i<=4;i++){const tick=Math.round(minTick+(maxTick-minTick)*i/4);svg.append(svgElement('text',{x:x(tick),y:161,'text-anchor':i===4?'end':i===0?'start':'middle',fill:'#93a6b6','font-size':10},'tick '+tick));}
+ for(const [items,color] of [[source,'#f0949d'],[target,'#efc582']])for(const key of ['left','right']){const valid=items.filter(r=>r.jaw_opening_mm&&Number.isFinite(r.jaw_opening_mm[key]));if(!valid.length)continue;const path=valid.map((r,i)=>(i?'L':'M')+x(r.tick).toFixed(2)+','+y(r.jaw_opening_mm[key]).toFixed(2)).join('');svg.append(svgElement('path',{d:path,fill:'none',stroke:color,'stroke-width':key==='left'?2:1,'stroke-dasharray':key==='left'?'':'4 3','vector-effect':'non-scaling-stroke'}));}
+ const failure=(tel.source&&tel.source.failure)||((tel.target||{}).failure);if(failure){const fx=x(failure.tick);svg.append(svgElement('line',{x1:fx,x2:fx,y1:12,y2:140,stroke:'#f0949d','stroke-width':2,'stroke-dasharray':'5 3'}));svg.append(svgElement('text',{x:Math.min(fx+5,870),y:20,fill:'#f0949d','font-size':11},`tick ${failure.tick} · ${failure.event}`));}
+}
+function renderTelemetry(tel){
+ tel=tel||{};const source=telemetryRows(tel,'source'),target=telemetryRows(tel,'target'),latest=s=>s.at(-1),s=latest(source),t=latest(target);
+ const failure=tel.source?.failure||tel.target?.failure;const active=tel.status==='running',complete=tel.status==='complete',tone=active?'warn':failure?'bad':complete?'good':'';
+ tag('telemetry-status',active?'实时采集中':failure?'失败已保留':complete?'执行遥测':'等待遥测',tone);
+ const showTick=r=>r?`${r.tick} · ${r.stage||'—'}`:'—';text('telemetry-source-tick',showTick(s));text('telemetry-target-tick',showTick(t));
+ const showGrip=r=>r?`${telemetryValue(r.jaw_opening_mm&&r.jaw_opening_mm.left)}/${telemetryValue(r.jaw_opening_mm&&r.jaw_opening_mm.right)} mm · ${r.grasp_state||'—'}`:'—';text('telemetry-source-state',showGrip(s));text('telemetry-target-state',showGrip(t));
+ text('telemetry-failure',failure?`tick ${failure.tick} · ${failure.stage||'—'} · ${failure.event} · actual ${failure.actual_substeps??'—'}/${failure.requested_substeps??'—'} substeps；这是 native failure event，尚未判定为可忽略的 release transition。`:active?'双侧执行与录制仍在运行；每秒拉取一次逐 tick JSONL，页面每 3 秒刷新。':'暂无 failure event；若未提供 runtime 接触字段，界面保留 —。');
+ drawTelemetryPlot(tel);const body=$('#telemetry-rows');body.replaceChildren();const combined=[...source.map(r=>({...r,side:'source'})),...target.map(r=>({...r,side:'target'}))].sort((a,b)=>b.tick-a.tick||a.side.localeCompare(b.side)).slice(0,18);
+ if(!combined.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=6;cell.textContent='暂无逐 tick 遥测';row.append(cell);body.append(row);return;}
+ for(const r of combined){const row=document.createElement('tr'),grip=r.jaw_opening_mm||{};for(const value of [r.side==='source'?'源端':'目标端',r.tick,r.stage||'—',`${telemetryValue(grip.left)}/${telemetryValue(grip.right)}`,r.grasp_state||'—',`${r.event||'—'} · ${r.actual_substeps??'—'}/${r.requested_substeps??'—'}`]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}body.append(row);}
+}
+function drawJointPlot(){if(!previewPlan)return;const arm=$('#trajectory-arm').value,legend=$('#joint-legend');legend.replaceChildren();for(let j=0;j<6;j++){const item=document.createElement('span');item.style.color=jointColors[j];item.textContent='J'+(j+1);legend.append(item);}drawPlot('joint-plot',jointColors.map((color,j)=>({color,values:previewPlan.ticks.map(t=>t.target[arm+'_arm_joints'][j])})),220);inspectTick();}
+function inspectTick(){if(!previewPlan)return;const index=Number($('#trajectory-tick').value),tick=previewPlan.ticks[index];if(!tick)return;
+ const stages=previewPlan.stages||[],active=stages.filter(s=>s.start_tick<=tick.tick).at(-1);text('trajectory-selection',`tick ${tick.tick} / ${previewPlan.ticks.at(-1).tick} · ${tick.time_s.toFixed(3)} s${active?' · '+(stageLabels[active.name]||active.name):''}`);
+ const body=$('#trajectory-values');body.replaceChildren();for(const side of ['left','right']){const row=document.createElement('tr');for(const value of [side==='left'?'左臂':'右臂',...tick.target[side+'_arm_joints'].map(n=>n.toFixed(5)),tick.target[side+'_gripper'].toFixed(2)]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}body.append(row);}
+ for(const id of ['joint-plot','gripper-plot']){const cursor=$('#'+id+'-cursor');if(cursor){cursor.setAttribute('x1',plotX(tick.time_s));cursor.setAttribute('x2',plotX(tick.time_s));}}
+ for(const button of $('#trajectory-stages').children)button.setAttribute('aria-current',active&&Number(button.dataset.tick)===active.start_tick?'step':'false');
+}
+async function loadPlan(digest, latest=false){
+ digest=digest||null;const requestKey=workbenchMode+':'+(latest?'latest:':'promoted:')+digest;if(requestKey===requestedDigest)return;requestedDigest=requestKey;previewPlan=null;$('#plan-preview').hidden=true;$('#plan-retry').hidden=true;$('#trajectory-tick').disabled=true;
+ for(const id of ['joint-plot','gripper-plot','trajectory-stages','trajectory-values'])$('#'+id).replaceChildren();
+ text('plan-preview-status',digest?(latest?'正在加载本轮未验收的只读轨迹…':'正在加载冻结轨迹…'):'等待目标端生成冻结轨迹。');if(!digest)return;
+ try{const response=await fetch('/api/pipeline/plan?mode='+workbenchMode+(latest?'&view=latest':''),{cache:'no-store'});if(!response.ok)throw Error('服务返回 '+response.status);const plan=await response.json();if(requestedDigest!==requestKey)return;
+  if(plan.timeline_digest!==digest||!Array.isArray(plan.ticks)||!plan.ticks.length)throw Error('轨迹内容与当前 timeline digest 不一致');
+  for(const tick of plan.ticks){if(!Number.isFinite(tick.time_s)||!tick.target)throw Error('轨迹时间或目标缺失');for(const side of ['left','right'])if(!Array.isArray(tick.target[side+'_arm_joints'])||tick.target[side+'_arm_joints'].length!==6||!tick.target[side+'_arm_joints'].every(Number.isFinite)||!Number.isFinite(tick.target[side+'_gripper']))throw Error('轨迹目标不符合 physical14');}
+  previewPlan=plan;$('#plan-preview').hidden=false;$('#trajectory-tick').disabled=false;$('#trajectory-tick').max=plan.ticks.length-1;$('#trajectory-tick').value=0;
+  text('plan-preview-status',latest?'本轮导出的轨迹 · 只读预览 · 未经完整执行验收':'冻结计划 · 只读预览');text('plan-preview-meta',`${plan.ticks.length} ticks · ${plan.ticks.at(-1).time_s.toFixed(3)} s · ${(plan.stages||[]).length} 个阶段${latest?' · 未 promoted':''}`);
+  for(const stage of plan.stages||[]){const button=document.createElement('button');button.dataset.tick=stage.start_tick;button.textContent=`${stageLabels[stage.name]||stage.name} · ${Number(stage.start_s).toFixed(2)} s`;button.title=stage.name+' · tick '+stage.start_tick;button.onclick=()=>{const i=plan.ticks.findIndex(t=>t.tick===stage.start_tick);if(i>=0){$('#trajectory-tick').value=i;inspectTick();}};$('#trajectory-stages').append(button);}
+  drawPlot('gripper-plot',[{color:jointColors[0],values:plan.ticks.map(t=>t.target.left_gripper)},{color:jointColors[1],values:plan.ticks.map(t=>t.target.right_gripper)}],145,true);drawJointPlot();
+ }catch(e){if(requestedDigest===requestKey){previewPlan=null;$('#plan-preview').hidden=true;text('plan-preview-status','轨迹加载失败：'+e.message);$('#plan-retry').hidden=false;}}
+}
+$('#trajectory-tick').oninput=inspectTick;$('#trajectory-arm').onchange=drawJointPlot;$('#plan-retry').onclick=()=>{requestedDigest=undefined;loadPlan(window.currentPlanDigest,window.currentPlanLatest);};
+function renderEvidence(evidence){
+ const e=evidence||{},labels={pending:'等待中',waiting:'等待中',running:'运行中',completed:'已完成',passed:'通过',failed:'失败',blocked:'受阻',stopped:'已停止'};
+ tag('evidence-status',labels[e.status]||e.status||'等待运行证据',['failed','blocked'].includes(e.status)?'bad':e.status==='running'?'warn':['completed','passed'].includes(e.status)?'good':'');
+ text('evidence-phase',e.phase||'尚未开始');text('evidence-message',(e.message||'等待远端报告当前阶段与执行结果。').replaceAll('双侧回放','双侧执行与录制'));
+ const attempts=Array.isArray(e.attempts)?e.attempts:[],body=$('#attempts-body');body.replaceChildren();
+ text('attempts-summary','尝试记录 · '+attempts.length+' 条');
+ if(!attempts.length){const row=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=4;cell.textContent='尚无运行尝试记录';row.append(cell);body.append(row);return;}
+ for(const [i,item] of attempts.entries()){const a=item&&typeof item==='object'?item:{message:String(item)},row=document.createElement('tr');
+  for(const value of [a.run_id||a.id||a.attempt||String(i+1),a.phase||'—',labels[a.status]||a.status||'—',a.message||a.error||a.reason||'—']){const cell=document.createElement('td');cell.textContent=typeof value==='string'?value:JSON.stringify(value);row.append(cell);}body.append(row);
+ }
+}
+ function render(x){const job=x.job||{},e=x.evidence||{},running=job.status==='running',failedJob=job.status==='failed'||job.runtime?.status==='failed',needsReview=job.status==='needs-review',diagnosticJob=job.mode==='diagnostic';renderEvidence(e);updateRuntime(job);renderTelemetry(x.telemetry);updateInitialization(x.initialization);const p=x.pipeline||{},s=p.source_lane||{},t=p.target_lane||{},timing=p.timing||{},comparison=p.comparison||x.comparison||{},tracking=p.tracking||comparison,lanes=p.execution_lanes||[],visual=e.visual_pipeline||{},current=x.current_run||{},visualFailed=visual.status==='failed',currentPlan=current.plan||{},ready=visualFailed?(visual.detection||{}).status==='passed':s.status==='ready',planned=visualFailed?(visual.planning||{}).status==='passed':t.status==='planned',aligned=visualFailed?planned:p.alignment==='aligned',complete=visualFailed||failedJob?false:workbenchMode==='real'?p.collection_complete===true:lanes.length===2,profile=x.calibration_profile||{},profileReady=!!profile.profile_id||ready;$('#start-pipeline').disabled=x.initialization?.status!=='ready'||!x.pipeline_configured||running||needsReview||visualFailed;const failure=visual.execution||{},diag=job.diagnostic||{},diagSource=diag.source||{},diagTarget=diag.target||{};text('job-status',diagnosticJob?(job.status==='running'?`强制仿真诊断运行中：source tick ${diagSource.last_tick??'—'} / target tick ${diagTarget.last_tick??'—'}；仅记录碰撞，不进入 promotion。`:`强制仿真诊断已结束：source ${diagSource.ticks??'—'} ticks，碰撞事件 ${Array.isArray(diagSource.collision_events)?diagSource.collision_events.length:'—'} 条，终态 ${diagSource.terminal_failure||'未出现'}；promotion 已禁止。`):visualFailed?`当前 run 已失败（source tick ${failure.source_failed_tick||'—'}：${failure.source_reason||'未知原因'}）；修复规划后再启动。`:running?'正在执行：'+runtimeStageLabel(job):job.error|| (job.status==='completed'?'本轮采集已完成，结果已校验并载入。':x.pipeline_configured?'当前配置已冻结；启动前自动检查 GPU 与输入身份。':'远端运行配置尚未启用；当前可检查已加载证据。'));
+ if(x.workflow?.blockers?.length){text('job-status',x.workflow.blockers.map(b=>typeof b==='string'?b:b.message||JSON.stringify(b)).join('；'));if(!x.workflow.preparation_ready)$('#start-pipeline').disabled=true;}
+ window.currentPlanDigest=current.promoted===false?currentPlan.timeline_digest:p.timeline_digest;window.currentPlanLatest=current.promoted===false&&current.plan_available; text('state',JSON.stringify(x,null,2));text('pipeline',JSON.stringify(p,null,2));loadPlan(window.currentPlanDigest,window.currentPlanLatest);
+ tag('source-status',ready?'观测已接收':'等待观测',ready?'good':'');tag('target-status',planned?(visualFailed?'规划已导出 · 未验收':'轨迹已冻结'):'等待场景',planned?(visualFailed?'warn':'good'):'');tag('alignment',aligned?'场景参数已传递':'等待场景传递',aligned?'good':'');
+ text('source-instance',s.instance_id||(workbenchMode==='real'?'ARX · 10.17.32.5':'dsw-nygxkzfd5znx4if0t2'));text('target-instance',t.instance_id||'等待仿真运行身份');
+ const statuses={waiting:['等待运行','先接收源端观测，再由目标端生成冻结轨迹。'],'in-progress':['单侧回执已到达','等待另一侧完整执行回执，暂不判定双侧完成。'],'replay-complete':['执行与录制完成','按同一冻结轨迹执行，完成后按模拟时间轴对比视频。'],synchronized:['同步执行已验证','两侧完整执行、开始时差及逐 tick 调度均通过时间门限。']};
+ const execution=failedJob?[(runtimeStageLabel(job)||'本轮运行')+'失败',job.error||'本轮未完成，历史成功回执不计入本轮。']:running?['本轮正在执行',`当前阶段：${runtimeStageLabel(job)}；历史回执仅作参考，不计入本轮完成状态。`]:visualFailed?['当前视觉 run 执行失败','FoundationPose 检测与规划已完成，但双侧执行与录制未完成；历史成功回执仅作审计。']:statuses[p.execution]||statuses.waiting;
+ const diagnosticReady=workbenchMode==='dual_dsw'&&x.initialization?.status==='ready'&&(visualFailed||failedJob)&&current.plan_available&&!running&&!needsReview;$('#force-diagnostic').disabled=!diagnosticReady;text('execution-status',execution[0]);text('execution-detail',execution[1]);text('tick-count',current.promoted===false?(currentPlan.tick_count?currentPlan.tick_count+' · 未验收':'未取得本轮轨迹'):visualFailed?(currentPlan.tick_count?currentPlan.tick_count+' · 未验收':'—'):(p.tick_count||'—'));text('lane-count',running?'本轮待回执':visualFailed?'0 / 2 · 未完成':lanes.length+' / 2');
+ stage('profile',profileReady,!profileReady,profileReady?'版本已接收':'等待 profile');stage('source',ready,profileReady&&!ready,ready?'窗口已接收':'等待源端');stage('scene',aligned,ready&&!aligned,aligned?'摘要一致':'等待对齐');stage('plan',planned,aligned&&!planned,planned?(visualFailed?'轨迹已导出 · 未验收':'时间线已冻结'):'等待规划');stage('execution',!visualFailed&&complete,planned&&!visualFailed&&!complete,visualFailed?'执行失败 · 历史回执未计入':complete?(p.execution==='synchronized'?'同步验证通过':'执行与录制完成'):'等待双侧回执');
+ if(failedJob)stage('execution',false,false,'本轮失败 · 历史回执未计入');
+ if(running){for(const id of ['source','scene','plan'])stage(id,false,false,'本轮待回执');stage('execution',false,true,'正在执行 · '+runtimeStageLabel(job));}
+ tag('timing-status',timing.status==='passed'?'时差诊断：门限内':timing.status==='exceeded'?'时差诊断：门限外':'时差诊断：待测',timing.status==='passed'?'good':timing.status==='exceeded'?'warn':'');
+ text('start-skew',metric(visualFailed?null:timing.start_skew_s,'ms',1000));text('max-skew',metric(visualFailed?null:timing.max_skew_with_uncertainty_s,'ms',1000));text('schedule-error',metric(visualFailed?null:timing.max_schedule_error_s,'ms',1000));
+ text('joint-error',metric(visualFailed?null:tracking.max_joint_error_rad,'rad'));text('gripper-error',metric(visualFailed?null:tracking.max_gripper_error_mm,'mm'));
+ text('measurement-note',complete?'两侧回执已接收。时差仅用于诊断，不阻塞当前采集与视频回放验收。¹ 包含时钟不确定度；缺失数据以 — 显示。':'尚无完整双侧实测对照。时差仅用于诊断，不作为当前阻塞。¹ 包含时钟不确定度。');
+ const detection=visual.detection||{},gt=s.adapter==='sim-online-detection-ground-truth',fp=visualFailed?detection.provider_id==='foundationpose':s.adapter==='foundationpose'||detection.provider_id==='foundationpose';
+ tag('detection-source',visualFailed?(fp?'FoundationPose · 当前失败 run':'当前视觉 run 失败'):fp?'FoundationPose · 已接入':gt?'GT · 历史链路':'等待检测来源',visualFailed?'bad':fp?'good':gt?'warn':'');
+ text('detection-note',visualFailed&&detection.status==='passed'
+  ?`FoundationPose 当前 run 已完成 ${detection.valid_window_s||'—'} 秒连续有效窗口（${detection.valid_frames||'—'} 帧）；规划已导出，但 source tick ${failure.source_failed_tick||'—'} 发生 ${failure.source_reason||'未知失败'}。历史 GT 回执未计入当前执行状态。`
+  :detection.status==='passed'?`FoundationPose 已完成 ${detection.valid_window_s||'—'} 秒连续有效窗口（${detection.valid_frames||'—'} 帧）；当前已载入的视觉证据通过。`
+  :fp&&ready?'FoundationPose 有效观测窗口已校验，检测场景已载入；执行与录制结果分别见对应回执。'
+  :gt?'当前使用仿真真值（GT）验证场景传递与执行链路；FoundationPose 视觉检测尚未接入当前 promoted pipeline。':'检测链路尚未验证。GT 场景传递与 FoundationPose 视觉检测分别验收。');
+ for(const [side,id] of [[workbenchMode==='real'?'physical-real':'simulated-real','source-recording'],['dsw-scene','target-recording']]){const r=visualFailed?{}:(p.recording||{})[side]||{};text(id,r.capture_status==='complete'&&r.validation==='passed'?'raw 已封存并校验':r.capture_status==='failed'?'录制失败':r.capture_status==='not_requested'?'本轮未启用录制':'未提供完整 raw 证据');}
+ const measuredAudit=p.measured_scene_comparison||{},visualAudit=(e.visual_pipeline||{}).scene_comparison||{},audit=measuredAudit.status==='measured'?measuredAudit:p.scene_comparison||{};text('scene-audit-status',visualAudit.coffee_machine_position_error_m!=null?'视觉场景误差已记录':audit.status==='measured'?'两侧沉降后实测差':audit.status==='configured'?'两侧 reset 配置差':'旧回执未提供实际场景身份');text('scene-audit-note',visualAudit.coffee_machine_position_error_m!=null?'source 保留原始场景，规划侧使用 FoundationPose 检测场景；误差只作审计，不重置 source。纸杯不比较朝向。':audit.status==='measured'?'比较两侧沉降后的 mesh root 实测位姿；真值仅用于误差审计，不作为视觉输入。纸杯不比较朝向。':'源端保留原始场景，规划侧采用检测位姿。这里比较两侧 reset 配置，尚无沉降后的实测证据。纸杯不比较朝向。');text('machine-position-error',metric(visualAudit.coffee_machine_position_error_m??audit.machine_position_error_m,'mm',1000));text('machine-rotation-error',metric(visualAudit.coffee_machine_rotation_error_rad??audit.machine_rotation_error_rad,'°',180/Math.PI));text('cup-position-error',metric(visualAudit.cup_position_error_m??audit.cup_position_error_m,'mm',1000));
+ text('scene-digest',visualFailed?(visual.scene_comparison||{}).detected_scene_digest||'检测场景 digest 未在失败 run 封存':s.scene_digest||'尚未生成');text('timeline-digest',visualFailed?(currentPlan.timeline_digest||'失败 run 未封存轨迹 digest'):p.timeline_digest||'尚未生成');text('profile-id',profile.profile_id||p.calibration_profile_id||'尚未提供 profile 标识');
+ text('source-run',visualFailed?(visual.run_id||'当前视觉 run'):s.run_id||p.source_run_id||'尚未提供 run ID');text('target-run',visualFailed?(currentPlan.run_id||'当前失败 run 规划'):t.run_id||p.plan_run_id||p.run_id||'尚未提供 run ID');text('execution-run',current.promoted===false?current.run_id||'本轮未取得运行标识':visualFailed?(visual.run_id||'当前视觉 run'):(p.execution_run_id||p.plan_run_id||(complete?'两侧完整执行回执':'等待记录')));text('source-record',visualFailed?(ready?'检测完成 · 未执行验收':'未接收'):(ready?'已接收':'未接收'));text('plan-record',visualFailed?(planned?'已导出 · 未验收':'未接收'):(planned?'已冻结':'未接收'));text('execution-record',failedJob?'本轮失败 · 历史回执未计入':running?'本轮正在执行 · 历史回执仅参考':visualFailed?'0 / 2 · 执行失败':lanes.length+' / 2'+(complete?' · '+(p.execution==='synchronized'?'同步通过':'执行完成'):''));
+}
+let refreshing=false;
+let liveRefreshing=false,liveRun=null,liveRunning=false,liveSequences={};
+function syncPreviewJob(job){
+ const run=job?.directory||null;liveRunning=job?.status==='running';if(run===liveRun)return;liveRun=run;
+ for(const side of ['source','target'])if(!(workbenchMode==='real'&&side==='source'))clearComparisonImage(side);
+}
+async function refreshLive(){
+ if(!workbenchMode||liveRefreshing)return;liveRefreshing=true;const mode=workbenchMode,run=liveRun;
+ try{for(const side of ['source','target']){
+  if(mode==='real'&&side==='source')continue;
+  const camera=$('#'+side+'-camera').value;
+  try{const r=await fetch('/api/live-preview/'+side+'.json?mode='+mode+'&camera='+camera,{cache:'no-store'});if(!r.ok)continue;const m=await r.json();if(mode!==workbenchMode||run!==liveRun||camera!==$('#'+side+'-camera').value)continue;
+   const img=$('#'+side+'-image'),fresh=liveRunning&&Number.isFinite(m.age_s)&&m.age_s<=2;
+   if(Number.isFinite(m.sequence)&&m.sequence!==liveSequences[side]&&!img.dataset.loading){liveSequences[side]=m.sequence;img.dataset.mode=mode;img.dataset.camera=camera;img.dataset.loading='true';img.src='/api/live-preview/'+side+'.jpg?mode='+mode+'&camera='+camera+'&seq='+m.sequence;}
+   text(side+'-image-label',fresh?'执行画面预览':'最后缓存帧');text(side+'-image-status',`${Number.isFinite(m.source_fps)?m.source_fps.toFixed(1):'—'} FPS · ${Number.isFinite(m.age_s)?m.age_s.toFixed(1)+' 秒前':'时间未知'}`);
+  }catch(_){}
+ }}finally{liveRefreshing=false;}
+}
+async function refresh(){if(!workbenchMode||refreshing)return;refreshing=true;const mode=workbenchMode;try{const r=await fetch('/api/state?mode='+mode,{cache:'no-store'});if(!r.ok)throw Error('服务返回 '+r.status);const state=await r.json();if(mode!==workbenchMode||state.mode&&state.mode!==mode)return;syncPreviewJob(state.job);render(state);tag('connection','工作台在线','good');text('updated',new Date().toLocaleTimeString('zh-CN',{hour12:false})+' 更新');text('footer-status','本地服务连接正常 · 运行结束后可并排回放视频');$('main').classList.remove('offline');}catch(e){if(mode===workbenchMode){tag('connection','连接中断','bad');text('footer-status','状态更新失败：'+e.message);$('main').classList.add('offline');}}finally{refreshing=false;}}
+
+const playbackVideos=['source','target'].map(side=>$('#playback-'+side));
+let playbackManifest=null,playbackKey='',playbackLoaded=false,playbackPlaying=false,playbackAt=0,playbackAnchor=0,playbackLoading=false,playbackRate=1;
+function playbackDuration(){return Math.max(...playbackVideos.map(v=>Number.isFinite(v.duration)?v.duration:0));}
+function playbackPosition(){return playbackAt+(playbackPlaying?(performance.now()-playbackAnchor)/1000*playbackRate:0);}
+function playbackPause(){playbackAt=Math.min(playbackPosition(),playbackDuration());playbackPlaying=false;playbackVideos.forEach(v=>v.pause());text('playback-toggle','播放两侧');}
+function playbackSeek(t){playbackAt=t;playbackAnchor=performance.now();for(const v of playbackVideos)if(Number.isFinite(v.duration))v.currentTime=Math.min(t,v.duration);}
+async function playbackPlay(){
+ if(!playbackLoaded)return;if(playbackPosition()>=playbackDuration())playbackSeek(0);
+ playbackAnchor=performance.now();playbackPlaying=true;text('playback-toggle','暂停两侧');
+ try{await Promise.all(playbackVideos.filter(v=>v.currentTime<v.duration).map(v=>{v.playbackRate=playbackRate;return v.play();}));}
+ catch(e){playbackPause();text('playback-status','视频播放失败：'+e.message);}
+}
+function playbackMediaUrl(path,revision,mode){const url=new URL(path,location.href);url.searchParams.set('mode',mode);url.searchParams.set('v',revision);return url.href;}
+function selectPlayback(){
+ const camera=$('#playback-camera').value,pair=playbackManifest?.cameras?.[camera];
+ const key=playbackManifest?.run_id+':'+camera+':'+JSON.stringify(pair);if(key===playbackKey)return;playbackKey=key;
+ playbackPause();playbackLoaded=false;$('#playback-toggle').disabled=true;$('#playback-time').disabled=true;
+ for(const v of playbackVideos){v.removeAttribute('src');v.load();}
+ text('playback-clock','0.00 / — s');text('playback-status',pair?.ready?'正在读取两侧视频…':'回放未就绪：此相机两侧视频尚未完整下载。');
+ if(!pair?.ready)return;
+ playbackVideos.forEach((v,i)=>{const meta=pair[i===0?'source':'target'];v.src=playbackMediaUrl(meta.url,meta.revision,workbenchMode);v.load();});
+}
+for(const v of playbackVideos){
+ v.addEventListener('loadedmetadata',()=>{if(!playbackVideos.every(x=>x.readyState>=1&&Number.isFinite(x.duration)&&x.duration>0))return;playbackLoaded=true;$('#playback-toggle').disabled=false;$('#playback-time').disabled=false;$('#playback-time').max=playbackDuration();playbackSeek(Math.min(playbackAt,playbackDuration()));text('playback-status',workbenchMode==='real'?'两侧视频已就绪 · 真机与仿真采集时间轴回放':'两侧视频已就绪 · 同一模拟时间轴回放');});
+ v.addEventListener('error',()=>{if(!v.getAttribute('src'))return;playbackPause();playbackLoaded=false;$('#playback-toggle').disabled=true;$('#playback-time').disabled=true;text('playback-status','视频无法解码或下载失败；需要完整的 H.264 浏览器回放副本。');});
+}
+$('#playback-toggle').onclick=()=>playbackPlaying?playbackPause():playbackPlay();
+$('#playback-camera').onchange=selectPlayback;
+$('#playback-time').oninput=()=>{const wasPlaying=playbackPlaying;playbackPause();playbackSeek(Number($('#playback-time').value));if(wasPlaying)playbackPlay();};
+$('#playback-speed').onchange=()=>{const wasPlaying=playbackPlaying;playbackPause();playbackRate=Number($('#playback-speed').value);if(wasPlaying)playbackPlay();};
+async function refreshPlayback(){if(!workbenchMode||playbackLoading)return;playbackLoading=true;const mode=workbenchMode;try{const r=await fetch('/api/playback?mode='+mode,{cache:'no-store'});if(!r.ok)throw Error(r.status);const manifest=await r.json();if(mode!==workbenchMode)return;playbackManifest=manifest;selectPlayback();}catch(e){text('playback-status','回放状态不可用：'+e.message);}finally{playbackLoading=false;}}
+function playbackFrame(){if(playbackLoaded){const t=Math.min(playbackPosition(),playbackDuration());if(playbackPlaying){for(const v of playbackVideos){if(t>=v.duration){v.pause();if(Math.abs(v.currentTime-v.duration)>.08)v.currentTime=v.duration;}else if(Math.abs(v.currentTime-t)>.12)v.currentTime=t;}if(t>=playbackDuration())playbackPause();}$('#playback-time').value=t;text('playback-clock',t.toFixed(2)+' / '+playbackDuration().toFixed(2)+' s');}requestAnimationFrame(playbackFrame);}
+refreshPlayback();setInterval(refreshPlayback,3000);requestAnimationFrame(playbackFrame);
+
+
+function runtimeStageLabel(job){const key=job.progress?.stage;return job.runtime?.stages?.find(s=>s.key===key)?.label||(key==='replay'?'双侧执行与录制':key)||'GPU 与输入预检';}
+let runtimeJob=null,runtimeReceived=0;
+function updateRuntime(job){runtimeJob=job;runtimeReceived=performance.now();renderRuntime();}
+function renderRuntime(){
+ const model=runtimeJob?.runtime,panel=$('#runtime-panel');panel.hidden=!runtimeJob?.directory;if(panel.hidden)return;
+ if(!model?.stages?.length){text('runtime-current','等待本轮阶段计时回执');$('#runtime-bar').removeAttribute('value');text('runtime-time','当前运行使用旧版计时；更新服务后可显示分段实际耗时。');return;}
+ const running=model.status==='running'&&!model.pipeline_finished,delta=running?(performance.now()-runtimeReceived)/1000:0;
+ const rows=model.stages.map(s=>({...s,elapsed_s:s.elapsed_s===null?null:s.elapsed_s+(s.status==='running'?delta:0)}));
+ const total=rows.reduce((n,s)=>n+s.estimate_s,0),done=rows.filter(s=>s.status==='completed').reduce((n,s)=>n+s.estimate_s,0);
+ const current=rows.find(s=>['running','failed','stopped'].includes(s.status)),over=current&&current.elapsed_s>current.estimate_s;
+ const finished=['completed','diagnostic-complete'].includes(model.status),failed=model.status==='failed';
+ const percent=finished?100:Math.min(99,100*(done+(current?Math.min(current.elapsed_s||0,current.estimate_s*.95):0))/Math.max(1,total));
+ $('#runtime-bar').value=percent;
+ text('runtime-current',`${finished?'已结束':failed?(current?.label||'运行')+'失败':current?.label||'校验并载入工作台'} · ${finished?'完成':'预估进度'} ${Math.floor(percent)}%${over&&!finished&&!failed?' · 当前阶段已超出预估':''}`);
+ const remaining=rows.reduce((n,s)=>n+(s.status==='pending'?s.estimate_s:s.status==='running'?Math.max(0,s.estimate_s-s.elapsed_s):0),0);
+ text('runtime-time',`${current?'当前阶段已用 '+secondsLabel(current.elapsed_s||0)+' / 预计 '+secondsLabel(current.estimate_s)+' · ':''}本轮已用 ${secondsLabel(model.elapsed_s+delta)} · 原预计总计 ${secondsLabel(total)} · ${finished||failed?'计时已停止':over?'剩余时间暂不可靠，后续阶段约 '+secondsLabel(remaining):'预计剩余约 '+secondsLabel(remaining)}。预估基于历史分段耗时，100% 以完成回执为准。`);
+ const next=rows.find(s=>s.status==='pending'&&s!==current);text('runtime-next',finished?'下一步：回放对比与检查结果':failed?'下一步：检查失败阶段与日志；后续阶段未执行':'下一步：'+(next?.label||'载入结果与回放视频'));
+ const body=$('#runtime-rows');body.replaceChildren();const labels={pending:'待执行',running:'进行中',completed:'完成',failed:'失败',stopped:'已停止'};
+ for(const s of rows){const tr=document.createElement('tr');if(s.status==='running')tr.style.background='#1b342b';for(const value of [s.label,labels[s.status],secondsLabel(s.estimate_s)+' · '+s.basis,s.elapsed_s===null?'—':secondsLabel(s.elapsed_s)]){const td=document.createElement('td');td.textContent=value;tr.append(td);}body.append(tr);}
+ if(failed){tag('evidence-status','本轮失败','bad');text('evidence-phase',(current?.label||'运行')+'失败');text('evidence-message',runtimeJob.error||'检查该阶段原始执行日志。');}
+ if(running){tag('evidence-status','本轮运行中','warn');text('evidence-phase',current?.label||'准备中');text('evidence-message','当前耗时与进度来自本轮阶段记录。');}
+}
+setInterval(renderRuntime,1000);
+
+let initializationSnapshot=null,initializationReceivedAt=0,initializationFetching=false;
+function secondsLabel(value){const seconds=Math.max(0,Math.ceil(value));return seconds<60?seconds+' 秒':Math.floor(seconds/60)+' 分 '+seconds%60+' 秒';}
+function updateInitialization(value){initializationSnapshot=value||{status:'starting',message:'等待初始化状态'};initializationReceivedAt=performance.now();renderInitialization();}
+function renderInitialization(){
+ const m=initializationSnapshot;if(!m)return;const status=m.status,ready=status==='ready',failed=status==='failed',active=['starting','busy'].includes(status);
+ const labels={starting:'初始化中',ready:'检测器已就绪',busy:'检测器正在处理任务',failed:'初始化失败',stopped:'检测器已停止',disabled:'历史回放模式'};
+ tag('initialization-status',labels[status]||'尚未就绪',ready?'good':failed?'bad':active?'warn':'');
+ const stages={queued:'等待启动',preflight:'核验运行环境',connecting:'连接检测环境',starting:'启动检测服务',loading:'加载检测模型',warmup:'检测器预热',ready:'检测器初始化完成',failed:'检测器初始化失败'};
+ text('initialization-message',status==='busy'?'模型已就绪，正在检测本轮输入':m.message||stages[m.stage]||m.stage||'等待检测器状态');
+ const bar=$('#initialization-progress'),progress=m.progress_percent??m.progress;
+ if(ready||status==='busy')bar.value=100;else if(Number.isFinite(progress))bar.value=Math.min(99,Math.max(0,progress));else bar.removeAttribute('value');
+ const since=status==='starting'?(performance.now()-initializationReceivedAt)/1000:0,elapsed=Number.isFinite(m.elapsed_s)?Math.max(0,m.elapsed_s+since):null;
+ const eta=Number.isFinite(m.eta_s)?m.eta_s-since:null;
+ let timing=status==='busy'||elapsed===null?'':'已用 '+secondsLabel(elapsed)+' · ';
+ timing+=ready?'准备完成，可以开始采集':status==='busy'?'模型已就绪，正在检测本轮输入':failed?'初始化未完成，请查看错误':status==='disabled'?'可查看已保存的视频与运行记录':status==='stopped'?'服务已停止，采集不可用':eta===null?'预计剩余：暂无可靠估计':eta>0?'预计还需约 '+secondsLabel(eta)+'（估计）':'已超过预计时间，仍在执行当前阶段';
+ text('initialization-time',timing);const error=$('#initialization-error');error.hidden=!m.error;error.textContent=m.error||'';
+ if(!ready){$('#start-pipeline').disabled=true;$('#force-diagnostic').disabled=true;}
+}
+async function refreshInitialization(){if(!workbenchMode||initializationFetching)return;initializationFetching=true;const mode=workbenchMode;try{const r=await fetch('/api/initialization?mode='+mode,{cache:'no-store'});if(!r.ok)throw Error(r.status);const initialization=await r.json();if(mode===workbenchMode)updateInitialization(initialization);}catch(e){updateInitialization({status:'failed',message:'无法读取检测器状态',error:String(e)});}finally{initializationFetching=false;}}
+refreshInitialization();setInterval(refreshInitialization,1000);setInterval(renderInitialization,250);
+
+refresh();setInterval(refresh,3000);setInterval(refreshLive,33);refreshLive();
+
+function applyMode(mode,busy=false){
+ const changed=workbenchMode!==mode;workbenchMode=mode;modeBusy=busy;
+ $('#workbench-mode').value=mode;$('#workbench-mode').disabled=busy||realRequest;$('#workflow-pane').hidden=false;$('#real-pane').hidden=mode!=='real';$('#physical-confirmation').hidden=mode!=='real';$('#force-diagnostic').hidden=mode==='real';$('#force-diagnostic').title=mode==='real'?'真机不支持强制诊断：碰撞风险策略尚未验收':'仅用于双 DSW 仿真诊断';
+ text('workbench-title','数采工作台');text('source-recording-label',mode==='real'?'源端 · 真机':'源端 · 模拟真机');text('workflow-identity',mode==='real'?'真机 + 仿真':'双 DSW 仿真');text('workflow-description','源端观测，目标端复现场景并规划；两侧执行同一份冻结轨迹。');
+ text('source-label',mode==='real'?'SOURCE / 真机':'SOURCE / 模拟真机');text('source-name',mode==='real'?'ARX 双臂 · 10.17.32.5':'zfy-zj · GPU 0');text('playback-source-label',mode==='real'?'SOURCE / 真机':'SOURCE / 模拟真机');$('#source-image').alt=mode==='real'?'真机所选相机实时画面':'源端仿真所选相机画面';
+ text('mode-message',busy?'当前任务正在运行，暂不可切换模式':mode==='real'?'实际机器人 · 切换不会自动接入控制':'双侧仿真 · 用于功能开发与验证');
+ if(changed){clearRealPreview();realSnapshot=null;for(const side of ['source','target'])clearComparisonImage(side);liveRun=null;requestedDigest=undefined;render({initialization:{status:'starting',message:'正在核验当前模式状态'}});playbackPause();playbackManifest=null;playbackKey='';selectPlayback();refresh();refreshPlayback();refreshInitialization();if(mode==='real')refreshReal();}
+}
+
+async function refreshMode(){
+ if(modePolling||realRequest)return;modePolling=true;
+ try{const r=await fetch('/api/mode',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const m=await r.json();if(!['real','dual_dsw'].includes(m.mode)||!m.csrf_token)throw Error('模式或请求身份缺失');modeCsrf=m.csrf_token;applyMode(m.mode,!!m.busy);}
+ catch(e){$('#workbench-mode').disabled=true;text('mode-message','工作模式核验失败：'+e.message);}
+ finally{modePolling=false;}
+}
+$('#workbench-mode').onchange=async function(){const old=workbenchMode;this.disabled=true;try{await post('/api/mode',{mode:this.value});await refreshMode();}catch(e){this.value=old;text('mode-message','切换失败：'+e.message);this.disabled=modeBusy;}};
+function renderRealControls(){
+ const configured=realSnapshot?.configured===true&&realSnapshot?.hardware_access_enabled!==false,connected=realSnapshot?.connected===true,supported=$('#real-supported').checked;
+ $('#real-acquire').disabled=realRequest||!configured||connected||!supported;
+ $('#real-release').disabled=realRequest||!connected||!supported;
+ $('#real-stop').disabled=!configured;
+ $('#real-recover').disabled=realRequest||!connected||!realSnapshot?.owner?.recoverable_fault;
+ $('#real-preview').disabled=realRequest||!connected||!realSnapshot?.collection_ready;
+ $('#real-clearance').disabled=!realPreview;
+ $('#real-confirm').disabled=realRequest||!connected||!realSnapshot?.collection_ready||!realPreview||!$('#real-clearance').checked;
+}
+$('#real-supported').onchange=renderRealControls;
+async function realControl(action,extra={}){
+ if(workbenchMode!=='real')return;
+ clearRealPreview();realRequest=true;renderRealControls();$('#workbench-mode').disabled=true;
+ try{const result=await post('/api/real/control',{action,...extra});text('real-action-result',result.message||'请求已受理，正在核验实测状态。');$('#real-action-result').className='feedback ok';}
+ catch(e){text('real-action-result',e.message+'；请检查当前状态后操作，不会自动重试。');$('#real-action-result').className='feedback err';}
+ finally{realRequest=false;$('#real-supported').checked=false;await refreshReal();await refreshMode();}
+}
+$('#real-acquire').onclick=()=>{if($('#real-supported').checked)realControl('acquire',{confirmation:'ARMS_SUPPORTED_CONNECT'});};
+$('#real-release').onclick=()=>{if($('#real-supported').checked)realControl('release',{confirmation:'ARMS_SUPPORTED_RELEASE'});};
+$('#real-stop').onclick=()=>realControl('stop');
+$('#real-recover').onclick=()=>{const owner=realSnapshot?.owner;if(owner?.recoverable_fault)realControl('recover',{confirmation:'ACKNOWLEDGE_MOTION_FAULT',owner_pid:owner.pid,command_epoch:owner.command_epoch});};
+function stopRealCamera(){
+ ++realCameraGeneration;clearTimeout(realCameraTimer);realCameraTimer=null;realCameraRequest?.abort();realCameraRequest=null;realCameraKey=null;
+ if(realCameraBlob){URL.revokeObjectURL(realCameraBlob);realCameraBlob=null;}
+}
+async function nextRealCameraFrame(key,generation){
+ if(generation!==realCameraGeneration||workbenchMode!=='real'||document.hidden||realCameraPaused||key!==$('#source-camera').value)return;
+ const started=performance.now(),request=new AbortController();realCameraRequest=request;let failed=false;
+ const timeout=setTimeout(()=>request.abort(),2500);
+ try{
+  const response=await fetch('/api/real/camera/'+key+'/frame.jpg',{cache:'no-store',signal:request.signal});
+  if(!response.ok)throw Error('HTTP '+response.status);
+  const blob=await response.blob();
+  if(generation!==realCameraGeneration||request.signal.aborted)return;
+  const img=$('#source-image'),old=realCameraBlob;realCameraBlob=URL.createObjectURL(blob);
+  img.dataset.mode='real';img.dataset.camera=key;img.dataset.loading='true';img.src=realCameraBlob;
+  if(old)URL.revokeObjectURL(old);
+  await img.decode();
+ }catch(error){failed=true;if(generation===realCameraGeneration)text('source-image-status','画面读取失败，正在重试');}
+ finally{
+  clearTimeout(timeout);
+  if(generation===realCameraGeneration){realCameraRequest=null;realCameraTimer=setTimeout(()=>nextRealCameraFrame(key,generation),failed?250:Math.max(0,33-(performance.now()-started)));}
+ }
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopRealCamera();else updateRealCamera();});
+window.addEventListener('pagehide',()=>{realCameraPaused=true;stopRealCamera();});
+window.addEventListener('pageshow',()=>{realCameraPaused=false;updateRealCamera();});
+function updateRealCamera(){
+ if(workbenchMode!=='real'||document.hidden||realCameraPaused){stopRealCamera();return;}
+ const key=$('#source-camera').value,c=realSnapshot?.cameras?.[key]||{},img=$('#source-image'),ok=c.connected===true||c.ready===true||c.status==='ready';
+ const depthReady=c.depth_ready??(c.rgbd_paired===true&&c.ready===true),age=c.source_age_s??c.age_s;
+ if(ok){if(realCameraKey!==key){stopRealCamera();realCameraKey=key;nextRealCameraFrame(key,realCameraGeneration);}}
+ else clearComparisonImage('source');
+ text('source-image-label','真机 RGB-D · 实时预览');text('source-image-status',c.error||`${c.serial||'序列号待核验'} · ${depthReady?'深度已就绪':'深度未就绪'}${Number.isFinite(age)?' · '+age.toFixed(2)+' s':''}`);
+}
+
+async function refreshReal(){
+ if(workbenchMode!=='real'||realPolling)return;realPolling=true;
+ try{
+  const r=await fetch('/api/real/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();if(workbenchMode!=='real')return;realSnapshot=s;
+  const owner=s.owner||{},feedback=owner.calibration_feedback||owner.feedback||{},fake=owner.simulation_only===true||owner.physical_hardware_connected===false;
+  tag('real-identity',fake?'非物理硬件 · 禁止当作真机验收':owner.robot_id||s.robot_id||'ARX · 等待身份核验',fake?'bad':'');
+  tag('real-connection',s.connected?'控制已连接':s.configured?'服务已配置 · 控制未连接':'服务未配置',s.connected&&!fake?'good':'warn');
+  tag('connection','工作台在线','good');text('updated',new Date().toLocaleTimeString('zh-CN',{hour12:false})+' 更新');
+  text('real-status',s.error||(owner.state==='CALIBRATION_OWNED'?'标定工作台正在使用相机与控制；数采处于离线开发模式':null)||owner.safety_state||owner.state||'控制服务可访问，连接状态以实测反馈为准。');
+  const raw=owner.raw14||feedback.raw14||feedback.qpos||owner.joint_positions,jaw=owner.jaw_gap_mm||feedback.jaw_gap_mm;
+  text('real-feedback',`owner PID: ${owner.pid??'—'} · epoch: ${owner.command_epoch??owner.epoch??'—'} · 反馈年龄: ${metric(owner.sample_age_s??feedback.age_s,'s')}\n关节 / 原始反馈: ${raw?JSON.stringify(raw):'尚无反馈'}\n夹爪物理开度 mm: ${jaw?JSON.stringify(jaw):'尚无已标定反馈'}`);
+  if(!s.collection_ready||!s.connected||realPreview&&(realPreview.expiresAt<=Date.now()||realPreview.epoch!==(owner.command_epoch??owner.epoch)))clearRealPreview();
+  const blockers=$('#real-blockers');blockers.replaceChildren();for(const item of s.blockers||[]){const li=document.createElement('li');li.textContent=typeof item==='string'?item:item.message||JSON.stringify(item);blockers.append(li);}if(!s.collection_ready&&!blockers.children.length){const li=document.createElement('li');li.textContent='采集尚未就绪';blockers.append(li);}
+  text('real-readiness',s.collection_ready?'采集条件已就绪，执行前仍需检查冻结轨迹并确认。':'完成上述检查后才能进入真机采集。');
+  updateRealCamera();
+ }catch(e){realSnapshot=null;clearRealPreview();tag('real-connection','状态不可用','bad');text('real-status','无法核验真机状态：'+e.message);if(workbenchMode==='real'){clearComparisonImage('source');text('source-image-status','状态不可用 · 等待重新核验 RGB-D');}}
+
+ finally{realPolling=false;renderRealControls();}
+}
+function clearRealPreview(){realPreview=null;$('#real-clearance').checked=false;$('#real-clearance').disabled=true;$('#real-confirm').disabled=true;text('real-plan-summary','等待预览真机冻结轨迹');}
+$('#real-clearance').onchange=renderRealControls;
+function acceptRealPreview(p){const token=p.token||p.preview?.token;if(!token)throw Error('预览未返回确认 token');const m=p.preview||p;realPreview={token,epoch:realSnapshot?.owner?.command_epoch??realSnapshot?.owner?.epoch,expiresAt:Date.now()+Math.min(30,Number(p.expires_in_s)||30)*1000};text('real-plan-summary',`总时长: ${m.duration_s??m.total_duration_s??'—'} s\n控制 ticks: ${m.tick_count??'—'}\n冻结摘要: ${m.timeline_digest??m.digest??'—'}\n确认窗口最长 30 秒；失效后需重新预览。`);renderRealControls();$('#physical-confirmation').scrollIntoView({block:'center',behavior:'smooth'});}
+$('#real-preview').onclick=async()=>{
+ if(!realSnapshot?.collection_ready||realRequest)return;
+ clearRealPreview();realRequest=true;renderRealControls();
+ try{const p=await post('/api/real/control',{action:'preview_frozen'});acceptRealPreview(p);}
+ catch(e){text('real-plan-summary','预览失败：'+e.message);}
+ finally{realRequest=false;renderRealControls();}
+};
+$('#real-confirm').onclick=()=>{if(!realPreview||!$('#real-clearance').checked)return;if(Date.now()>=realPreview.expiresAt){clearRealPreview();return;}realControl('confirm',{token:realPreview.token,confirmation:'START_REVIEWED_SINGLE_ARM',physical_clearance:true});};
+refreshMode();setInterval(refreshMode,3000);setInterval(refreshReal,1000);
+
+// Playground uses independent recordings; only the three explicit clicks submit actions.
+let pgSnapshot=null,pgReceived=0,pgFetching=false,pgRequest=false,pgVideoKey='',pgPageActive=true,pgVersion=0,pgLastError='';
+const pgCameras=new Map(['base_0','left_wrist_0','right_wrist_0'].map(key=>[key,{controller:null,timer:null,blob:null,generation:0}]));
+function pgControlConnected(s){return s?.environment?.control_connected===true||s?.environment?.checks?.some(c=>c.key==='control'&&c.status==='ready')===true;}
+function pgButtons(){
+ const s=pgSnapshot,busy=pgRequest||s?.busy===true,known=!!s&&!!modeCsrf;
+ $('#pg-prepare').disabled=!known||busy||(!pgControlConnected(s)&&!$('#pg-supported').checked);
+ $('#pg-plan').disabled=!known||busy||s.environment?.ready!==true;
+ $('#pg-execute').disabled=!known||busy||s.environment?.ready!==true||s.plan?.validated!==true||s.can_execute!==true;
+ $('#pg-interrupt').disabled=!known||pgRequest||!(s?.busy===true||['failed','stopped'].includes(s?.status));
+ $('#pg-speed').disabled=busy;$('#pg-supported').disabled=busy;
+ $('#pg-support-label').hidden=pgControlConnected(s);
+}
+function pgMediaUrl(value){if(typeof value!=='string'||!value)return null;try{const u=new URL(value,location.href);return u.origin===location.origin&&['http:','https:'].includes(u.protocol)?u.href:null;}catch{return null;}}
+function pgTiming(){
+ const s=pgSnapshot,p=s?.progress||{},delta=s?.busy?(performance.now()-pgReceived)/1000:0;
+ const elapsed=Number.isFinite(p.elapsed_s)?p.elapsed_s+delta:null,estimate=Number.isFinite(p.estimate_s)?p.estimate_s:null;
+ const stageElapsed=Number.isFinite(p.stage_elapsed_s)?p.stage_elapsed_s+(p.stage_status==='running'?delta:0):null;
+ const eta=Number.isFinite(p.eta_s)?p.eta_s-delta:estimate!==null&&elapsed!==null?estimate-elapsed:null;
+ const bar=$('#pg-progress'),percent=Number.isFinite(p.percent)?p.percent:s?.busy&&estimate>0?Math.min(95,100*elapsed/estimate):null;
+ if(Number.isFinite(percent))bar.value=Math.max(0,Math.min(s.busy?99:100,percent));else bar.removeAttribute('value');
+ text('pg-timing',`${p.label||'当前步骤'} · 本段已用 ${stageElapsed===null?'—':secondsLabel(stageElapsed)}${Number.isFinite(p.stage_estimate_s)?' / 本段预计 '+secondsLabel(p.stage_estimate_s):''} · 本次总用时 ${elapsed===null?'—':secondsLabel(elapsed)} · 总预计 ${estimate===null?'—':secondsLabel(estimate)}${p.estimate_source?'（'+p.estimate_source+'）':''}${s?.busy?' · '+(eta===null?'剩余时间尚无可靠估计':eta>0?'预计还需 '+secondsLabel(eta):'已超过预估，等待完成回执'):''}${p.next_label?' · 下一步：'+p.next_label:''}`);
+ const body=$('#pg-stages');body.replaceChildren();const labels={pending:'待执行',running:'进行中',ready:'就绪',completed:'完成',failed:'失败',stopped:'停止'};
+ for(const row of p.stages||[]){const tr=document.createElement('tr');for(const value of [row.label,labels[row.status]||row.status,Number.isFinite(row.estimate_s)?secondsLabel(row.estimate_s):'—',Number.isFinite(row.elapsed_s)?secondsLabel(row.elapsed_s+(s?.busy&&row.status==='running'?delta:0)):'—']){const td=document.createElement('td');td.textContent=value;tr.append(td);}body.append(tr);}
+}
+function pgRender(s){
+ pgSnapshot=s;pgReceived=performance.now();pgButtons();pgTiming();
+ text('pg-message',s.message||({running:'正在执行',ready:'已就绪',completed:'本步骤完成',failed:'本步骤失败',stopped:'已停止'}[s.status])||'选择环境准备开始本轮工作。');
+ $('#pg-error').hidden=!(s.error||pgLastError);text('pg-error',s.error||pgLastError);
+ const checks=$('#pg-checks');checks.replaceChildren();for(const item of s.environment?.checks||[]){const badge=document.createElement('span');badge.className='tag '+(item.status==='ready'?'good':item.status==='failed'?'bad':'warn');badge.textContent=(item.label||item.key)+' · '+({ready:'就绪',running:'准备中',pending:'未准备',failed:'失败'}[item.status]||item.status);badge.title=item.message||'';checks.append(badge);}
+ const plan=s.plan||{};text('pg-plan-summary',(plan.validated?'路径验证通过 · ':'尚无可执行计划 · ')+(plan.summary||'夹杯目标：62 mm 胶面净距（65 mm 金属净距）')+(plan.timeline_digest?' · 轨迹 '+plan.timeline_digest.slice(0,12):''));
+ const frame=pgMediaUrl(plan.first_frame_url),img=$('#pg-sim');if(frame){if(img.dataset.url!==frame){img.hidden=true;$('#pg-sim-empty').hidden=false;img.dataset.url=frame;img.src=frame;}}else{img.hidden=true;img.removeAttribute('src');delete img.dataset.url;$('#pg-sim-empty').hidden=false;}
+ const videos=(s.videos||[]).map(v=>({...v,url:pgMediaUrl(v.url)})).filter(v=>v.url),key=JSON.stringify(videos);
+ if(key!==pgVideoKey){pgVideoKey=key;const box=$('#pg-videos');box.replaceChildren();for(const item of videos){const figure=document.createElement('figure'),label=document.createElement('figcaption'),video=document.createElement('video');label.textContent=item.label||'录制视频';video.controls=true;video.muted=true;video.playsInline=true;video.preload='metadata';video.src=item.url;video.setAttribute('aria-label',label.textContent);figure.append(label,video);box.append(figure);}}
+ text('pg-video-status',videos.length?'已保存 '+videos.length+' 路视频 · 可独立回放；结果以本轮状态为准。':s.busy?'本轮录制与视频导出完成后自动显示。':'尚无本轮可回放视频。');pgUpdateCameras();
+}
+async function pgRefresh(){
+ if(pgFetching||pgRequest||document.hidden||!pgPageActive)return;pgFetching=true;const version=pgVersion,controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),5000);
+ try{const r=await fetch('/api/playground',{cache:'no-store',signal:controller.signal});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();if(version===pgVersion)pgRender(s);}
+ catch(e){if(version===pgVersion){pgSnapshot=null;pgButtons();pgUpdateCameras();text('pg-message','Playground 状态不可用：'+e.message+'。操作已停用，等待重新核验。');}}
+ finally{clearTimeout(timeout);pgFetching=false;}
+}
+async function pgAction(action){
+ const button=$('#pg-'+action);if(button.disabled||pgRequest)return;
+ const speed=Number($('#pg-speed').value)/100;if(action!=='interrupt'&&(!Number.isFinite(speed)||speed<.1||speed>1))return;
+ pgRequest=true;++pgVersion;pgSnapshot=null;pgLastError='';pgButtons();text('pg-error','');$('#pg-error').hidden=true;
+ try{await post('/api/playground',action==='interrupt'?{action}:{action,speed_scale:speed,arms_supported:action==='prepare'&&$('#pg-supported').checked});$('#pg-supported').checked=false;}
+ catch(e){pgLastError=e.message+'；请求不会自动重试。';text('pg-error',pgLastError);$('#pg-error').hidden=false;}
+ finally{pgRequest=false;pgButtons();await pgRefresh();}
+}
+function pgStopCamera(key){const c=pgCameras.get(key);++c.generation;clearTimeout(c.timer);c.timer=null;c.controller?.abort();c.controller=null;if(c.blob){URL.revokeObjectURL(c.blob);c.blob=null;}const img=$('#pg-'+key);img.hidden=true;img.removeAttribute('src');$('#pg-'+key+'-empty').hidden=false;}
+async function pgCameraFrame(key,generation){
+ const c=pgCameras.get(key);if(generation!==c.generation)return;
+ const started=performance.now(),controller=new AbortController();c.controller=controller;const timeout=setTimeout(()=>controller.abort(),2500);let failed=false;
+ try{const r=await fetch('/api/playground/camera/'+key+'/frame.jpg',{cache:'no-store',signal:controller.signal});if(!r.ok)throw Error('HTTP '+r.status);const blob=await r.blob();if(generation!==c.generation||controller.signal.aborted)return;const img=$('#pg-'+key),old=c.blob;c.blob=URL.createObjectURL(blob);img.src=c.blob;if(old)URL.revokeObjectURL(old);await img.decode();if(generation!==c.generation)return;img.hidden=false;$('#pg-'+key+'-empty').hidden=true;}
+ catch{failed=true;if(generation===c.generation){$('#pg-'+key).hidden=true;$('#pg-'+key+'-empty').hidden=false;text('pg-'+key+'-empty','画面读取失败，正在重试');}}
+ finally{clearTimeout(timeout);if(generation===c.generation){c.controller=null;c.timer=setTimeout(()=>{c.timer=null;pgCameraFrame(key,generation);},failed?500:Math.max(0,33-(performance.now()-started)));}}
+}
+function pgUpdateCameras(){for(const [key,c]of pgCameras){const active=pgPageActive&&!document.hidden&&$('#playground-pane').open&&pgSnapshot?.cameras?.[key]?.ready===true;if(!active)pgStopCamera(key);else if(!c.controller&&!c.timer)pgCameraFrame(key,c.generation);}}
+$('#pg-sim').onload=()=>{if($('#pg-sim').dataset.url){$('#pg-sim').hidden=false;$('#pg-sim-empty').hidden=true;}};
+$('#pg-sim').onerror=()=>{$('#pg-sim').hidden=true;$('#pg-sim-empty').hidden=false;text('pg-sim-empty','首帧读取失败；尚无可核验图像');};
+for(const action of ['prepare','plan','execute','interrupt'])$('#pg-'+action).onclick=()=>pgAction(action);
+$('#pg-speed').oninput=()=>text('pg-speed-value',$('#pg-speed').value+'%');$('#pg-supported').onchange=pgButtons;
+$('#playground-pane').addEventListener('toggle',pgUpdateCameras);
+document.addEventListener('visibilitychange',()=>{pgUpdateCameras();if(!document.hidden)pgRefresh();});
+window.addEventListener('pagehide',()=>{pgPageActive=false;pgUpdateCameras();});window.addEventListener('pageshow',()=>{pgPageActive=true;pgRefresh();});
+pgRefresh();setInterval(pgRefresh,1000);setInterval(pgTiming,1000);
+
+</script>
+</body>
+</html>
