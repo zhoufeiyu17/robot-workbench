@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -18,6 +19,18 @@ import traceback
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT/'calibration'), str(ROOT/'calibration/infra'), str(ROOT/'rule_based_workbench')]
 from probe_owner_physx import preflight, save
+
+
+def plant_joint_offsets(base):
+    """Fixed plant-only truth, ordered left J1..J6 then right J1..J6."""
+    values=base.get('plant_joint_offsets_rad',[0.]*12)
+    if not isinstance(values,list) or len(values)!=12 or any(type(q) not in (int,float) for q in values):
+        raise ValueError('plant_joint_offsets_rad must contain twelve finite numbers')
+    try:offsets=tuple(float(q) for q in values)
+    except OverflowError as error:raise ValueError('plant_joint_offsets_rad must contain twelve finite numbers') from error
+    if not all(math.isfinite(q) for q in offsets):
+        raise ValueError('plant_joint_offsets_rad must contain twelve finite numbers')
+    return offsets
 
 
 def install_notification(workflow,workbench,notify):
@@ -181,7 +194,7 @@ def run(args, base, nominal):
             nominal_candidate_sha256=hashlib.sha256(Path(nominal['candidate']).read_bytes()).hexdigest(),
             plant_base_case=base['case_id'],estimator_reads_this_file=False))
         plant=IsaacPlant(env);clock=SimulationClock()
-        backend=PhysxBackend(plant,joint_offsets=[0.]*12,metal_gap_offset_mm=.008,event=event)
+        backend=PhysxBackend(plant,joint_offsets=args.plant_joint_offsets_rad,metal_gap_offset_mm=.008,event=event)
         source_clock=clock_spec('fake',source_clock_id=backend.source_clock_id)
         plant_fixture=dict(source_clock_id=backend.source_clock_id,joint_offsets_rad=list(backend.offsets),metal_gap_offset_mm=backend.gap_offset)
         save(args.output/'plant-fixture.json',plant_fixture)
@@ -410,12 +423,15 @@ def main():
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
         args.collection_spec=load_collection_contract(args.collection_contract,args.output,args.gpu,args.duration_wall_s)
-    base=json.loads(args.base.read_text());nominal=nominal_inputs(args.nominal_config)
+    base=json.loads(args.base.read_text())
+    args.plant_joint_offsets_rad=plant_joint_offsets(base)
+    nominal=nominal_inputs(args.nominal_config)
     binding=base['lanes']['source']['configuration']['cameras']['calibration_binding']
     if (nominal['asset_seal_sha256']!=binding['a1_sha256'] or
             nominal['asset_geometry_id']!=binding['geometry_id']):
         raise ValueError('nominal estimator assets differ from this frozen plant A1 identity')
     checked=preflight(base)
+    checked['plant_joint_offsets_rad']=list(args.plant_joint_offsets_rad)
     if args.collection_spec:
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
