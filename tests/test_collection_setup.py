@@ -24,6 +24,7 @@ from a1_isaac_assets import prepare as prepare_assets
 from a1_asset_validation import validate_assets
 from run_pipeline import load_config,pinned_files,transport
 from planner_service import decode_private_spec
+from launch_environment import clean_command
 from real_acquisition import validate_config as validate_acquisition
 
 
@@ -169,7 +170,7 @@ def main(a1,roles=4):
             decoded=decode_private_spec(private.read_bytes(),spec['spec_sha256'])
             assert decoded['session_id']==execution['session_id'] and 'owner_token' not in spec
             assert len(spec['socket'].encode())<104 and len(cfg['detector_service']['socket'].encode())<104
-            assert transport(cfg,'dsw-scene','true')==['bash','-c','true']
+            assert transport(cfg,'dsw-scene','true')==clean_command(['bash','-c','true'])
             bridge=read(configured['collection_config']);validate_acquisition(bridge['preparation'])
             assert bridge['preparation']['acquisition']['transport']['endpoint'] is None
             write(root/'collection-binding.json',read(configured['initial_trusted_binding_source']))

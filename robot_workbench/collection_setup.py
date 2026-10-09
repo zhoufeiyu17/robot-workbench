@@ -138,6 +138,8 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         env={'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':execution['session_id']},
         gpu_execution_required=True,executed=False,
         purpose='new planning/model assets only; fixed observation plant is never replaced')
+    from run_pipeline import isaac_environment
+    conversion['env']=isaac_environment({**base,'planning_backend':'native','remote_run_root':str(output/'conversion')},'dsw-scene')
     if execution['max_processes']==5:conversion['argv']+=['--execution-json',json.dumps(execution)]
     pins[str(wb/'a1_isaac_assets.py')]=sha(wb/'a1_isaac_assets.py')
     setup=dict(schema_version='resident_collection_setup.v1',status='awaiting_native_asset_conversion',

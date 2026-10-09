@@ -105,7 +105,8 @@ class PreviewService:
         args=['/isaac-sim/python.sh','-u','-B',spec['script'],'--config',spec['config_path'],
             '--output',str(output),'--token-file',spec['token_file'],'--port',str(spec['port']),
             '--render-gpu','1','--duration-s',str(budget),'--display-only','--execution-json',json.dumps(self.execution)]
-        return ['python3','-B',str(ROOT/'rule_based_workbench/owned_process.py'),'--timeout',str(budget),'--',*args]
+        from launch_environment import owned_command
+        return owned_command(ROOT/'rule_based_workbench',args,budget)
 
     def _start(self):
         try:
@@ -121,10 +122,14 @@ class PreviewService:
                 raise ValueError('frozen renderer inputs changed')
             output=Path(self.spec['root'])/('frames-'+secrets.token_hex(8))
             self.log=(output.parent/(output.name+'.log')).open('xb')
-            env={**os.environ,'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':self.execution['session_id'],
+            from launch_environment import clean_environment,clean_command,owned_command
+            env={'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':self.execution['session_id'],
                 'PYTHONPATH':':'.join((str(ROOT/'rule_based_workbench'),str(ROOT/'calibration/infra'),str(ROOT/'calibration'),self.deps)),
                 'PYTHONNOUSERSITE':'1','OMP_NUM_THREADS':'4','MKL_NUM_THREADS':'4','OPENBLAS_NUM_THREADS':'1'}
-            self.process=subprocess.Popen(self.launch(budget,output),env=env,stdout=self.log,stderr=subprocess.STDOUT)
+            command=self.launch(budget,output)
+            cut=command.index('--')
+            command=owned_command(ROOT/'rule_based_workbench',clean_command(command[cut+1:],env),budget)
+            self.process=subprocess.Popen(command,env=clean_environment(),stdout=self.log,stderr=subprocess.STDOUT)
             ready_deadline=min(time.monotonic()+120,time.monotonic()+budget)
             while time.monotonic()<ready_deadline and not self.closed.wait(.1):
                 if self.process.poll() is not None:raise RuntimeError('owned renderer exited before readiness')

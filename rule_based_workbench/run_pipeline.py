@@ -15,6 +15,7 @@ import time
 
 from integration import DualGpuPipeline, PIPELINE_LANES
 from runtime_progress import estimates
+from launch_environment import HOST_PYTHON,clean_command,owned_command
 from live_preview import PREVIEW_CAMERAS, camera_frame_path, receive_stream
 from playback import FILES as PLAYBACK_FILES, validate as validate_playback
 
@@ -258,13 +259,13 @@ def transport(config, side, command, *, timeout=None):
     if validate(config) is None:return ssh(side,command)
     argv=['bash','-c',command]
     if timeout is not None:
-        argv=['python3','-B',config['workbench_code']+'/owned_process.py','--timeout',str(timeout),'--',*argv]
-    return argv
+        return owned_command(config['workbench_code'],argv,timeout)
+    return clean_command(argv)
 
 
 def python_command(script, *args):
     values = list(map(str, args))
-    command = shlex.join(["python3", "-I", "-B", "-c", script, *values])
+    command = shlex.join(clean_command([HOST_PYTHON, "-I", "-B", "-c", script, *values]))
     if len(command.encode()) < 32768:
         return command
     # Large SHA manifests exceed Linux's per-argument limit; decode inside Python.
@@ -274,7 +275,7 @@ def python_command(script, *args):
     bootstrap = ("import base64,json,sys,zlib; "
                  "s,a=json.loads(zlib.decompress(base64.b64decode(sys.argv[1]))); "
                  "sys.argv=['-c',*a]; exec(compile(s,'<remote>','exec'))")
-    return shlex.join(["python3", "-I", "-B", "-c", bootstrap, payload])
+    return shlex.join(clean_command([HOST_PYTHON, "-I", "-B", "-c", bootstrap, payload]))
 
 
 def pull_telemetry(side, remote_path, local_path, config=None):
@@ -332,7 +333,7 @@ def start_preview_stream(config, side, label, local_path, camera="base_0"):
     local_path.parent.mkdir(parents=True, exist_ok=True)
     workbench = config["workbench_code"]
     command = "cd " + shlex.quote(config["remote_run_root"]) + " && " + shlex.join([
-        "env", "PYTHONPATH=" + workbench, "python3", "-B", workbench + "/live_preview.py", "stream",
+        "env", "PYTHONPATH=" + workbench, HOST_PYTHON, "-B", workbench + "/live_preview.py", "stream",
         "--path", remote, "--hz", "30"])
     process = subprocess.Popen(transport(config,side, ("exec bash -c " if config.get('execution') else "bash -c ") + shlex.quote(command)),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -407,8 +408,8 @@ def build_plan(config, contract):
 
     def command(side, args, overrides=None):
         settings = {**env(side), **(overrides or {})}
-        return "cd " + shlex.quote(root) + " && " + shlex.join([
-            "env", *[f"{k}={v}" for k, v in settings.items()], "python3", "-B", "-c", AFFINITY_EXEC, *args])
+        return "cd " + shlex.quote(root) + " && " + shlex.join(clean_command(
+            [HOST_PYTHON, "-I", "-B", "-c", AFFINITY_EXEC, *args],settings))
 
     def gpu_guard(side):
         guard=gpu_check_command(c,side)
@@ -433,7 +434,7 @@ def build_plan(config, contract):
         else:
             wall_budget=limits.get('stage_wall_seconds',{}).get(name,limits.get('max_replay_time_seconds',1800) if name.startswith('replay-') else 600)
             owned_budget=max(1,wall_budget-50)
-        args = ["python3", "-B", wb + "/owned_process.py", "--timeout",str(owned_budget),"--",*args]
+        args = [HOST_PYTHON, "-I", "-B", wb + "/owned_process.py", "--timeout",str(owned_budget),"--",*args]
         stage(name, side, gpu_guard(side) + " && " + command(side, args, overrides),
                        group="replay" if "replay-" in name else None)
         stages[-1]['gpu_work']=True
@@ -670,7 +671,8 @@ def bounded_command(stage, remaining):
         raise ValueError("unexpected remote timeout wrapper")
     remote[3] = str(seconds)
     argv[-1] = shlex.join(remote)
-    if len(argv)>5 and argv[2].endswith('/owned_process.py') and argv[3]=='--timeout':argv[4]=str(seconds)
+    for index,value in enumerate(argv[:-2]):
+        if value.endswith('/owned_process.py') and argv[index+1]=='--timeout':argv[index+2]=str(seconds)
     return argv, seconds
 
 

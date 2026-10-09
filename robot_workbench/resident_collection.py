@@ -247,10 +247,11 @@ class CollectionPreparation:
         if self.closed.is_set():raise InterruptedError('resident preparation cancelled before conversion')
         gpu_check({'execution':execution})
         conversion=setup['conversion'];wb=Path(script).parents[1]/'rule_based_workbench'
-        command=['python3','-B',str(wb/'owned_process.py'),'--timeout',str(budget),'--',*conversion['argv']]
+        from launch_environment import owned_command,clean_environment,clean_command
+        command=owned_command(wb,clean_command(conversion['argv'],conversion['env']),budget)
         self._status('converting_planning_assets',output=str(output),deadline_wall_ns=self.deadline_wall_ns)
         with (output/'conversion.log').open('xb') as log:
-            self.process=subprocess.Popen(command,env={**os.environ,**conversion['env']},stdout=log,stderr=subprocess.STDOUT)
+            self.process=subprocess.Popen(command,env=clean_environment(),stdout=log,stderr=subprocess.STDOUT)
             while self.process.poll() is None:
                 if self.closed.wait(.2):
                     self.process.terminate();self.process.wait(timeout=30);raise InterruptedError('resident conversion cancelled')

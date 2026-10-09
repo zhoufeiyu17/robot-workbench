@@ -92,11 +92,12 @@ sys.exit(child.returncode or 0)
 
 def launch_command(c):
     from run_pipeline import python_command, AFFINITY_EXEC,lane
+    from launch_environment import HOST_PYTHON
     s=c['detector_service']
     args=['env','CUDA_VISIBLE_DEVICES='+str(lane(c,'simulated-real')['gpu']),'PYTHONPATH=','PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',
           'OMP_NUM_THREADS=4','MKL_NUM_THREADS=4','MAX_JOBS=4','CUDA_HOME='+c['detection_cuda_home'],
           'PATH='+c['detection_cuda_home']+'/bin:'+str(PurePosixPath(c['detection_python']).parent)+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-          'python3','-B','-c',AFFINITY_EXEC,c['detection_python'],'-u','-B',c['detection_script'],
+          HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,c['detection_python'],'-u','-B',c['detection_script'],
           '--serve','--service-root',s['root'],'--socket',s['socket'],'--owner-token',s['owner_token'],
           '--node-config',c['detection_node_config'],'--allowed-output-root',s['allowed_output_root']]
     for root in s['allowed_read_roots']:

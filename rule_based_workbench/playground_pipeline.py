@@ -14,6 +14,7 @@ from integration import _digest
 from run_pipeline import load_config, python_command, ssh, transport, lane, bounded_command, AFFINITY_EXEC, isaac_environment
 from detector_service import gpu_check_command
 from real_contract import namespace, validate_namespace, owner_matches_environment
+from launch_environment import HOST_PYTHON,clean_command
 
 NATIVE_STAGE_STATUS = {'playground-geometry-inputs':'geometry-inputs-ready',
                        'playground-first-frame':'first-frame-ready',
@@ -77,9 +78,9 @@ def native_stage(cfg, mode, output, *, speed=.3, plan_path=None, execution_timel
     if execution_timeline_path:args+=['--execution-timeline',execution_timeline_path]
     if cfg.get('environment')=='fake':args+=['--environment','fake']
     if cfg.get('execution'):args+=['--execution-json',json.dumps(cfg['execution'])]
-    environment=[key+'='+value for key,value in isaac_environment(cfg,'dsw-scene').items()]
+    environment=isaac_environment(cfg,'dsw-scene')
     seconds=timeout_s
-    command=gpu_check_command(cfg,'dsw-scene')+' && '+shlex.join(['env',*environment,'python3','-B','-c',AFFINITY_EXEC,*args])
+    command=gpu_check_command(cfg,'dsw-scene')+' && '+shlex.join(clean_command([HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,*args],environment))
     return dict(name='playground-'+mode,side='dsw-scene',timeout_s=seconds,
                 result_path=output+'/result.json',
                 **({'execution_config':{'execution':cfg['execution'],'workbench_code':cfg['workbench_code']}} if cfg.get('execution') else {}),
@@ -124,8 +125,7 @@ def geometry_stage(cfg,output,*,speed=.3,initial=None):
             CUDA_HOME=install+'/cuda-overlay',LD_LIBRARY_PATH=install+'/cuda-overlay/lib64',
             TORCH_EXTENSIONS_DIR=cache+'/torch',WARP_CACHE_PATH=cache+'/warp',XDG_CACHE_HOME=cache,
             MAX_JOBS='4',TORCH_CUDA_ARCH_LIST='12.0')
-    command=shlex.join(['env',*[key+'='+value for key,value in environment.items()],
-                       'python3','-B','-c',AFFINITY_EXEC,*args])
+    command=shlex.join(clean_command([HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,*args],environment))
     if gpu:command=gpu_check_command(cfg,'dsw-scene')+' && '+command
     return dict(name='playground-plan',side='dsw-scene',timeout_s=600,
                 expected_native_status=expected,

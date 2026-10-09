@@ -51,7 +51,8 @@ def main():
         def env(stage):
             shell=shlex.split(stage['argv'][-1])[-1]
             argv=shlex.split(shell.split(' && ')[-1])
-            values={p.split('=',1)[0]:p.split('=',1)[1] for p in argv[1:argv.index('python3')]}
+            from launch_environment import HOST_PYTHON
+            values={p.split('=',1)[0]:p.split('=',1)[1] for p in argv[:argv.index(HOST_PYTHON)] if '=' in p}
             return shell,argv,values
         shell,argv,values=env(accelerated)
         assert values['CUDA_VISIBLE_DEVICES']=='0' and shell.startswith('GPU_IDLE_CHECK && ')

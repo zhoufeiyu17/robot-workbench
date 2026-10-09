@@ -19,6 +19,7 @@ from local_execution import TARGET,validate,gpu_check
 from run_pipeline import PATH_KEYS,PIPELINE_LANES,transport,ssh,isaac_environment,load_config,build_plan,bounded_command,pinned_files,digest
 from playground_pipeline import native_stage,geometry_stage,fetch
 from planner_service import startup_config,validate_config
+from launch_environment import clean_command
 
 WB=Path(__file__).resolve().parent
 
@@ -81,12 +82,12 @@ class LocalExecutionTest(unittest.TestCase):
         stages=build_plan(cfg,contract)
         detection=next(stage for stage in stages if stage['name']=='detect')
         self.assertIn('ROBOT_WORKBENCH_DETECTOR_RUNTIME_ROOT=/remote/input/detector-runtime',detection['argv'][-1])
-        self.assertTrue(all(s['argv'][0]=='python3' and s['argv'][2].endswith('/owned_process.py') for s in stages))
+        self.assertTrue(all(any(value.endswith('/owned_process.py') for value in s['argv']) for s in stages))
         for stage in stages:
             self.assertNotIn('root@47.116.111.83',stage['argv'])
             self.assertNotIn('HostKeyAlias',str(stage['argv']))
         with patch('run_pipeline.ssh',side_effect=AssertionError('SSH fallback')):
-            self.assertEqual(transport(cfg,'dsw-scene','command'),['bash','-c','command'])
+            self.assertEqual(transport(cfg,'dsw-scene','command'),clean_command(['bash','-c','command']))
             with self.assertRaises(ValueError):transport({**cfg,'execution':{**cfg['execution'],'gpu_index':0}},'dsw-scene','command')
         native=native_stage(cfg,'geometry-inputs',cfg['remote_run_root']+'/scene')
         self.assertIn('--gpu 1',native['argv'][-1]);self.assertIn(TARGET['instance_id'],native['argv'][-1])
@@ -94,7 +95,7 @@ class LocalExecutionTest(unittest.TestCase):
         plan=geometry_stage(cfg,cfg['remote_run_root']+'/plan')
         self.assertIn('CUDA_VISIBLE_DEVICES=1',plan['argv'][-1])
         bounded,seconds=bounded_command(native,100)
-        self.assertEqual(bounded[4],str(seconds))
+        self.assertEqual(bounded[bounded.index('--timeout')+1],str(seconds))
 
     def test_local_fetch_uses_local_transport(self):
         source=self.root/'source';source.write_bytes(b'owned output')
