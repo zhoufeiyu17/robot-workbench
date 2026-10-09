@@ -31,6 +31,10 @@ export function actionPermission(state, action, options = {}) {
   }
   if (action === 'connect' && state.device?.environment === 'physical' && !options.supported)
     return {allowed:false, reason:'请先确认当前双臂已可靠支撑'};
+  if(action==='delete_confirm'){
+    if(!state.workflow?.deletion_preview?.id||state.workflow.deletion_preview.valid!==true)return {allowed:false,reason:state.workflow?.deletion_preview?.reason||'请先预览具体删除范围'};
+    if(!options.deleteClearance)return {allowed:false,reason:'请先勾选确认本次预览中的删除范围'};
+  }
   return {allowed:true, reason:''};
 }
 
@@ -61,14 +65,16 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
   let resultActions=[],queueActions=[],replayControlsKey='',manualQueueKey='';
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
+  let deletionKey='';const confirmedDeletions=new Set();
   let previewView='target',meshCamera='head',meshCandidate='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
   let overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0},overviewDirty=false,overviewSending=false,overviewPointer=null;
   const displayRequests=new Map(),previewFloors=new Map(),previewErrors=new Map(),planPreviewButtons=[];
   const jointInputs=role=>[...el('joint-inputs').querySelectorAll('input')].filter(input=>input.dataset.role===role);
   const key = () => context.environment + '/' + context.business;
-  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked});
+  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked,deleteClearance:el('delete-clearance').checked});
   const permission = action => ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
-    ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
+    ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
+    ? {allowed:false,reason:'本次删除确认已提交，请查看删除回执；旧预览不能重复确认'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
   const make = (tag, content, className) => { const node = doc.createElement(tag); if (content !== undefined) node.textContent = textValue(content); if(className)node.className=className; return node; };
   function notice(message, active = false, waitingForState = false) { waitingForStateNotice=waitingForState;setText('request-status',message); el('request-status').classList.toggle('pending',active); }
   function gate(id, action, extraReason = '') {
@@ -129,6 +135,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     for(const id of ['mesh-camera','mesh-candidate'])el(id).disabled=!permission('preview_mesh').allowed||displayBusy('mesh');
     for(const button of planPreviewButtons)button.disabled=!permission('preview_target').allowed||displayBusy('target');
     gate('preview-recover','preview_recover',!preview?.recovery?.allowed?(preview?.recovery?.reason||'当前没有后端允许的渲染恢复操作'):displayRequests.has('recovery')?'渲染服务恢复请求正在处理':'');
+    gate('delete-all','delete_preview',(state?.results||[]).some(row=>row.kind==='capture')?'':'当前没有可删除的原始批次');
+    gate('delete-confirm','delete_confirm');gate('delete-cancel','delete_cancel');
   }
   function manualReady() {
     const m=state?.manual;
@@ -380,6 +388,21 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     }
   }
   function renderResults() {
+    const deletion=state?.workflow?.deletion_preview;
+    el('delete-tools').hidden=context.business!=='calibration';el('deletion-preview').hidden=context.business!=='calibration'||!deletion;
+    const nextDeletionKey=JSON.stringify([key(),deletion?.id]);
+    if(nextDeletionKey!==deletionKey){deletionKey=nextDeletionKey;el('delete-clearance').checked=false;if(deletion)el('deletion-preview').scrollIntoView?.({block:'center'});}
+    if(deletion){const installed=deletion.preserved_installed;
+      renderDetails('deletion-details',[{label:'删除范围',value:deletion.scope==='all'?'全部本地原始批次':'单个本地原始批次'},{label:'本地根目录',value:deletion.root},
+        {label:'批次列表',value:(deletion.batches||[]).join('\n')},{label:'图像文件数',value:deletion.image_files},{label:'全部文件数',value:deletion.files},
+        {label:'占用空间',value:Number.isFinite(deletion.bytes)?(deletion.bytes<1024?deletion.bytes+' B':deletion.bytes<1048576?(deletion.bytes/1024).toFixed(2)+' KiB':(deletion.bytes/1048576).toFixed(2)+' MiB'):'未知'},
+        {label:'保留的结果版本',value:deletion.preserved_versions?.length?deletion.preserved_versions.join(' / '):'本次范围没有已登记版本'},
+        {label:'保留的安装组',value:installed?'头部 '+installed.head_id+' / 双腕 '+installed.wrist_id:'当前没有安装组'},
+        {label:'保留内容',value:(deletion.preserved||[]).join('；')},{label:'确认后会清空',value:deletion.clears?.length?deletion.clears.join('；'):'不清空其他批次的求解来源或显示选择'},
+        {label:'边界',value:deletion.detail},{label:'预览有效性',value:deletion.valid?'有效；确认时后端仍会重新核对文件清单':deletion.reason||'预览已失效'}]);
+    }
+    const deletionResult=state?.workflow?.deletion_result;
+    setText('deletion-result',(deletionResult?.message||'')+(deletionResult?.overlay_error?'；叠加清理未完成：'+deletionResult.overlay_error:''));
     const installed=state?.workflow?.calibration_tools?.installed;
     el('installed-group').hidden=context.business!=='calibration';
     renderDetails('installed-details',installed?Object.entries(installed).map(([label,value])=>({label:({head_id:'头部结果',wrist_id:'双腕结果',head_version:'头部版本',wrist_version:'双腕版本',verified:'active 文件校验',problems:'校验问题',path:'安装目录',geometry_id:'几何身份',installed_at:'安装时间',acceptance:'验收依据',notes:'说明',environment:'环境'}[label]||label),value:label==='verified'?(value===true?'通过':value===false?'未通过':'未知'):value})):[{label:'当前安装组',value:'尚未安装'}]);
@@ -394,6 +417,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       label.append(make('h3',result.label||result.id),make('p',({head:'头部标定',wrist:'双腕标定',capture:'采集批次',recording:'录制视频'}[result.kind]||result.kind||'结果')+' · '+statusText(result.status)+' · '+result.id));
       if(result.kind!=='recording')addAction(actions,'查看此结果','select_result',{result_id:result.id});
       else actions.append(make('p','下方独立回放','muted'));
+      if(result.kind==='capture')addAction(actions,'预览删除原始批次','delete_preview',{scope:'batch',result_id:result.id});
+      if(result.raw_deleted)label.append(make('p','原始批次已删除；已登记版本、参数和依赖快照保留。'));
       if(result.install){const install=result.install;label.append(make('p','安装组：头部 '+String(install.head_result_id||result.id).slice(0,12)+' + 双腕 '+String(install.wrist_result_id||'尚无').slice(0,12)));addAction(actions,install.installed?'当前有效标定':'安装这组头部与双腕','install',{result_id:result.id},install);}
       if(result.details){
         const details=make('details'),list=make('dl',undefined,'detail-list');details.append(make('summary','质量指标、依赖与来源'));
@@ -488,6 +513,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const body={environment:context.environment,business:context.business,request_id:requestId,...extra};
     if(action==='preview_batch'&&body.queue_revision===undefined)body.queue_revision=state?.workflow?.calibration_tools?.queue_revision;
     if(action==='fit_batch'&&body.batch_id===undefined)body.batch_id=state?.workflow?.calibration_tools?.fit_source_id;
+    if(action==='delete_confirm'){body.delete_preview_id=state.workflow.deletion_preview.id;body.confirmed=el('delete-clearance').checked;confirmedDeletions.add(key()+'/'+body.delete_preview_id);}
     if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?el('clearance').checked:true;}
     if(action==='connect'&&context.environment==='physical')body.arms_supported=el('supported').checked;
     const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),controller=new AbortController();
@@ -570,6 +596,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('mesh').addEventListener('change',sendMesh);
     el('reconnect-images').addEventListener('click',reconnectImages);
     el('preview-recover').addEventListener('click',()=>sendDisplay('preview_recover'));
+    el('delete-all').addEventListener('click',()=>send('delete_preview',{scope:'all'}));
+    el('delete-clearance').addEventListener('change',renderGates);
+    el('delete-confirm').addEventListener('click',()=>send('delete_confirm'));
+    el('delete-cancel').addEventListener('click',()=>send('delete_cancel'));
     for(const id of ['clearance','supported'])el(id).addEventListener('change',renderGates);
     for(const id of ['jaw-left','jaw-right','jaw-speed'])el(id).addEventListener('input',editManual);
     el('manual-preview').addEventListener('click',()=>manualPreview());

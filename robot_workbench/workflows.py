@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 CALIBRATION_STAGES=('head.plan','head.capture','head.solve','wrist.plan','wrist.capture','wrist.solve','install')
 CALIBRATION_TOOLS=('configure_calibration','plan_batch','preview_batch','fit_source','fit_batch')
+HISTORY_ACTIONS=('delete_preview','delete_confirm','delete_cancel')
 
 
 def calibration_stage(state):
@@ -61,6 +62,7 @@ class CalibrationWorkflow:
         self.active=False
         self.operation=None
         self.tool_catalog={}
+        self.deletion=None
         self.preview_key=None
         self.installed_id=None
         self.app.on_calibration_installed=self.calibration_installed
@@ -134,6 +136,8 @@ class CalibrationWorkflow:
                     status=row.get('pair_status') or row.get('status','candidate'))
                 item['details']={key:deepcopy(row[key]) for key in ('version','environment','robot_source','simulation_only',
                     'batch','file','objective','acceptance','optimizer','metrics_rectified_px','mesh_metrics','left','right','capture_coverage') if key in row}
+                source=row.get('batch') if row['kind']=='head' else str(Path(row.get('file','')).parent)
+                item['raw_deleted']=bool(source and hasattr(self.app,'deleted_batch') and self.app.deleted_batch(source))
                 if row.get('version'):
                     item['download_url']='/api/calibration-file?'+urlencode(dict(environment=self.device.environment,result_id=row['id']))
                 if row['kind']=='head':
@@ -192,7 +196,58 @@ class CalibrationWorkflow:
             self.value=value
 
     def snapshot(self):
-        with self.lock:return deepcopy(self.value)
+        with self.lock:value=deepcopy(self.value)
+        value['deletion_preview']=self.deletion_preview()
+        value['deletion_result']=deepcopy(getattr(self,'deletion_result',None))
+        return value
+
+    def deletion_preview(self):
+        with self.lock:pending=deepcopy(getattr(self,'deletion',None))
+        if not pending:return None
+        value=pending['view'];record=getattr(self.app,'delete_tokens',{}).get(value['id'])
+        value['valid']=bool(record and record[2]>time.monotonic())
+        value['reason']=None if value['valid'] else '删除预览已过期或被替换，请重新预览范围'
+        return value
+
+    def delete_history(self,action,body):
+        if action=='delete_cancel':
+            with self.lock:self.deletion=None
+            return {'message':'已取消本次删除确认，原始批次未删除'}
+        if action=='delete_preview':
+            with self.lock:self.deletion=None;self.deletion_result=None
+            scope=body.get('scope','batch')
+            if scope=='all':request={'scope':'all'}
+            elif scope=='batch':
+                identity=body.get('result_id')
+                if not isinstance(identity,str) or not identity.startswith('capture:'):raise ValueError('请选择结果列表中的原始采集批次')
+                request={'id':identity[8:]}
+            else:raise ValueError('删除范围必须为单批或全部原始批次')
+            preview=self.app.action('/api/history-delete-preview',request)
+            images=sum(Path(name).suffix.lower() in ('.png','.jpg','.jpeg','.webp','.tif','.tiff','.bmp')
+                for batch in preview['batches'] for name,_,_ in self.app.deletion_inventory(batch)[1])
+            view={key:deepcopy(value) for key,value in preview.items() if key not in ('id','token')}
+            view.update(id=preview['token'],root=str(Path(self.app.output).resolve()),image_files=images,
+                detail='仅删除上列本地原始批次；其他目录不在本次删除范围内。',
+                preserved_installed=self.app.installed_pair(),
+                preserved=['已登记标定版本及依赖快照','当前 active 安装组','关节到位统计日志与汇总','上列删除范围以外的目录'])
+            with self.lock:self.deletion=dict(request=request,view=view)
+            return {'message':'删除范围已核验，请检查结果页的具体预览后明确确认'}
+        with self.lock:pending=deepcopy(getattr(self,'deletion',None))
+        if not pending or body.get('delete_preview_id')!=pending['view']['id'] or body.get('confirmed') is not True:
+            raise ValueError('必须明确确认当前页面展示的删除范围')
+        try:
+            result=self.app.action('/api/history-delete',{**pending['request'],'token':pending['view']['id']})
+        finally:
+            with self.lock:self.deletion=None
+        removed=set(result.get('removed',[]))
+        with self.lock:
+            self.deletion_result=deepcopy(result)
+            self.catalog=[row for row in self.catalog if row['id'] not in {'capture:'+batch for batch in removed}]
+            if (self.replay_context or {}).get('batch_id') in removed:
+                self.replay=[];self.replay_context=None;self.media_files={}
+                self.value.update(replay=[],replay_context=None)
+        self.last_catalog=0.
+        return result
 
     @staticmethod
     def install_identity(snapshot):
@@ -265,6 +320,14 @@ class CalibrationWorkflow:
 
     def allowed(self, action):
         state=self.snapshot()
+        if action in HISTORY_ACTIONS:
+            if action=='delete_cancel':return dict(allowed=bool(state.get('deletion_preview')),reason=None)
+            busy=state.get('busy') or getattr(self.app,'pipeline_running',False) or getattr(self.app,'importing',False) or getattr(self.app,'pending_capture',None) or getattr(self.app,'status',None) in ('RUNNING','PLANNING','CAPTURING','FITTING') or (getattr(self.app,'remote',None) or {}).get('status') in ('EXECUTING','VALIDATING','RUNNING','SETTLING','AWAITING_CAPTURE')
+            if busy:return dict(allowed=False,reason='采集、导入或求解任务进行中，禁止删除原始批次')
+            preview=state.get('deletion_preview')
+            if action=='delete_confirm' and not (preview and preview.get('valid')):
+                return dict(allowed=False,reason=(preview or {}).get('reason') or '请先预览具体删除范围')
+            return dict(allowed=True,reason=None)
         if action=='preview_batch' and not getattr(self.app,'queue',[]):return dict(allowed=False,reason='请先生成标定采样计划')
         if action=='fit_batch' and not getattr(self.app,'selected_batch',None):return dict(allowed=False,reason='请先明确设置求解来源')
         if action=='install' and (not self.device.runtime or self.device.runtime.holder!='calibration'):
@@ -289,7 +352,8 @@ class CalibrationWorkflow:
         elif isinstance(identity,str) and identity.startswith('capture:') and identity[8:] in {r['id'] for r in self.app.history()}:
             kind,row,batch='capture',{},identity[8:]
         else:raise ValueError('所选标定结果或采集批次不存在')
-        view=self.app.review_batch(batch)  # The old API deliberately leaves solver input unchanged.
+        raw_deleted=hasattr(self.app,'deleted_batch') and self.app.deleted_batch(batch)
+        view={'frames':[]} if raw_deleted else self.app.review_batch(batch)  # Replay never changes solver input.
         frames=view.get('frames') or [];index=body.get('frame_index',0)
         if type(index) is not int or index<0 or frames and index>=len(frames):raise ValueError('回放帧索引无效')
         image_urls=frames[index].get('image_urls',{}) if frames else {}
@@ -297,7 +361,7 @@ class CalibrationWorkflow:
         if camera not in ('head','left','right'):raise ValueError('请选择头部或左右腕相机')
         overlay=body.get('overlay',False)
         if type(overlay) is not bool:raise ValueError('overlay 必须是布尔值')
-        overlay_available=kind=='head' and camera=='head' or kind=='wrist' and camera in ('left','right')
+        overlay_available=bool(frames) and not raw_deleted and (kind=='head' and camera=='head' or kind=='wrist' and camera in ('left','right'))
         if overlay:
             if not overlay_available:raise ValueError('当前相机需要匹配的头部或双腕结果')
             image=self.app.historical_overlay(dict(batch_id=batch,frame_index=index,camera=camera,result_id=identity))['image_url']
@@ -321,7 +385,7 @@ class CalibrationWorkflow:
             message=reply.get('message','已选择标定结果')
         context=dict(result_id=identity,batch_id=batch,frame_index=index,frame_count=len(frames),camera=camera,
             cameras=sorted(image_urls),overlay=overlay,overlay_available=overlay_available,
-            message='本帧没有所选相机图像' if frames and not image else '尚无采集帧' if not frames else '')
+            message='原始批次已删除；版本参数与依赖快照保留，无法回放原始图像' if raw_deleted else '本帧没有所选相机图像' if frames and not image else '尚无采集帧' if not frames else '')
         with self.lock:
             self.media_files=files;self.replay=replay;self.replay_context=context
             self.value.update(replay=deepcopy(replay),replay_context=deepcopy(context))
@@ -329,6 +393,7 @@ class CalibrationWorkflow:
 
     def action(self, action, body):
         if not self.allowed(action)['allowed']:raise ValueError(self.allowed(action)['reason'])
+        if action in HISTORY_ACTIONS:return self.delete_history(action,body)
         if action=='generate_plan':
             self.active=True
             self.operation=None

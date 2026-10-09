@@ -322,4 +322,36 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   h.reply(0,value);await settle();assert.equal(h.get('mesh').disabled,true);
   assert.equal(h.get('mesh-reason').textContent,'渲染服务尚未配置');h.app.destroy();
 }
-console.log('PASS unified web: review/stop gates, calibration tools, target and mesh frame identities, display-only actions, coalesced overview, recovery isolation and truthful L1 availability.');
+function deletionSnapshot(){
+  const value=calibrationSnapshot();for(const action of ['delete_preview','delete_confirm','delete_cancel'])value.runtime.allowed_operations[action]={allowed:true};
+  value.results=[{id:'capture:head-batch',kind:'capture',label:'头部批次',status:'completed'}];return value;
+}
+{
+  const h=harness();h.app.start();const value=deletionSnapshot();h.reply(0,value);await settle();
+  const buttons=h.get('results-list').querySelectorAll('button');assert.equal(buttons[1].textContent,'预览删除原始批次');
+  const previewRequest=buttons[1].events.click();let body=JSON.parse(h.requests[1].options.body);
+  assert.equal(h.requests[1].url,'/api/actions/delete_preview');assert.equal(body.result_id,'capture:head-batch');assert.equal(body.scope,'batch');
+  h.reply(1,{message:'请核对范围',job_id:'delete-preview-job'});await previewRequest;
+  value.revision=2;value.workflow.deletion_preview={id:'legacy-preview-one',scope:'all',root:'/fixture/results',batches:['head-batch'],image_files:2,files:5,bytes:4096,preserved_versions:['H001','W001'],preserved_installed:{head_id:'installed-head',wrist_id:'installed-wrist'},preserved:['关节到位统计日志与汇总','当前 active 安装组'],clears:['所选求解批次','实时叠加选择'],detail:'仅本地批次',valid:true};
+  h.reply(2,value);await settle();assert.equal(h.get('deletion-preview').hidden,false);assert.equal(h.get('delete-confirm').disabled,true);
+  assert(h.get('deletion-details').querySelectorAll('dd').some(row=>row.textContent.includes('关节到位统计')));
+  assert(h.get('deletion-details').querySelectorAll('dd').some(row=>row.textContent.includes('所选求解批次')));
+  h.get('delete-clearance').checked=true;h.get('delete-clearance').events.change();assert.equal(h.get('delete-confirm').disabled,false);
+  value.revision=3;value.workflow.deletion_preview.valid=false;value.workflow.deletion_preview.reason='预览已过期';h.app.poll();h.reply(3,value);await settle();assert.equal(h.get('delete-confirm').disabled,true);
+  value.revision=4;value.workflow.deletion_preview={...value.workflow.deletion_preview,id:'legacy-preview-two',valid:true,reason:null};h.app.poll();h.reply(4,value);await settle();assert.equal(h.get('delete-clearance').checked,false,'new scope preview always needs a new explicit confirmation');
+  h.get('delete-clearance').checked=true;h.get('delete-clearance').events.change();const confirmation=h.get('delete-confirm').events.click();
+  body=JSON.parse(h.requests[5].options.body);assert.equal(h.requests[5].url,'/api/actions/delete_confirm');assert.equal(body.delete_preview_id,'legacy-preview-two');assert.equal(body.confirmed,true);assert.equal(body.token,undefined,'token is never entered through a generic input');assert.equal(body.scope,undefined,'confirmation cannot expand the server-owned scope');
+  h.reply(5,{message:'删除请求已受理',job_id:'delete-job'});await confirmation;value.revision=5;h.reply(6,value);await settle();assert.equal(h.get('delete-confirm').disabled,true,'old cached preview must not allow a second confirmation');
+  value.revision=6;value.workflow.deletion_preview=null;value.workflow.deletion_result={message:'已删除原始批次，标定版本保留'};value.results=[];h.app.poll();h.reply(7,value);await settle();assert.equal(h.get('deletion-preview').hidden,true);assert.match(h.get('deletion-result').textContent,/标定版本保留/);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=deletionSnapshot();h.reply(0,value);await settle();
+  assert.equal(h.get('delete-all').disabled,false,'an idle selected fit source does not add a new all-delete gate');
+  h.get('delete-all').events.click();assert.equal(JSON.parse(h.requests[1].options.body).scope,'all');assert.equal(h.requests[1].url,'/api/actions/delete_preview');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=deletionSnapshot();value.runtime.allowed_operations.delete_preview={allowed:false,reason:'采集任务进行中'};value.runtime.allowed_operations.delete_confirm={allowed:false,reason:'采集任务进行中'};
+  value.workflow.deletion_preview={id:'pending-delete',valid:true,batches:['head-batch'],preserved:[]};h.reply(0,value);await settle();h.get('delete-clearance').checked=true;h.get('delete-clearance').events.change();
+  assert.equal(h.get('delete-all').disabled,true);assert.equal(h.get('delete-confirm').disabled,true);h.get('delete-cancel').events.click();assert.equal(h.requests[1].url,'/api/actions/delete_cancel');assert.equal(h.requests.filter(row=>row.url==='/api/actions/delete_confirm').length,0);h.app.destroy();
+}
+console.log('PASS unified web: truthful stages/media, read-only preview, recovery isolation and explicit legacy deletion preview/confirmation gates.');

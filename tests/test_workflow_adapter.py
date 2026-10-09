@@ -51,6 +51,85 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.service=SimpleNamespace(add_review=Mock(),lock=threading.Lock(),reviews={('fake','collection'):{'id':'old'}})
         return workflow,state
 
+    def legacy_library(self):
+        root=Path(__file__).resolve().parents[1]
+        sys.path[:0]=[str(root/'calibration'),str(root/'calibration/infra'),str(root/'calibration/examples/scripts/debug'),str(root/'calibration/tests')]
+        from test_joint_head_workbench_library import LibraryTests
+        legacy=LibraryTests();legacy.setUp();self.addCleanup(legacy.doCleanups)
+        flow=self.calibration();flow.app=legacy.app;c=legacy.app
+        c.live=False;c.mesh_rendering_enabled=False;c.calibration_root=c.output/'calibration-diagnostics'
+        c.runtime_state=lambda:dict(status=c.status,workflow=c.workflow,counts=c.counts(),selected_batch=c.selected_batch)
+        return legacy,flow
+
+    def test_original_delete_all_preserves_installed_group_versions_and_arrival_log(self):
+        legacy,flow=self.legacy_library();c=legacy.app;head,wrist=legacy.pair();extra=legacy.batch('extra-source')
+        c.action('/api/calibration-install',{'head_result_id':head['id'],'wrist_result_id':wrist['id']})
+        installed=c.installed_pair();active=Path(installed['path'])
+        active_bytes={str(path.relative_to(active)):path.read_bytes() for path in active.rglob('*') if path.is_file()}
+        stats=c.arrival_store('simulated')
+        stats.record(dict(event_id='arrival-one',batch_id='head-capture',workflow='head',status='success',
+            q_target_rad=[0.]*12,q_actual_rad=[.001]*12,timestamp_ns=1,owner_pid=1,command_epoch=0,plan_sha256='a'*64))
+        report=stats.summary();arrival_bytes={key:Path(report[key]).read_bytes() for key in ('raw_path','summary_path')}
+        c.load_batch('extra-source');flow.refresh()
+        flow.action('select_result',{'result_id':'capture:head-capture'})
+        self.assertEqual(c.selected_batch,'extra-source','ordinary browsing must not select a solver source')
+        flow.action('delete_preview',{'scope':'all'});preview=flow.snapshot()['deletion_preview']
+        self.assertTrue(preview['valid']);self.assertIn('extra-source',preview['batches'])
+        self.assertIn('所选求解批次',preview['clears']);self.assertIn('实时叠加选择',preview['clears'])
+        self.assertGreaterEqual(preview['image_files'],4);self.assertTrue(preview['preserved_versions'])
+        self.assertEqual(preview['preserved_installed'],installed)
+        self.assertTrue(extra.exists(),'a deletion preview may not remove raw data')
+        with self.assertRaisesRegex(ValueError,'明确确认'):
+            flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':False})
+        result=flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+        self.assertEqual(set(result['removed']),set(preview['batches']));self.assertEqual(c.history(),[])
+        self.assertIsNone(c.selected_batch);self.assertIsNone(flow.snapshot()['replay_context'])
+        self.assertEqual(c.installed_pair(),installed)
+        self.assertEqual({str(path.relative_to(active)):path.read_bytes() for path in active.rglob('*') if path.is_file()},active_bytes)
+        self.assertEqual({key:Path(report[key]).read_bytes() for key in arrival_bytes},arrival_bytes)
+        flow.last_catalog=-1e10;flow.refresh()
+        self.assertTrue(all(row['kind']!='capture' for row in flow.results()))
+        self.assertTrue(all(row['raw_deleted'] for row in flow.results()))
+        self.assertEqual(flow.download(head['id'])['id'],head['id'])
+        flow.action('select_result',{'result_id':head['id']})
+        self.assertEqual(flow.snapshot()['replay_context']['frame_count'],0)
+        self.assertFalse(flow.snapshot()['replay_context']['overlay_available'])
+        self.assertIn('已删除',flow.snapshot()['replay_context']['message'])
+        self.assertIsNone(c.selected_batch)
+
+    def test_original_single_delete_rechecks_busy_changed_files_and_cancelled_preview(self):
+        legacy,flow=self.legacy_library();c=legacy.app;path=legacy.batch('delete-one')
+        flow.action('delete_preview',{'scope':'batch','result_id':'capture:delete-one'})
+        preview=flow.snapshot()['deletion_preview'];self.assertEqual(preview['image_files'],2)
+        for status in ('CAPTURING','FITTING'):
+            c.status=status
+            self.assertFalse(flow.allowed('delete_preview')['allowed'])
+            with self.assertRaisesRegex(ValueError,'进行中'):
+                flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+            self.assertTrue(path.exists())
+        c.status='READY';(path/'frame-000.png').write_bytes(b'changed after preview')
+        with self.assertRaisesRegex(ValueError,'文件变化'):
+            flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+        self.assertTrue(path.exists());self.assertIsNone(flow.snapshot()['deletion_preview'])
+        flow.action('delete_preview',{'scope':'batch','result_id':'capture:delete-one'})
+        expired=flow.snapshot()['deletion_preview'];record=c.delete_tokens[expired['id']]
+        c.delete_tokens[expired['id']]=(record[0],record[1],0.,record[3])
+        self.assertFalse(flow.snapshot()['deletion_preview']['valid']);self.assertFalse(flow.allowed('delete_confirm')['allowed'])
+        self.assertTrue(path.exists())
+        flow.action('delete_preview',{'scope':'batch','result_id':'capture:delete-one'})
+        flow.action('delete_cancel',{})
+        with self.assertRaises(ValueError):flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+        self.assertTrue(path.exists())
+        c.selected_batch='delete-one'
+        with self.assertRaisesRegex(ValueError,'栏目中使用'):
+            flow.action('delete_preview',{'scope':'batch','result_id':'capture:delete-one'})
+        c.selected_batch=None
+        flow.action('delete_preview',{'scope':'batch','result_id':'capture:delete-one'})
+        preview=flow.snapshot()['deletion_preview']
+        flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+        self.assertFalse(path.exists())
+        with self.assertRaises(ValueError):flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
+
     def test_expired_batch_review_can_refresh_without_restarting_pipeline(self):
         workflow=CalibrationWorkflow.__new__(CalibrationWorkflow)
         workflow.lock=threading.Lock()

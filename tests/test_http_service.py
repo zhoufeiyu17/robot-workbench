@@ -327,6 +327,28 @@ class HTTPTest(unittest.TestCase):
         with self.assertRaises(HTTPError):self.http.open(path.replace('environment=fake','environment=physical')+head['id'])
         self.assertIsNone(self.device.runtime)
 
+    def test_delete_preview_confirm_through_HTTP_uses_legacy_token_without_device_connection(self):
+        sys.path[:0]=[str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'calibration/examples/scripts/debug'),str(ROOT/'calibration/tests')]
+        from test_joint_head_workbench_library import LibraryTests
+        from robot_workbench.workflows import CalibrationWorkflow
+        legacy=LibraryTests();legacy.setUp();self.addCleanup(legacy.doCleanups);path=legacy.batch('delete-via-http')
+        c=legacy.app;c.live=False;c.mesh_rendering_enabled=False
+        flow=CalibrationWorkflow.__new__(CalibrationWorkflow);flow.lock=threading.Lock();flow.app=c
+        flow.device=self.device;flow.service=self.app;flow.value={'busy':False,'status':'idle','primary_action':None}
+        flow.catalog=[{'id':'capture:delete-via-http','kind':'capture'}];flow.replay_context=None;flow.replay=[];flow.media_files={}
+        self.device.workflows['calibration']=flow
+        ready=self.manual_job('delete_preview',scope='batch',result_id='capture:delete-via-http')
+        preview=ready['workflow']['deletion_preview'];self.assertEqual(preview['image_files'],2)
+        self.assertIn(preview['id'],c.delete_tokens,'UI identity must wrap the actual legacy deletion token')
+        self.assertTrue(path.exists());self.assertIsNone(self.device.runtime)
+        self.action('delete_confirm',delete_preview_id=preview['id'],confirmed=False)
+        self.wait(lambda s:(s['workflow'].get('request') or {}).get('status')=='failed')
+        self.assertTrue(path.exists())
+        result=self.manual_job('delete_confirm',delete_preview_id=preview['id'],confirmed=True)
+        self.assertFalse(path.exists());self.assertIsNone(result['workflow']['deletion_preview'])
+        self.assertEqual(result['workflow']['deletion_result']['removed'],['delete-via-http'])
+        self.assertEqual(result['results'],[]);self.assertIsNone(self.device.runtime)
+
     def test_csrf_namespace_and_frame_identity(self):
         with self.assertRaises(HTTPError) as error:
             self.http.open(Request(self.url+'/api/actions/stop',b'{}',headers={'Content-Type':'application/json'}))

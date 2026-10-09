@@ -10,7 +10,7 @@ import secrets
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit,urlencode
-from robot_workbench.workflows import CALIBRATION_TOOLS
+from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection')
@@ -222,10 +222,10 @@ class Application:
             allowed[action]=dict(allowed=bool(preview.get('connected')),reason=None if preview.get('connected') else '目标图像服务尚未就绪，请查看画面恢复指引')
         allowed['preview_recover']=dict(allowed=bool(device.preview and hasattr(device.preview,'recover') and preview.get('recovery',{}).get('allowed')),
             reason=preview.get('recovery',{}).get('message'))
-        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS):
+        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*HISTORY_ACTIONS):
             allowed.setdefault(action,dict(allowed=False,reason='当前业务后端尚未配置'))
         if workflow:
-            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS):
+            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*HISTORY_ACTIONS):
                 if hasattr(workflow,'allowed'):
                     allowed[action]=workflow.allowed(action)
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
@@ -341,9 +341,9 @@ class Application:
                     with self.lock:self.manual_tasks.pop((environment,business),None)
                     raise
             body={**body,'token':review['token']}
-        if action not in {'connect','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS}:
+        if action not in {'connect','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
-        if action not in ('connect','mesh','select_result','cancel'):
+        if action not in ('connect','mesh','select_result','cancel',*HISTORY_ACTIONS):
             if device.runtime is None:raise ValueError('请先连接设备')
             if device.runtime.holder != business:
                 raise PermissionError('请先交接控制权限：当前由 '+device.runtime.holder+' 持有')
@@ -420,8 +420,8 @@ class Application:
     def perform(self, device, business, action, body):
         if action=='connect':return device.connect(body)
         runtime=device.runtime
-        if runtime is None and action not in ('mesh','select_result'):raise ValueError('请先连接设备')
-        if runtime is not None and runtime.holder != business and action not in ('mesh','select_result','cancel'):
+        if runtime is None and action not in ('mesh','select_result',*HISTORY_ACTIONS):raise ValueError('请先连接设备')
+        if runtime is not None and runtime.holder != business and action not in ('mesh','select_result','cancel',*HISTORY_ACTIONS):
             raise PermissionError('请先交接控制权限：当前由 '+runtime.holder+' 持有')
         if action in ('manual_preview','manual_queue','manual_queue_preview'):
             if business!='calibration':raise ValueError('人工姿态工具需要交接到标定业务')
