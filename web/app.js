@@ -60,6 +60,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   const setText = (id, value) => { el(id).textContent = textValue(value); };
   let context = {environment:'fake', business:'calibration'}, tab = 'calibration';
   let state = null, generation = 0, revision = -1, receivedAt = 0, online = false, polling = null;
+  let serverInstance;const retiredServerInstances=new Set();
   let requestSequence = 0, displayedRequest = 0, reviewKey = '', manualKey = '', replayKey = '', stopped = false;
   let waitingForStateNotice=true;
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
@@ -445,18 +446,38 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   async function poll() {
     if(stopped||polling)return;
-    const controller=new AbortController(),at=generation,requestedContext={...context};polling=controller;
+    const controller=new AbortController(),requestedContext={...context};let at=generation;polling=controller;
     try {
       const query=new URLSearchParams(requestedContext),response=await request('/api/state?'+query,{cache:'no-store',signal:controller.signal});
       if(!response.ok)throw Error('状态接口 '+response.status);const incoming=await response.json();
       if(at!==generation||controller.signal.aborted)return;
       if(incoming.schema!=='robot-workbench-ui.v1'||!Number.isFinite(incoming.revision)||incoming.device?.environment!==context.environment)throw Error('状态契约或设备环境不匹配');
+      if(!acceptServerInstance(incoming.server_instance_id??null))return;
+      at=generation;
       if(incoming.revision<revision)return;
       revision=incoming.revision;state=incoming;receivedAt=clock.now();online=true;
       if(waitingForStateNotice)notice('设备与任务状态已更新。');
       render();
     } catch(error) {if(at===generation&&!controller.signal.aborted){online=false;clearReview();notice('状态核验失败：'+error.message);render();}}
     finally{if(polling===controller)polling=null;}
+  }
+  function acceptServerInstance(instance){
+    if(instance!==null&&(typeof instance!=='string'||!instance))throw Error('服务实例身份无效');
+    if(serverInstance===undefined){serverInstance=instance;return true;}
+    if(instance===serverInstance)return true;
+    // Legacy snapshots may be read before upgrading, but cannot replace a known instance.
+    if(instance===null||retiredServerInstances.has(instance))return false;
+    if(serverInstance!==null)retiredServerInstances.add(serverInstance);
+    serverInstance=instance;generation++;revision=-1;displayedRequest=++requestSequence;
+    for(const request of pending.values())request.controller.abort();pending.clear();
+    for(const controller of displayRequests.values())controller.abort();displayRequests.clear();
+    clearMedia();clearReview();invalidatedReviews.clear();confirmedDeletions.clear();previewFloors.clear();previewErrors.clear();
+    reviewKey='';manualKey='';manualQueueKey='';calibrationKey='';calibrationPlanKey='';resultsKey='';replayKey='';replayControlsKey='';deletionKey='';
+    previewView='target';meshCamera='head';meshCandidate='';meshStateKey='';meshOptionsKey='';previewRenderer=null;
+    overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0};overviewDirty=false;overviewSending=false;overviewPointer=null;
+    el('supported').checked=false;el('delete-clearance').checked=false;
+    notice('工作台服务已重新连接，旧页面审批已清除；请按当前状态重新审阅。');
+    return true;
   }
   function barrier() {
     generation++;polling?.abort();polling=null;clearReview();
@@ -467,7 +488,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(!allowed.allowed){notice(allowed.reason);return;}
     if(displayRequests.has(view)||displayRequests.has('recovery'))return;
     if(action==='preview_recover'&&state?.preview?.recovery?.allowed!==true){notice(state?.preview?.recovery?.reason||'当前后端未允许恢复渲染服务');return;}
-    const requestContext=key(),controller=new AbortController(),sequence=++requestSequence;
+    const requestContext=key(),requestInstance=serverInstance,controller=new AbortController(),sequence=++requestSequence;
     displayedRequest=sequence;displayRequests.set(view,controller);previewErrors.delete(view);
     const affected=view==='recovery'?['target','overview','mesh']:[view];
     for(const name of affected){const slot=mediaSlots.get(name==='mesh'?'mesh':'preview');if(slot)clearSlot(slot);if(view!=='recovery')previewFloors.set(name,(state.preview?.revisions?.[name]??0)+1);}
@@ -476,12 +497,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       const response=await request('/api/actions/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
         body:JSON.stringify({environment:context.environment,business:context.business,request_id:crypto.randomUUID(),...extra}),signal:controller.signal});
       const result=await response.json();if(!response.ok)throw Error(result.error||result.message||'显示请求被拒绝');
-      if(requestContext!==key()||controller.signal.aborted)return;
+      if(requestContext!==key()||requestInstance!==serverInstance||controller.signal.aborted)return;
       if(view==='recovery'){previewFloors.clear();previewErrors.clear();}
       else{if(!Number.isInteger(result.client_revision))throw Error('后端未返回可核验的预览修订');previewFloors.set(view,result.client_revision);}
       if(displayedRequest===sequence)notice(result.message||'只读显示请求已受理，等待对应修订的画面。');
-    }catch(error){if(requestContext===key()&&!controller.signal.aborted){previewErrors.set(view,error.message);if(displayedRequest===sequence)notice('只读显示请求失败：'+error.message);}}
-    finally{if(displayRequests.get(view)===controller)displayRequests.delete(view);if(requestContext===key()){renderMedia();renderGates();void poll();}}
+    }catch(error){if(requestContext===key()&&requestInstance===serverInstance&&!controller.signal.aborted){previewErrors.set(view,error.message);if(displayedRequest===sequence)notice('只读显示请求失败：'+error.message);}}
+    finally{if(displayRequests.get(view)===controller)displayRequests.delete(view);if(requestContext===key()&&requestInstance===serverInstance){renderMedia();renderGates();void poll();}}
   }
   function showTarget(q12,jaw_gap_mm){
     if(!Array.isArray(q12)||q12.length!==12||!q12.every(Number.isFinite)||!Array.isArray(jaw_gap_mm)||jaw_gap_mm.length!==2||!jaw_gap_mm.every(value=>Number.isFinite(value)&&value>=0&&value<=83)){notice('目标图像需要12个有效关节位置及0–83 mm夹爪开度');return;}
@@ -489,9 +510,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return sendDisplay('preview_target',{q12,jaw_gap_mm});
   }
   async function sendOverview(){
-    overviewDirty=true;if(overviewSending)return;overviewSending=true;
-    try{while(overviewDirty){overviewDirty=false;await sendDisplay('preview_overview',{...overview});}}
-    finally{overviewSending=false;}
+    overviewDirty=true;if(overviewSending)return;overviewSending=true;const requestInstance=serverInstance;
+    try{while(overviewDirty&&requestInstance===serverInstance){overviewDirty=false;await sendDisplay('preview_overview',{...overview});}}
+    finally{if(requestInstance===serverInstance)overviewSending=false;}
   }
   function setOverviewPreset(){
     Object.assign(overview,({front:{yaw:-Math.PI/2,pitch:.4},left:{yaw:-Math.PI/2-.7,pitch:.45},right:{yaw:-Math.PI/2+.7,pitch:.45},top:{yaw:-Math.PI/2,pitch:1.5}}[el('overview-preset').value]||{yaw:-Math.PI/2,pitch:.4}),{zoom:1,pan_y:0});
@@ -503,7 +524,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return sendDisplay('preview_mesh',{enabled:el('mesh').checked,camera:meshCamera,candidate_id:meshCandidate||null});
   }
   async function reconnectImages(){
-    clearMedia();await poll();renderMedia();notice(online?'已重新打开浏览器画面订阅；连接与源帧状态请查看图像诊断。':'状态连接仍未恢复，请按图像诊断中的后端指引检查。');
+    const requestInstance=serverInstance;clearMedia();await poll();if(requestInstance!==serverInstance)return;renderMedia();notice(online?'已重新打开浏览器画面订阅；连接与源帧状态请查看图像诊断。':'状态连接仍未恢复，请按图像诊断中的后端指引检查。');
   }
   async function send(action,extra={}) {
     const allowed=permission(action);
@@ -516,7 +537,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(action==='delete_confirm'){body.delete_preview_id=state.workflow.deletion_preview.id;body.confirmed=el('delete-clearance').checked;confirmedDeletions.add(key()+'/'+body.delete_preview_id);}
     if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?el('clearance').checked:true;}
     if(action==='connect'&&context.environment==='physical')body.arms_supported=el('supported').checked;
-    const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),controller=new AbortController();
+    const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),requestInstance=serverInstance,controller=new AbortController();
     if(state.workflow?.review?.id&&['stop','cancel','handoff','generate_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     barrier();const at=generation;displayedRequest=sequence;pending.set(sequence,{action,context:requestContext,controller});
@@ -524,9 +545,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     try {
       const response=await request('/api/actions/'+encodeURIComponent(action),{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body),signal:controller.signal});
       const result=await response.json();if(!response.ok)throw Error(result.message||result.error||result.reason||'请求被拒绝');
-      if(requestContext===key()&&sequence===displayedRequest)notice(result.message||(action==='stop'?'停止请求已受理；以停止回执为准。':'请求已受理；以任务回执为准。'));
-    } catch(error) {if(requestContext===key()&&sequence===displayedRequest&&!controller.signal.aborted)notice('请求结果未确认：'+error.message+'；不会自动重试，请核对状态。');}
-    finally {pending.delete(sequence);if(requestContext===key()){el('supported').checked=false;renderGates();if(at===generation)void poll();}}
+      if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice(result.message||(action==='stop'?'停止请求已受理；以停止回执为准。':'请求已受理；以任务回执为准。'));
+    } catch(error) {if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice('请求结果未确认：'+error.message+'；不会自动重试，请核对状态。');}
+    finally {pending.delete(sequence);if(requestContext===key()&&requestInstance===serverInstance){el('supported').checked=false;renderGates();if(at===generation)void poll();}}
   }
   function switchContext(next) {
     if(next.environment===context.environment&&next.business===context.business)return;

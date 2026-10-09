@@ -26,7 +26,7 @@ function documentStub(){
 const response=(value,headers={})=>({ok:true,status:200,headers:{get:key=>headers[key]??null},json:async()=>value,blob:async()=>new Blob(['fixture'])});
 const settle=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 function snapshot(overrides={}){
-  return {schema:'robot-workbench-ui.v1',revision:1,server_wall_ns:10e9,csrf:'fixture-only',device:{id:'fixture-device',label:'Fixture device',environment:'fake'},runtime:{connected:true,holder:'calibration',feedback_healthy:true,motion_status:'idle',hold:{left:'position',right:'position'},allowed_operations:Object.fromEntries(['handoff','stop','connect','cancel','recover','mesh','manual_preview','select_result'].map(action=>[action,{allowed:true,reason:''}]))},workflow:{id:'fixture-run',revision:1,status:'planning',stage_id:'head.plan',title:'头部规划',message:'仍在规划',progress:null,primary_action:{id:'generate_plan',label:'生成计划',allowed:true,reason:''},outcomes:{}},media:[],results:[],diagnostics:[],mesh:{requested:false,applied:false},...overrides};
+  return {schema:'robot-workbench-ui.v1',server_instance_id:'fixture-server',revision:1,server_wall_ns:10e9,csrf:'fixture-only',device:{id:'fixture-device',label:'Fixture device',environment:'fake'},runtime:{connected:true,holder:'calibration',feedback_healthy:true,motion_status:'idle',hold:{left:'position',right:'position'},allowed_operations:Object.fromEntries(['handoff','stop','connect','cancel','recover','mesh','manual_preview','select_result'].map(action=>[action,{allowed:true,reason:''}]))},workflow:{id:'fixture-run',revision:1,status:'planning',stage_id:'head.plan',title:'头部规划',message:'仍在规划',progress:null,primary_action:{id:'generate_plan',label:'生成计划',allowed:true,reason:''},outcomes:{}},media:[],results:[],diagnostics:[],mesh:{requested:false,applied:false},...overrides};
 }
 function manualSnapshot(){
   const value=snapshot();value.runtime.allowed_operations.manual_queue={allowed:true};value.runtime.allowed_operations.manual_queue_preview={allowed:true};
@@ -354,4 +354,35 @@ function deletionSnapshot(){
   value.workflow.deletion_preview={id:'pending-delete',valid:true,batches:['head-batch'],preserved:[]};h.reply(0,value);await settle();h.get('delete-clearance').checked=true;h.get('delete-clearance').events.change();
   assert.equal(h.get('delete-all').disabled,true);assert.equal(h.get('delete-confirm').disabled,true);h.get('delete-cancel').events.click();assert.equal(h.requests[1].url,'/api/actions/delete_cancel');assert.equal(h.requests.filter(row=>row.url==='/api/actions/delete_confirm').length,0);h.app.destroy();
 }
-console.log('PASS unified web: truthful stages/media, read-only preview, recovery isolation and explicit legacy deletion preview/confirmation gates.');
+{
+  const h=harness();h.app.start();const old=snapshot({server_instance_id:'server-old',revision:80,csrf:'old-csrf'});
+  old.workflow={id:'old-run',status:'awaiting_review',stage_id:'manual.review',primary_action:{id:'manual_execute',allowed:true},review:{id:'old-review',physical_clearance_required:true}};
+  old.media=[{id:'head',kind:'actual',url:'/api/media/head',ready:true,frame_id:'old-frame',source_wall_ns:10e9}];
+  h.reply(0,old);await settle();h.get('clearance').checked=true;
+  const actionIndex=h.requests.length,oldAction=h.app.send('manual_execute');h.app.poll();
+  const refreshIndex=h.requests.length-1;h.reply(refreshIndex,{...old,revision:81});await settle();const oldFrame=h.requests.at(-1);
+  h.get('clearance').checked=true;h.get('delete-clearance').checked=true;h.app.poll();
+  const fresh=snapshot({server_instance_id:'server-new',revision:1,csrf:'new-csrf'});
+  fresh.workflow={id:'new-run',status:'awaiting_review',stage_id:'new.manual.review',primary_action:{id:'manual_execute',allowed:true},review:{id:'new-review',physical_clearance_required:true}};
+  fresh.media=[{...old.media[0],frame_id:'new-frame'}];h.reply(h.requests.length-1,fresh);await settle();const freshFrame=h.requests.at(-1);
+  assert.equal(h.app.state.server_instance_id,'server-new');assert.equal(h.app.state.revision,1,'new instance accepts a reset revision counter');
+  assert.equal(h.get('clearance').checked,false);assert.equal(h.get('delete-clearance').checked,false);assert.equal(h.get('primary').disabled,true,'old approvals cannot authorize the new instance');
+  assert.equal(h.requests[actionIndex].options.signal.aborted,true);assert.equal(oldFrame.options.signal.aborted,true);
+  oldFrame.resolve(response({}, {'X-Frame-Id':'old-frame','X-Source-Wall-Ns':String(10e9)}));h.reply(actionIndex,{message:'迟到的旧动作已完成'});await oldAction;await settle();
+  assert.equal(h.get('media-head').querySelector('img').hidden,true);assert.doesNotMatch(h.get('request-status').textContent,/迟到/);
+  freshFrame.resolve(response({}, {'X-Frame-Id':'new-frame','X-Source-Wall-Ns':String(10e9)}));await settle();assert.equal(h.get('media-head').querySelector('img').hidden,false);
+  h.app.poll();h.reply(h.requests.length-1,{...old,revision:9999});await settle();assert.equal(h.app.state.server_instance_id,'server-new','a retired instance can never return with a larger revision');assert.equal(h.app.state.csrf,'new-csrf');
+  h.app.poll();h.reply(h.requests.length-1,{...fresh,revision:0,workflow:{stage_id:'stale-new'}});await settle();assert.equal(h.get('stage-id').textContent,'new.manual.review','same-instance stale revisions remain rejected');
+  const stopIndex=h.requests.length,stop=h.app.send('stop');assert.equal(h.requests[stopIndex].options.headers['X-CSRF-Token'],'new-csrf');h.reply(stopIndex,{message:'new stop accepted'});await stop;h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const old=previewSnapshot();old.server_instance_id='display-old';old.revision=100;old.preview.frames.target.ready=true;
+  h.reply(0,old);await settle();const oldFrame=h.requests[1],displayIndex=h.requests.length,oldDisplay=h.get('show-target').events.click();
+  h.app.poll();const fresh=previewSnapshot();fresh.server_instance_id='display-new';fresh.csrf='display-new-csrf';fresh.preview.revisions.target=1;fresh.preview.frames.target={...fresh.preview.frames.target,ready:true,revision:1};
+  h.reply(h.requests.length-1,fresh);await settle();const newFrame=h.requests.at(-1);
+  assert.equal(h.requests[displayIndex].options.signal.aborted,true);oldFrame.resolve(response({},previewHeaders('target',7)));
+  h.reply(displayIndex,{client_revision:999,message:'old preview'});await oldDisplay;await settle();assert.equal(h.get('media-preview').querySelector('img').hidden,true);
+  newFrame.resolve(response({},previewHeaders('target',1)));await settle();assert.equal(h.get('media-preview').querySelector('img').hidden,false,'old display response must not restore its revision floor');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'server restart must not replay an old action');h.app.destroy();
+}
+console.log('PASS unified web: server-instance restart isolation, truthful media, review gates and legacy deletion confirmation.');

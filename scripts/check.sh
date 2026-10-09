@@ -15,6 +15,7 @@ python tests/test_workflow_adapter.py
 python tests/test_physx_camera.py
 python tests/test_physx_task.py
 python tests/test_resident_collection.py
+python tests/test_collection_preparation_http.py
 python tests/test_detector_adapter.py
 python tests/test_target_preview.py
 python tests/test_preview_http.py

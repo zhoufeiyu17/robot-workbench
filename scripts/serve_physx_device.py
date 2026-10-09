@@ -249,7 +249,8 @@ def run(args, base, nominal):
             collection_preparation=CollectionPreparation(contract=args.collection_spec,output=args.output,base=base,
                 device=device,application=application,ports=ports,directories=producer.directories,
                 control_url='http://127.0.0.1:'+str(gateway.server_port),token_file=token_files['collection'],
-                deadline_wall_ns=resident_deadline_wall_ns)
+                deadline_wall_ns=resident_deadline_wall_ns,installed_snapshot=calibration.installed_pair)
+            device.collection_preparation=collection_preparation
             install_notification(device.workflows['calibration'],calibration,collection_preparation.notify)
         for role,name in CAMERAS.items():
             def frame(name=name):

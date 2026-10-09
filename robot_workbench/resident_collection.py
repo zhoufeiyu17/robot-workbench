@@ -178,11 +178,15 @@ def load_collection_contract(path,output,gpu,duration):
 
 class CollectionPreparation:
     """One installation's owned conversion/services; notification never blocks C."""
-    def __init__(self,*,contract,output,base,device,application,ports,directories,control_url,token_file,deadline_wall_ns):
+    def __init__(self,*,contract,output,base,device,application,ports,directories,control_url,token_file,deadline_wall_ns,installed_snapshot=None):
         self.contract,self.output,self.base=deepcopy(contract),Path(output),base
         self.device,self.application=device,application
         self.ports,self.directories,self.control_url,self.token_file=ports,directories,control_url,token_file
         self.deadline_wall_ns=deadline_wall_ns
+        self.installed_snapshot=installed_snapshot
+        self.lock=threading.Lock();self.busy=False;self.running=False;self.last_install=None
+        self.value=dict(status='awaiting_calibration',error=None,attempt=0,installed=None,
+            message='等待有效标定安装；安装后自动准备数采环境。')
         self.closed=threading.Event();self.notifications=queue.Queue(maxsize=1)
         self.identity=None;self.parts=None;self.process=None;self.error=None
         self.thread=threading.Thread(target=self._run,daemon=True,name='resident-collection-setup');self.thread.start()
@@ -190,28 +194,85 @@ class CollectionPreparation:
     def notify(self,snapshot):
         if self.closed.is_set() or not snapshot or snapshot.get('verified') is not True:return
         value=deepcopy(snapshot)
-        try:self.notifications.put_nowait(value)
-        except queue.Full:
-            try:self.notifications.get_nowait()
-            except queue.Empty:pass
-            self.notifications.put_nowait(value)
+        with self.lock:
+            self.last_install=value
+            if self.running and self.value.get('installed')==value:return
+            try:self.notifications.put_nowait(value)
+            except queue.Full:
+                try:self.notifications.get_nowait();self.notifications.task_done()
+                except queue.Empty:pass
+                self.notifications.put_nowait(value)
+            self.busy=True
+            if not self.running:self.value.update(status='queued',installed=deepcopy(value),error=None,worker=None,
+                message='已安装标定保留，正在排队准备数采环境。')
+
+    def snapshot(self):
+        with self.lock:value=deepcopy(self.value);value['busy']=self.busy
+        remaining=max(0.,(self.deadline_wall_ns-time.time_ns())/1e9)
+        reason=('驻留服务已结束' if self.closed.is_set() else '驻留服务剩余时间不足，不能延长期限' if remaining<=60
+                else '数采环境正在准备，请等待当前请求结束' if value['busy'] else
+                '当前没有可复用的有效安装组' if not (value.get('installed') or {}).get('verified') else None)
+        value.update(can_retry=value['status']=='failed' and reason is None,
+            retry_reason=reason or ('当前环境未失败，无需重新准备' if value['status']!='failed' else None),
+            resident_deadline_wall_ns=self.deadline_wall_ns,remaining_wall_s=remaining,
+            installed_calibration_preserved=bool((value.get('installed') or {}).get('verified')),
+            movement_started=False)
+        return value
+
+    def _require_idle(self):
+        runtime=self.device.runtime
+        state=self.device.snapshot(runtime.holder if runtime else 'collection')
+        if state.get('automatic_enabled') or (state.get('recording') or {}).get('done') is False:
+            raise ValueError('当前动作或录制尚未结束，不能重新准备数采环境')
+        if self.parts:
+            with self.parts.playground.lock:busy=self.parts.playground.state.get('busy')
+            if busy:raise ValueError('当前数采任务尚未结束，不能替换其准备环境')
+
+    def retry(self):
+        with self.lock:
+            if self.closed.is_set() or self.busy:raise ValueError('数采准备已关闭或正在进行，不能并发重试')
+            if self.value['status']!='failed':raise ValueError('仅失败的数采准备可重试')
+            if time.time_ns()>=self.deadline_wall_ns-60_000_000_000:raise ValueError('原驻留期限剩余不足，不能延长或重启设备')
+            self.busy=True;self.value.update(status='verifying_installation',error=None,worker=None)
+        try:
+            self._require_idle()
+            current=self.installed_snapshot() if self.installed_snapshot is not None else None
+            if not current or current.get('verified') is not True:
+                with self.lock:self.value['installed']=deepcopy(current)
+                raise ValueError('当前安装组不再有效，请检查标定安装；不会自动重新采集')
+            self.identity=None
+            self.application.invalidate_collection_preparation(self.device)
+            self.notify(current)
+            return dict(queued=True,message='复用当前已验证标定，重新准备数采环境；不会运动、重连或重新采集标定。')
+        except Exception as error:
+            with self.lock:self.busy=False;self.value.update(status='failed',error=str(error))
+            raise
 
     def _status(self,status,**fields):
         from probe_owner_physx import save
-        save(self.output/'collection-setup-status.json',dict(status=status,wall_ns=time.time_ns(),**fields))
+        with self.lock:
+            if status=='failed':fields.setdefault('failed_stage',self.value['status'])
+            self.value.update(status=status,wall_ns=time.time_ns(),**fields)
+            value=deepcopy(self.value)
+        save(self.output/'collection-setup-status.json',value)
 
     def _close_parts(self):
         if self.parts:
-            parts=self.parts;self.parts=None;errors=[]
+            parts=self.parts;self.parts=None;self.identity=None;errors=[]
             parts.playground.cancel_event.set()
             parts.workflow.closed.set()
+            monitor=getattr(parts.workflow,'thread',None)
+            if monitor is not None:monitor.join(timeout=5)
             job=parts.playground.thread
             if job is not None:job.join(timeout=30)
             for manager in (parts.detector,parts.planner):
                 try:manager.close()
                 except Exception as error:errors.append(str(error))
             if job is not None and job.is_alive():errors.append('collection job did not exit within cleanup budget')
-            if errors:raise RuntimeError('; '.join(errors))
+            if monitor is not None and monitor.is_alive():errors.append('old collection review monitor has not exited')
+            if errors:
+                self.parts=parts  # A retry must finish retiring this scope before replacing it.
+                raise RuntimeError('; '.join(errors))
 
     def _prepare(self,snapshot):
         from local_execution import TARGET,gpu_check
@@ -220,18 +281,19 @@ class CollectionPreparation:
         root=self.output;active=root/'calibrations/hardware/active'
         expected=dict(head_id=snapshot['head_id'],wrist_id=snapshot['wrist_id'],
             manifest_sha256=hashlib.sha256((active/'manifest.json').read_bytes()).hexdigest())
-        if expected==self.identity:return
+        if (expected==self.identity and self.parts and self.parts.detector.status().get('status')=='ready'
+                and self.parts.planner.status().get('status')=='ready'):
+            self._status('ready',error=None);return
         if self.parts:
-            state=self.device.snapshot(self.device.runtime.holder)
-            if state.get('automatic_enabled') or (state.get('recording') or {}).get('done') is False:
-                raise ValueError('new installation preparation waits for the current frozen D run to finish')
+            self._require_idle()
+            self.application.invalidate_collection_preparation(self.device)
             self._close_parts()
         details=self.contract['collection_setup']
         script=str(Path(__file__).resolve().parents[1]/'scripts/serve_physx_device.py')
         from robot_workbench.preview_service import resident_execution
         execution=resident_execution(self.contract,root)
         output=root/('collection-'+expected['manifest_sha256'][:16]+'-'+str(time.time_ns()))
-        self._status('preparing_profile',installed=expected,output=str(output))
+        self._status('preparing_profile',installed=deepcopy(snapshot),installation_identity=expected,output=str(output),error=None)
         detector_entry=Path(__file__).resolve().parents[1]/'detector_adapter'/'isaac_rgbd_detection.py'
         if not detector_entry.is_file():raise FileNotFoundError('frozen detector adapter missing: '+str(detector_entry))
         pipeline_config={**self.base['pipeline_config'],'detection_script':str(detector_entry)}
@@ -259,33 +321,59 @@ class CollectionPreparation:
         self.process=None
         if self.closed.is_set():raise InterruptedError('resident preparation cancelled')
         configured=finalize_collection_setup(setup['setup_path'])
-        if self.closed.is_set():raise InterruptedError('resident preparation cancelled before worker startup')
+        if self.closed.is_set() or time.time_ns()>=self.deadline_wall_ns-45_000_000_000:
+            raise InterruptedError('resident preparation cancelled or deadline reached before worker startup')
         save(root/'collection-binding.json',json.loads(Path(configured['initial_trusted_binding_source']).read_bytes()))
         self.parts=construct_collection(output/'configured.json',self.device,self.application)
-        self.device.workflows['collection']=self.parts.workflow
+        self._status('initializing_detector',worker=None)
         self.parts.detector.start(self.parts.pipeline_config,self.parts.worker_state_directory)
         # The detector owns its GPU PID only after its private status is
         # published. Do not race the planner admission against that startup.
         while True:
             state=self.parts.detector.status()
+            self._status('initializing_detector',worker=dict(name='detector',**state))
             if state.get('status')=='ready':break
             if state.get('status') in ('failed','stopped'):
                 raise RuntimeError('private detector did not become ready: '+str(state.get('error') or state))
             if self.closed.wait(.2) or time.time_ns()>=self.deadline_wall_ns-45_000_000_000:
                 raise InterruptedError('resident detector startup cancelled or deadline reached')
         self.parts.planner.start(self.parts.pipeline_config,self.parts.worker_state_directory)
+        while True:
+            state=self.parts.planner.status()
+            self._status('initializing_planner',worker=dict(name='planner',**state))
+            if state.get('status')=='ready':break
+            if state.get('status') in ('failed','stopped'):
+                raise RuntimeError('private planner did not become ready: '+str(state.get('error') or state))
+            if self.closed.wait(.2) or time.time_ns()>=self.deadline_wall_ns-45_000_000_000:
+                raise InterruptedError('resident planner startup cancelled or deadline reached')
+        self.device.workflows['collection']=self.parts.workflow
         self.identity=expected
-        self._status('workers_starting',installed=expected,configured=str(output/'configured.json'),
+        self._status('ready',configured=str(output/'configured.json'),error=None,
                      movement_started=False,requires_explicit_handoff=True)
 
     def _run(self):
         while not self.closed.is_set():
             try:snapshot=self.notifications.get(timeout=.1)
             except queue.Empty:continue
+            with self.lock:
+                self.running=True;self.busy=True
+                self.error=None
+                for key in ('failed_stage','cleanup_error','status_log_error'):self.value.pop(key,None)
+                self.value.update(status='preparing_profile',installed=deepcopy(snapshot),error=None,worker=None,attempt=self.value['attempt']+1)
+            previous_parts=self.parts
             try:self._prepare(snapshot)
             except Exception as error:
-                self.error=str(error);self._status('failed',error=str(error),movement_started=False)
-            finally:self.notifications.task_done()
+                self.error=str(error)
+                try:self._status('failed',error=str(error),movement_started=False)
+                except OSError as log_error:
+                    with self.lock:self.value['status_log_error']=str(log_error)
+                if self.parts is not None and self.parts is not previous_parts:
+                    try:self._close_parts()
+                    except Exception as cleanup_error:
+                        with self.lock:self.value['cleanup_error']=str(cleanup_error)
+            finally:
+                self.notifications.task_done()
+                with self.lock:self.running=False;self.busy=not self.notifications.empty()
 
     def close(self):
         self.closed.set()

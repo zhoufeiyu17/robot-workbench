@@ -9,6 +9,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit,urlencode
 from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS
 
@@ -29,6 +30,7 @@ class Device:
         self.thread = None
         self.error = None
         self.preview = None
+        self.collection_preparation = None
         self.stop_latched = False
         self.connecting = False
 
@@ -100,6 +102,7 @@ class Application:
             raise ValueError('device environment namespace mismatch')
         self.devices = devices
         self.csrf = secrets.token_urlsafe(32)
+        self.server_instance_id = str(uuid.uuid4())  # Public lifetime identity, not an authorization token.
         self.lock = threading.Lock()
         self.revision = 0
         self.display_actions=threading.Lock()
@@ -144,6 +147,26 @@ class Application:
         return raw,dict(metadata,revision=revision,view_revision=state['revisions']['overview'],view=view,environment=environment,
             renderer_id=metadata['renderer_instance_id'],source_wall_ns=metadata.get('source_wall_ns',metadata.get('source_timestamp_ns')))
 
+    @staticmethod
+    def preparation_view(preparation):
+        phase=preparation['status'];busy=preparation['busy'];installed=preparation.get('installed') or {}
+        titles={'awaiting_calibration':'等待标定安装','queued':'数采环境等待准备','verifying_installation':'核验当前已安装标定',
+            'preparing_profile':'根据已安装标定构建数采配置','converting_planning_assets':'转换数采规划资产',
+            'initializing_detector':'初始化物体检测服务','initializing_planner':'初始化轨迹规划服务',
+            'ready':'数采环境已就绪','failed':'数采环境准备失败'}
+        title=titles.get(phase,'准备数采环境')
+        detail=preparation.get('error') or (preparation.get('worker') or {}).get('message') or title
+        retained=preparation.get('installed_calibration_preserved')
+        return dict(status='running' if busy else 'failed' if phase=='failed' else 'idle',busy=busy,
+            stage_id='collection.setup.'+phase,title=title,
+            message=('已安装标定保留，无需重新采集。' if retained else '')+str(detail),
+            primary_action=dict(id='prepare_collection',label='重新准备数采环境',allowed=preparation['can_retry'],reason=preparation['retry_reason']),
+            progress=dict(indeterminate=True,unit=title) if busy else None,
+            details=[dict(label='头部标定',value=installed.get('head_version') or installed.get('head_id') or '尚未安装'),
+                     dict(label='双腕标定',value=installed.get('wrist_version') or installed.get('wrist_id') or '尚未安装'),
+                     dict(label='本次驻留剩余时间',value=f"{preparation['remaining_wall_s']:.0f} 秒")],
+            outcomes=dict(calibration='已安装并保留' if retained else '等待有效安装',preparation=phase),preparation=preparation)
+
     def state(self, environment, business):
         if business not in BUSINESSES:
             raise ValueError('未知业务')
@@ -159,6 +182,11 @@ class Application:
         value = workflow.snapshot() if workflow else dict(status='unconfigured',busy=False,
             stage_id='configuration',title='配置业务后端',message='设备控制可独立验证；当前业务的采集、求解与数据路径尚未配置。',
             primary_action=None,progress=None,outcomes={})
+        preparation=device.collection_preparation.snapshot() if business=='collection' and device.collection_preparation else None
+        preparing=bool(preparation and (workflow is None or preparation['busy'] or preparation['status']=='failed' and not value.get('busy')))
+        if preparing:
+            value=self.preparation_view(preparation)
+            review=None
         if review is not None:
             if (review['runtime_nonce'] != runtime.get('runtime_nonce') or review['epoch'] != runtime.get('command_epoch')
                     or review.get('calibration_revision') != runtime.get('calibration_revision')):
@@ -230,10 +258,15 @@ class Application:
                     allowed[action]=workflow.allowed(action)
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
                     allowed[action]=dict(allowed=False,reason=allowed['preview']['reason'])
+        if preparation:
+            allowed['prepare_collection']=dict(allowed=preparation['can_retry'],reason=preparation['retry_reason'])
+            if preparing:
+                for action in ('generate_plan','execute'):
+                    allowed[action]=dict(allowed=False,reason='先完成数采环境准备；已安装标定仍保留')
         primary = value.get('primary_action')
         if primary and primary['id'] in (*CALIBRATION_TOOLS,'generate_plan') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
-        if primary and (not runtime['connected'] or holder != business):
+        if primary and primary['id']!='prepare_collection' and (not runtime['connected'] or holder != business):
             primary.update(allowed=False,reason='请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有')
         raw = (runtime.get('calibration_feedback') or {}).get('qpos')
         limits = runtime.get('joint_limits')
@@ -247,7 +280,8 @@ class Application:
         manual['queue']=queue
         calibration=device.workflows.get('calibration')
         arrival=(calibration.snapshot().get('arrival_statistics') if calibration and hasattr(calibration,'snapshot') else None) or {'error':'未配置标定到位统计；协议 Fake 不生成统计数据'}
-        return dict(schema='robot-workbench-ui.v1',revision=revision,server_wall_ns=time.time_ns(),csrf=self.csrf,
+        return dict(schema='robot-workbench-ui.v1',server_instance_id=self.server_instance_id,
+            revision=revision,server_wall_ns=time.time_ns(),csrf=self.csrf,
             device=dict(id=device.id,label=device.label,environment=environment),runtime=runtime,
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
             results=workflow.results() if workflow else [],diagnostics=[{'label':'控制循环','value':device.error or '未报告错误'}],
@@ -307,6 +341,14 @@ class Application:
             result=runtime.handoff(device.credentials[runtime.holder],body.get('target_business'))
             self.invalidate(environment,clear_manual=True)
             return {'message':'控制权限已交接，保持连接',**result}
+        if action=='prepare_collection':
+            if business!='collection' or set(body)!={'environment','business','request_id'} or device.collection_preparation is None:
+                raise ValueError('当前数采后台准备入口未配置')
+            state=device.collection_preparation.snapshot()
+            if not state['can_retry']:raise ValueError(state['retry_reason'] or '当前数采准备不能重试')
+        if business=='collection' and action in ('generate_plan','execute') and device.collection_preparation:
+            if device.collection_preparation.snapshot()['status']!='ready':
+                raise ValueError('数采环境尚未准备成功；已有标定保留，请先完成环境准备')
         if action in ('manual_execute','execute'):
             review_id=body.get('review_id')
             with self.lock:
@@ -341,9 +383,9 @@ class Application:
                     with self.lock:self.manual_tasks.pop((environment,business),None)
                     raise
             body={**body,'token':review['token']}
-        if action not in {'connect','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*HISTORY_ACTIONS}:
+        if action not in {'connect','prepare_collection','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
-        if action not in ('connect','mesh','select_result','cancel',*HISTORY_ACTIONS):
+        if action not in ('connect','prepare_collection','mesh','select_result','cancel',*HISTORY_ACTIONS):
             if device.runtime is None:raise ValueError('请先连接设备')
             if device.runtime.holder != business:
                 raise PermissionError('请先交接控制权限：当前由 '+device.runtime.holder+' 持有')
@@ -417,8 +459,15 @@ class Application:
                     self.manual_tasks.pop(key,None)
         for workflow in self.device(environment).workflows.values():workflow.invalidate()
 
+    def invalidate_collection_preparation(self,device):
+        """Replacing D preparation revokes its review/checkpoint, never C or motors."""
+        with self.lock:self.reviews.pop((device.environment,'collection'),None)
+        workflow=device.workflows.get('collection')
+        if workflow is not None:workflow.invalidate()
+
     def perform(self, device, business, action, body):
         if action=='connect':return device.connect(body)
+        if action=='prepare_collection':return device.collection_preparation.retry()
         runtime=device.runtime
         if runtime is None and action not in ('mesh','select_result',*HISTORY_ACTIONS):raise ValueError('请先连接设备')
         if runtime is not None and runtime.holder != business and action not in ('mesh','select_result','cancel',*HISTORY_ACTIONS):
@@ -464,6 +513,8 @@ class Application:
         manual_revision=(preview.get('review_generation',workflow.manual_revision())
                          if action=='manual_execute' and workflow and hasattr(workflow,'manual_revision') else None)
         with self.lock:
+            if business=='collection' and device.collection_preparation:
+                if device.collection_preparation.snapshot()['status']!='ready':return
             review=dict(id=secrets.token_hex(16),action=action,
                 token=preview['token'],summary=summary,physical_clearance_required=device.environment=='physical',
                 owner_preview=bool(preview.get('owner_pid')),

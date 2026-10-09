@@ -60,6 +60,28 @@ class HTTPTest(unittest.TestCase):
         code,_=self.action('connect');self.assertEqual(code,202)
         return self.wait(lambda s:s['runtime'].get('stationary'))
 
+    def test_two_Application_instances_reuse_port_with_new_identity_revision_and_CSRF(self):
+        first=self.state()
+        for _ in range(5):old=self.state()
+        self.assertEqual(first['server_instance_id'],old['server_instance_id'])
+        self.assertNotEqual(first['server_instance_id'],first['csrf'])
+        port=self.server.server_port
+        self.server.shutdown();self.server.server_close();self.thread.join(1)
+        self.app=Application({'fake':self.device,'physical':Device('robot','physical',None)})
+        self.server=serve(self.app,port=port)
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+        fresh=self.state()
+        self.assertEqual(self.server.server_port,port)
+        self.assertNotEqual(fresh['server_instance_id'],old['server_instance_id'])
+        self.assertLess(fresh['revision'],old['revision'])
+        self.assertNotEqual(fresh['csrf'],old['csrf'])
+        stale=Request(self.url+'/api/actions/stop',json.dumps(dict(environment='fake',business='calibration',request_id='old-instance')).encode(),
+            headers={'Content-Type':'application/json','Origin':self.url,'X-CSRF-Token':old['csrf']})
+        with self.assertRaises(HTTPError) as rejected:self.http.open(stale)
+        self.assertEqual(rejected.exception.code,403)
+        code,_=self.action('stop');self.assertEqual(code,200)
+        self.assertIsNone(self.device.runtime,'restart checks must not start an SDK or fake control loop')
+
     def calibration_adapter(self):
         """Actual C HTTP client/preflight/queue plus shared Owner; geometry is a CPU fixture."""
         import numpy as np
