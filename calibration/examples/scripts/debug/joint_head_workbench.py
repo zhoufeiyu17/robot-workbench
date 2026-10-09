@@ -1865,7 +1865,17 @@ class Workbench:
     @classmethod
     def require_joint_head_dependency(cls,row):
         if not cls.head_dependency_eligible(row):
-            raise ValueError('腕标定需要同来源、完整快照且通过 mesh/贴纸独立留出门槛的头部联合结果')
+            parameters=row.get('parameters',row)
+            marker=parameters.get('metrics_rectified_px',{}).get('holdout',{}).get('rms_px','缺失')
+            mesh=parameters.get('mesh_metrics',{}).get('holdout',{})
+            from arx_env.joint_head_x5_hybrid import head_mesh_thresholds
+            try:
+                thresholds=head_mesh_thresholds({**parameters,**row},parameters.get('acceptance',{}).get('thresholds'))
+                limits=f"mesh误差≤{thresholds['holdout_mesh_max_px']:g}px、覆盖率≥{thresholds['holdout_mesh_min_coverage']:.0%}"
+            except (TypeError,ValueError):limits='mesh阈值记录无效'
+            raise ValueError('腕标定需要同来源、完整快照且通过 mesh/贴纸独立留出门槛的头部联合结果；'
+                f"当前留出：贴纸RMS={marker}px（≤2px），mesh误差={mesh.get('macro_mean_penalized_px','缺失')}px、"
+                f"覆盖率={mesh.get('macro_coverage','缺失')}（0～1）；要求{limits}。请查看该头部结果的质量详情。")
         return row
 
     def register_result(self,row):

@@ -420,6 +420,18 @@ class LibraryTests(unittest.TestCase):
         parameters['snapshot_complete']=False
         self.assertFalse(Workbench.head_dependency_eligible(row))
 
+    def test_rejected_head_reports_measured_holdout_and_source_thresholds(self):
+        parameters={'objective':'sticker_corners_plus_mesh','snapshot_complete':True,
+            'acceptance':{'image_checks':{'positive_depth':True}},'optimizer':{'success':True},
+            'mesh_metrics':{'holdout':{'macro_coverage':.59625,'macro_mean_penalized_px':11.084}},
+            'metrics_rectified_px':{'holdout':{'rms_px':6.892}}}
+        for source,limit in [('simulated','≤7px、覆盖率≥70%'),('physical','≤10px、覆盖率≥60%')]:
+            row={'parameters':{**parameters,'robot_source':source,'simulation_only':source=='simulated'}}
+            before=copy.deepcopy(row)
+            with self.assertRaises(ValueError) as caught:Workbench.require_joint_head_dependency(row)
+            for detail in ['6.892','11.084','0.59625',limit]:self.assertIn(detail,str(caught.exception))
+            self.assertEqual(row,before)
+
     def test_physical_head_mesh_thresholds_match_solver_and_install_group(self):
         from arx_env.joint_head_x5_hybrid import head_mesh_thresholds
         parameters={'objective':'sticker_corners_plus_mesh','snapshot_complete':True,
