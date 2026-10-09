@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+from real_contract import is_device_source
 from pathlib import Path
 import sys
 import time
@@ -65,7 +66,7 @@ def load(path, source, native_code, assets):
     planner.contact_tracking_reserve_m=planner.CUP_GRASP_RESERVE_M
     planner.outlet_tolerance_m=None;planner.hover_clearances_m=(.005,)
     from robot_sim.tasks.manager_based.coffee_make.initial_robot_state import joint_positions
-    if source.get('schema_version')=='physical_collection_source.v1':
+    if is_device_source(source):
         initial_model=source['initial_state']['model']
     elif source.get('schema_version')=='dual_gpu_pipeline.v1' and source.get('lane')=='simulated-real':
         initial_model=data['simulation_initial_state']
@@ -128,11 +129,16 @@ def main(args):
             save(args.output/'initial-plan.json',initial)
             if initial.get('passed') is not True:raise ValueError('no collision-free complete route; see initial-plan.json')
             route_ready=time.monotonic()
-            base=build(planner,obs,initial,source,data['native_identity'],speed_scale=None)
+            base=build(planner,obs,initial,source,data['native_identity'],speed_scale=None,
+                **({'environment':'fake'} if getattr(args,'environment','physical')=='fake' else {}))
             base=stamp_plan(base,identity)
         save(args.output/'base-plan.json',base)
         checked=time.monotonic()
-        plan=retime(base,source,args.speed_scale)
+        plan=retime(base,source,args.speed_scale,**({'environment':'fake'} if getattr(args,'environment','physical')=='fake' else {}))
+        if getattr(args,'execution_json',None):
+            from local_execution import validate,TARGET,stamp_plan
+            validate({'execution':json.loads(args.execution_json)})
+            stamp_plan(plan,TARGET)
         from frozen_executor import validate_plan_evidence
         validate_plan_evidence(plan,source)
         save(args.output/'plan.json',plan)
@@ -154,4 +160,6 @@ if __name__=='__main__':
     parser.add_argument('--initial',type=Path)
     parser.add_argument('--speed-scale',type=float,default=.3)
     parser.add_argument('--backend',choices=('native','curobo','motiongen'),default='native')
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
+    parser.add_argument('--execution-json')
     main(parser.parse_args())

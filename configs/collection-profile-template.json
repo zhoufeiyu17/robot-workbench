@@ -1,0 +1,92 @@
+{
+  "schema_version": "calibration_profile.v1",
+  "profile_id": "unconfigured-coffee-interface-template",
+  "source": {
+    "kind": "interface_template",
+    "calibration_available": false
+  },
+  "camera": {
+    "xyz_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rpy_rad": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "joints": {
+    "zero_offsets_rad": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "signs": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  },
+  "gripper": {
+    "mapping": "sum_of_two_prismatic_displacements_mm",
+    "max_opening_mm": 82.992
+  },
+  "frames": {
+    "environment_from_camera": {
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "orientation_wxyz": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "divergence_thresholds": {
+    "joint_rad": 0.05,
+    "gripper_mm": 5,
+    "timing_s": 0.1
+  },
+  "threshold_provenance": "simulation-development thresholds; not hardware measurements",
+  "scene_support": {
+    "machine_asset": "objects/owner_coffee_machine_00003/v1",
+    "machine_root_z_m": 0.78,
+    "cup_root_z_m": 0.78,
+    "source": "coffee_episode_layout/table_top; canonical upright mesh roots at base"
+  },
+  "template_provenance": {
+    "interface_source_sha256": "e3f377f44e7f802289be91c27af3da571d9e58f2e3684087e51379d9814d34ee",
+    "copied_fields": [
+      "schema_version",
+      "gripper",
+      "divergence_thresholds",
+      "threshold_provenance",
+      "scene_support"
+    ],
+    "camera_and_joints": "placeholders; replaced by mandatory current C installed calibration before acquisition"
+  }
+}

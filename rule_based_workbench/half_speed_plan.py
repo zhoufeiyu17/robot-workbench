@@ -13,7 +13,7 @@ from real_contract import validate_real_plan
 WAIT_STAGES = frozenset({"preclose_settle", "close_and_hold", "lift_hold", "support_settle", "release_hold", "home_hold"})
 
 
-def resample_speed(plan, source, binding, speed_scale=.3):
+def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physical'):
     """Retain every parent vertex at 30 Hz, interpolating only within original edges.
 
     Explicit stationary wait stages retain their duration. Motion is slowed;
@@ -23,11 +23,11 @@ def resample_speed(plan, source, binding, speed_scale=.3):
     def check(value):
         return FrozenExecutor(value, source, sink=lambda _:None, gate=lambda:False,
                               stop=lambda _:None,
-                              source_validator=lambda p,s:validate_real_plan(p,s,binding))
+                              source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment))
     geometric = plan.get('simulation') == {'validated':False,'outcome':'not_run'}
     if geometric:
         # Preparation may resample an unsigned geometric candidate, never execute it.
-        validate_real_plan(plan,source,binding)
+        validate_real_plan(plan,source,binding,environment=environment)
         from gripper_distance_plan import validate_distance_control
         validate_distance_control(plan,source)
         if 'planning_validation' in plan:
@@ -149,20 +149,20 @@ def resample_speed(plan, source, binding, speed_scale=.3):
             result['planning_validation']=receipt
             validate_plan_evidence(result,source)
         result['execution_derivation']['geometric_validation_required']='planning_validation' not in result
-        validate_real_plan(result,source,binding)
+        validate_real_plan(result,source,binding,environment=environment)
         validate_distance_control(result,source)
     else:
         check(result)
     return result
 
 
-def half_speed(plan,source,binding):
-    return resample_speed(plan,source,binding,.5)
+def half_speed(plan,source,binding,*,environment='physical'):
+    return resample_speed(plan,source,binding,.5,environment=environment)
 
 
-def resume_initial_open(plan, source, binding, measured_gap_mm, *, minimum_tick=0):
+def resume_initial_open(plan, source, binding, measured_gap_mm, *, minimum_tick=0, environment='physical'):
     """Operator-approved resume only within stationary initial opening; keep the checked suffix."""
-    validate_real_plan(plan,source,binding)
+    validate_real_plan(plan,source,binding,environment=environment)
     validate_plan_evidence(plan,source)
     if 'execution_resume' in plan or type(measured_gap_mm) not in (int,float) or not math.isfinite(measured_gap_mm):
         raise ValueError('one finite measured initial-opening resume required')
@@ -193,5 +193,5 @@ def resume_initial_open(plan, source, binding, measured_gap_mm, *, minimum_tick=
         derivation=dict(method='checked_stationary_initial_open_suffix',parent_timeline_digest=plan['timeline_digest'],
             parent_receipt_digest=_digest(plan['planning_validation']),collision_audit_rerun=False))
     result['planning_validation']=receipt
-    validate_real_plan(result,source,binding);validate_plan_evidence(result,source)
+    validate_real_plan(result,source,binding,environment=environment);validate_plan_evidence(result,source)
     return result

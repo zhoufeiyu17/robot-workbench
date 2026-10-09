@@ -33,6 +33,10 @@ from test_real_observation import fixture as snapshot
 
 
 class PlaygroundMotionGenEntryTest(unittest.TestCase):
+    environment = 'physical'
+    source_clock_id='cpu-fake-device-clock-v1'
+    runtime_nonce='cpu-fake-runtime-v1'
+
     def setUp(self):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -59,6 +63,12 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
         self.write(rig, dict(id=profile['profile_id'], calibration_binding=profile['model_binding']))
         self.write(self.root/'profile.json', profile)
         self.write(self.root/'binding.json', self.binding)
+        if self.environment == 'fake':
+            profile['source']['simulation_only'] = True
+            self.binding.update(environment='fake', simulation_only=True, evidence_source='fake_device_rgbd',
+                                calibration_profile_digest=_digest(profile))
+            self.write(self.root/'profile.json', profile)
+            self.write(self.root/'binding.json', self.binding)
         run = '/mnt/data/feiyu.zhou/runs/robot_sim/prepare-cpu-fixture'
         self.contract = dict(schema_version='anyverse.dsw-codex-experiment.v1',
             filesystem=dict(readonly_roots=[str(self.root)], writable_roots=[run, str(self.uploads)],
@@ -70,14 +80,30 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
         self.cfg.update(contract_path=str(self.root/'contract.json'), remote_run_root=run,
             assets=str(assets), opening_mm=83., finger_envelope_sha256='a'*64,
             planning_backend='motiongen', curobo_root=str(self.root/'curobo'))
+        if self.environment=='fake':self.cfg['environment']='fake'
         self.write(self.root/'contract.json', self.contract)
         self.write(self.root/'config.json', self.cfg)
         self.bridge = SimpleNamespace(config=dict(preparation=dict(pipeline_config=str(self.root/'config.json'),
             acquisition=dict(profile_path=str(self.root/'profile.json'), acquisition_binding_path=str(self.root/'binding.json'),
                 measured_initial_state=True, transport=dict(remote_root=str(self.uploads), endpoint=None)))))
-        frames = iter(snapshot(i) for i in range(9))
+        if self.environment=='fake':self.bridge.config['environment']='fake'
+        self.last_source_ns=1_000_000_000
+        def update(meta):
+            ns=meta['frame_number']*1_000_000_000+1_000_000_000;self.last_source_ns=ns
+            meta.update(environment='fake',simulation_only=True,evidence_source='fake_device_rgbd',timestamp_kind='simulation_step',
+                clock_domain='simulation',source_clock_id=self.source_clock_id,source_time_ns=ns,physics_step=ns*240//1_000_000_000,
+                host_receive_ns=time.time_ns(),device_timestamp_ms=ns/1e6,depth_device_timestamp_ms=ns/1e6,timestamp_domain='simulation',
+                owner_available=True,owner_pid=1234,command_epoch=3,runtime_nonce=self.runtime_nonce)
+        frames = iter(snapshot(i,update if self.environment=='fake' else None) for i in range(9))
         self.bridge.camera = lambda *args: (next(frames), 'application/zip')
-        self.bridge.owner = lambda: owner(stamp=time.time_ns())
+        def read_owner():
+            result=owner(stamp=time.time_ns())
+            if self.environment=='fake':
+                result.update(mode='simulation',environment='fake',evidence_source='fake',runtime_nonce=self.runtime_nonce)
+                result['calibration_feedback'].update(clock_domain='simulation',source_clock_id=self.source_clock_id,
+                    source_time_ns=self.last_source_ns,sample_time_s=self.last_source_ns/1e9,physics_step=self.last_source_ns*240//1_000_000_000)
+            return result
+        self.bridge.owner = read_owner
         self.stages = []; self.tamper = None
 
     @staticmethod
@@ -112,7 +138,7 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
                 self.assertTrue(self.remote.is_dir())
             elif name == 'physical-capture-import':
                 self.assertIn('import_capture', command)
-                import_capture(self.prepared['capture_dir'], self.prepared['physical_binding'], self.remote/'capture')
+                import_capture(self.prepared['capture_dir'], self.prepared['physical_binding'], self.remote/'capture',self.environment)
             elif name == 'detect':
                 # Fake detector output refers to the actual sealed capture bytes.
                 summary, rows, _ = detection_fixture()
@@ -127,14 +153,15 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
                 self.write(self.remote/'detection/summary.json', summary)
                 (self.remote/'detection/observations.jsonl').write_text('\n'.join(map(json.dumps, rows)))
             elif name == 'physical-detection-bind':
-                self.assertIn('bind_detection', command); bind_detection(self.remote)
+                self.assertIn('bind_detection', command); bind_detection(self.remote,self.environment)
             elif name == 'bridge':
                 tokens = shlex.split(command)
                 self.assertNotIn('--simulation-initial-suite', tokens)
                 self.assertEqual(tokens[tokens.index('--physical-binding')+1], cfg['remote_run_root']+'/physical-detection-binding.json')
                 bound = json.loads((self.remote/'physical-detection-binding.json').read_text())
                 convert(self.remote/'capture/profile.json', self.remote/'detection', self.remote/'detection-bridge',
-                        tokens[tokens.index('--run-id')+1], bound)
+                        tokens[tokens.index('--run-id')+1], bound, environment=self.environment)
+                if self.environment=='fake':self.assertIn('--environment fake',command)
             elif name == 'physical-model-bind':
                 self.assertIn('validate_assets', command)
                 validate_assets(cfg['assets'], self.remote/'capture/profile.json', pins)
@@ -146,6 +173,7 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
             elif name == 'playground-plan':
                 self.assertEqual(self.stages[-2], 'playground-geometry-inputs')
                 self.assertIn('/motiongen_plan.py', command)
+                if self.environment=='fake':self.assertIn('--environment fake',command)
                 self.assertIn('--physical-binding '+cfg['remote_run_root']+'/detection-bridge/hardware-binding.json', command)
                 self.assertEqual(stage['expected_native_status'], 'motiongen-plan-ready')
                 self.synthetic_gpu_result()
@@ -166,7 +194,7 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
         model['planning_backend']['native_robot_sha256'] = source['calibration_profile']['model_binding']['urdf_sha256']
         model['planning_validation'].update(source_digest=_digest(source), timeline_digest=model['timeline_digest'])
         model['control_validation'] = validate_control(model)
-        physical = freeze_physical(model, source, binding)
+        physical = freeze_physical(model, source, binding,environment=self.environment)
         self.write(self.remote/'playground-plan/plan.json', physical)
         self.write(self.remote/'playground-plan/result.json', dict(status='motiongen-plan-ready'))
         if self.tamper == 'returned-binding':

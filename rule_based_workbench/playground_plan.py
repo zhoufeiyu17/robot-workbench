@@ -9,7 +9,7 @@ from integration import _digest, SIM_PLANNER_ID, SIM_POLICY_ID
 from joint_space import convert_state, freeze_reported, gripper_offset_mm
 
 
-def build(planner, observation, initial, source, identity, speed_scale=.3):
+def build(planner, observation, initial, source, identity, speed_scale=.3, *, environment='physical'):
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from robot_sim.policies.continuous_motion import MotionLimits, continuous_trajectory
     from robot_sim.specs.action import ArmCommand, DualArmCommand, ac_one_dual_arm_zero_home_action_spec
@@ -116,20 +116,23 @@ def build(planner, observation, initial, source, identity, speed_scale=.3):
     freeze_reported(plan,source)
     plan=distance_plan(plan,source,close_metal_gap_mm=65.)
     audit(plan,source,planner,observation,initial)
-    return plan if speed_scale is None else retime(plan,source,speed_scale)
+    return plan if speed_scale is None else retime(plan,source,speed_scale,environment=environment)
 
 
-def retime(plan,source,speed_scale):
+def retime(plan,source,speed_scale,*,environment='physical'):
     """Change timing along the checked polyline, without another geometric audit."""
     from half_speed_plan import resample_speed
     # The source binding is checked again by the caller; here no robot is accessed.
-    binding=dict(calibration_accepted=True,evidence_source='physical_rgbd',robot_id=source['robot_id'],
+    from real_contract import namespace
+    spec=namespace(environment)
+    binding=dict(calibration_accepted=True,evidence_source=spec['evidence'],robot_id=source['robot_id'],
                  camera_serials=source['camera_serials'],source_digest=_digest(source),
                  calibration_profile_digest=_digest(source['calibration_profile']),initial_state=source['initial_state'])
+    if environment=='fake':binding.update(environment='fake',simulation_only=True)
     if plan.get('physical_gpu_conversion'):
         from physical_motiongen import retime_physical
-        return retime_physical(plan,source,binding,speed_scale)
-    return resample_speed(plan,source,binding,speed_scale)
+        return retime_physical(plan,source,binding,speed_scale,environment=environment)
+    return resample_speed(plan,source,binding,speed_scale,environment=environment)
 
 
 def audit(plan,source,planner,observation,initial):

@@ -23,8 +23,9 @@ from contract import validate_physical14, validate_physical_feedback
 from frozen_executor import FrozenExecutor
 from integration import _digest
 from playback import sha256
-from real_contract import validate_real_plan
+from real_contract import validate_real_plan, namespace, validate_namespace
 from real_rgbd import pair_metadata
+from robot_workbench.sample_clock import clock_spec, clock_for_source, sample_stamp, assert_progress, bracket_samples, owner_identity
 
 CAMERAS = ('base_0','left_wrist_0','right_wrist_0')
 SIDES = dict(zip(CAMERAS,('head','left','right')))
@@ -67,7 +68,8 @@ def png_shape(image, *, depth=False):
     return width,height
 
 
-def bundle(blob, serial):
+def bundle(blob, serial, *, environment='physical', clock=None):
+    namespace(environment)
     if not isinstance(blob,bytes) or len(blob) > 16*1024*1024:
         raise ValueError('bounded snapshot ZIP bytes required')
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:
@@ -77,6 +79,22 @@ def bundle(blob, serial):
             raise ValueError('RGB-D bundle decompressed size exceeds limit')
         meta = json.loads(archive.read('metadata.json'))
         color,depth = archive.read('color.png'),archive.read('depth.png')
+    if meta.get('data_valid') is False:
+        raise ValueError('camera data invalid: '+str(meta.get('recording_error') or 'producer rejected this frame'))
+    if environment=='fake':
+        validate_namespace(meta,environment)
+        owner_identity(meta,require_available=True)
+        if meta.get('timestamp_kind')!='simulation_step':
+            raise ValueError('fake RGB-D requires simulation_step timestamps')
+        clock=clock or clock_spec('fake',clock_domain=meta.get('clock_domain'),source_clock_id=meta.get('source_clock_id'))
+        sample_stamp(meta,clock)
+        attached=meta.get('frame_readback')
+        if attached is not None and (not isinstance(attached,dict) or any(attached.get(key)!=meta.get(key)
+                for key in ('clock_domain','source_clock_id','source_time_ns','physics_step'))):
+            raise ValueError('RGB-D frame readback belongs to another source step')
+    elif (meta.get('environment','physical')!='physical' or meta.get('simulation_only') is True
+          or meta.get('evidence_source','physical_rgbd')!='physical_rgbd'):
+        raise ValueError('fake camera frames cannot enter a physical recording')
     if (meta.get('serial') != serial or meta.get('rgbd_paired') is not True
             or meta.get('depth_aligned_to') != 'color' or meta.get('depth_encoding') != 'uint16_png'):
         raise ValueError('camera identity or aligned RGB-D provenance differs')
@@ -91,10 +109,17 @@ def bundle(blob, serial):
 
 
 class RealRecorder:
-    def __init__(self, root, source, plan, binding, *, clock_ns=time.time_ns, execution_timeline=None):
-        validate_real_plan(plan,source,binding)
+    def __init__(self, root, source, plan, binding, *, clock_ns=time.time_ns, execution_timeline=None, environment='physical', clock_domain=None, source_clock_id=None, execution_owner=None):
+        self.namespace=namespace(environment)
+        self.environment=environment
+        self.execution_owner=owner_identity(execution_owner) if execution_owner is not None else None
+        self.clock=clock_for_source(source,environment)
+        if (clock_domain is not None or source_clock_id is not None) and clock_spec(environment,
+                clock_domain=clock_domain,source_clock_id=source_clock_id)!=self.clock:
+            raise ValueError('recorder clock differs from sealed source')
+        validate_real_plan(plan,source,binding,environment=environment)
         self.frozen = FrozenExecutor(plan,source,sink=lambda _:None,gate=lambda:True,stop=lambda _:None,
-                                    source_validator=lambda p,s:validate_real_plan(p,s,binding),
+                                    source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment),
                                     execution_policy='observation' if execution_timeline else 'strict')
         if execution_timeline is not None:
             from execution_timeline import validate
@@ -121,7 +146,26 @@ class RealRecorder:
         with (self.root/name).open('a') as stream:
             stream.write(json.dumps(row,allow_nan=False)+'\n')
 
-    def record_command(self,tick,target,send_monotonic_s,send_wall_ns):
+    def _stamp(self,row,kind):
+        wall_key={'command':'send_wall_ns','feedback':'sample_wall_ns','rgbd':'host_receive_ns'}[kind]
+        value=row.get(wall_key)
+        if kind=='rgbd' and isinstance(value,str) and value.isdigit():row={**row,wall_key:int(value)}
+        return sample_stamp(row,self.clock,wall_key=wall_key,
+            source_key='send_source_time_ns' if kind=='command' else 'source_time_ns',require_step=kind!='command')
+
+    def _check_owner(self,row,*,frame=False):
+        identity=owner_identity(row,require_available=frame)
+        if self.execution_owner is None and not frame:
+            self.execution_owner=identity
+            if any(owner_identity(value,require_available=True)!=identity for rows in self.frames.values() for value in rows):
+                raise ValueError('pre-roll frame Owner differs from the execution Owner')
+        if self.execution_owner is not None and identity!=self.execution_owner:
+            raise ValueError('sample Owner instance/epoch differs from this execution')
+
+    def record_command(self,tick,target,send_monotonic_s,send_wall_ns,*,clock_domain=None,source_clock_id=None,send_source_time_ns=None,physics_step=None,feedback_at_send=None,owner_pid=None,command_epoch=None,runtime_nonce=None):
+        if self.environment=='physical' and any(value is not None for value in
+                (clock_domain,source_clock_id,send_source_time_ns,physics_step,feedback_at_send,owner_pid,command_epoch,runtime_nonce)):
+            raise ValueError('simulation command-clock fields cannot enter physical recording')
         if (type(tick) is not int or tick != len(self.commands) or tick >= len(self.frozen.ticks)
                 or target != self.frozen.ticks[tick]['target'] or not finite(send_monotonic_s)
                 or type(send_wall_ns) is not int or send_wall_ns <= 0
@@ -129,10 +173,27 @@ class RealRecorder:
                                        or send_wall_ns <= self.commands[-1]['send_wall_ns'])):
             raise ValueError('ordered unchanged frozen command and advancing timestamps required')
         row = dict(tick=tick,target=deepcopy(target),send_monotonic_s=send_monotonic_s,send_wall_ns=send_wall_ns)
+        if self.environment=='fake':
+            row.update(clock_domain=clock_domain,source_clock_id=source_clock_id,send_source_time_ns=send_source_time_ns,physics_step=physics_step)
+            row.update(owner_pid=owner_pid,command_epoch=command_epoch,runtime_nonce=runtime_nonce)
+            self._check_owner(row)
+            stamp=self._stamp(row,'command')
+            if abs(round(send_monotonic_s*1e9)-stamp[0])>1:
+                raise ValueError('command control time differs from source time')
+            if physics_step is not None:
+                raise ValueError('command submission is not a completed physics sample; use feedback_at_send')
+            observed=sample_stamp(feedback_at_send,self.clock,wall_key='sample_wall_ns')
+            if not 0<=stamp[0]-observed[0]<=100_000_000 or feedback_at_send['sample_wall_ns']>send_wall_ns:
+                raise ValueError('command requires its preceding fresh feedback sample')
+            row['feedback_at_send']=deepcopy(feedback_at_send)
+            assert_progress(self._stamp(self.commands[-1],'command') if self.commands else None,stamp)
         self.append('commands.jsonl',row)
         self.commands.append(row)
 
-    def record_feedback(self,tick,state,sample_monotonic_s,sample_wall_ns,raw=None):
+    def record_feedback(self,tick,state,sample_monotonic_s,sample_wall_ns,raw=None,*,clock_domain=None,source_clock_id=None,source_time_ns=None,physics_step=None,owner_pid=None,command_epoch=None,runtime_nonce=None):
+        if self.environment=='physical' and any(value is not None for value in
+                (clock_domain,source_clock_id,source_time_ns,physics_step,owner_pid,command_epoch,runtime_nonce)):
+            raise ValueError('simulation feedback-clock fields cannot enter physical recording')
         validate_physical_feedback(state,self.source['calibration_profile'],enforce_range=False)
         if (type(tick) is not int or not 0 <= tick < len(self.frozen.ticks) or not finite(sample_monotonic_s)
                 or type(sample_wall_ns) is not int or sample_wall_ns <= 0
@@ -140,14 +201,29 @@ class RealRecorder:
                                        or sample_wall_ns <= self.feedback[-1]['sample_wall_ns'])):
             raise ValueError('measured feedback and advancing sample clocks required')
         row = dict(tick=tick,state=deepcopy(state),sample_monotonic_s=sample_monotonic_s,sample_wall_ns=sample_wall_ns,raw=raw)
+        if self.environment=='fake':
+            supplied=dict(clock_domain=clock_domain,source_clock_id=source_clock_id,source_time_ns=source_time_ns,physics_step=physics_step,
+                owner_pid=owner_pid,command_epoch=command_epoch,runtime_nonce=runtime_nonce)
+            for key,value in supplied.items():
+                if value is None:value=(raw or {}).get(key)
+                elif raw is not None and key in raw and raw[key]!=value:
+                    raise ValueError('feedback source clock differs from raw sample')
+                row[key]=value
+            self._check_owner(row)
+            stamp=self._stamp(row,'feedback')
+            if abs(round(sample_monotonic_s*1e9)-stamp[0])>1:
+                raise ValueError('feedback control time differs from source time')
+            assert_progress(self._stamp(self.feedback[-1],'feedback') if self.feedback else None,stamp)
         self.append('feedback.jsonl',row)
         self.feedback.append(row)
 
     def record_rgbd(self,camera,blob):
         if self.closed or camera not in CAMERAS: raise ValueError('open recording and known camera required')
-        meta,_,_ = bundle(blob,self.source['camera_serials'][SIDES[camera]])
+        meta,_,_ = bundle(blob,self.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+        if self.environment=='fake':self._check_owner(meta,frame=True)
         rows = self.frames[camera]
         if rows and meta['pair_id'] == rows[-1]['pair_id']: return False
+        assert_progress(self._stamp(rows[-1],'rgbd') if rows else None,self._stamp(meta,'rgbd'))
         if rows and (int(meta['host_receive_ns']) <= int(rows[-1]['host_receive_ns'])
                      or meta['frame_number'] <= rows[-1]['frame_number']
                      or meta['depth_frame_number'] <= rows[-1]['depth_frame_number']):
@@ -165,30 +241,48 @@ class RealRecorder:
         if self.closed or status not in ('completed','failed','stopped','recording_failed'):
             raise ValueError('one explicit terminal outcome required')
         problems = []
+        pairings=[]
         if len(self.commands) != len(self.frozen.ticks): problems.append('not every execution command recorded')
         if not self.feedback or not self.commands:
             problems.append('command or measured feedback stream missing')
         else:
-            endpoint = self.commands[0]['send_monotonic_s']+self.frozen.duration_s
-            if self.feedback[-1]['sample_monotonic_s']+1e-9 < endpoint:
+            commands=[self._stamp(row,'command') for row in self.commands]
+            feedback=[self._stamp(row,'feedback') for row in self.feedback]
+            endpoint = (commands[0][0]/1e9 if self.environment=='fake' else self.commands[0]['send_monotonic_s'])+self.frozen.duration_s
+            last_feedback = feedback[-1][0]/1e9 if self.environment=='fake' else self.feedback[-1]['sample_monotonic_s']
+            if last_feedback+1e-9 < endpoint:
                 problems.append('feedback does not cover complete command duration')
-            if any(b['sample_monotonic_s']-a['sample_monotonic_s']>.1 for a,b in zip(self.feedback,self.feedback[1:])):
+            feedback_gap = (any(b[0]-a[0]>100_000_000 for a,b in zip(feedback,feedback[1:])) if self.environment=='fake'
+                else any(b['sample_monotonic_s']-a['sample_monotonic_s']>.1 for a,b in zip(self.feedback,self.feedback[1:])))
+            if feedback_gap:
                 problems.append('measured feedback gaps exceed 0.1 s')
             for camera,rows in self.frames.items():
                 if not rows:
                     problems.append(camera+': RGB-D stream missing'); continue
-                if (int(rows[0]['host_receive_ns']) > self.commands[0]['send_wall_ns']
-                        or int(rows[-1]['host_receive_ns']) < self.feedback[-1]['sample_wall_ns']):
+                frames=[self._stamp(row,'rgbd') for row in rows]
+                if frames[0][0] > commands[0][0] or frames[-1][0] < feedback[-1][0]:
                     problems.append(camera+': RGB-D does not bracket execution')
                 if any(b['frame_number'] != a['frame_number']+1 or b['depth_frame_number'] != a['depth_frame_number']+1
                        for a,b in zip(rows,rows[1:])):
                     problems.append(camera+': dropped RGB-D frames')
-                if any(int(b['host_receive_ns'])-int(a['host_receive_ns'])>100_000_000 for a,b in zip(rows,rows[1:])):
+                if any(b[0]-a[0]>100_000_000 for a,b in zip(frames,frames[1:])):
                     problems.append(camera+': RGB-D capture gap exceeds 0.1 s')
+                if self.environment=='fake':
+                    for frame,row in zip(frames,rows):
+                        if not commands[0][0]<=frame[0]<=feedback[-1][0]:continue
+                        try:left,right=bracket_samples(feedback,frame)
+                        except ValueError as error:
+                            problems.append(camera+': '+str(error));continue
+                        pairings.append(dict(camera=camera,frame_number=row['frame_number'],source_time_ns=frame[0],physics_step=frame[1],
+                            feedback_left_index=left,feedback_right_index=right,
+                            feedback_left_source_time_ns=feedback[left][0],feedback_right_source_time_ns=feedback[right][0],
+                            feedback_left_physics_step=feedback[left][1],feedback_right_physics_step=feedback[right][1],
+                            association='exact_feedback_sample' if left==right else 'feedback_bracket',interpolated=left!=right))
         if status != 'completed': problems.append('controller outcome: '+status)
+        if self.environment=='fake':self.write_json('frame-feedback-pairs.json',dict(clock=self.clock,pairs=pairings))
         files = {str(path.relative_to(self.root)):dict(size_bytes=path.stat().st_size,sha256=sha256(path))
                  for path in self.root.rglob('*') if path.is_file()}
-        manifest = dict(schema_version='physical_raw_dataset.v1',evidence_source='physical_rgbd',
+        manifest = dict(schema_version=self.namespace['raw_schema'],evidence_source=self.namespace['evidence'],
                         source_run_id=self.source['run_id'],plan_run_id=self.plan['run_id'],timeline_digest=self.plan['timeline_digest'],
                         robot_id=self.source['robot_id'],camera_serials=self.source['camera_serials'],
                         created_wall_ns=self.created_ns,sealed_wall_ns=self.clock_ns(),
@@ -200,6 +294,9 @@ class RealRecorder:
                         controller_reason=None if status=='recording_failed' else reason,
                         recording_error=reason if status=='recording_failed' else None,
                         task_outcome='unverified',files=files)
+        if self.environment=='fake':manifest.update(environment='fake',simulation_only=True,clock=self.clock,source_clock='simulation',
+            source_clock_id=self.clock['source_clock_id'],execution_owner=self.execution_owner,
+            frame_feedback_association='exact samples or explicit same-clock brackets')
         if self.frozen.runtime_timeline:
             manifest.update(execution_timeline_digest=self.frozen.runtime_timeline['timeline_digest'],
                 execution_hz=self.frozen.runtime_timeline['control_hz'],
@@ -209,12 +306,13 @@ class RealRecorder:
         return manifest
 
 
-def verify_raw(root):
+def verify_raw(root, *, environment='physical'):
     root = Path(root).resolve()
     if (root/'manifest.json').is_symlink(): raise ValueError('raw manifest symlink forbidden')
     manifest = json.loads((root/'manifest.json').read_text())
-    if manifest.get('schema_version') != 'physical_raw_dataset.v1' or manifest.get('evidence_source') != 'physical_rgbd':
+    if manifest.get('schema_version') != namespace(environment)['raw_schema']:
         raise ValueError('physical raw manifest required')
+    validate_namespace(manifest, environment)
     if not {'source.json','plan.json','binding.json'} <= set(manifest.get('files',{})):
         raise ValueError('raw identity files must be sealed')
     for name,pin in manifest['files'].items():
@@ -222,7 +320,10 @@ def verify_raw(root):
         if path.is_symlink() or not path.resolve().is_relative_to(root) or path.stat().st_size != pin['size_bytes'] or sha256(path) != pin['sha256']:
             raise ValueError('sealed raw file changed: '+name)
     source,plan,binding = [json.loads((root/name).read_text()) for name in ('source.json','plan.json','binding.json')]
-    validate_real_plan(plan,source,binding)
+    validate_real_plan(plan,source,binding,environment=environment)
+    if environment=='fake' and (manifest.get('clock')!=clock_for_source(source,environment)
+            or manifest.get('source_clock')!='simulation' or manifest.get('source_clock_id')!=source['clock']['source_clock_id']):
+        raise ValueError('raw clock differs from sealed source')
     if manifest.get('source_run_id') != source['run_id'] or manifest.get('plan_run_id') != plan['run_id'] or manifest.get('timeline_digest') != plan['timeline_digest']:
         raise ValueError('raw identity differs')
     if manifest.get('execution_timeline_digest'):
@@ -235,15 +336,16 @@ def verify_raw(root):
     return manifest,source,plan
 
 
-def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run):
+def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run,environment='physical'):
     """Derived videos may exist for a failed run; raw/task outcome stays explicit."""
     raw_root = Path(raw_root).resolve()
     target_manifest_path = Path(target_manifest_path).resolve() if target_manifest_path is not None else None
-    raw,source,plan = verify_raw(raw_root)
+    spec=namespace(environment)
+    raw,source,plan = verify_raw(raw_root,environment=environment)
     target = json.loads(target_manifest_path.read_text()) if target_manifest_path is not None else None
     if target is not None and target.get('execution_timeline_digest') != raw.get('execution_timeline_digest'):
         raise ValueError('physical and simulation execution commands differ')
-    if target is not None and (target.get('schema_version') != 'physical_target_playback.v1' or target.get('evidence_source') != 'simulation'
+    if target is not None and (target.get('schema_version') != spec['target_playback_schema'] or target.get('evidence_source') != 'simulation'
             or target.get('source_run_id') != source['run_id'] or target.get('plan_run_id') != plan['run_id']
             or target.get('timeline_digest') != plan['timeline_digest']
             or set(target.get('files',{})) != {f'target-{c}.mp4' for c in CAMERAS}):
@@ -261,17 +363,19 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     output.mkdir(parents=True,exist_ok=False)
     files = {}
     timing = {}
-    command_start = json.loads((raw_root/'commands.jsonl').read_text().splitlines()[0])['send_wall_ns']
+    clock=clock_for_source(source,environment)
+    first_command=json.loads((raw_root/'commands.jsonl').read_text().splitlines()[0])
+    command_start = sample_stamp(first_command,clock,wall_key='send_wall_ns',source_key='send_source_time_ns',require_step=False)[0]
     with tempfile.TemporaryDirectory(dir=output) as temporary:
         temporary = Path(temporary)
         for camera,rows in frames.items():
-            stamps = [int(row['host_receive_ns']) for row in rows]
+            stamps = [sample_stamp({**row,'host_receive_ns':int(row['host_receive_ns'])},clock)[0] for row in rows]
             periods = [(b-a)/1e9 for a,b in zip(stamps,stamps[1:])]
             last = statistics.median(periods) if periods else 1/rows[0]['capture_fps']
             entries = []
             for index,(row,duration) in enumerate(zip(rows,periods+[last])):
                 path = temporary/f'{camera}-{index:08d}.png'
-                _,color,_ = bundle((raw_root/row['path']).read_bytes(),source['camera_serials'][SIDES[camera]])
+                _,color,_ = bundle((raw_root/row['path']).read_bytes(),source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
                 path.write_bytes(color)
                 escaped = str(path).replace("'", "'\\''")
                 entries.extend([f"file '{escaped}'",'option framerate 1000',f'duration {duration:.9f}'])
@@ -285,9 +389,10 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
                     '-an','-c:v','libx264','-threads','2','-preset','fast','-crf','24','-pix_fmt','yuv420p',
                     '-bf','0','-bsf:v',f'setts=duration=if(eq(N\\,{len(rows)-1})\\,{tail_ns}/1000000000/TB\\,DURATION)',
                     '-fps_mode','vfr','-enc_time_base','1:1000','-video_track_timescale','1000000','-movflags','+faststart',str(destination)],check=True,timeout=300)
-            timing[camera] = dict(clock='host_receive',frame_offsets_s=[(stamp-command_start)/1e9 for stamp in stamps],
+            timing[camera] = dict(clock='simulation' if environment=='fake' else 'host_receive',frame_offsets_s=[(stamp-command_start)/1e9 for stamp in stamps],
                                  frame_count=len(rows),depth_in_raw=True,last_frame_duration_s=last,
                                  duration_s=(stamps[-1]-stamps[0])/1e9+last)
+            if environment=='fake':timing[camera].update(source_clock_id=clock['source_clock_id'],host_receive_ns=[int(row['host_receive_ns']) for row in rows])
         import shutil
         for name,path in target_paths.items(): shutil.copyfile(path,output/name)
     for path in sorted(output.glob('*.mp4')):
@@ -304,11 +409,12 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
             if not math.isfinite(duration) or abs(duration-expected) > .002:
                 raise ValueError('source replay duration differs from recorded timing and final-frame hold')
         files[path.name] = dict(size_bytes=path.stat().st_size,sha256=sha256(path),probe=probe[0])
-    manifest = dict(schema_version='physical_workbench_playback.v1',mode='real_robot',clock='elapsed',
+    manifest = dict(schema_version=spec['playback_schema'],mode=spec['mode'],clock='elapsed',
                     source_run_id=source['run_id'],plan_run_id=plan['run_id'],timeline_digest=plan['timeline_digest'],
-                    provenance={'source':'physical_rgbd', **({'target':'simulation'} if target is not None else {})},files=files,source_timing=timing,
+                    provenance={'source':spec['evidence'], **({'target':'simulation'} if target is not None else {})},files=files,source_timing=timing,
                     raw_manifest_sha256=sha256(raw_root/'manifest.json'),target_manifest_sha256=sha256(target_manifest_path) if target_manifest_path is not None else None,capture_status=raw['capture_status'],
                     controller_outcome=raw['controller_outcome'],task_outcome='unverified')
+    if environment=='fake':manifest.update(environment='fake',simulation_only=True,source_clock=clock)
     (output/'manifest.json').write_text(json.dumps(manifest,allow_nan=False,indent=2)+'\n')
     return manifest
 
@@ -321,10 +427,15 @@ class RecordingSession:
     Tests may omit directories and submit paired bundles through the same queue.
     """
     def __init__(self,root,source,plan,binding,*,camera_directories=None,clock_ns=time.time_ns,
-                 capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None):
+                 capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None):
         import queue
         import threading
         self.root=Path(root)
+        self.environment=namespace(environment)['environment']
+        self.clock=clock_for_source(source,environment)
+        if (clock_domain is not None or source_clock_id is not None) and clock_spec(environment,clock_domain=clock_domain,source_clock_id=source_clock_id)!=self.clock:
+            raise ValueError('recording session clock differs from source')
+        self.execution_owner=execution_owner
         self.events=queue.Queue(maxsize=capacity)
         self.ready,self.done=threading.Event(),threading.Event()
         self.lock=threading.Lock()
@@ -374,9 +485,12 @@ class RecordingSession:
         import queue
         cursors={}
         leases=[]
+        lease_deadline_wall_ns=None
         try:
             self.recorder=factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
-                **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}))
+                **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
+                **({'environment':self.environment,'clock_domain':self.clock['clock_domain'],'source_clock_id':self.clock['source_clock_id'],
+                    'execution_owner':self.execution_owner} if self.environment=='fake' else {}))
             if self.camera_directories is not None:
                 if set(self.camera_directories)!=set(CAMERAS):raise ValueError('three native RGB-D spool directories required')
                 duration=self.recorder.frozen.duration_s+15
@@ -386,11 +500,13 @@ class RecordingSession:
                     if json.loads((directory/'recording-service.json').read_text()).get('schema') != 'rgbd_lease.v1':
                         raise ValueError(camera+': on-demand recording service required')
                     start=self.clock_ns()
+                    deadline_wall_ns=start+round(duration*1e9)
+                    lease_deadline_wall_ns=min(lease_deadline_wall_ns or deadline_wall_ns,deadline_wall_ns)
                     token=uuid.uuid4().hex
                     request=directory/'recording-request.json'
                     temporary=directory/(token+'.request.tmp')
                     temporary.write_text(json.dumps(dict(run_id=token,start_wall_ns=start,
-                                                        deadline_wall_ns=start+round(duration*1e9))))
+                                                        deadline_wall_ns=deadline_wall_ns)))
                     try:os.link(temporary,request)  # Atomic exclusive publish; never replace another run.
                     finally:temporary.unlink()
                     leases.append((request,token))
@@ -401,7 +517,7 @@ class RecordingSession:
                     for camera,(directory,index) in cursors.items():
                         path=directory/f'{index:09d}.zip'
                         if path.is_file():
-                            meta,_,_=bundle(path.read_bytes(),source['camera_serials'][SIDES[camera]])
+                            meta,_,_=bundle(path.read_bytes(),source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
                             if meta.get('recording_run_id') != directory.name or not meta.get('recording_enabled'):
                                 raise ValueError(camera+': raw recording lease differs')
                             first.append(meta)
@@ -418,6 +534,8 @@ class RecordingSession:
                     raise ValueError('native raw stream absent or stale')
             self.ready.set()
             while True:
+                if lease_deadline_wall_ns is not None and self.clock_ns()>=lease_deadline_wall_ns:
+                    raise ValueError('recording lease actual wall deadline exceeded')
                 try:
                     kind,fields=self.events.get(timeout=.01)
                 except queue.Empty:pass
@@ -440,8 +558,8 @@ class RecordingSession:
                 with self.lock:terminal=self.terminal
                 if terminal and self.events.empty():
                     status,reason,requested=terminal
-                    endpoint=self.recorder.feedback[-1]['sample_wall_ns'] if self.recorder.feedback else 0
-                    covered=all(rows and int(rows[-1]['host_receive_ns'])>=endpoint for rows in self.recorder.frames.values())
+                    endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
+                    covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
                     if not cursors or covered or time.monotonic()-requested>=1:
                         self.manifest=self.recorder.seal(status,reason)
                         break

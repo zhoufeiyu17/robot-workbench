@@ -111,16 +111,11 @@ def normalize_initial_arm_limits(state, spec, tolerance_rad=.005):
     return result,changes
 
 
-def validate_inputs(source,binding,suite,plan=None,execution_timeline=None):
+def validate_inputs(source,binding,suite,plan=None,execution_timeline=None,*,environment='physical'):
     from real_observation import validate_binding
-    validate_binding(source['calibration_profile'],binding)
-    if (source.get('schema_version')!='physical_collection_source.v1'
-            or source.get('evidence_source')!='physical_rgbd'
-            or binding.get('source_digest')!=_digest(source)
-            or binding.get('robot_id')!=source.get('robot_id')
-            or binding.get('camera_serials')!=source.get('camera_serials')
-            or binding.get('initial_state')!=source.get('initial_state')):
-        raise ValueError('trusted physical source binding required')
+    from real_contract import validate_real_source
+    validate_binding(source['calibration_profile'],binding,environment=environment)
+    validate_real_source(source,binding,environment=environment)
     validate_initial_state(source['initial_state'],source['calibration_profile'])
     episodes=suite.get('episodes')
     if not isinstance(episodes,list) or len(episodes)!=1:
@@ -134,7 +129,7 @@ def validate_inputs(source,binding,suite,plan=None,execution_timeline=None):
     if plan is not None:
         from real_contract import validate_real_plan
         from frozen_executor import validate_plan_evidence
-        validate_real_plan(plan,source,binding)
+        validate_real_plan(plan,source,binding,environment=environment)
         validate_plan_evidence(plan,source)
         if plan.get('native_action_encoding')!=NATIVE_DISTANCE_ENCODING:
             raise ValueError('playground replay requires explicit native distance encoding')
@@ -285,7 +280,7 @@ def plan_episode(args,source,runtime,episode,control,acceptance,info):
     initial_ready=time.monotonic()
     print(json.dumps(dict(stage='initial-route-ready',elapsed_s=initial_ready-geometry_ready,passed=initial.get('passed'))),flush=True)
     write(args.output/'initial-plan.json',initial)
-    plan=build(planner,obs,initial,source,identity,args.speed_scale)
+    plan=build(planner,obs,initial,source,identity,args.speed_scale,environment=getattr(args,'environment','physical'))
     write(args.output/'plan.json',plan)
     write(args.output/'planning-timings.json',dict(geometry=geometry_ready-started,
         route=initial_ready-geometry_ready,timeline_audit=time.monotonic()-initial_ready,total=time.monotonic()-started))
@@ -400,7 +395,7 @@ def main(args):
     timeline_path=getattr(args,'execution_timeline',None)
     timeline=json.loads(timeline_path.read_text()) if timeline_path else None
     if timeline is not None and args.mode!='replay':raise ValueError('execution timeline is replay-only')
-    validate_inputs(source,binding,suite,plan,timeline)
+    validate_inputs(source,binding,suite,plan,timeline,environment=getattr(args,'environment','physical'))
     if args.mode=='replay' and plan is None:raise ValueError('replay requires plan')
     if args.mode in ('plan','geometry-inputs') and (not args.finger_envelope or not args.finger_envelope_sha256
             or file_sha256(args.finger_envelope)!=args.finger_envelope_sha256):
@@ -452,11 +447,17 @@ if __name__=='__main__':
     parser.add_argument('--finger-envelope',type=Path)
     parser.add_argument('--finger-envelope-sha256')
     parser.add_argument('--speed-scale',type=float,default=.3)
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
+    parser.add_argument('--execution-json',help='trusted local deployment, supplied by the frozen pipeline')
     parser.add_argument('--gpu',type=int,required=True)
     parser.add_argument('--instance',required=True)
     parser.add_argument('--run-id',required=True)
     args=parser.parse_args()
-    lane=PIPELINE_LANES['dsw-scene']
+    if args.execution_json:
+        from local_execution import validate
+        execution=validate({'execution':json.loads(args.execution_json)})
+        lane=dict(instance_id=execution['instance_id'],gpu=execution['gpu_index'])
+    else:lane=PIPELINE_LANES['dsw-scene']
     if (args.instance,args.gpu)!=(lane['instance_id'],lane['gpu']) or os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.gpu):
         raise ValueError('instance/GPU not authorized for target simulation')
     if not .1<=args.speed_scale<=1:raise ValueError('speed scale outside [0.1,1]')

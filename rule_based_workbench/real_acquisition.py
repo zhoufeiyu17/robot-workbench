@@ -7,15 +7,22 @@ from uuid import uuid4
 
 from artifact_transport import manifest, transfer as transport_transfer
 from run_pipeline import absolute, below
+from real_contract import namespace
+from robot_workbench.sample_clock import clock_spec, owner_identity
 
 
 def validate_config(config):
     pipeline = json.loads(Path(config['pipeline_config']).read_text())
     contract = json.loads(Path(pipeline['contract_path']).read_text())
     acquisition = config['acquisition']
+    environment = namespace(config.get('environment', pipeline.get('environment', 'physical')))['environment']
+    if pipeline.get('environment', 'physical') != environment:
+        raise ValueError('acquisition and pipeline device environments differ')
     for name in ('profile_path', 'acquisition_binding_path'):
         if not Path(acquisition[name]).is_file():
             raise ValueError('missing physical acquisition input: ' + name)
+        if environment == 'fake' and '/calibration/hardware/active' in str(Path(acquisition[name]).resolve()):
+            raise ValueError('fake acquisition must use its own calibration installation snapshot')
     transport = acquisition['transport']
     root = absolute(transport['remote_root'])
     fs = contract['filesystem']
@@ -32,6 +39,7 @@ def prepare_inputs(config, output, *, read_snapshot, read_owner=None, transfer=t
     """Injected callback is the hardware boundary; never acquire/control here."""
     pipeline, contract = validate_config(config)
     acquisition = config['acquisition']
+    environment = pipeline.get('environment', 'physical')
     profile = json.loads(Path(acquisition['profile_path']).read_text())
     binding = json.loads(Path(acquisition['acquisition_binding_path']).read_text())
     binding.pop('initial_state', None)  # Never reuse a previous observation's measured start.
@@ -42,15 +50,22 @@ def prepare_inputs(config, output, *, read_snapshot, read_owner=None, transfer=t
     from real_observation import capture, read_initial_sample, seal_initial_state
     from real_pipeline import validate_capture
     measured_start = acquisition.get('measured_initial_state', False)
+    if environment=='fake' and measured_start is not True:
+        raise ValueError('fake-device acquisition requires measured initial-state sealing')
     if type(measured_start) is not bool or measured_start and read_owner is None:
         raise ValueError('measured initial state requires explicit boolean and read-only owner callback')
-    before = read_initial_sample(read_owner) if measured_start else None
+    before = read_initial_sample(read_owner,environment=environment) if measured_start else None
+    if environment=='fake':
+        binding['clock']=clock_spec('fake',clock_domain=before[1]['clock_domain'],source_clock_id=before[1]['source_clock_id'])
+        binding['capture_owner']=owner_identity(before[1],pid_key='pid')
     sealed = capture(read_snapshot, profile, binding, capture_dir,
-                     **({'cancel':cancel} if cancel is not None else {}))
+                     **({'cancel':cancel} if cancel is not None else {}),
+                     **({'environment':environment} if environment != 'physical' else {}))
     if measured_start:
-        sealed['initial_state'] = seal_initial_state(before, read_initial_sample(read_owner), profile)
+        sealed['initial_state'] = seal_initial_state(before, read_initial_sample(read_owner,environment=environment,
+            **({'clock':binding['clock']} if environment=='fake' else {})), profile)
         (capture_dir / 'acquisition-binding.json').write_text(json.dumps(sealed, indent=2, allow_nan=False))
-    frames = validate_capture(capture_dir, sealed)['frames']
+    frames = validate_capture(capture_dir, sealed,environment=environment)['frames']
     names = ['profile.json', 'rgbd-manifest.json', 'acquisition-binding.json',
              *(frame['path'] for frame in frames)]
     expected = manifest(capture_dir, names)

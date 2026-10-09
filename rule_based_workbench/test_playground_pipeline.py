@@ -2,6 +2,8 @@
 from contextlib import ExitStack
 from copy import deepcopy
 import json
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ import playground_pipeline as pipeline
 
 
 def main():
+    real_popen=subprocess.Popen
     from run_pipeline import isaac_environment
     gpu_cfg=dict(remote_run_root='/run',workbench_code='/wb',native_code='/native',assets='/assets',deps='/deps',
                  planning_backend='motiongen',curobo_root='/curobo',finger_envelope='/finger',finger_envelope_sha256='a'*64)
@@ -156,17 +159,24 @@ def main():
             def __init__(self, config):
                 self.config, self.confirmed = config, False
                 lanes.append(self)
+                self.instance=f'{len(lanes):032x}';self.acceptance_read=False
 
             def owner(self):
                 status=dict(owner_fields)
-                if self.confirmed and owner_sequence:status.update(owner_sequence.pop(0))
-                return dict(connected=True, **status,recording=dict(directory=str(raw) if self.confirmed else '/previous/raw', done=self.confirmed,**recording_fields))
+                if self.config.get('environment')=='fake':
+                    instance=self.instance if self.confirmed else '0'*32
+                    status.update(execution_instance_id=instance,runtime_nonce='owner-runtime',command_epoch=3,
+                        execution_calibration=dict(execution_instance_id=instance,command_epoch=3,plan_sha256=['a'*64]))
+                acceptance=self.config.get('environment')=='fake' and self.confirmed and not self.acceptance_read
+                if acceptance:self.acceptance_read=True
+                elif self.confirmed and owner_sequence:status.update(owner_sequence.pop(0))
+                return dict(connected=True, **status,recording=dict(directory=str(raw) if self.confirmed else '/previous/raw', done=self.confirmed)|recording_fields)
 
             def control(self, command):
                 actions.append(command['action'])
                 if command['action'] == 'confirm':
                     self.confirmed = True
-                    return {'accepted': True}
+                    return {'queued':'confirm','plan_sha256':'a'*64,'sequence_id':'a'*64}
                 return dict(token='single-use-preview', timeline_digest=plan['timeline_digest'],**preview_fields)
 
         stack.enter_context(patch('real_bridge.RealBridge', Lane))
@@ -355,6 +365,94 @@ def main():
         assert result['physical_outcome']=='completed' and result['capture_outcome']=='failed'
         assert result['status']=='failed' and 'controller' not in result['errors'] and len(result['videos'])==6
         assert native.call_args.kwargs['execution_timeline_path']=='/remote/shared-runtime.json'
+        # Local fake non-realtime execution uses one frozen wall deadline, not
+        # simulation duration + 60 s. L3 replay cannot qualify same-plant tasks.
+        fake_cfg=json.loads(Path(prepared['config_path']).read_text())
+        fake_contract=json.loads(Path(fake_cfg['contract_path']).read_text())
+        fake_cfg.update(environment='fake',execution={'transport':'local'},resident_deadline_wall_ns=900_000_000_000,
+                        contract_path=str(root/'fake-contract.json'))
+        fake_contract['resources']['resident_deadline_wall_ns']=fake_cfg['resident_deadline_wall_ns']
+        (root/'fake-config.json').write_text(json.dumps(fake_cfg));(root/'fake-contract.json').write_text(json.dumps(fake_contract))
+        fake_prepared=dict(prepared,environment='fake',config_path=str(root/'fake-config.json'))
+        bridge.config['environment']='fake'
+        owner_fields.clear();recording_fields.clear();actions.clear()
+        owner_fields.update(feedback_healthy=True,execution_timeline={'command_count':20},
+                            native_task={'task_outcome':'success','task_qualified':True,'receipt_path':'unverified-owner-pointer'})
+        owner_sequence.extend([dict(frozen={'status':'running','send_count':i},automatic_enabled=True) for i in range(16)])
+        owner_sequence.append(dict(frozen={'status':'completed','send_count':20},automatic_enabled=False))
+        raw_verify.return_value=(dict(controller_outcome='completed',validation={'status':'passed'},
+            camera_frames=dict.fromkeys(('base_0','left_wrist_0','right_wrist_0'),2)),source,plan)
+        clock=[0.];events=[]
+        with patch.object(pipeline,'execution_runtime',return_value=runtime), \
+             patch.object(pipeline,'prepare_remote_runtime',return_value='/remote/shared-runtime.json'), \
+             patch.object(pipeline.time,'monotonic',side_effect=lambda:clock[0]), \
+             patch.object(pipeline.time,'time_ns',return_value=0), \
+             patch.object(pipeline.time,'sleep',side_effect=lambda _:clock.__setitem__(0,clock[0]+10)):
+            result=pipeline.execute(configured,root/'resident-slow',bridge,fake_prepared,
+                                    progress=lambda label,**kw:events.append(dict(label=label,**kw)))
+        assert clock[0]==160 and not owner_sequence and result['status']=='completed'
+        assert result['task_outcome']=='unverified', 'unvalidated Owner pointer or independent L3 receipt qualified L2 task'
+        assert result['simulation']['scope']=='L3_auxiliary_independent_target' and result['simulation']['task_success_evidence'] is False
+        assert result['native_task']['receipt_verified'] is False
+        waits=[row['execution_wait'] for row in events if row.get('execution_wait')]
+        assert waits[-1]['budget_s']==600 and waits[-1]['commands_sent']==20 and waits[-1]['percent']==100
+        assert all(row.get('estimate_s') is None for row in events if 'estimate_s' in row)
+        assert all(video['label'].startswith('L3 辅助') for video in result['videos'][3:])
+        # Expiring resident wins over the job budget; absent lifetime is never an infinite wait.
+        with patch.object(pipeline.time,'time_ns',return_value=800_000_000_000):
+            assert pipeline.resident_wait_budget(fake_cfg,fake_contract)==55
+        with patch.object(pipeline.time,'time_ns',return_value=900_000_000_000):
+            try:pipeline.resident_wait_budget(fake_cfg,fake_contract)
+            except TimeoutError:pass
+            else:raise AssertionError('expired resident accepted')
+        owner_fields.update(automatic_enabled=True,frozen={'status':'running','send_count':0})
+        clock[0]=0.;actions.clear()
+        with patch.object(pipeline,'execution_runtime',return_value=runtime), \
+             patch.object(pipeline,'prepare_remote_runtime',return_value='/remote/shared-runtime.json'), \
+             patch.object(pipeline.time,'monotonic',side_effect=lambda:clock[0]), \
+             patch.object(pipeline.time,'time_ns',return_value=0), \
+             patch.object(pipeline.time,'sleep',side_effect=lambda _:clock.__setitem__(0,clock[0]+200)):
+            try:pipeline.execute(configured,root/'resident-timeout',bridge,fake_prepared)
+            except TimeoutError as error:assert 'frozen wall budget' in str(error)
+            else:raise AssertionError('non-advancing resident waited without a bound')
+        assert clock[0]==600 and actions==['preview_frozen','confirm','stop']
+        # Cancellation during compilation must also stop the local active Owner.
+        actions.clear()
+        with patch.object(pipeline,'execution_runtime',side_effect=InterruptedError('cancel compilation')), \
+             patch.object(pipeline.time,'time_ns',return_value=0):
+            try:pipeline.execute(configured,root/'resident-cancel-compilation',bridge,fake_prepared)
+            except InterruptedError:pass
+            else:raise AssertionError('compilation cancellation swallowed')
+        assert actions==['preview_frozen','confirm','stop']
+        # An already queued confirm is revoked even before automatic_enabled starts.
+        actions.clear();owner_fields['automatic_enabled']=False
+        with patch.object(pipeline,'resident_execution_identity',side_effect=InterruptedError('cancel queued confirm')), \
+             patch.object(pipeline.time,'time_ns',return_value=0):
+            try:pipeline.execute(configured,root/'resident-cancel-queued',bridge,fake_prepared)
+            except InterruptedError:pass
+            else:raise AssertionError('queued cancellation swallowed')
+        assert actions==['preview_frozen','confirm','stop']
+        owner_fields['automatic_enabled']=True
+        # Execute's real Popen/cancel path reaps its local wrapper and child; no GPU.
+        actions.clear();recording_fields['done']=False
+        marker=root/'replay-child.pid';children=[]
+        script='import os,time,pathlib;pathlib.Path('+repr(str(marker))+').write_text(str(os.getpid()));time.sleep(60)'
+        argv=[sys.executable,str(Path(pipeline.__file__).with_name('owned_process.py')),'--timeout','60','--',sys.executable,'-c',script]
+        def launch(*args,**kwargs):
+            value=real_popen(*args,**kwargs);children.append(value);return value
+        native.side_effect=lambda *args,**kwargs:dict(name='playground-replay',argv=argv,timeout_s=60)
+        popen.side_effect=launch
+        with patch.object(pipeline,'execution_runtime',return_value=runtime), \
+             patch.object(pipeline,'prepare_remote_runtime',return_value='/remote/shared-runtime.json'), \
+             patch.object(pipeline.time,'time_ns',return_value=0):
+            try:pipeline.execute(configured,root/'resident-cancel-live-child',bridge,fake_prepared,cancel=marker.exists)
+            except InterruptedError:pass
+            else:raise AssertionError('live cancellation swallowed')
+        assert children and all(child.poll() is not None for child in children)
+        with real_popen(['ps','-o','stat=','-p',marker.read_text()],stdout=subprocess.PIPE,text=True) as probe:
+            status=probe.communicate()[0].strip()
+        assert not status or status.startswith('Z')
+        assert actions==['preview_frozen','confirm','stop']
     print('PASS Playground pipeline: parent evidence, one confirm, shared30Hz runtime, independent capture/control outcomes and videos')
 
 

@@ -8,6 +8,7 @@ import math
 from dataclasses import asdict, replace
 from copy import deepcopy
 import json
+from real_contract import is_device_source
 import os
 import shutil
 import sys
@@ -457,9 +458,11 @@ def legal_tray_contact(evaluator, sample, scene, contacts, dt):
     return math.isfinite(force) and 0<force<=a.support_force_max_n
 
 
-def install_motiongen_replay_policy(runtime, plan):
+def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     """Frozen success timing and explicit, contact-scoped supported unloading."""
     from gripper_distance_plan import NATIVE_DISTANCE_ENCODING
+    if applied_context is not None and not callable(applied_context):
+        raise ValueError('applied command context must be callable')
     if (plan.get('planner_id') != CUROBO_PLANNER_ID or plan.get('schema_version') != 'dual_gpu_pipeline.v1'
             or plan.get('native_action_encoding') != NATIVE_DISTANCE_ENCODING):
         raise ValueError('success scheduling is limited to MotionGen simulation distance replay')
@@ -518,6 +521,11 @@ def install_motiongen_replay_policy(runtime, plan):
         final_native_success_required=True,
         final_gripper_travel_mm=ticks[-1]['target']['left_gripper'],
         restored_nonopen_jaw_may_prevent_success=abs(ticks[-1]['target']['left_gripper']/2000-base.open_position_m) > base.open_tolerance_m)
+    if applied_context is not None:
+        configuration.update(execution_source='owner_applied_command', final_physics_step=None,
+            success_policy='current native success at the actual Owner completion feedback step',
+            first_open_physics_step=None,last_open_physics_step=None,
+            initialization_scope='source_tick=None; no parent-plan tick or geometry qualification')
     if plan.get('cup_contact_preset'):
         configuration['release_preload_unload_until_model_gap_mm']=plan['planning_validation']['gpu_final_acceptance']['closing']['end_m']*2000
         configuration['release_preload_unload_scope']='simulation diagnosis; unchanged targets, grip force cap and2N release cap'
@@ -542,6 +550,7 @@ def install_motiongen_replay_policy(runtime, plan):
     original_fail=evaluator.fail
     placement_transition=[False]
     observed_transition_failure=[False]
+    applied_execution_id=[None]
     receipt['progress'].update(placement_transition_substeps=0,
         transition_grasp_loss_observations=0,transition_slip_observations=0,
         max_transition_relative_speed_m_s=0.,max_transition_cup_speed_m_s=0.)
@@ -570,12 +579,34 @@ def install_motiongen_replay_policy(runtime, plan):
     def observe(*args, **kwargs):
         sample = args[0] if args else kwargs['sample']
         step = sample.physics_step
-        if step > deadline:
+        if applied_context is None and step > deadline:
             raise RuntimeError('native observation exceeded frozen replay deadline')
         scene=args[1] if len(args)>1 else kwargs.get('scene')
         contacts=args[2] if len(args)>2 else kwargs.get('contacts',())
-        tick_index=min(len(ticks)-1,(step-start-1)//nominal)
-        stage=next(row['name'] for row in reversed(stages) if row['start_tick']<=tick_index)
+        if applied_context is None:
+            tick_index=min(len(ticks)-1,(step-start-1)//nominal)
+            stage=next(row['name'] for row in reversed(stages) if row['start_tick']<=tick_index)
+            final_sample=step==deadline
+        else:
+            context=applied_context(sample)
+            if not isinstance(context,dict) or type(context.get('final_sample')) is not bool:
+                raise ValueError('actual applied source tick/stage/final-sample context required')
+            identity=context.get('execution_id')
+            if (not isinstance(identity,str) or not identity or
+                    applied_execution_id[0] not in (None,identity)):
+                raise ValueError('applied execution identity changed')
+            applied_execution_id[0]=identity
+            tick_index=context.get('source_tick');stage=context.get('stage')
+            if tick_index is None:
+                if stage!='initialize':raise ValueError('no parent tick is only valid for initialization')
+            elif (type(tick_index) is not int or not 0<=tick_index<len(ticks) or
+                    stage!=next(row['name'] for row in reversed(stages) if row['start_tick']<=tick_index)):
+                raise ValueError('applied stage differs from the frozen parent source tick')
+            final_sample=context['final_sample']
+            if final_sample and tick_index!=len(ticks)-1:
+                raise ValueError('final task sample requires the final actually applied parent command')
+            receipt['progress'].update(last_observed_source_tick=tick_index,
+                last_observed_execution_id=context.get('execution_id'))
         contact_ok=(diagnostic_cup and stage in {'lower','support_settle','open','release_hold'}
             and scene is not None and legal_tray_contact(evaluator,sample,scene,contacts,kwargs['dt']))
         releasing=(diagnostic_cup and stage in {'open','release_hold'}
@@ -610,6 +641,8 @@ def install_motiongen_replay_policy(runtime, plan):
         finally:
             evaluator.spec=effective;placement_transition[0]=False
         receipt['progress']['last_observed_step'] = step
+        if applied_context is not None:
+            receipt['progress']['last_sample_native_success']=False
         if event is not None and event.reason == 'success':
             if receiving_goal is not None:
                 from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import outlet_distance
@@ -621,7 +654,9 @@ def install_motiongen_replay_policy(runtime, plan):
                 if not passed:return original_fail('outlet_misaligned')
             if evaluator.event is not event:
                 raise RuntimeError('native success event and terminal latch differ')
-            if step < deadline:
+            if applied_context is not None:
+                receipt['progress']['last_sample_native_success']=True
+            if not final_sample:
                 receipt['progress']['deferred_success_count'] += 1
                 if receipt['progress']['first_deferred_success_step'] is None:
                     receipt['progress']['first_deferred_success_step'] = step
@@ -633,12 +668,33 @@ def install_motiongen_replay_policy(runtime, plan):
     evaluator.spec = effective  # Keep frozen runtime.spec.acceptance and physical identity unchanged.
     evaluator.observe = observe
     runtime._motiongen_replay_policy = receipt
+    if applied_context is not None:
+        runtime._motiongen_applied_context=applied_context
+        runtime._motiongen_final_source_tick=len(ticks)-1
     return receipt
 
 
 def finish_motiongen_replay_policy(runtime):
     receipt = runtime._motiongen_replay_policy
     event = runtime.evaluator.event
+    applied_context=getattr(runtime,'_motiongen_applied_context',None)
+    if applied_context is not None:
+        context=applied_context(runtime.evaluator.previous)
+        progress=receipt['progress']
+        if (context.get('final_sample') is not True or
+                context.get('source_tick')!=runtime._motiongen_final_source_tick or
+                context.get('execution_id')!=progress.get('last_observed_execution_id') or
+                progress.get('last_observed_source_tick')!=context['source_tick'] or
+                progress['last_observed_step']!=runtime.loop.physics_steps or
+                runtime.evaluator.previous.physics_step!=runtime.loop.physics_steps or
+                progress.get('last_sample_native_success') is not True or
+                getattr(runtime.evaluator,'first_failure_reason',None) is not None or
+                event is not None and event.reason!='success'):
+            raise ValueError('Owner completed without current final-step native task success')
+        progress['final_native_success']=True
+        receipt['configuration']['actual_final_physics_step']=runtime.loop.physics_steps
+        receipt['configuration_sha256']=_digest(receipt['configuration'])
+        return receipt
     if (runtime.loop.physics_steps != receipt['configuration']['final_physics_step']
             or receipt['progress']['last_observed_step'] != runtime.loop.physics_steps
             or not receipt['progress']['final_native_success']
@@ -820,9 +876,13 @@ def validate_record_options(args):
 
 def validate_replay_inputs(args, plan, source, suite):
     expected = PIPELINE_LANES.get(args.side)
+    if getattr(args,'execution_json',None):
+        from local_execution import validate
+        resource=validate({'execution':json.loads(args.execution_json)})
+        expected=dict(instance_id=resource['instance_id'],gpu=resource['gpu_index'])
     if not expected or (args.instance, args.gpu) != (expected["instance_id"], expected["gpu"]):
         raise ValueError("instance/GPU not authorized for this lane")
-    physical_source = source.get("schema_version") == "physical_collection_source.v1"
+    physical_source = is_device_source(source)
     from gripper_distance_plan import NATIVE_DISTANCE_ENCODING
     if plan.get('native_action_encoding') == NATIVE_DISTANCE_ENCODING and (
             physical_source or plan.get('planner_id') != CUROBO_PLANNER_ID or getattr(args, 'force_diagnostic_replay', False)):
@@ -834,7 +894,7 @@ def validate_replay_inputs(args, plan, source, suite):
                 or not binding_path or getattr(args,"force_diagnostic_replay",False) or getattr(args,"barrier",None)):
             raise ValueError("physical source permits only independent validated target simulation replay")
         from real_contract import validate_real_plan
-        validate_real_plan(plan, source, json.loads(Path(binding_path).read_text()))
+        validate_real_plan(plan, source, json.loads(Path(binding_path).read_text()),environment=getattr(args,'environment','physical'))
     else:
         if binding_path:
             raise ValueError("physical binding cannot use simulated source")
@@ -1202,7 +1262,7 @@ def run(args):
         if actual_scene is not None:
             actual_scene.update(measured_reset_scene=reset_scene, measured_scene_source="isaac_post_reset_mesh_roots")
         from joint_space import replay_state
-        physical_reset = args.mode == "replay" and source.get("schema_version") == "physical_collection_source.v1"
+        physical_reset = args.mode == "replay" and is_device_source(source)
         reset_state = replay_state(measured(), source) if physical_reset else measured()
         write(args.output / "reset.json", {"episode": asdict(episode), "state": reset_state, "info": info,
                                            "joint_space": "reported" if physical_reset else "model",
@@ -1484,6 +1544,8 @@ if __name__ == "__main__":
     p.add_argument("--force-diagnostic-replay", action="store_true",
                    help="simulation-only replay: log collision events and continue; never a successful dataset")
     p.add_argument("--hardware-binding", type=Path, help="Trusted physical calibration/source receipt for target-only replay")
+    p.add_argument('--environment',choices=('physical','fake'),default='physical')
+    p.add_argument('--execution-json')
     p.add_argument("--independent-replay", action="store_true", help="Physical target simulation runs without peer barriers")
     p.add_argument("--whitebox-fast", action="store_true",
                    help="replay with matte task meshes and a 640x480 top-camera monitor")
@@ -1496,6 +1558,10 @@ if __name__ == "__main__":
         p.add_argument("--" + field, type=Path, required=field in {"suite", "assets", "output"})
     args = p.parse_args()
     expected = {side: (lane["instance_id"], lane["gpu"]) for side, lane in PIPELINE_LANES.items()}
+    if args.execution_json:
+        from local_execution import validate
+        resource=validate({'execution':json.loads(args.execution_json)})
+        expected={side:(resource['instance_id'],resource['gpu_index']) for side in PIPELINE_LANES}
     if (args.instance, args.gpu) != expected[args.side] or os.environ.get("CUDA_VISIBLE_DEVICES") != str(args.gpu):
         raise ValueError("instance/GPU not authorized for this lane")
     args.output.mkdir(parents=True, exist_ok=False)

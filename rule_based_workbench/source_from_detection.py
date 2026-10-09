@@ -11,6 +11,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from real_contract import namespace, validate_namespace
 
 from integration import (DualGpuPipeline, EARLY_CUP_MOTION_THRESHOLD_M, ObservationWindow,
                          PIPELINE_LANES, PIPELINE_SCHEMA, WINDOW_NS, _digest, _finite,
@@ -23,9 +24,10 @@ def nonempty(value, name):
     return value
 
 
-def validate_physical_binding(binding, profile, summary, observations):
+def validate_physical_binding(binding, profile, summary, observations, *, environment='physical'):
+    validate_namespace(binding, environment)
     if (not isinstance(binding, dict) or binding.get("calibration_accepted") is not True
-            or binding.get("evidence_source") != "physical_rgbd"):
+            or environment == 'fake' and profile['source'].get('simulation_only') is not True):
         raise ValueError("accepted physical calibration/acquisition binding required")
     nonempty(binding.get("robot_id"), "physical robot_id")
     serials = binding.get("camera_serials")
@@ -40,11 +42,13 @@ def validate_physical_binding(binding, profile, summary, observations):
         raise ValueError("detection differs from trusted physical acquisition receipt")
 
 
-def build_source(summary, observations, profile, run_id, physical_binding=None):
+def build_source(summary, observations, profile, run_id, physical_binding=None, *, environment='physical'):
     validate_profile(profile)
     nonempty(run_id, "run_id")
     if physical_binding is not None:
-        validate_physical_binding(physical_binding, profile, summary, observations)
+        validate_physical_binding(physical_binding, profile, summary, observations, environment=environment)
+    elif environment != 'physical':
+        raise ValueError('fake-device source requires explicit accepted calibration/acquisition binding')
     if (not isinstance(summary, dict) or summary.get("schema_version") != "isaac_rgbd_detection.v1"
             or summary.get("status") != "DETECTION_WINDOW_READY" or summary.get("cleanup_complete") is not True):
         raise ValueError("completed DETECTION_WINDOW_READY summary is required")
@@ -167,9 +171,14 @@ def build_source(summary, observations, profile, run_id, physical_binding=None):
               "run_id": run_id, "sequence": 0, "scene": scene, "calibration_profile": deepcopy(profile)}
     if physical_binding is not None:
         source = {k: v for k, v in source.items() if k not in PIPELINE_LANES["simulated-real"]}
-        source.update(schema_version="physical_collection_source.v1", lane="physical-real",
-                      evidence_source="physical_rgbd", robot_id=physical_binding["robot_id"],
+        spec = namespace(environment)
+        source.update(schema_version=spec['source_schema'], lane=spec['lane'],
+                      evidence_source=spec['evidence'], robot_id=physical_binding["robot_id"],
                       camera_serials=deepcopy(physical_binding["camera_serials"]))
+        if environment == 'fake':source.update(environment='fake', simulation_only=True)
+        if environment == 'fake':
+            from robot_workbench.sample_clock import clock_for_source
+            source['clock']=clock_for_source(physical_binding,environment)
         if 'initial_state' in physical_binding:
             from joint_space import validate_initial_state
             source['initial_state'] = deepcopy(validate_initial_state(physical_binding['initial_state'], profile))
@@ -178,7 +187,7 @@ def build_source(summary, observations, profile, run_id, physical_binding=None):
     return source
 
 
-def convert(profile_path, detection_dir, output, run_id, physical_binding=None, simulation_initial_suite=None):
+def convert(profile_path, detection_dir, output, run_id, physical_binding=None, simulation_initial_suite=None, *, environment='physical'):
     summary_bytes = (detection_dir / "summary.json").read_bytes()
     observation_bytes = (detection_dir / "observations.jsonl").read_bytes()
     summary = json.loads(summary_bytes)
@@ -191,7 +200,7 @@ def convert(profile_path, detection_dir, output, run_id, physical_binding=None, 
             raise ValueError("detection files differ from trusted physical acquisition receipt")
         physical_binding.update(detection_summary_digest=_digest(summary),
                                 observations_digest=_digest(observations))
-    source = build_source(summary, observations, json.loads(profile_path.read_text()), run_id, physical_binding)
+    source = build_source(summary, observations, json.loads(profile_path.read_text()), run_id, physical_binding, environment=environment)
     source["detection_files"] = detection_files
     episode = deepcopy(source['scene']['episode_scene'])
     if simulation_initial_suite is not None:
@@ -226,6 +235,7 @@ def main():
     for flag in ("profile", "detection-dir", "output"):
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument('--simulation-initial-suite',type=Path)
+    parser.add_argument('--environment', choices=('physical','fake'), default='physical')
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--physical-binding", type=Path, help="Trusted accepted physical acquisition/calibration receipt")
     args = parser.parse_args()
@@ -236,7 +246,7 @@ def main():
     if args.simulation_initial_suite is not None and not args.simulation_initial_suite.is_absolute():
         parser.error('simulation-initial-suite must be an absolute path')
     binding = json.loads(args.physical_binding.read_text()) if args.physical_binding else None
-    source = convert(args.profile, args.detection_dir, args.output, args.run_id, binding,args.simulation_initial_suite)
+    source = convert(args.profile, args.detection_dir, args.output, args.run_id, binding,args.simulation_initial_suite,environment=args.environment)
     print(json.dumps({"source": str(args.output / "source.json"), "scene_digest": source["scene"]["scene_digest"],
                       "observation_mode": source["observation_mode"]}))
 

@@ -67,6 +67,39 @@ class OwnerTest(unittest.TestCase):
         self.assertIs(state['simulation_only'],True)
         self.assertEqual(state['evidence_source'],'simulated_owner')
 
+    def test_explicit_fake_capture_window_carries_source_boundary_and_ack_identity(self):
+        self.owner.environment='fake'
+        original=self.owner.backend.read_calibration_state
+        def feedback():
+            return {**original(),'clock_domain':'simulation','source_clock_id':'fixture-plant',
+                    'source_time_ns':round((self.now-10000.)*1e9),'physics_step':round((self.now-10000.)*100)}
+        with patch.object(self.owner.backend,'read_calibration_state',feedback):
+            self.advance(.04)
+            self.capture_sequence();self.wait_capture('sample-0')
+            state=self.owner.snapshot();motion=state['motion'];sample=state['calibration_feedback']
+            self.assertEqual(state['mode'],'simulation')
+            self.assertEqual(motion['capture_ready_source_ns'],sample['source_time_ns'])
+            self.assertEqual(motion['capture_ready_physics_step'],sample['physics_step'])
+            self.assertEqual(motion['capture_source_clock_id'],'fixture-plant')
+            self.assertNotEqual(motion['capture_ready_wall_ns'],motion['capture_ready_source_ns'])
+            epoch=self.owner.epoch;self.capture_ack();self.advance(.04)
+            receipt=self.owner.snapshot()['last_capture_ack']
+            self.assertEqual(receipt['command_epoch'],epoch)
+            self.assertEqual(receipt['source_clock_id'],'fixture-plant')
+            self.assertEqual(receipt['capture_ready_source_ns'],motion['capture_ready_source_ns'])
+            with patch.object(self.owner.backend,'read_calibration_state',lambda:{**feedback(),'source_clock_id':'restarted'}):
+                with self.assertRaisesRegex(ValueError,'clock differs'):self.owner.read_feedback()
+
+    def test_explicit_fake_capture_rejects_missing_source_clock(self):
+        self.owner.environment='fake'
+        self.capture_sequence()
+        for _ in range(200):
+            self.advance(.04)
+            if self.owner.runner.status=='FAULT':break
+        self.assertEqual(self.owner.runner.status,'FAULT')
+        self.assertIn('source_clock_id',self.owner.runner.reason)
+        self.assertIsNone(self.owner.capture_wait)
+
     def test_arrival_events_record_each_workbench_plan_once_without_jaws(self):
         preview=self.capture_sequence();self.wait_capture('sample-0')
         first=self.owner.snapshot()['arrival_events']
@@ -496,6 +529,8 @@ class OwnerTest(unittest.TestCase):
                     controller.set_gain(gain)
             def _require_connected(self): pass
             def get_joint_position_limits(self,side): return np.array([[-3.,3.]]*6+[[0.,.082]])
+            def get_bimanual_joint_position_limits(self):
+                return np.concatenate([self.get_joint_position_limits(side) for side in self.sides])
         module=ModuleType('arx_env.backends.arx5_backend'); module.Arx5Backend=Base; module.Arx5BackendConfig=lambda **kw:SimpleNamespace(**kw)
         with patch.dict(sys.modules, {'arx_env.backends.arx5_backend':module}):
             b=hardware_backend()

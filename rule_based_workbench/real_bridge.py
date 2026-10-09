@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from real_contract import namespace, owner_matches_environment
 
 CAMERAS = ('base_0', 'left_wrist_0', 'right_wrist_0')
 
@@ -17,6 +18,7 @@ class NoRedirect(HTTPRedirectHandler):
 class RealBridge:
     def __init__(self, config):
         self.config = config
+        namespace(config.get('environment', 'physical'))
         for url in [config['control_url'], *[v['url'] for v in config['cameras'].values()]]:
             parsed = urlsplit(url)
             if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost')
@@ -29,6 +31,10 @@ class RealBridge:
         if len(self.token) < 32:
             raise ValueError('control token must contain at least 32 characters')
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
+
+    @property
+    def environment(self):
+        return namespace(self.config.get('environment','physical'))['environment']
 
     def request(self, url, payload=None, *, control=False):
         if self.config.get('hardware_access_enabled', True) is False:
@@ -101,8 +107,9 @@ class RealBridge:
         if not status['collection_ready']:
             raise ValueError('；'.join(status['blockers']))
         preview = self.control({'action':'preview_frozen'})
-        return dict(status='awaiting-physical-confirmation',mode='real_robot',preview=preview,
-                    message='本轮真实轨迹已预览，等待现场确认；尚未发送运动指令')
+        spec = namespace(self.environment)
+        return dict(status='awaiting-physical-confirmation',mode=spec['mode'],environment=self.environment,preview=preview,
+                    message=spec['label']+'轨迹已预览，等待确认；尚未发送运动指令')
 
     def status(self):
         if self.config.get('hardware_access_enabled', True) is False:
@@ -123,11 +130,16 @@ class RealBridge:
         blockers = []
         if not owner.get('connected'):
             blockers.append('尚未申请真机控制权；连接前请支撑双臂')
-        elif owner.get('mode') != 'hardware':
-            blockers.append('当前 owner 不是真实硬件模式，不能作为真机采集')
+        elif not owner_matches_environment(owner, self.environment):
+            blockers.append('当前 owner 与工作台 '+self.environment+' 环境不一致')
         elif not owner.get('feedback_healthy'):
             blockers.append('真机关节反馈尚未健康')
         if owner.get('connected'):
+            if owner.get('holder', 'collection') != 'collection':
+                blockers.append('请先交接控制权限：当前由 '+str(owner.get('holder'))+' 持有')
+            permission=(owner.get('allowed_operations') or {}).get('preview')
+            if permission is not None and permission.get('allowed') is not True:
+                blockers.append(permission.get('reason') or '当前控制服务不允许新轨迹预览')
             if not owner.get('stationary'):
                 blockers.append('真机尚未静止，不能预览新轨迹')
             if owner.get('automatic_enabled'):
@@ -137,12 +149,16 @@ class RealBridge:
             pedal = owner.get('pedal',{})
             if not pedal.get('input_healthy') or pedal.get('physically_down'):
                 blockers.append('脚踏输入不健康或正在按下')
+            age = owner.get('sample_age_s')
+            if age is not None and (type(age) not in (int,float) or not 0 <= age <= .1):
+                blockers.append('设备反馈已过期')
         capture_ready=bool(owner.get('recording_configured')) and all(c.get('ready') for c in values.values())
         try:
             self.inputs()
         except (OSError, ValueError, KeyError) as error:
             blockers.append(str(error))
         return dict(configured=True, connected=bool(owner.get('connected')), owner=owner,
+                    environment=self.environment,environment_label=namespace(self.environment)['label'],
                     cameras=values, collection_ready=not blockers, blockers=blockers,
                     robot_id=self.config['robot_id'], control_hz=30,capture_ready=capture_ready,
                     control_decoupled_from_rendering=True)

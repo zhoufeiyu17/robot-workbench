@@ -2,13 +2,14 @@
 import argparse
 import hashlib
 import json
+from real_contract import is_device_source
 from pathlib import Path
 
 from integration import CUROBO_PLANNER_ID, DualGpuPipeline, PIPELINE_LANES, SIM_PLANNER_ID, SIM_POLICY_ID, _digest
 from isaac_lane import physical, write
 
 
-def export(source_path, episode_path, output, hardware_binding=None):
+def export(source_path, episode_path, output, hardware_binding=None, *, environment='physical'):
     from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
     spec = ac_one_dual_arm_zero_home_action_spec()
     source = json.loads(source_path.read_text())
@@ -68,22 +69,22 @@ def export(source_path, episode_path, output, hardware_binding=None):
     freeze_reported(plan, source)
     if 'initial_state' in source:
         plan['initial_state_digest'] = _digest(source['initial_state'])
-    if source.get('schema_version') == 'physical_collection_source.v1':
+    if is_device_source(source):
         from gripper_distance_plan import read_trace, distance_plan
         plan = distance_plan(plan, source, read_trace(episode_path, plan))
-    summary = validate_export(plan, source, hardware_binding)
+    summary = validate_export(plan, source, hardware_binding, environment=environment)
     write(output, plan)
     print(json.dumps(summary))
 
 
-def validate_export(plan, source, hardware_binding=None):
-    if source.get("schema_version") == "physical_collection_source.v1":
+def validate_export(plan, source, hardware_binding=None, *, environment='physical'):
+    if is_device_source(source):
         if hardware_binding is None:
             raise ValueError("physical plan export requires trusted hardware binding")
         from real_contract import validate_real_plan
         binding = json.loads(Path(hardware_binding).read_text())
-        validate_real_plan(plan, source, binding)
-        return {"mode": "real", "source_run_id": source["run_id"],
+        validate_real_plan(plan, source, binding, environment=environment)
+        return {"mode": "fake_device" if environment=='fake' else "real", "source_run_id": source["run_id"],
                 "timeline_digest": plan["timeline_digest"], "tick_count": len(plan["ticks"])}
     if hardware_binding is not None:
         raise ValueError("physical hardware binding cannot authorize simulated source")
@@ -123,5 +124,6 @@ if __name__ == "__main__":
     for field in ("source", "episode", "output"):
         parser.add_argument("--" + field, type=Path, required=True)
     parser.add_argument("--hardware-binding", type=Path)
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
     args = parser.parse_args()
-    export(args.source, args.episode, args.output, args.hardware_binding)
+    export(args.source, args.episode, args.output, args.hardware_binding,environment=args.environment)

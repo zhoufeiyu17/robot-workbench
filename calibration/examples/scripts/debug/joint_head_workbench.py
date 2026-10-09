@@ -28,6 +28,14 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def transport_environment(config):
+    environment=config.get('environment','physical')
+    if environment not in ('physical','fake'):raise ValueError('明确指定 physical/fake 设备环境')
+    if environment=='fake' and (config.get('simulation_only') is not True or config.get('robot_source','simulated')!='simulated'):
+        raise ValueError('Fake 接入必须明确 simulation_only=true 且 robot_source 为 simulated')
+    return environment
+
+
 def load_wrist_selection(path):
     """Load the persisted wrist selection.
 
@@ -65,6 +73,12 @@ class Workbench:
     PREFLIGHT_PATHS=frozenset(('/api/hardware-trajectory-preview','/api/hardware-jaw-preview','/api/queue','/api/calibration-preview',
         *('/api/control/'+action for action in ('trajectory-preview','jaw-preview','motion-preview','home-preview','both-home-preview','arm-home-preview'))))
     def __init__(self, config, output):
+        environment=transport_environment(config)
+        if environment=='fake':
+            root=Path(config.get('calibration_root',''))
+            if (not str(config.get('robot_id','')).startswith('fake-') or not root.is_absolute()
+                    or root.resolve().is_relative_to(Path('/var/lib/anyverse/calibration').resolve())):
+                raise ValueError('Fake 必须使用独立 fake- robot_id 和绝对 calibration_root，禁止物理标定目录')
         if config.get('jaw_mapping_file'):
             from arx_env.joint_head_jaw_mapping import configure_mapping
             configure_mapping(config['jaw_mapping_file'])
@@ -99,13 +113,13 @@ class Workbench:
             self.control_http=build_opener(ProxyHandler({}),NoRedirect())
         if config.get('hardware_camera_port') is not None:
             from arx_env.joint_head_workbench_hardware import HardwareCameraAdapter
-            self.hardware_camera=HardwareCameraAdapter(config['hardware_camera_port'])
+            self.hardware_camera=HardwareCameraAdapter(config['hardware_camera_port'],environment=environment)
         from arx_env.joint_head_workbench_hardware import HardwareCameraAdapter
-        self.wrist_cameras={side:HardwareCameraAdapter(port) for side,port in config.get('hardware_wrist_camera_ports',{}).items() if side in ('left','right')}
+        self.wrist_cameras={side:HardwareCameraAdapter(port,environment=environment) for side,port in config.get('hardware_wrist_camera_ports',{}).items() if side in ('left','right')}
         self.hardware_reader=None
         if config.get('hardware_status_owner_port') is not None:
             from arx_env.joint_head_workbench_hardware import HardwareReadAdapter
-            self.hardware_reader=HardwareReadAdapter(config['hardware_status_owner_port'])
+            self.hardware_reader=HardwareReadAdapter(config['hardware_status_owner_port'],environment=environment)
         self.config=config; self.geometry=Geometry(config); self.output=Path(output).resolve()
         self.output.mkdir(parents=True,exist_ok=True)
         from arx_env.joint_head_calibration_store import CalibrationStore
@@ -357,7 +371,7 @@ class Workbench:
                     owner=view['raw_owner']; feedback=owner['calibration_feedback']
                     value={'owner':owner,'source_age_s':view['feedback']['host_sample_age_s'],'reachable':True,'state_view':view}
                 else:raise ValueError('独立状态网关未配置')
-                q=np.asarray(feedback['qpos'],float);sdk=feedback['sdk_timestamps'];source=owner['pid']
+                q=np.asarray(feedback['qpos'],float);sdk=feedback['sdk_timestamps'];source=(owner['pid'],feedback.get('source_clock_id'))
                 if q.shape!=(14,) or not np.isfinite(q).all() or not owner.get('feedback_healthy') or not 0<=value['source_age_s']<=.5:raise ValueError('真机反馈无效或过期')
                 if source!=last_source:last_sdk=None;advanced=[0.,0.];last_source=source
                 if len(sdk)!=2 or not all(type(v) in (int,float) and np.isfinite(v) for v in sdk):raise ValueError('SDK clocks invalid')
@@ -486,7 +500,9 @@ class Workbench:
         if source=='unknown':source='simulated' if getattr(self,'config',{}).get('simulation_only') is True else 'physical' if getattr(self,'config',{}).get('simulation_only') is False else 'unknown'
         try:
             result=self.arrival_store(source).summary()
-            result['recording_supported']='arrival_events' in ((getattr(self,'hardware_feedback',None) or {}).get('owner') or {})
+            feedback=getattr(self,'hardware_feedback',None) or {}
+            owner=feedback.get('raw_owner') or feedback.get('owner') or {}
+            result['recording_supported']='arrival_events' in owner
             return result
         except (ValueError,OSError) as exc:return {'error':str(exc),'robot_source':source}
 
@@ -860,7 +876,7 @@ class Workbench:
         if not pending or pending['expires']<time.monotonic() or pending['workflow']!=self.workflow or pending.get('pipeline_run_id')!=getattr(self,'pipeline_run_id',None):raise ValueError('标定预览已过期或依赖变化')
         if self.control_mode!='hardware_sync' or not self.control_available():raise ValueError('真机控制或反馈不可用')
         root=self.output/('batch-hardware-'+secrets.token_hex(5));dataset=root/'capture';dataset.mkdir(parents=True)
-        manifest={'environment':'hardware','robot_source':self.robot_source(),'simulation_only':self.robot_source()!='physical','robot_id':self.store.robot_id,'frames':[],'planned_frames':pending['queue'],'camera':pending['intrinsics']['head']}
+        manifest={'environment':'hardware','runtime_environment':transport_environment(self.config),'robot_source':self.robot_source(),'simulation_only':self.robot_source()!='physical','robot_id':self.store.robot_id,'frames':[],'planned_frames':pending['queue'],'camera':pending['intrinsics']['head']}
         manifest.update(geometry_id=self.geometry_id,asset_geometry_id=self.config.get('asset_geometry_id'),
                         asset_seal_sha256=self.config.get('asset_seal_sha256'),jaw_mapping=mapping_identity())
         if pending['contract']:manifest['wrist_contract']=pending['contract']
@@ -889,6 +905,9 @@ class Workbench:
 
     def collect_hardware(self,pending,dataset,manifest):
         from arx_env.joint_head_workbench_capture import capture_sample
+        from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp
+        environment=transport_environment(self.config)
+        source_clock=None;last_source_stamp=None;ready_source=None;ready_step=None
         preview=pending['preview'];pid=preview['owner_pid'];epoch=preview['command_epoch']
         window_v2=None
         tentative=None;created=[]
@@ -897,17 +916,30 @@ class Workbench:
         def save():
             tmp=dataset/'dataset.json.tmp';tmp.write_text(json.dumps(manifest,allow_nan=False));tmp.replace(dataset/'dataset.json')
         def checked_owner(owner=None):
-            nonlocal window_v2
+            nonlocal window_v2,source_clock,last_source_stamp
             if owner is None:owner=self.control_request('state').get('owner') or {}
             if owner.get('pid')!=pid or owner.get('command_epoch')!=epoch:
                 raise ValueError('控制器身份或动作版本已变化，采集中止'+('：'+str(owner['reason']) if owner.get('reason') else ''))
             if not owner.get('feedback_healthy') or owner.get('state') in ('FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY','STOPPED','DISCONNECTED'):
                 raise ValueError(owner.get('reason') or '真机反馈失效或已停止')
+            if environment=='fake':
+                if owner.get('environment')!='fake' or owner.get('mode')!='simulation' or owner.get('simulation_only') is not True:
+                    raise ValueError('Fake 采集必须绑定明确的模拟 Owner，不能跨设备环境')
+                feedback=owner.get('calibration_feedback') or {}
+                source_clock=source_clock or clock_spec('fake',clock_domain=feedback.get('clock_domain'),source_clock_id=feedback.get('source_clock_id'))
+                point=sample_stamp(feedback,source_clock,wall_key='sample_wall_ns')
+                last_source_stamp=assert_progress(last_source_stamp,point,allow_same=True)
+                manifest['clock']=source_clock
+            elif owner.get('environment') not in (None,'physical') or owner.get('simulation_only') is True:
+                raise ValueError('物理采集拒绝 Fake Owner')
             if window_v2 is None:window_v2='calibration_capture_window_v2' in (owner.get('capabilities') or [])
             return owner
         def same_window(owner,identity,ready_ns):
             motion=owner.get('motion') or {}
-            return motion.get('status')=='AWAITING_CAPTURE' and motion.get('sample_id')==identity and motion.get('capture_ready_wall_ns')==ready_ns
+            return (motion.get('status')=='AWAITING_CAPTURE' and motion.get('sample_id')==identity and motion.get('capture_ready_wall_ns')==ready_ns
+                    and (environment!='fake' or (motion.get('capture_ready_source_ns')==ready_source
+                         and motion.get('capture_ready_physics_step')==ready_step and motion.get('capture_clock_domain')=='simulation'
+                         and motion.get('capture_source_clock_id')==source_clock['source_clock_id'])))
         def reject_window(identity,ready_ns,reason):
             nonlocal tentative
             if tentative is not None:
@@ -935,11 +967,18 @@ class Workbench:
                         self.stop.wait(.03);continue  # ACK is queued; wait for the owner tick without acknowledging twice.
                     ready_ns=motion.get('capture_ready_wall_ns')
                     if type(ready_ns) is not int or ready_ns<=0:raise ValueError('控制器缺少采样就绪时间，拒绝使用缓存帧')
+                    capture_time={'not_before_ns':ready_ns}
+                    if environment=='fake':
+                        ready_source,ready_step=sample_stamp(dict(host_receive_ns=ready_ns,
+                            clock_domain=motion.get('capture_clock_domain'),source_clock_id=motion.get('capture_source_clock_id'),
+                            source_time_ns=motion.get('capture_ready_source_ns'),physics_step=motion.get('capture_ready_physics_step')),source_clock)
+                        if ready_source>last_source_stamp[0] or ready_step>last_source_stamp[1]:raise ValueError('Fake 就绪边界晚于实际反馈')
+                        capture_time=dict(environment='fake',source_clock_id=source_clock['source_clock_id'],not_before_source_ns=ready_source)
                     required={w['observer']:[30 if w['observer']=='left' else 24]} if pending['workflow']['kind']=='wrist' else {'head':[w.get('expected_marker_id') or (24 if w.get('arm')=='left' else 30)]}
                     limit=time.monotonic()+2;sample=None
                     while True:
                         if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('真机采样已停止')
-                        try:sample=capture_sample(cameras,intrinsics,self.feedback_history_snapshot,feedback_diagnostics=self.feedback_diagnostics,owner_pid=pid,command_epoch=epoch,required_markers=required,not_before_ns=ready_ns);break
+                        try:sample=capture_sample(cameras,intrinsics,self.feedback_history_snapshot,feedback_diagnostics=self.feedback_diagnostics,owner_pid=pid,command_epoch=epoch,required_markers=required,**capture_time);break
                         except Exception as exc:
                             if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('真机采样已停止') from exc
                             if window_v2 and not same_window(checked_owner(),identity,ready_ns):
@@ -952,6 +991,7 @@ class Workbench:
                     observer=w.get('observer','head');paired=sample['rows'][observer]
                     row={**sample['row'],'qpos':paired['qpos'],'q_reported_rad':paired['q_reported12'],'bracket_gap_s':paired['bracket_gap_s'],'pose_span_rad':paired['pose_span_rad'],'camera_metadata':{name:value['metadata'] for name,value in sample['rows'].items()},'jaw_gap_mm':feedback_gaps(paired['qpos']),'id':identity,'planned_id':w.get('id',identity),'split':w['split'],'valid_for_fit':True,'environment':'hardware'}
                     row.update({k:w[k] for k in ('observer','target') if k in w});row['camera_images']={};row['capture_ready_wall_ns']=ready_ns
+                    if environment=='fake':row.update(capture_ready_source_ns=ready_source,clock=source_clock,runtime_environment='fake')
                     for name,raw in sample['images'].items():
                         filename=identity+'-'+name+'.png';write_sample(dataset/filename,raw);row['camera_images'][name]=filename
                     for name,raw in sample.get('raw_images',{}).items():write_sample(dataset/(identity+'-'+name+'-raw.jpg'),raw)
@@ -978,7 +1018,9 @@ class Workbench:
                         while True:
                             if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('采样期间已停止，不确认继续动作')
                             owner=self.control_request('state').get('owner') or {};receipt=owner.get('last_capture_ack') or {}
-                            if owner.get('pid')==pid and receipt.get('sample_id')==identity and receipt.get('capture_ready_wall_ns')==ready_ns:break
+                            accepted=receipt.get('sample_id')==identity and receipt.get('capture_ready_wall_ns')==ready_ns
+                            if environment=='fake':accepted=accepted and receipt.get('command_epoch')==epoch and receipt.get('source_clock_id')==source_clock['source_clock_id'] and receipt.get('capture_ready_source_ns')==ready_source
+                            if accepted and owner.get('pid')==pid:break  # Keep a confirmed frame if a later fault changes the epoch.
                             checked_owner(owner)
                             if not same_window(owner,identity,ready_ns):
                                 reject_window(identity,ready_ns,'窗口撤销或旧窗口 ACK 未确认');break
@@ -1631,7 +1673,14 @@ class Workbench:
         installed=store.install(head_record,wrist_record,geometry_id=self.geometry_id,
             robot_source=self.robot_source(),acceptance=exception,
             notes='用户明确接受本版误差的临时标定；原数值验收失败保持不变，后续应替换为通过正常验收的版本。')
-        return {'message':'已安装用户接受误差的临时标定','installed':self.installed_pair(),'path':installed['path']}
+        return {'message':'已安装用户接受误差的临时标定','installed':self.notify_installation(),'path':installed['path']}
+
+    def notify_installation(self):
+        """Notify the embedding owner before this install is published as success."""
+        installed=self.installed_pair()
+        callback=getattr(self,'on_calibration_installed',None)
+        if callback is not None:callback(installed)
+        return installed
 
     def installed_pair(self):
         """The group currently installed for this workbench's environment, if any.
@@ -3117,7 +3166,7 @@ class Workbench:
                                        acceptance=self.install_acceptance(wrist),
                                        notes=self.install_notes(head_record,wrist_record),robot_source=self.robot_source())
                 return {'message':'已安装为当前有效标定：头部 %s ＋ 双腕 %s'%(head_record.get('version'),wrist_record.get('version')),
-                        'group':group['id'],'installed':self.installed_pair(),
+                        'group':group['id'],'installed':self.notify_installation(),
                         'path':manifest.get('path')}
         if path=='/api/calibration-pipeline':
             if body.get('stop'):

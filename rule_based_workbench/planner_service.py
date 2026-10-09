@@ -7,6 +7,16 @@ import subprocess
 import threading
 from uuid import uuid4
 
+RUNTIME_KEYS=('native_code','assets','deps','curobo_root','workbench_code')
+
+
+def frozen_identity(config,contract):
+    from run_pipeline import pinned_files,digest
+    pins={k:v for group in pinned_files(contract) for k,v in group.items()}
+    paths={k:config[k] for k in RUNTIME_KEYS}
+    return dict(input_pins_sha256=digest(json.dumps(pins,sort_keys=True).encode()),runtime_paths=paths,
+                identity=digest(json.dumps(dict(input_pins=pins,runtime_paths=paths),sort_keys=True).encode()))
+
 
 def private_spec_arguments(config):
     spec=config['planner_service']
@@ -43,13 +53,17 @@ def startup_config(template,directory,*,shared_config=None):
     token=uuid4().hex; old=base['remote_run_root']; jobs=old+'-planner-jobs-'+token[:8]
     root='/tmp/rbw-planner-'+token[:24]
     previous=base.get('planner_service') or {}
+    local=bool(base.get('execution'))
+    frozen=frozen_identity(base,contract) if local else None
+    if local:contract['planner_inputs']={k:v for group in pinned_files(contract) for k,v in group.items()}
     if shared_config is not None:
         shared,_,_=load_config(Path(shared_config))
         spec=shared.get('planner_service')
         if not spec:raise ValueError('主工作台尚未配置共享 MotionGen 服务')
         # A shared process has one frozen code/assets identity. Never silently
         # replace another mode's observation or calibration inputs to match it.
-        if spec['identity']!=digest(json.dumps(pinned_files(contract),sort_keys=True).encode()):
+        expected=frozen['identity'] if local else digest(json.dumps(pinned_files(contract),sort_keys=True).encode())
+        if spec['identity']!=expected or shared.get('execution')!=base.get('execution'):
             raise ValueError('双 DSW 与真机规划代码或资产身份不一致，不能共享规划进程')
         for key in ('native_code','assets','deps','curobo_root','workbench_code'):
             if base[key]!=shared[key]:raise ValueError('共享规划 runtime 路径不一致：'+key)
@@ -63,6 +77,10 @@ def startup_config(template,directory,*,shared_config=None):
         allowed_read_roots=[*contract['filesystem']['readonly_roots'],jobs],allowed_output_root=jobs,
         max_memory_mib=12288,min_free_memory_mib=16384,
         max_lifetime_seconds=int(contract['resources'].get('service_lifetime_seconds',contract['resources']['max_wall_time_minutes']*60)))
+    if local:
+        from local_execution import TARGET,validate
+        validate(base,contract)
+        private.update(frozen,compute_resource=TARGET)
     if spec is None:
         payload=json.dumps(private,sort_keys=True,separators=(',',':')).encode()
         spec={k:v for k,v in private.items() if k!='owner_token'}
@@ -91,7 +109,17 @@ def validate_spec(spec,*,private=False):
     fields={'root','socket','session_id','identity','allowed_read_roots','allowed_output_root',
             'max_memory_mib','min_free_memory_mib','max_lifetime_seconds'}
     fields.add('owner_token' if private else 'spec_sha256')
+    local_fields={'input_pins_sha256','runtime_paths','compute_resource'}
+    if isinstance(spec,dict) and set(spec)&local_fields:
+        fields|=local_fields
     if not isinstance(spec,dict) or set(spec)!=fields:raise ValueError('invalid planner service fields')
+    if 'input_pins_sha256' in spec:
+        from local_execution import TARGET
+        if (spec['compute_resource']!=TARGET or not isinstance(spec['input_pins_sha256'],str)
+                or not re.fullmatch('[0-9a-f]{64}',spec['input_pins_sha256'])
+                or not isinstance(spec['runtime_paths'],dict) or set(spec['runtime_paths'])!=set(RUNTIME_KEYS)
+                or any(not isinstance(v,str) or not v.startswith('/') for v in spec['runtime_paths'].values())):
+            raise ValueError('invalid frozen planner code/model inputs')
     root=PurePosixPath(spec['root'])
     if (len(root.parts)!=3 or root.parts[1]!='tmp' or not root.name.startswith('rbw-planner-')
             or len(root.name)<=len('rbw-planner-') or PurePosixPath(spec['socket']).parent!=root
@@ -119,11 +147,13 @@ def validate_config(config,contract):
     if spec!=contract.get('planner_service') or config.get('planning_backend')!='motiongen':
         raise ValueError('planner service must match a frozen MotionGen contract')
     fs=contract['filesystem']; resources=contract['resources']
+    owned_output=config['execution']['plant']['scope'] if config.get('execution') else '/mnt/data/feiyu.zhou/runs/robot_sim'
     if (spec['root'] not in fs['writable_roots'] or spec['allowed_output_root'] not in fs['writable_roots']
             or not below(config['remote_run_root'],spec['allowed_output_root'])
-            or not below(spec['allowed_output_root'],'/mnt/data/feiyu.zhou/runs/robot_sim')):
+            or not below(spec['allowed_output_root'],owned_output)):
         raise ValueError('planner output is outside the frozen task scope')
-    if resources.get('max_workers_per_instance')!=2:raise ValueError('planner/Isaac need explicit two-worker authorization')
+    expected_workers=config['execution']['max_processes'] if config.get('execution') else 2
+    if resources.get('max_workers_per_instance')!=expected_workers:raise ValueError('planner/Isaac worker budget differs')
     if spec['session_id']!=contract.get('identity',{}).get('session_id'):
         raise ValueError('planner Session differs from frozen contract owner')
     if spec['allowed_output_root'] not in spec['allowed_read_roots']:
@@ -131,7 +161,16 @@ def validate_config(config,contract):
     if any(p!=spec['allowed_output_root'] and not any(below(p,r) for r in fs['readonly_roots']) for p in spec['allowed_read_roots']):
         raise ValueError('planner read root not authorized')
     pins=pinned_files(contract)
-    if spec['identity']!=digest(json.dumps(pins,sort_keys=True).encode()):raise ValueError('planner pins identity differs')
+    if config.get('execution'):
+        actual={k:v for group in pins for k,v in group.items()}
+        frozen=dict(input_pins=contract.get('planner_inputs'),runtime_paths=spec.get('runtime_paths'))
+        if (not isinstance(frozen['input_pins'],dict) or not frozen['input_pins']
+                or any(actual.get(k)!=v for k,v in frozen['input_pins'].items())
+                or spec.get('input_pins_sha256')!=digest(json.dumps(frozen['input_pins'],sort_keys=True).encode())
+                or frozen['runtime_paths']!={k:config[k] for k in RUNTIME_KEYS}
+                or spec['identity']!=digest(json.dumps(frozen,sort_keys=True).encode())):
+            raise ValueError('planner frozen code/model inputs differ; create a new scope')
+    elif spec['identity']!=digest(json.dumps(pins,sort_keys=True).encode()):raise ValueError('planner pins identity differs')
     code=contract.get('provenance',{}).get('code_sha256',{})
     required=('curobo_worker.py','planner_service.py','motiongen_plan.py','motiongen_motion.py','gpu_acceptance.py',
               'curobo_robot_model.py','cup_contact.py','cup_envelope.py','region_self_collision.py')
@@ -191,7 +230,7 @@ class PlannerService:
         self.closed=False
 
     def start(self,config_path,directory,*,resume=False):
-        from run_pipeline import load_config,python_command,ssh,pinned_files,GPU_CHECK
+        from run_pipeline import load_config,python_command,transport,lane,pinned_files,GPU_CHECK
         from detector_service import SUPERVISOR
         config,contract,_=load_config(Path(config_path)); spec=config.get('planner_service')
         if spec is None:return
@@ -202,8 +241,8 @@ class PlannerService:
         decoded=decode_private_spec(payload,private['spec_sha256'])
         if {k:v for k,v in decoded.items() if k!='owner_token'}!={k:v for k,v in spec.items() if k!='spec_sha256'}:
             raise ValueError('local private planner scope differs from frozen contract')
-        args=['env','CUDA_VISIBLE_DEVICES=0','PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',
-              'PYTHONPATH='+':'.join((wb,install+'/python',install+'/deps',config['deps'],config['native_code']+'/source/robot_sim')),
+        args=['env','CUDA_VISIBLE_DEVICES='+str(lane(config,'dsw-scene')['gpu']),'PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',
+              'PYTHONPATH='+':'.join((wb,str(Path(wb).parent),install+'/python',install+'/deps',config['deps'],config['native_code']+'/source/robot_sim')),
               'CUDA_HOME='+install+'/cuda-overlay','LD_LIBRARY_PATH='+install+'/cuda-overlay/lib64',
               'TORCH_EXTENSIONS_DIR='+cache+'/torch','WARP_CACHE_PATH='+cache+'/warp','XDG_CACHE_HOME='+cache,
               'CUDA_CACHE_PATH='+cache+'/cuda',
@@ -212,12 +251,21 @@ class PlannerService:
               '--assets',config['assets'],'--allow-output-root',spec['allowed_output_root'],
               '--service-spec-file',private['spec_path'],'--spec-sha256',private['spec_sha256']]
         for root in spec['allowed_read_roots']:args+=['--allow-read-root',root]
+        if config.get('execution'):args.insert(1,'ROBOT_WORKBENCH_SESSION_ID='+config['execution']['session_id'])
         # The same stdin-owned supervisor already used by the detector bounds
         # this child; worker EOF/socket cancellation never searches for PIDs.
-        command=python_command(GPU_CHECK,0)+' 1>&2 && '+python_command(INSTALL_SPEC,json.dumps(pinned_files(contract)),private['spec_sha256'],'resume' if resume else 'new')+' && '+python_command(SUPERVISOR,json.dumps(args),spec['max_lifetime_seconds'],'hold-stdin')
+        if config.get('execution'):
+            from local_execution import check_command
+            guard=check_command(config,exclude='planner')
+        else:guard=python_command(GPU_CHECK,0)
+        if config.get('execution'):
+            from detector_service import LOCAL_SUPERVISOR
+            supervisor=python_command(LOCAL_SUPERVISOR,json.dumps(args),spec['max_lifetime_seconds'],'hold-stdin',wb)
+        else:supervisor=python_command(SUPERVISOR,json.dumps(args),spec['max_lifetime_seconds'],'hold-stdin')
+        command=guard+' 1>&2 && '+python_command(INSTALL_SPEC,json.dumps(pinned_files(contract)),private['spec_sha256'],'resume' if resume else 'new')+' && '+('exec ' if config.get('execution') else '')+supervisor
         Path(directory).mkdir(parents=True,exist_ok=True)
         self.log=(Path(directory)/'planner-service.log').open('a')
-        self.process=subprocess.Popen(ssh('dsw-scene',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
+        self.process=subprocess.Popen(transport(config,'dsw-scene',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
         self.process.stdin.write(payload.decode()+'\n');self.process.stdin.flush()
         self.config=config
         self.config_path,self.directory=Path(config_path),Path(directory)
@@ -254,7 +302,7 @@ class PlannerService:
             try:self.process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 self.process.terminate()
-                try:self.process.wait(timeout=5)
+                try:self.process.wait(timeout=30 if getattr(self,'config',{}).get('execution') else 5)
                 except subprocess.TimeoutExpired:self.process.kill();self.process.wait(timeout=5)
         if getattr(self,'thread',None) is not None:self.thread.join(timeout=5)
         if self.log is not None:self.log.close()
@@ -269,7 +317,7 @@ class PlannerService:
         from detector_service import wait_for_gpu_idle
         def waiting(remaining):
             if progress:progress('等待 GPU 释放（最多 30 秒）',next_label='恢复规划服务')
-        wait_for_gpu_idle('dsw-scene',progress=waiting)
+        wait_for_gpu_idle('dsw-scene',progress=waiting,**({'config':self.config,'exclude':'planner'} if self.config.get('execution') else {}))
         if progress:progress('当前规划进程已退出，正在恢复规划服务',next_label='场景重建及规划')
         self.start(config_path,directory,resume=True)
         deadline=time.monotonic()+timeout

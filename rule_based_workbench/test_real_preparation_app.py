@@ -61,7 +61,7 @@ class RealPreparationAppTest(unittest.TestCase):
             old = json.loads(new); old['source_digest'] = 'previous'
             previous = json.dumps(old).encode(); target.write_bytes(previous)
             bridge.config['trusted_binding_path'] = str(target)
-            bridge.owner = Mock(return_value=dict(state='READY', stationary=True, automatic_enabled=False))
+            bridge.owner = Mock(return_value=dict(mode='hardware',state='READY', stationary=True, automatic_enabled=False))
             with patch.object(app, 'REAL_BRIDGE', bridge):
                 app.publish_real_binding(result)
                 self.assertEqual(target.read_bytes(), new)
@@ -72,11 +72,11 @@ class RealPreparationAppTest(unittest.TestCase):
                 for update in ({'automatic_enabled': True}, {'stationary': False}, {'state': 'RUNNING'},
                                {'motion': {'status': 'VERIFYING'}}, {'acquisition_pending': True}):
                     target.write_bytes(previous)
-                    bridge.owner.return_value = dict(state='READY', stationary=True, automatic_enabled=False) | update
+                    bridge.owner.return_value = dict(mode='hardware',state='READY', stationary=True, automatic_enabled=False) | update
                     with self.assertRaisesRegex(ValueError, 'stationary'):
                         app.publish_real_binding(result)
                     self.assertEqual(target.read_bytes(), previous)
-                bridge.owner.return_value = dict(state='READY', stationary=True, automatic_enabled=False)
+                bridge.owner.return_value = dict(mode='hardware',state='READY', stationary=True, automatic_enabled=False)
                 bad = json.loads(new); bad['source_digest'] = 'unvalidated'
                 (result / 'hardware-binding.json').write_text(json.dumps(bad))
                 with self.assertRaisesRegex(ValueError, 'observation differs'):

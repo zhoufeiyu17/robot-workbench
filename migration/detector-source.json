@@ -1,0 +1,19 @@
+{
+  "schema": "detector_adapter_source.v1",
+  "source_files": {
+    "isaac_rgbd_detection.py": {
+      "origin": "/mnt/data/feiyu.zhou/code/detector-workbench-20260923-0310/detector/scripts/isaac_rgbd_detection.py",
+      "sha256": "79a53bd3306b3a031d457eab3c45b57e05339c1d88ac3384ea050b1e42229830"
+    },
+    "isaac_detection_service.py": {
+      "origin": "/mnt/data/feiyu.zhou/code/detector-workbench-20260923-0310/detector/scripts/isaac_detection_service.py",
+      "sha256": "43c9766e95eff0a3ca535e11f26f8590747e46763af101292ecfabecd0f9576f"
+    }
+  },
+  "scope": "two CLI/service adapters only; runtime/models remain readonly external dependencies",
+  "changes": [
+    "explicit runtime root",
+    "single physical CUDA0/1 mask with logical CUDA0; separate physical index metadata"
+  ],
+  "hardware_qualified": false
+}

@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contract import validate_physical14, validate_physical_feedback
 from frozen_executor import FrozenExecutor, validate_plan_evidence
 from real_contract import validate_real_plan
+from robot_workbench.sample_clock import clock_spec, clock_for_source, sample_stamp, assert_progress, owner_identity
 
 
 class LoopTimingProbe:
@@ -217,8 +218,11 @@ def classes(ref, *, jaw_mapping_file=None):
                              execution_timeline_digest=timeline['timeline_digest'])
             try:
                 if self.owner.recording_factory:
+                    identity={}
+                    if self.owner.environment=='fake':
+                        identity['execution_owner']=owner_identity(dict(owner_pid=os.getpid(),command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce))
                     self.recording = self.owner.recording_factory(
-                        dict(self.payload, execution_timeline=timeline), self.owner.recording_failed)
+                        dict(self.payload, execution_timeline=timeline,**identity), self.owner.recording_failed)
             except Exception as error:
                 self.owner.recording_failed(error)
             self.owner.recording = self.recording
@@ -260,14 +264,23 @@ def classes(ref, *, jaw_mapping_file=None):
             if self.index != self.last_sent_index:
                 self.send(sdk_target(target))
                 self.last_submission_s = self.owner.control_time()
+                send_wall_ns=time.time_ns()
                 self.last_sent_index = self.index
+                timing={}
+                if self.owner.environment=='fake':
+                    current=self.owner.current_feedback
+                    timing=dict(clock_domain=current.get('clock_domain'),source_clock_id=current.get('source_clock_id'),
+                        send_source_time_ns=round(self.last_submission_s*1e9),physics_step=None,
+                        feedback_at_send={key:current.get(key) for key in
+                            ('clock_domain','source_clock_id','source_time_ns','physics_step','sample_wall_ns')},
+                        owner_pid=os.getpid(),command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce)
                 if self.recording:
-                    self.owner.timing_probe.call('recording_command_submit', self.owner.recording_call, 'submit', 'command',tick=self.index,target=target,send_monotonic_s=self.last_submission_s,send_wall_ns=time.time_ns())
+                    self.owner.timing_probe.call('recording_command_submit', self.owner.recording_call, 'submit', 'command',tick=self.index,target=target,send_monotonic_s=self.last_submission_s,send_wall_ns=send_wall_ns,**timing)
                 self.owner.event('command', timeline_digest=self.frozen.plan['timeline_digest'], tick=self.index,
                                  execution_timeline_digest=self.runtime['timeline_digest'],
                                  source_tick=self.frozen.ticks[self.index]['source_tick'],
                                  stage=self.frozen.ticks[self.index]['stage'],
-                                 target=target, send_monotonic_s=self.last_submission_s)
+                                 target=target, send_monotonic_s=self.last_submission_s,send_wall_ns=send_wall_ns,**timing)
             return self.last_submission_s
 
         def _fault(self, reason, *, cancelled=False):
@@ -329,10 +342,20 @@ def classes(ref, *, jaw_mapping_file=None):
                 return self._fault(error)
 
     class CollectionOwner(ref.Owner):
-        def __init__(self, *args, hardware_binding=None, recording_factory=None, alignment_profile=None, timing_probe=None, execution_root=None, **kwargs):
+        def __init__(self, *args, hardware_binding=None, recording_factory=None, alignment_profile=None, timing_probe=None, execution_root=None, environment=None, source_clock_id=None, runtime_nonce=None, **kwargs):
             self.execution_root=Path(execution_root) if execution_root is not None else None
             self.timing_probe = timing_probe or LoopTimingProbe()
             super().__init__(*args, **kwargs)
+            from real_contract import namespace
+            if environment is not None:namespace(environment)
+            if self.hardware and environment not in (None,'physical') or not self.hardware and environment=='physical':
+                raise ValueError('trusted environment differs from hardware backend mode')
+            self.environment = environment
+            self.runtime_nonce=runtime_nonce
+            self.sample_clock=clock_spec('fake',source_clock_id=source_clock_id) if source_clock_id is not None else None
+            self.previous_source_stamp=None
+            if environment=='fake' and hardware_binding is not None and '/calibration/hardware/active' in str(Path(hardware_binding).resolve()):
+                raise ValueError('fake owner must use its isolated calibration binding')
             self.hardware_binding = hardware_binding
             self.recording_factory = recording_factory
             self.recording = None
@@ -346,16 +369,25 @@ def classes(ref, *, jaw_mapping_file=None):
                 if hardware_binding is None or jaw_mapping_file is None:
                     raise ValueError('alignment requires trusted binding and reviewed jaw mapping')
                 profile = json.loads(Path(alignment_profile).read_text())
-                validate_binding(profile, json.loads(Path(hardware_binding).read_text()))
+                validate_binding(profile, json.loads(Path(hardware_binding).read_text()),environment=environment or 'physical')
                 gripper_offset_mm(profile)
-                if (profile.get('source', {}).get('kind') != 'installed_physical_calibration'
+                if (profile.get('source', {}).get('kind') != ('installed_fake_calibration' if environment=='fake' else 'installed_physical_calibration')
                         or profile['model_binding']['jaw_mapping_sha256'] != mapping_identity['source_sha256']):
                     raise ValueError('alignment profile differs from installed model/mapping')
                 self.alignment_profile = deepcopy(profile)
                 self.alignment_target = [-v for v in offsets(profile)]
 
         def read_feedback(self):
-            return self.timing_probe.call('feedback_read', super().read_feedback)
+            feedback=self.timing_probe.call('feedback_read', super().read_feedback)
+            if self.environment=='fake':
+                clock=self.sample_clock or clock_spec('fake',clock_domain=feedback.get('clock_domain'),source_clock_id=feedback.get('source_clock_id'))
+                stamp=sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+                assert_progress(self.previous_source_stamp,stamp,allow_same=True)
+                if abs(round(feedback['sample_time_s']*1e9)-stamp[0])>1:
+                    raise ValueError('Owner feedback sample clock differs from source time')
+                self.sample_clock,self.previous_source_stamp=clock,stamp
+                feedback.update(owner_pid=os.getpid(),command_epoch=self.epoch,runtime_nonce=self.runtime_nonce)
+            return feedback
 
         def tick(self):
             return self.timing_probe.call('owner_tick', super().tick)
@@ -432,11 +464,13 @@ def classes(ref, *, jaw_mapping_file=None):
             return tuple(measured)
 
         def source_validator(self, plan, source):
-            if self.hardware:
+            if self.hardware or self.environment=='fake':
                 if self.hardware_binding is None:
                     raise ValueError('real calibration/source provenance binding unavailable')
                 binding = json.loads(Path(self.hardware_binding).read_text())
-                validate_real_plan(plan, source, binding)
+                validate_real_plan(plan, source, binding,environment=self.environment or 'physical')
+                if self.environment=='fake' and clock_for_source(source,'fake')!=self.sample_clock:
+                    raise ValueError('plan source clock differs from the live fake device')
             else:
                 from integration import DualGpuPipeline
                 bridge = DualGpuPipeline()
@@ -579,6 +613,7 @@ def classes(ref, *, jaw_mapping_file=None):
             self.timing_probe.call('cache_state_base', super().cache_state, feedback, limits)
             with self.lock:
                 self.cache['service'] = 'collection-real-control'
+                if self.environment is not None:self.cache['environment']=self.environment
                 self.cache['capabilities'] = ['collection_execution_v2']
                 if self.runner and hasattr(self.runner, 'frozen'):
                     self.cache['frozen'] = self.timing_probe.call('frozen_snapshot', self.runner.frozen.snapshot, include_history=False)

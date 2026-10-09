@@ -399,7 +399,8 @@ def publish_real_binding(root):
     configured = REAL_BRIDGE.config.get('trusted_binding_path')
     if configured is None:
         return  # Legacy/fake deployments retain their existing artifact handling.
-    from real_contract import validate_real_plan
+    from real_contract import validate_real_plan, validate_namespace, owner_matches_environment
+    environment=REAL_BRIDGE.config.get('environment','physical')
     target = Path(configured)
     if not target.is_absolute() or target.is_symlink() or not target.is_file():
         raise ValueError('trusted binding must be an existing absolute regular file')
@@ -407,12 +408,15 @@ def publish_real_binding(root):
     plan = json.loads((root / 'plan.json').read_text())
     data = (root / 'hardware-binding.json').read_bytes()
     binding = json.loads(data)
-    validate_real_plan(plan, source, binding)
+    validate_real_plan(plan, source, binding,environment=environment)
     previous = target.read_bytes()
     old = json.loads(previous)
+    validate_namespace(old,environment)
     if any(old.get(key) != binding.get(key) for key in ('robot_id', 'camera_serials')):
         raise ValueError('new binding differs from trusted robot/camera identity')
     owner = REAL_BRIDGE.owner()  # GET /state only; never preview, acquire or command.
+    if not owner_matches_environment(owner,environment):
+        raise ValueError('owner environment differs from trusted binding publication')
     if (owner.get('automatic_enabled') is not False or owner.get('acquisition_pending')
             or owner.get('stationary') is not True
             or owner.get('state') not in ('READY', 'STOPPED_DAMPING_HOLD', 'MANUAL_TAKEOVER')
@@ -949,53 +953,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.SERVICE_UNAVAILABLE, {'error': str(error)})
 
     def serve_video_file(self, path, head=False):
-        with path.open("rb") as stream:
-            size = path.stat().st_size
-            start, end = 0, size - 1
-            requested = self.headers.get("Range")
-            if requested:
-                try:
-                    unit, value = requested.split("=", 1)
-                    first, last = value.split("-", 1)
-                    if unit != "bytes" or "," in value or not (first or last):
-                        raise ValueError()
-                    if first:
-                        start = int(first)
-                        end = min(int(last), size - 1) if last else size - 1
-                    else:
-                        suffix = int(last)
-                        if suffix <= 0:
-                            raise ValueError()
-                        start = max(0, size - suffix)
-                    if start < 0 or start >= size or end < start:
-                        raise ValueError()
-                except ValueError:
-                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                    self.send_header("Content-Range", f"bytes */{size}")
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
-            self.send_response(HTTPStatus.PARTIAL_CONTENT if requested else HTTPStatus.OK)
-            self.send_header("Content-Type", "video/mp4")
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(end - start + 1))
-            if requested:
-                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.end_headers()
-            if not head:
-                stream.seek(start)
-                remaining = end - start + 1
-                try:
-                    while remaining:
-                        block = stream.read(min(65536, remaining))
-                        if not block:
-                            break
-                        self.wfile.write(block)
-                        remaining -= len(block)
-                except (BrokenPipeError, ConnectionResetError):
-                    pass
+        from robot_workbench.http_media import serve_file
+        return serve_file(self, path, head=head)
 
     def get_locked(self):
         route = self.path.split("?", 1)[0]

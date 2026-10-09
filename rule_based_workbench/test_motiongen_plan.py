@@ -291,6 +291,33 @@ def main(native_code, urdf):
             holds=adjusted['stages']
             index=next(i for i,s in enumerate(holds) if s['name']=='close_and_hold')
             assert holds[index+1]['start_tick']-holds[index]['start_tick']==18
+        # Explicit fake-device goes through this same numerical producer and
+        # retiming path; it never gains physical evidence labels or permission.
+        fake_source=deepcopy(physical_source)
+        fake_source.update(schema_version='fake_device_collection_source.v1',lane='fake-device',
+            environment='fake',simulation_only=True,evidence_source='fake_device_rgbd')
+        fake_source['calibration_profile']['source']['simulation_only']=True
+        def fake_owner(stamp):
+            value=dict(owner(reported,stamp=stamp),mode='simulation',environment='fake',evidence_source='fake',runtime_nonce='cpu-motiongen-owner')
+            value['calibration_feedback'].update(clock_domain='simulation',source_clock_id='cpu-motiongen-clock',
+                source_time_ns=stamp,physics_step=stamp*240//1_000_000_000)
+            return value
+        before=read_initial_sample(lambda:fake_owner(1_000_000_000),wall_ns=lambda:1_003_000_000,environment='fake')
+        after=read_initial_sample(lambda:fake_owner(9_000_000_000),wall_ns=lambda:9_003_000_000,environment='fake')
+        fake_source['initial_state']=seal_initial_state(before,after,fake_source['calibration_profile'])
+        fake_source['clock']=fake_source['initial_state']['clock']
+        fake_binding=dict(binding,environment='fake',simulation_only=True,evidence_source='fake_device_rgbd',
+            source_digest=_digest(fake_source),calibration_profile_digest=_digest(fake_source['calibration_profile']),
+            initial_state=fake_source['initial_state'],clock=fake_source['clock'])
+        fake_base,fake_plan,_=plan_loaded(planner,observation,data,fake_source,urdf,
+            speed_scale=.3,physical_binding=fake_binding,environment='fake')
+        for value in (fake_base,fake_plan,retime_physical(fake_base,fake_source,fake_binding,.55,environment='fake')):
+            validate_real_plan(value,fake_source,fake_binding,environment='fake')
+            assert value['initial_state_validation']['inactive_arm_source']=='fake_device_source.initial_state.model'
+            assert value['environment']=='fake' and value['simulation_only'] is True
+            try:validate_real_plan(value,fake_source,fake_binding)
+            except ValueError:pass
+            else:raise AssertionError('fake numerical output accepted by physical validator')
         FrozenExecutor(physical_plan,physical_source,sink=lambda _:None,gate=lambda:False,stop=lambda _:None,
                        source_validator=lambda p,s:validate_real_plan(p,s,binding))
         historical_data = {key: value for key, value in data.items() if key != 'simulation_initial_command'}

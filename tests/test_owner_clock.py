@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / 'calibration'), str(ROOT / 'calibration/infra'),
+sys.path[:0] = [str(ROOT), str(ROOT / 'calibration'), str(ROOT / 'calibration/infra'),
                str(ROOT / 'calibration/tests'), str(ROOT / 'rule_based_workbench')]
 from examples.scripts.debug import joint_head_real_owner as calibration
 from arx_env import joint_head_jaw_mapping as jaw
@@ -18,17 +18,24 @@ from test_frozen_executor import fixture
 
 class ClockBackend(calibration.SimulatedBackend):
     """Protocol fake only: advancing feedback is explicitly supplied by the test."""
-    def __init__(self, clock, q=None):
+    def __init__(self, clock, q=None, source_clock_id=None):
         super().__init__(q)
         self.clock = clock
         self.read_delay = lambda: None
         self.frozen_sample = None
+        self.source_clock_id = source_clock_id
 
     def read_calibration_state(self):
         self.read_delay()
         now = self.clock() if self.frozen_sample is None else self.frozen_sample
-        return dict(qpos=self.q[:], qvel=[0.] * 14, sample_time_s=now,
+        result=dict(qpos=self.q[:], qvel=[0.] * 14, sample_time_s=now,
                     sample_wall_ns=time.time_ns(), sdk_timestamps=[now, now + 41.])
+        if self.source_clock_id:
+            stamp=round(now*1e9)
+            result.update(clock_domain='simulation',source_clock_id=self.source_clock_id,
+                          source_time_ns=stamp,physics_step=stamp,step_kind='protocol_clock_tick',
+                          environment='fake',simulation_only=True)
+        return result
 
     def send(self, side, q):
         super().send(side, q)

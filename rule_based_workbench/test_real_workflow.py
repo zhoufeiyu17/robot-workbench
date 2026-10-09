@@ -94,6 +94,7 @@ def main():
     except ValueError: pass
     else: raise AssertionError('disabled camera stream reached service')
     bridge = RealBridge.__new__(RealBridge)
+    bridge.config = {'environment':'physical'}
     calls = []
     bridge.status = lambda:dict(collection_ready=True)
     bridge.control = lambda value:calls.append(value) or {'token':'review'}

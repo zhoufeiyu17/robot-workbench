@@ -61,6 +61,9 @@ class ProvisionalInstallTest(unittest.TestCase):
                 wrist_contract=lambda r:{'head_snapshot':{'id':head['id']}},output=root,
                 store_for=lambda env:store,register_result=lambda r:h,geometry_id='geometry',
                 robot_source=lambda:'physical',installed_pair=store.active)
+            announced=[]
+            app.on_calibration_installed=announced.append
+            app.notify_installation=lambda:Workbench.notify_installation(app)
             body={'head_result_id':head['id'],'wrist_result_id':row['id']}
             with self.assertRaisesRegex(ValueError,'confirmation'):
                 Workbench.install_provisional_pair(app,body)
@@ -76,6 +79,7 @@ class ProvisionalInstallTest(unittest.TestCase):
             row['id']=original_id;(root/'wrist.json').write_bytes(raw)
             result=Workbench.install_provisional_pair(app,body)
             self.assertTrue(result['installed']['verified'])
+            self.assertEqual(announced,[result['installed']])
             active=json.loads((store.root/'active/wrist.json').read_text())
             self.assertFalse(active['payload']['row']['accepted'])
             self.assertEqual(active['payload']['row']['pair_status'],'incomplete_both')

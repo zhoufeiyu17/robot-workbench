@@ -81,9 +81,9 @@ def validate_model_evidence(plan,source):
         raise ValueError('physical and GPU 65/62 mm distance definitions differ')
 
 
-def freeze_physical(plan,source,binding):
+def freeze_physical(plan,source,binding,*,environment='physical'):
     from real_contract import validate_real_source, validate_real_plan
-    validate_real_source(source,binding)
+    validate_real_source(source,binding,environment=environment)
     validate_initial_state(source.get('initial_state'),source['calibration_profile'])
     if 'joint_space' in plan or 'physical_gpu_conversion' in plan:
         raise ValueError('physical conversion has already been applied')
@@ -114,7 +114,7 @@ def freeze_physical(plan,source,binding):
         controlled_gripper='left_gripper',holding_stages=sorted(HOLDING_STAGES),
         command_semantics='fixed_distance_target; contact may prevent reaching the target',
         contact_detection=False,force_control=False,hardware_validated=False)
-    validate_real_plan(result,source,binding)
+    validate_real_plan(result,source,binding,environment=environment)
     validate_distance_control(result,source)
     return result
 
@@ -153,12 +153,12 @@ def validate_evidence(plan,source):
     return model
 
 
-def retime_physical(plan,source,binding,speed_scale):
+def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
     """Reuse the existing GPU planner's stage time interpolation, without queries."""
     from real_contract import validate_real_plan
     from motiongen_plan import scaled_stages,freeze
     from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
-    validate_real_plan(plan,source,binding)
+    validate_real_plan(plan,source,binding,environment=environment)
     model=validate_evidence(plan,source)
     if model['planning_validation'].get('derivation') is not None:
         raise ValueError('speed adjustment requires the original checked base plan')
@@ -180,4 +180,4 @@ def retime_physical(plan,source,binding,speed_scale):
         method='uniform_source_time_stage_scale',parent_timeline_digest=model['timeline_digest'],
         parent_receipt_sha256=_digest(model['planning_validation']),speed_scale=speed_scale,
         parent_stage_sample_times=times,collision_audit_rerun=False))
-    return freeze_physical(derived,source,binding)
+    return freeze_physical(derived,source,binding,environment=environment)

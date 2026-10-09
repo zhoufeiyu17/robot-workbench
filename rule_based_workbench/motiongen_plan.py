@@ -7,6 +7,7 @@ from fractions import Fraction
 import hashlib
 import importlib
 import json
+from real_contract import is_device_source
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -155,12 +156,12 @@ def initial_motion_state(planner, data, source, spec, opening):
     if any(not math.isfinite(value) for value in measured.values()):
         raise ValueError('nonfinite simulation initial feedback')
     start, projections = dict(measured), []
-    physical=source.get('schema_version')=='physical_collection_source.v1'
+    physical=is_device_source(source)
     if physical:
         from joint_space import validate_initial_state
         initial=validate_initial_state(source.get('initial_state'),source['calibration_profile'])
         frozen=dict(schema_version='physical_model_initial_command.v1',
-            evidence_source='physical_source.initial_state.model',source_digest=_digest(source),
+            evidence_source=('fake_device_source' if source.get('environment')=='fake' else 'physical_source')+'.initial_state.model',source_digest=_digest(source),
             initial_state_digest=_digest(initial),target=deepcopy(initial['model']))
     else:frozen = data.get('simulation_initial_command')
     offline = frozen is None and (source.get('synthetic_fixture') is True or source.get('test_fixture') is True)
@@ -397,7 +398,7 @@ def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=No
         world_description=world_description,engine=engine,reused=reused,initialization_wall=initialization_wall)
 
 
-def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1., diagnostic=lambda name, value: None, engine_cache=None, physical_binding=None):
+def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1., diagnostic=lambda name, value: None, engine_cache=None, physical_binding=None, environment='physical'):
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
     from curobo_robot_model import build_conservative_robot_model, fixed_world_mesh_descriptors
@@ -409,10 +410,10 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     planning_started=time.perf_counter()
     prior_engine=(engine_cache or {}).get('engine')
     graph_start=dict(getattr(prior_engine,'cuda_graph_calls',dict(captures=0,replays=0)))
-    physical=source.get('schema_version')=='physical_collection_source.v1'
+    physical=is_device_source(source)
     if physical:
         from real_contract import validate_real_source
-        validate_real_source(source,physical_binding)
+        validate_real_source(source,physical_binding,environment=environment)
         bridge=None
     else:
         if physical_binding is not None:raise ValueError('physical binding cannot relabel a simulation source')
@@ -704,7 +705,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     plan['planning_validation']['derivation']['max_joint_interpolation_roundoff_rad'] = max(stage.get('interpolation_roundoff_rad', 0.) for stage in derived_stages)
     if physical:
         from physical_motiongen import freeze_physical
-        base,plan=(freeze_physical(value,source,physical_binding) for value in (base,plan))
+        base,plan=(freeze_physical(value,source,physical_binding,environment=environment) for value in (base,plan))
     else:
         bridge.accept_plan(base); bridge.accept_plan(plan)
     if not physical and initial['simulation_initial_command']['evidence_source'] != 'runtime.loop.previous':
@@ -729,12 +730,12 @@ def main(args):
     result = dict(status='failed', backend='curobo_motiongen', hardware_access=False)
     try:
         source = json.loads(args.source.read_text())
-        physical=source.get('schema_version')=='physical_collection_source.v1'
+        physical=is_device_source(source)
         binding_path=getattr(args,'physical_binding',None)
         binding=json.loads(binding_path.read_text()) if binding_path is not None else None
         if physical:
             from real_contract import validate_real_source
-            validate_real_source(source,binding)
+            validate_real_source(source,binding,environment=getattr(args,'environment','physical'))
         else:
             if binding is not None:raise ValueError('physical binding cannot relabel a simulation source')
             bridge = DualGpuPipeline(); bridge.ingest_source(source)
@@ -749,7 +750,13 @@ def main(args):
                 name = f'motiongen-receipts-{updates:03d}.json'; updates += 1
             write_new(args.output/name, value)
         base, plan, evidence = plan_loaded(planner, observation, data, source, ac_one_asset_spec(args.assets).urdf_path,
-                                           speed_scale=args.speed_scale, diagnostic=diagnostic,physical_binding=binding)
+                                           speed_scale=args.speed_scale, diagnostic=diagnostic,physical_binding=binding,
+                                           environment=getattr(args,'environment','physical'))
+        if getattr(args,'execution_json',None):
+            from local_execution import validate,TARGET,stamp_plan
+            validate({'execution':json.loads(args.execution_json)})
+            stamp_plan(base,TARGET);stamp_plan(plan,TARGET)
+            evidence['compute_resource']=dict(TARGET,logical_cuda_index=0)
         write_new(args.output/'base-plan.json', base)
         write_new(args.output/'plan.json', plan)
         result.update(status='motiongen-plan-ready', timeline_digest=plan['timeline_digest'],
@@ -769,4 +776,6 @@ if __name__ == '__main__':
         parser.add_argument('--'+name, type=Path, required=True)
     parser.add_argument('--speed-scale', type=float, default=1.)
     parser.add_argument('--physical-binding',type=Path,help='trusted acquisition/calibration receipt; no hardware access')
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
+    parser.add_argument('--execution-json')
     raise SystemExit(main(parser.parse_args()))

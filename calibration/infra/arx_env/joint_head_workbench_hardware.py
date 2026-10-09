@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import time
 from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
+from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp
 
 
 def camera_process_inventory(serials, *, proc_root='/proc'):
@@ -54,7 +55,7 @@ def _number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5):
+def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5, environment='physical', source_clock_id=None):
     """Host age assumes synchronized clocks; SDK stamps have separate side epochs.
 
     `previous` is the last normalized result, never a controller target. PID is
@@ -62,16 +63,24 @@ def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5):
     """
     if not isinstance(owner, dict):
         raise ValueError('owner state must be an object')
+    if environment not in ('physical','fake'):
+        raise ValueError('trusted physical/fake environment required')
     if not _number(max_age_s) or max_age_s <= 0 or type(now_ns) is not int:
         raise ValueError('positive max age and integer wall clock required')
     identity = {key: owner.get(key) for key in ('pid', 'mode', 'command_epoch', 'state')}
     identity['protocol'] = owner.get('motion_protocol')
+    identity.update(environment=owner.get('environment'),simulation_only=owner.get('simulation_only'),
+                    evidence_source=owner.get('evidence_source'))
     reasons = []
     if type(identity['pid']) is not int or identity['pid'] <= 0:
         reasons.append('owner_pid_invalid')
     if type(identity['command_epoch']) is not int or identity['command_epoch'] < 0:
         reasons.append('command_epoch_invalid')
-    if identity['mode'] != 'hardware':
+    if environment=='fake':
+        if owner.get('mode')!='simulation' or owner.get('environment')!='fake' or owner.get('simulation_only') is not True:
+            reasons.append('owner_is_not_explicit_fake')
+    elif (identity['mode']!='hardware' or owner.get('environment') not in (None,'physical')
+          or owner.get('simulation_only') is True or owner.get('physical_hardware_connected') is False):
         reasons.append('owner_is_not_hardware')
     if identity['protocol'] != 'reviewed-single-arm-v1':
         reasons.append('owner_protocol_incompatible')
@@ -81,6 +90,19 @@ def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5):
         reasons.append('owner_feedback_unhealthy')
     feedback = owner.get('calibration_feedback')
     feedback = feedback if isinstance(feedback, dict) else {}
+    clock=None;source_stamp=None
+    try:
+        clock=clock_spec(environment,clock_domain=feedback.get('clock_domain'),
+                         source_clock_id=source_clock_id or feedback.get('source_clock_id'))
+        source_stamp=sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+        if previous and environment=='fake':
+            prior=previous['feedback']
+            if prior.get('source_clock_id')!=clock['source_clock_id']:
+                raise ValueError('simulation source_clock_id changed')
+            if type(prior.get('source_time_ns')) is int and type(prior.get('physics_step')) is int:
+                assert_progress((prior['source_time_ns'],prior['physics_step']),source_stamp,allow_same=True)
+    except (ValueError,KeyError,TypeError) as exc:
+        reasons.append('source_clock_invalid: '+str(exc))
     q, stamps = feedback.get('qpos'), feedback.get('sdk_timestamps')
     q_valid = isinstance(q, list) and len(q) == 14 and all(_number(x) for x in q)
     sdk_valid = isinstance(stamps, list) and len(stamps) == 2 and all(_number(x) and x >= 0 for x in stamps)
@@ -112,11 +134,16 @@ def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5):
                         reasons.append(f'{side}_sdk_clock_regressed')
     valid = not reasons
     return dict(
-        backend='hardware', source='existing_owner_raw_feedback', reachable=True,
+        backend='simulation' if environment=='fake' else 'hardware', environment=environment,
+        source='existing_owner_raw_feedback', reachable=True,
         raw_owner=owner,
         owner=identity, q_actual_rad=q[:6]+q[7:13] if valid else None,
         jaw_positions_m=dict(left=q[6], right=q[13]) if valid else None,
         feedback=dict(valid=valid, reasons=reasons, sample_wall_ns=wall if type(wall) is int else None,
+                      clock_domain=clock['clock_domain'] if clock else None,
+                      source_clock_id=clock['source_clock_id'] if clock else None,
+                      source_time_ns=source_stamp[0] if source_stamp and environment=='fake' else None,
+                      physics_step=source_stamp[1] if source_stamp else None,
                       host_sample_age_s=age, host_sample_recent=recent,
                       sdk_timestamps_s=sdk, sdk_advanced=advanced,
                       owner_feedback_healthy=owner.get('feedback_healthy') is True,
@@ -138,11 +165,13 @@ class _NoRedirect(HTTPRedirectHandler):
 
 class HardwareReadAdapter:
     """Explicit loopback tunnel only. Construction performs no I/O."""
-    def __init__(self, owner_port, *, timeout_s=.8, max_age_s=.5):
+    def __init__(self, owner_port, *, timeout_s=.8, max_age_s=.5, environment='physical'):
         if type(owner_port) is not int or not 1 <= owner_port <= 65535:
             raise ValueError('owner port must be an integer in 1..65535')
         if not _number(timeout_s) or timeout_s <= 0 or not _number(max_age_s) or max_age_s <= 0:
             raise ValueError('positive timeout and max age required')
+        if environment not in ('physical','fake'):raise ValueError('trusted physical/fake environment required')
+        self.environment,self.source_clock_id,self.source_stamp=environment,None,None
         self.url = f'http://127.0.0.1:{owner_port}/state'
         self.timeout_s, self.max_age_s = timeout_s, max_age_s
         self.http = build_opener(ProxyHandler({}), _NoRedirect())
@@ -165,12 +194,22 @@ class HardwareReadAdapter:
                     value=value["owner"]
                     now=value["calibration_feedback"]["sample_wall_ns"]+int((age+time.monotonic()-started)*1e9)
                 result = normalize_owner_state(value, now_ns=now,
-                                               previous=self.previous, max_age_s=self.max_age_s)
+                                               previous=self.previous, max_age_s=self.max_age_s,
+                                               environment=self.environment,source_clock_id=self.source_clock_id)
+                if result['feedback']['valid'] and self.environment=='fake':
+                    point=(result['feedback']['source_time_ns'],result['feedback']['physics_step'])
+                    try:assert_progress(self.source_stamp,point,allow_same=True)
+                    except ValueError as exc:
+                        result['feedback']['valid']=False
+                        result['feedback']['reasons'].append('source_clock_invalid: '+str(exc))
+                        result.update(q_actual_rad=None,jaw_positions_m=None)
+                    else:self.source_clock_id,self.source_stamp=result['feedback']['source_clock_id'],point
                 self.previous = result
                 return result
             except (OSError, ValueError) as exc:
                 self.previous = None
-                result = normalize_owner_state({}, now_ns=time.time_ns(), max_age_s=self.max_age_s)
+                result = normalize_owner_state({}, now_ns=time.time_ns(), max_age_s=self.max_age_s,
+                                               environment=self.environment,source_clock_id=self.source_clock_id)
                 result.update(reachable=False, error=f'{type(exc).__name__}: {exc}')
                 return result
 
@@ -182,11 +221,13 @@ class HardwareCameraAdapter:
     Older sources use bracketing reads. Neither supplies synchronized joints or
     an exposure timestamp; do not invent either.
     """
-    def __init__(self, camera_port, *, timeout_s=.8, max_age_s=2.):
+    def __init__(self, camera_port, *, timeout_s=.8, max_age_s=2., environment='physical'):
         if type(camera_port) is not int or not 1 <= camera_port <= 65535:
             raise ValueError('camera port must be an integer in 1..65535')
         if not all(_number(x) and x > 0 for x in (timeout_s, max_age_s)):
             raise ValueError('positive timeout and max age required')
+        if environment not in ('physical','fake'):raise ValueError('trusted physical/fake environment required')
+        self.environment,self.source_clock_id,self.source_stamp=environment,None,None
         self.base = f'http://127.0.0.1:{camera_port}'
         self.timeout_s, self.max_age_s = timeout_s, max_age_s
         self.http = build_opener(ProxyHandler({}), _NoRedirect())
@@ -259,14 +300,30 @@ class HardwareCameraAdapter:
         stamp = int(raw_stamp) if (type(raw_stamp) is int or isinstance(raw_stamp, str) and raw_stamp.isdecimal()) else None
         if stamp is not None and stamp <= 0:
             raise ValueError('invalid camera host timestamp')
+        if self.environment=='fake':
+            if status.get('timestamp_kind')!='simulation_step':raise ValueError('fake camera requires simulation_step timestamp')
+            clock=clock_spec('fake',clock_domain=status.get('clock_domain'),
+                             source_clock_id=self.source_clock_id or status.get('source_clock_id'))
+            source_stamp=sample_stamp({**status,'host_receive_ns':stamp},clock)
+            assert_progress(self.source_stamp,source_stamp,allow_same=True)
+        else:
+            # Older physical previews may omit wall timestamps, but never use a
+            # simulation source as an implicit physical camera fallback.
+            if (status.get('environment') not in (None,'physical') or status.get('simulation_only') is True
+                    or status.get('timestamp_kind')=='simulation_step' or status.get('clock_domain') not in (None,'host_wall') or status.get('source_clock_id') is not None):
+                raise ValueError('simulation camera cannot authorize physical capture')
         age = status.get('source_age_s',(time.time_ns()-stamp)/1e9 if stamp is not None else None)
         if age is not None and not _number(age):raise ValueError('invalid camera age')
         if age is not None and not 0 <= age <= self.max_age_s:
             raise ValueError('camera frame stale or host clocks disagree')
+        if self.environment=='fake':self.source_clock_id,self.source_stamp=clock['source_clock_id'],source_stamp
         device = status.get('device_timestamp_ms')
         self.last_success_ns = time.time_ns()
         self.latest = dict(ready=True, reachable=True, source_age_s=age,received_monotonic=time.monotonic() if 'source_age_s' in status else None,frame_seq=status['frame_number'],
-                           frame_timestamp_ns=stamp, timestamp_kind='host_receive', age_s=age,
+                           frame_timestamp_ns=stamp, timestamp_kind='simulation_step' if self.environment=='fake' else 'host_receive', age_s=age,
+                           environment=self.environment,clock_domain='simulation' if self.environment=='fake' else 'host_wall',
+                           source_clock_id=self.source_clock_id,source_time_ns=self.source_stamp[0] if self.source_stamp else None,
+                           physics_step=self.source_stamp[1] if self.source_stamp else None,
                            device_timestamp_ms=device if _number(device) and device >= 0 else None,
                            delivered_fps=status.get('delivered_fps'), capture_fps=status.get('capture_fps'),
                            timestamp_domain=status.get('timestamp_domain'), metadata_matched=True,

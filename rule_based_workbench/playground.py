@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event, RLock, Thread
 import time
 from uuid import uuid4
+from real_contract import namespace, owner_matches_environment
 
 
 class Playground:
@@ -65,13 +66,20 @@ class Playground:
         detector = self.initialization()
         with self.lock:
             value = deepcopy(self.state)
+        prepared_environment_ready = value['environment']['ready']
         owner = health.get('owner', {})
-        control_ready = bool(health.get('connected') and owner.get('mode') == 'hardware'
+        environment = self.bridge.config.get('environment', 'physical') if self.bridge else 'physical'
+        spec = namespace(environment)
+        control_ready = bool(health.get('connected') and owner_matches_environment(owner, environment)
+                             and owner.get('holder', 'collection') == 'collection'
                              and owner.get('feedback_healthy') and owner.get('state') in
                              ('READY','STOPPED_DAMPING_HOLD','MANUAL_TAKEOVER')
+                             and (owner.get('sample_age_s') is None or type(owner['sample_age_s']) in (int,float)
+                                  and 0 <= owner['sample_age_s'] <= .1)
                              and owner.get('automatic_enabled') is False)
         value['cameras'] = health.get('cameras', {})
-        dynamic = [dict(key='control', label='真机控制', status='ready' if control_ready else 'pending',
+        value.update(device_environment=environment, environment_label=spec['label'])
+        dynamic = [dict(key='control', label=spec['label']+'控制', status='ready' if control_ready else 'pending',
                         message=owner.get('error', '')),
                    dict(key='cameras', label='三路 RGB-D', status='ready' if
                         all(value['cameras'].get(key, {}).get('ready') is True for key in
@@ -83,12 +91,17 @@ class Playground:
         value['environment']['control_connected'] = health.get('connected') is True
         value['environment']['ready'] = bool(value['environment']['ready'] and
                                                all(c['status'] == 'ready' for c in checks + dynamic))
-        safe = (owner.get('stationary') is True and owner.get('automatic_enabled') is False
-                and not owner.get('acquisition_pending') and owner.get('recording_configured') is True
-                and owner.get('state') == 'READY' and owner.get('pedal', {}).get('input_healthy') is True
+        safe = (control_ready and owner.get('stationary') is True and owner.get('automatic_enabled') is False
+                and not owner.get('acquisition_pending')
+                and (owner.get('allowed_operations') or {}).get('preview', {}).get('allowed', True) is True
+                and owner.get('pedal', {}).get('input_healthy') is True
                 and owner.get('pedal', {}).get('physically_down') is False)
         value['can_execute'] = bool(not value['busy'] and not self.external_busy() and safe
-                                    and value['environment']['ready'] and value['plan'].get('validated') is True)
+                                    and prepared_environment_ready and all(c['status']=='ready' for c in checks)
+                                    and value['plan'].get('validated') is True)
+        value['capture_ready'] = bool(owner.get('recording_configured') and all(
+            value['cameras'].get(key, {}).get('ready') is True for key in ('base_0','left_wrist_0','right_wrist_0')))
+        value['capture_warning'] = None if value['capture_ready'] else '录制或相机未就绪；动作可独立执行，数据将标为未完成'
         if value['plan'].get('validated') is True and not safe and not value['busy']:
             value['message'] = '计划已验证；控制器尚未允许执行（' + str(owner.get('state', '未知')) + '），请检查真机连接与踏板状态。'
         if self.started is not None and value['busy']:
@@ -105,7 +118,7 @@ class Playground:
 
     def progress(self, label, **fields):
         with self.lock:
-            for key in ('errors', 'recording', 'physical_outcome', 'task_outcome'):
+            for key in ('errors', 'recording', 'physical_outcome', 'task_outcome', 'native_task', 'simulation'):
                 if key in fields:
                     self.state[key] = deepcopy(fields.pop(key))
             if self.state.get('action') == 'execute' and 'errors' in self.state:
@@ -187,7 +200,8 @@ class Playground:
                 raise ValueError('请先完成环境准备')
             if action == 'execute' and not fresh['can_execute']:
                 raise ValueError('当前环境、控制状态或本轮计划尚不允许执行')
-            if action == 'prepare' and not self.health().get('connected') and payload.get('arms_supported') is not True:
+            if (action == 'prepare' and self.bridge.config.get('environment','physical')=='physical'
+                    and not self.health().get('connected') and payload.get('arms_supported') is not True):
                 raise ValueError('连接控制会使能电机，需要确认当前双臂已受支撑')
             output = self.directory / 'jobs' / uuid4().hex
             self.cancel_event.clear()
@@ -210,7 +224,7 @@ class Playground:
             if action == 'plan':
                 self.state.update(plan={'validated': False}, videos=[])
             elif action=='execute':
-                for key in ('errors', 'recording', 'simulation', 'physical_outcome', 'task_outcome'):
+                for key in ('errors', 'recording', 'simulation', 'physical_outcome', 'task_outcome', 'native_task', 'execution_instance_id', 'execution_scope', 'execution_wait', 'simulation_scope'):
                     self.state.pop(key, None)
                 self.state['plan']['validated'] = False  # A click consumes this plan, including failed/mid-run attempts.
                 self.state['videos'] = []
@@ -259,7 +273,7 @@ class Playground:
                     self.progress(state.get('message') or '等待检测器加载', next_label='接入控制并确认三路相机')
                     time.sleep(.5)
                 if not self.health().get('connected'):
-                    if not supported:
+                    if not supported and self.bridge.config.get('environment','physical')=='physical':
                         raise ValueError('控制接入缺少当前支撑确认')
                     self.progress('接入真机控制与三路相机', next_label='确认环境就绪')
                     self.bridge.control({'action': 'acquire', 'confirmation': 'ARMS_SUPPORTED_CONNECT'})

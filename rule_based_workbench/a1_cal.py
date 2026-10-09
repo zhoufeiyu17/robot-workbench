@@ -25,13 +25,21 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()
 
 
-def read_active(active, geometry_id, *, fixture=False, asset_seal=None):
+def read_active(active, geometry_id, *, fixture=False, asset_seal=None, environment='physical'):
     active = Path(active)
-    records = {name: json.loads((active/(name+'.json')).read_text()) for name in ('head', 'wrist', 'manifest')}
+    if environment not in ('physical','fake') or fixture and environment!='physical':
+        raise ValueError('explicit physical/fake environment; fixture is a separate legacy test mode')
+    if active.is_symlink() or any((active/(name+'.json')).is_symlink() for name in ('head','wrist','manifest')):
+        raise ValueError('installed calibration must use regular files')
+    manifest_bytes=(active/'manifest.json').read_bytes()
+    records = {name: json.loads((active/(name+'.json')).read_bytes()) for name in ('head', 'wrist')}
+    if (active/'manifest.json').read_bytes()!=manifest_bytes:
+        raise ValueError('installed calibration changed during group read')
+    records['manifest']=json.loads(manifest_bytes)
     manifest = records['manifest']
     if manifest.get('schema') != 'joint-head-calibration-active-v1':
         raise ValueError('installed calibration schema required')
-    expected = ('simulation', 'simulated', True) if fixture else ('hardware', 'physical', False)
+    expected = ('hardware','simulated',True) if environment=='fake' else ('simulation', 'simulated', True) if fixture else ('hardware', 'physical', False)
     if tuple(manifest.get(k) for k in ('environment', 'robot_source', 'simulation_only')) != expected:
         raise ValueError('calibration provenance differs from requested physical/fixture mode')
     for kind in ('head', 'wrist'):
@@ -48,6 +56,8 @@ def read_active(active, geometry_id, *, fixture=False, asset_seal=None):
             raise ValueError(kind+' calibration source mismatch')
     if records['wrist'].get('dependency_id') != records['head']['id']:
         raise ValueError('wrist calibration must depend on this head result')
+    if environment=='fake' and manifest['wrist'].get('dependency_id')!=records['head']['id']:
+        raise ValueError('fake active manifest wrist dependency differs from this head')
     # Workbench geometry_id also hashes configuration/support policy; it is not
     # the asset ID. Both head and wrist must independently pin the same A1 asset.
     head = records['head']['payload']['row']['parameters']
@@ -61,7 +71,7 @@ def read_active(active, geometry_id, *, fixture=False, asset_seal=None):
     return records
 
 
-def build(a1, active, head_camera, template, registration, output, *, fixture=False):
+def build(a1, active, head_camera, template, registration, output, *, fixture=False, environment='physical'):
     a1, active, output = map(Path, (a1, active, output))
     verify(a1)
     contract = json.loads((a1/'calibration-input.json').read_text())
@@ -71,7 +81,8 @@ def build(a1, active, head_camera, template, registration, output, *, fixture=Fa
     if (hashlib.sha256(canonical(files)).hexdigest() != contract['geometry_id']
             or any(digest(a1/name) != sha for name, sha in files.items())):
         raise ValueError('A1 geometry identity mismatch')
-    records = read_active(active, contract['geometry_id'], fixture=fixture, asset_seal=digest(a1/'SHA256SUMS.json'))
+    records = read_active(active, contract['geometry_id'], fixture=fixture, asset_seal=digest(a1/'SHA256SUMS.json'),environment=environment)
+    simulated=fixture or environment=='fake'
     head, wrist, manifest = (records[k] for k in ('head', 'wrist', 'manifest'))
     parameters = head['payload']['row']['parameters']
     if any(len(parameters['joint_offsets_rad'][side]) != 6 for side in ('left', 'right')):
@@ -94,14 +105,14 @@ def build(a1, active, head_camera, template, registration, output, *, fixture=Fa
         T_world_head_optical=cameras['head'].tolist(),
         T_link6_wrist_optical={s: cameras[s].tolist() for s in ('left', 'right')},
         joint_zero_offsets_baked_into_urdf=False, head_id=head['id'], wrist_id=wrist['id'],
-        acceptance=manifest['acceptance'], simulation_only=fixture, runtime_allowed=False)
+        acceptance=manifest['acceptance'], simulation_only=simulated, runtime_allowed=False)
     calibration.update(calibration_geometry_id=manifest['geometry_id'],
                        head_acceptance=deepcopy(parameters.get('acceptance', {})))
     template = deepcopy(template)
     template['gripper'].update(mapping=MAPPING_ID, max_opening_mm=83.)
-    profile = profile_from_calibration(calibration, intrinsics, manifest, template, registration)
-    profile['source'].update(kind='fixture_calibration' if fixture else 'installed_physical_calibration',
-                             simulation_only=fixture)
+    profile = profile_from_calibration(calibration, intrinsics, manifest, template, registration,
+                                       environment='fake' if simulated else 'physical')
+    if fixture:profile['source']['kind']='fixture_calibration'
     profile['model_binding'] = dict(a1_sha256=digest(a1/'SHA256SUMS.json'),
         geometry_id=contract['geometry_id'], jaw_mapping_sha256=digest(a1/'jaw-mapping.json'))
     tree = ET.parse(a1/'robot.urdf')
@@ -130,7 +141,7 @@ def build(a1, active, head_camera, template, registration, output, *, fixture=Fa
         ET.indent(tree); tree.write(stage/'robot.urdf', encoding='utf-8', xml_declaration=True)
         profile['model_binding']['urdf_sha256'] = digest(stage/'robot.urdf')
         profile.pop('profile_id')
-        profile['profile_id'] = 'a1-cal-'+_digest(profile)[:16]
+        profile['profile_id'] = ('fake-' if environment=='fake' else '')+'a1-cal-'+_digest(profile)[:16]
         for name, value in (('profile', profile), ('adaptation', calibration)):
             (stage/(name+'.json')).write_bytes(canonical(value)+b'\n')
         (stage/'calibration_sources').mkdir()
@@ -139,13 +150,14 @@ def build(a1, active, head_camera, template, registration, output, *, fixture=Fa
         (stage/'head-camera.json').write_bytes(canonical(head_camera)+b'\n')
         model = json.loads((stage/'manifest.json').read_text())
         model.update(id=output.name, schema='robot_model_calibrated.v1', calibration_status='fixture' if fixture else 'candidate',
-                     runtime_allowed=False, simulation_only=fixture, urdf_sha256=digest(stage/'robot.urdf'),
+                     runtime_allowed=False, simulation_only=simulated, runtime_environment='fake' if simulated else 'physical',
+                     joint_zero_offsets_baked_into_urdf=False,urdf_sha256=digest(stage/'robot.urdf'),
                      a1_sha256=digest(a1/'SHA256SUMS.json'), profile_digest=_digest(profile))
         (stage/'manifest.json').write_bytes(canonical(model)+b'\n')
         seal(stage); verify(stage); verify(a1)
         stage.rename(output)
     return {'output': str(output), 'seal': digest(output/'SHA256SUMS.json'), 'profile_id': profile['profile_id'],
-            'runtime_allowed': False, 'simulation_only': fixture}
+            'runtime_allowed': False, 'simulation_only': simulated}
 
 
 if __name__ == '__main__':
@@ -153,7 +165,8 @@ if __name__ == '__main__':
     for name in ('a1', 'active', 'head-camera', 'template', 'registration', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--fixture', action='store_true')
+    p.add_argument('--environment',choices=('physical','fake'),default='physical')
     args = p.parse_args()
     load = lambda path: json.loads(path.read_text())
     print(json.dumps(build(args.a1, args.active, load(args.head_camera), load(args.template),
-                           load(args.registration), args.output, fixture=args.fixture), indent=2))
+                           load(args.registration), args.output, fixture=args.fixture,environment=args.environment), indent=2))

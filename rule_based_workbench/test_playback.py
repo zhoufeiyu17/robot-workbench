@@ -98,6 +98,8 @@ def main():
         source={k:v for k,v in source.items() if k not in ('lane','adapter','gpu','instance_id')}
         source.update(schema_version='physical_collection_source.v1',evidence_source='physical_rgbd',
                       robot_id='fixture',camera_serials=dict(head='h',left='l',right='r'))
+        from test_joint_space import physical_fixture as freeze_fixture
+        freeze_fixture(plan,source)
         binding=dict(calibration_accepted=True,evidence_source='physical_rgbd',robot_id='fixture',camera_serials=source['camera_serials'],
                      source_digest=_digest(source),calibration_profile_digest=_digest(source['calibration_profile']))
         (root/'plan.json').write_text(json.dumps(plan)); (root/'detection-bridge').mkdir()

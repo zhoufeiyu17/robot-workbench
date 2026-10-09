@@ -4,6 +4,7 @@ from functools import lru_cache
 import json
 import time
 import numpy as np
+from robot_workbench.sample_clock import assert_progress, bracket_samples, clock_spec, sample_stamp
 
 
 class CaptureError(ValueError):
@@ -45,23 +46,44 @@ def _rectification_map(serialized_camera):
 
 
 def _owner_evidence(owner):
-    result={key:owner.get(key) for key in ('pid','command_epoch','state','reason','feedback_healthy')}
+    result={key:owner.get(key) for key in ('pid','command_epoch','state','reason','feedback_healthy','environment','mode')}
     diagnostic=owner.get('last_fault_diagnostic') or {}
     result['fault_reasons']=diagnostic.get('reasons',[])
-    result['sample_wall_ns']=(owner.get('calibration_feedback') or {}).get('sample_wall_ns')
+    feedback=owner.get('calibration_feedback') or {}
+    result.update({key:feedback.get(key) for key in ('sample_wall_ns','clock_domain','source_clock_id','source_time_ns','physics_step')})
     return result
 
 
-def _bracket(history, stamp, pid, epoch):
-    samples=[]
+def _bracket(history, stamp, pid, epoch, *, clock=None, physics_step=None):
+    clock=clock or clock_spec()
+    simulated=clock['environment']=='fake'
+    samples=[];previous=None
     for row in history:
         owner=row.get('owner',{});feedback=owner.get('calibration_feedback',{})
         wall=feedback.get('sample_wall_ns')
-        if type(wall) is int:samples.append((wall,owner))
-    before=[row for row in samples if row[0]<=stamp];after=[row for row in samples if row[0]>=stamp]
+        if simulated:
+            if owner.get('environment')!='fake' or owner.get('mode')!='simulation' or owner.get('simulation_only') is not True:
+                raise ValueError('feedback belongs to another environment or is not explicit fake')
+            point=sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+            previous=assert_progress(previous,point,allow_same=True)
+            samples.append((point[0],owner))
+        elif type(wall) is int:
+            sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+            if owner.get('environment') not in (None,'physical') or owner.get('simulation_only') is True:
+                raise ValueError('fake owner cannot authorize physical capture')
+            samples.append((wall,owner))
+    if simulated:
+        bracket_samples([(point,owner['calibration_feedback']['physics_step']) for point,owner in samples],
+                        (stamp,physics_step))
+    # A simulator image may share an exact step with feedback. Still require
+    # distinct surrounding samples, with advancing SDK clocks, for interpolation.
+    before=[row for row in samples if row[0]<stamp] if simulated else [row for row in samples if row[0]<=stamp]
+    after=[row for row in samples if row[0]>stamp] if simulated else [row for row in samples if row[0]>=stamp]
     if not before or not after:raise ValueError('feedback bracket missing; retry whole capture')
     lo=max(before,key=lambda row:row[0]);hi=min(after,key=lambda row:row[0])
     if hi[0]<=lo[0] or hi[0]-lo[0]>100_000_000:raise ValueError('feedback bracket must span 0..0.1s')
+    if simulated and (type(physics_step) is not int or not lo[1]['calibration_feedback']['physics_step']<=physics_step<=hi[1]['calibration_feedback']['physics_step']):
+        raise ValueError('image physics_step outside feedback bracket')
     selected=sorted([row for row in samples if lo[0]<=row[0]<=hi[0]],key=lambda row:row[0])
     positions=[];sdk=[]
     for _,owner in selected:
@@ -86,11 +108,13 @@ def _bracket(history, stamp, pid, epoch):
     fraction=(stamp-lo[0])/(hi[0]-lo[0]);q=positions[0]+fraction*(positions[-1]-positions[0])
     return dict(qpos=q.tolist(),qpos14=q.tolist(),q_reported12=q[indices].tolist(),
                 bracket_gap_s=(hi[0]-lo[0])/1e9,pose_span_rad=span.tolist(),
-                feedback_bracket=dict(before_ns=lo[0],after_ns=hi[0],owner_pid=pid,command_epoch=epoch,
+                feedback_bracket=dict(before_ns=lo[0],after_ns=hi[0],owner_pid=pid,command_epoch=epoch,clock=clock,
+                                      physics_step_before=lo[1]['calibration_feedback'].get('physics_step'),
+                                      physics_step_after=hi[1]['calibration_feedback'].get('physics_step'),
                                       sdk_before=sdk[0].tolist(),sdk_after=sdk[-1].tolist(),qpos_before=positions[0].tolist(),qpos_after=positions[-1].tolist(),interpolation_fraction=fraction))
 
 
-def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_epoch, required_markers=None, feedback_wait_s=.15, not_before_ns=None, feedback_diagnostics=None):
+def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_epoch, required_markers=None, feedback_wait_s=.15, not_before_ns=None, feedback_diagnostics=None, environment='physical', source_clock_id=None, not_before_source_ns=None):
     """Bounded future-feedback wait; no motion or files and no frame rereads.
 
     Return rows per camera, rectified PNG images, original raw_images and cameras.
@@ -99,6 +123,14 @@ def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_
     import cv2
     evidence={'rows':{},'images':{},'raw_images':{},'cameras':{},'camera_metadata':{}}
     try:
+        clock=clock_spec(environment,source_clock_id=source_clock_id)
+        simulated=environment=='fake'
+        if simulated:
+            if not_before_ns is not None or type(not_before_source_ns) is not int or not_before_source_ns<0:
+                raise ValueError('fake capture requires nonnegative source readiness, never wall readiness')
+        elif not_before_source_ns is not None:
+            raise ValueError('physical capture requires wall readiness, not simulation time')
+        evidence['clock']=clock
         if type(owner_pid) is not int or owner_pid<=0 or type(command_epoch) is not int or command_epoch<0:
             raise ValueError('explicit owner PID and epoch required')
         if not_before_ns is not None and (type(not_before_ns) is not int or not_before_ns<=0):
@@ -118,24 +150,30 @@ def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_
             detect=cv2.aruco.ArucoDetector(dictionary,parameters).detectMarkers
         else:
             detect=lambda image:cv2.aruco.detectMarkers(image,dictionary,parameters=parameters)
-        captured={}
+        captured={};frame_stamps={}
         for name,adapter in cameras.items():
             evidence['failed_camera']=name
             raw,meta=adapter.read_calibration_frame();evidence['raw_images'][name]=raw
             captured[name]=(raw,meta)
             evidence['camera_metadata'][name]=meta
+            wall=meta.get('host_receive_ns')
+            if isinstance(wall,str) and wall.isdecimal():wall=int(wall)
+            if simulated and meta.get('timestamp_kind')!='simulation_step':
+                raise ValueError('fake RGB frame requires simulation_step timestamp')
+            if not simulated and meta.get('timestamp_kind')=='simulation_step':
+                raise ValueError('simulation frame cannot authorize physical capture')
+            frame_stamps[name]=sample_stamp({**meta,'host_receive_ns':wall},clock)
         deadline=time.monotonic()+feedback_wait_s
         while True:
             history=list(feedback_history() if callable(feedback_history) else feedback_history)
             if history:evidence['latest_owner']=_owner_evidence(history[-1].get('owner',{}))
-            latest=max((row.get('owner',{}).get('calibration_feedback',{}).get('sample_wall_ns',0) for row in history),default=0)
-            stamps=[int(meta['host_receive_ns']) for _,meta in captured.values()]
+            stamps=[point[0] for point in frame_stamps.values()]
+            latest=max((sample_stamp(row.get('owner',{}).get('calibration_feedback',{}),clock,wall_key='sample_wall_ns')[0] for row in history),default=-1)
             if latest>max(stamps) or not callable(feedback_history) or time.monotonic()>=deadline:break
             time.sleep(min(.01,max(0,deadline-time.monotonic())))
-        walls=[row.get('owner',{}).get('calibration_feedback',{}).get('sample_wall_ns') for row in history]
-        walls=[stamp for stamp in walls if type(stamp) is int]
+        walls=[sample_stamp(row.get('owner',{}).get('calibration_feedback',{}),clock,wall_key='sample_wall_ns')[0] for row in history]
         evidence['feedback_history']={'count':len(walls),'oldest_ns':min(walls) if walls else None,
-                                      'newest_ns':max(walls) if walls else None,'checked_at_ns':time.time_ns()}
+                                      'newest_ns':max(walls) if walls else None,'checked_at_ns':time.time_ns(),'clock':clock}
         for name,(raw,meta) in captured.items():
             evidence['failed_camera']=name
             if meta.get('raw') is not True or meta.get('annotated') is not False or meta.get('image_domain')!='raw' or meta.get('metadata_matched') is not True or meta.get('ready') is not True:
@@ -154,9 +192,12 @@ def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_
                 raise ValueError('atomic frame timestamp/number required')
             if not_before_ns is not None and stamp<not_before_ns:
                 raise ValueError('camera frame predates capture readiness')
+            matching_stamp,physics_step=frame_stamps[name]
+            if simulated and matching_stamp<not_before_source_ns:
+                raise ValueError('camera frame predates source capture readiness')
             image=cv2.imdecode(np.frombuffer(raw,np.uint8),cv2.IMREAD_COLOR)
             if image is None or image.shape[:2]!=(k['height'],k['width']):raise ValueError('invalid raw image or dimensions')
-            paired=_bracket(history,stamp,owner_pid,command_epoch)
+            paired=_bracket(history,matching_stamp,owner_pid,command_epoch,clock=clock,physics_step=physics_step)
             corners,ids,_=detect(image);detections={}
             for marker,uv in zip([] if ids is None else ids.ravel(),corners):
                 if int(marker) not in (24,30):continue
@@ -175,12 +216,15 @@ def capture_sample(cameras, intrinsics, feedback_history, *, owner_pid, command_
                 expected_markers=list(expected),missing_markers=missing,
                 image_sha256=hashlib.sha256(raw).hexdigest(),image_domain='raw',metadata=meta,
                 host_receive_ns=stamp,frame_number=meta['frame_number'],camera=k,
+                runtime_environment=environment,clock=clock,
+                source_time_ns=matching_stamp if simulated else None,physics_step=physics_step,
                 rectified_camera={**k,'rectified':True,'coefficients':[0.]*5},
-                synchronized=False,pairing='stationary host-receive bracket; not exposure synchronization')
+                synchronized=False,pairing='stationary simulation-step bracket' if simulated else 'stationary host-receive bracket; not exposure synchronization')
         evidence.pop('failed_camera',None)
         evidence['row']={'camera_detections':{name:row['detections_rectified'] for name,row in evidence['rows'].items()},
                          'camera_feedback':{name:{key:row[key] for key in ('qpos14','q_reported12','feedback_bracket','bracket_gap_s','pose_span_rad')} for name,row in evidence['rows'].items()},
-                         'owner_pid':owner_pid,'command_epoch':command_epoch,'synchronized':False}
+                         'owner_pid':owner_pid,'command_epoch':command_epoch,'synchronized':False,
+                         'runtime_environment':environment,'clock':clock,'simulation_only':simulated}
         return evidence
     except (ValueError,TypeError,KeyError,OSError,cv2.error) as exc:
         if isinstance(exc,CaptureError):evidence.update(exc.evidence)

@@ -48,11 +48,20 @@ def command_gap(side, sdk):
     return command_gap_mm(side, sdk)
 
 
-def feedback_to_command(q):
-    """Preserve measured physical gaps when sending a raw feedback pose to SDK."""
+ARM_LIMIT_ROUNDING_RAD = 1e-6  # Numeric boundary only, not arrival/tracking tolerance.
+
+
+def feedback_to_command(q, joint_limits=None):
+    """Convert a measured hold/start into legal commands; leave raw feedback intact."""
     command = list(q)
     for side, i, gap in zip(("left", "right"), JAW_INDICES, feedback_gaps(q)):
         command[i] = hold_command_sdk(side, gap)
+    if joint_limits is not None:
+        limits = _limits(joint_limits)
+        for i in active_indices('both'):
+            low, high = limits[i]
+            if low-ARM_LIMIT_ROUNDING_RAD <= command[i] < low:command[i] = low
+            elif high < command[i] <= high+ARM_LIMIT_ROUNDING_RAD:command[i] = high
     return tuple(command)
 
 
@@ -175,7 +184,7 @@ def plan_sha256(payload):
 
 def _check_pose(q, name, limits, *, feedback=False):
     if feedback:
-        q = feedback_to_command(q)
+        q = feedback_to_command(q, limits)
     for index, (value, (low, high)) in enumerate(zip(q, limits)):
         if not low <= value <= high:
             raise ValueError(f"{name}[{index}] outside SDK limit")
@@ -214,21 +223,27 @@ def make_plan(active_arm, q_start, q_target, joint_limits, *, duration_s=None,
     start = _numbers(q_start, 14, "q_start")
     if type(q_start_is_command) is not bool:
         raise ValueError("q_start_is_command must be boolean")
-    command_start = start if q_start_is_command else feedback_to_command(start)
-    target = _numbers(q_target, 14, "q_target")
     limits = _limits(joint_limits)
+    command_start = start if q_start_is_command else feedback_to_command(start, limits)
+    target = _numbers(q_target, 14, "q_target")
     _check_pose(start, "q_start", limits, feedback=not q_start_is_command)
-    _check_pose(target, "q_target", limits)
     indices, jaws = active_indices(active_arm), active_jaws(active_arm)
+    # Only measured, unchanged hold axes get boundary projection. Explicitly
+    # requested moving targets remain strict, including tiny out-of-range values.
+    if not q_start_is_command:
+        held = [i for i in active_indices('both') if i not in indices or kind == 'jaw_target']
+        target = tuple(command_start[i] if i in held and target[i] == start[i] else target[i]
+                       for i in range(14))
+    _check_pose(target, "q_target", limits)
     moving_jaws = jaws if kind in MOVING_JAW_KINDS else ()
     fixed = [i for i in range(14) if i not in indices and i not in moving_jaws]
-    if any(start[i] != target[i] for i in fixed):
+    if any(target[i] not in (start[i], command_start[i]) for i in fixed):
         raise ValueError("inactive arm and jaws must remain unchanged")
     if kind in ("home", "both_home", "arm_home", "both_arm_home") and any(target[i] != 0.0 for i in indices):
         raise ValueError("home requires exactly zero for all active-arm joints")
     if kind in ("home", "both_home") and any(abs(target[i]-command_sdk("left" if i == 6 else "right", 83)) > 1e-8 for i in jaws):
         raise ValueError("home requires selected jaws at mapped 83 mm opening")
-    if kind == "jaw_target" and any(start[i] != target[i] for i in indices):
+    if kind == "jaw_target" and any(target[i] not in (start[i], command_start[i]) for i in indices):
         raise ValueError("jaw target keeps arm joints unchanged")
     delta = max(abs(target[i] - start[i]) for i in indices)
     max_velocity = positive(DEFAULT_VELOCITY if max_velocity is None else max_velocity, "max_velocity")
@@ -271,7 +286,7 @@ def make_workbench_plans(q_start, waypoints, joint_limits, *, created_at_s=None)
         for speed in speeds:
             positive(speed, 'joint speed')
         jaw_speed = positive(waypoint.get('jaw_speed_mm_s', 10.), 'jaw_speed_mm_s')
-        command_start = previous if plans else feedback_to_command(previous)
+        command_start = previous if plans else feedback_to_command(previous, joint_limits)
         target = list(command_start)
         for i,value in zip(indices,q):
             target[i] = value
@@ -436,7 +451,7 @@ class MotionRunner:
                 measured = self.begin(tuple(q))  # Adapter returns its exact resampled hold.
                 measured = tuple(q) if measured is None else _numbers(measured, 14, "begin pose")
                 self._check_start_drift(measured)
-                self.execution_start = feedback_to_command(measured)
+                self.execution_start = feedback_to_command(measured, self.plan.joint_limits)
                 _check_pose(self.execution_start, "measured hold command", self.plan.joint_limits)
                 self.execution_target = list(self.plan.q_target)
                 indices, jaws = active_indices(self.plan.active_arm), active_jaws(self.plan.active_arm)
@@ -458,8 +473,10 @@ class MotionRunner:
                 raise MotionTrackingError(f"motion/settle deadline exceeded: {worst} error={arm_errors[worst]:+.6f} rad; "
                                  f"jaw_mm={ {k:round(v*1000,3) for k,v in jaw_errors.items()} }; stationary={stationary}")
             u = min(1.0, max(0.0, elapsed / self.plan.duration_s))
-            s = u * u * u * (10.0 + u * (-15.0 + 6.0 * u))
-            desired = tuple(a + (b - a) * s for a, b in zip(self.execution_start, self.execution_target))
+            # The polynomial can round above 1 near the endpoint. Bound its
+            # progress, never the approved targets or measured feedback.
+            s = min(1.0, max(0.0, u * u * u * (10.0 + u * (-15.0 + 6.0 * u))))
+            desired = tuple((1.-s)*a + s*b for a, b in zip(self.execution_start, self.execution_target))
             error = max(abs(q[i] - desired[i]) for i in indices)
             jaw_error_mm = max(abs(measured_gaps[n]-command_gap(side, desired[i]))
                                for n, (side, i) in enumerate(zip(("left", "right"), JAW_INDICES)) if i in jaws)

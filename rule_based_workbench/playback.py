@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+from real_contract import namespace, validate_namespace
 
 DEVICES = ("base_0", "left_wrist_0", "right_wrist_0")
 FILES = tuple(f"{side}-{device}.mp4" for side in ("source", "target") for device in DEVICES)
@@ -42,10 +43,14 @@ def validate_videos(root, manifest):
             raise ValueError("playback video format/count mismatch: " + name)
 
 
-def validate_target(root, source, plan):
+def validate_target(root, source, plan, *, environment='physical'):
+    spec=namespace(environment)
+    validate_namespace(source,environment)
+    if source.get('schema_version')!=spec['source_schema'] or plan.get('environment','physical')!=environment:
+        raise ValueError('target playback device environment differs')
     root = Path(root)
     manifest = json.loads((root / 'manifest.json').read_text())
-    if (manifest.get('schema_version') != 'physical_target_playback.v1' or manifest.get('evidence_source') != 'simulation'
+    if (manifest.get('schema_version') != spec['target_playback_schema'] or manifest.get('evidence_source') != 'simulation'
             or manifest.get('source_run_id') != source['run_id'] or manifest.get('plan_run_id') != plan['run_id']
             or manifest.get('timeline_digest') != plan['timeline_digest']
             or set(manifest.get('files', {})) != {f'target-{device}.mp4' for device in DEVICES}):
@@ -54,7 +59,7 @@ def validate_target(root, source, plan):
     return manifest
 
 
-def export(run, *, target_only=False):
+def export(run, *, target_only=False, environment='physical'):
     run = Path(run).resolve(strict=True)
     plan = json.loads((run / "plan.json").read_text())
     physical_source = None
@@ -62,7 +67,7 @@ def export(run, *, target_only=False):
         from real_contract import validate_real_plan
         physical_source = json.loads((run / 'detection-bridge/source.json').read_text())
         binding = json.loads((run / 'detection-bridge/hardware-binding.json').read_text())
-        validate_real_plan(plan, physical_source, binding)
+        validate_real_plan(plan, physical_source, binding, environment=environment)
     timeline = plan["timeline_digest"]
     k = sum(plan["native_substeps"])
     frame_count = k // 8 + 1
@@ -121,22 +126,23 @@ def export(run, *, target_only=False):
                 "timeline_digest": timeline, "final_physics_step": k, "camera_frames": frame_count,
                 "raw": provenance, "files": files}
     if target_only:
-        manifest.update(schema_version='physical_target_playback.v1',evidence_source='simulation',
+        manifest.update(schema_version=namespace(environment)['target_playback_schema'],evidence_source='simulation',
                         source_run_id=physical_source['run_id'],plan_run_id=plan['run_id'])
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if target_only:
-        return validate_target(output, physical_source, plan)
+        return validate_target(output, physical_source, plan, environment=environment)
     return validate(output, timeline, run_id=run.name)
 
 
-def export_target(run):
+def export_target(run, *, environment='physical'):
     """Only the validated simulation target; physical videos are recorded later."""
-    return export(run, target_only=True)
+    return export(run, target_only=True, environment=environment)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument('--target-only', action='store_true')
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
     args = parser.parse_args()
-    print(json.dumps(export(args.run_root, target_only=args.target_only)))
+    print(json.dumps(export(args.run_root, target_only=args.target_only,environment=args.environment)))

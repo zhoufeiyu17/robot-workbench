@@ -116,5 +116,55 @@ class CaptureTest(unittest.TestCase):
                 self.assertNotIn('ring',str(error.evidence['failed_owner']))
                 self.assertEqual(error.evidence['raw_images']['left'],self.raw)
 
+    def make_fake(self):
+        self.meta.update(environment='fake',simulation_only=True,timestamp_kind='simulation_step',
+            clock_domain='simulation',source_clock_id='fixture-plant',source_time_ns=50_000_000,physics_step=12,
+            host_receive_ns=9_000_000_000)
+        for row,source,step,wall in zip(self.history,(25_000_000,75_000_000),(6,18),(3_000_000_000,4_000_000_000)):
+            row['owner'].update(environment='fake',mode='simulation',simulation_only=True)
+            row['owner']['calibration_feedback'].update(clock_domain='simulation',source_clock_id='fixture-plant',
+                source_time_ns=source,physics_step=step,sample_wall_ns=wall)
+        return dict(environment='fake',source_clock_id='fixture-plant',not_before_source_ns=40_000_000)
+
+    def test_fake_pairs_on_source_time_without_rewriting_real_wall_metadata(self):
+        options=self.make_fake()
+        result=self.capture(**options)
+        row=result['rows']['left']
+        self.assertEqual(row['host_receive_ns'],9_000_000_000)
+        self.assertEqual(row['source_time_ns'],50_000_000)
+        self.assertEqual(row['feedback_bracket']['before_ns'],25_000_000)
+        self.assertEqual(row['feedback_bracket']['after_ns'],75_000_000)
+        self.assertEqual(row['feedback_bracket']['physics_step_before'],6)
+        self.assertEqual(row['feedback_bracket']['physics_step_after'],18)
+        self.assertEqual(row['clock']['source_clock_id'],'fixture-plant')
+        self.assertEqual(result['row']['runtime_environment'],'fake')
+        with self.assertRaises(CaptureError):self.capture()  # No implicit physical fallback.
+        with self.assertRaisesRegex(CaptureError,'source readiness'):self.capture(**options,not_before_ns=123)
+        with self.assertRaisesRegex(CaptureError,'predates'):self.capture(**{**options,'not_before_source_ns':51_000_000})
+
+    def test_fake_rejects_clock_step_identity_epoch_and_unbracketed_frames(self):
+        options=self.make_fake();meta=copy.deepcopy(self.meta);history=copy.deepcopy(self.history)
+        changes=[lambda:self.meta.update(source_clock_id='other-plant'),
+            lambda:self.meta.update(clock_domain='host_wall'),lambda:self.meta.update(environment='physical'),
+            lambda:self.meta.pop('source_time_ns'),lambda:self.meta.update(source_time_ns=100_000_000),
+            lambda:self.meta.update(physics_step=99),
+            lambda:self.history[1]['owner']['calibration_feedback'].update(physics_step=5),
+            lambda:self.history[1]['owner']['calibration_feedback'].update(source_clock_id='restarted-plant'),
+            lambda:self.history[1]['owner'].update(command_epoch=5),lambda:self.history[1]['owner'].update(pid=999),
+            lambda:self.history.reverse()]
+        for change in changes:
+            self.meta=copy.deepcopy(meta);self.history=copy.deepcopy(history)
+            change();self.camera.read_calibration_frame.return_value=(self.raw,self.meta)
+            with self.subTest(change=change),self.assertRaises(CaptureError):self.capture(**options,feedback_wait_s=0)
+
+    def test_exact_fake_source_step_still_uses_advancing_feedback_bracket(self):
+        options=self.make_fake()
+        middle=copy.deepcopy(self.history[0]);middle['owner']['calibration_feedback'].update(
+            source_time_ns=50_000_000,physics_step=12,sdk_timestamps=[1.5,1.5])
+        self.history.insert(1,middle)
+        self.assertEqual(self.capture(**options)['rows']['left']['bracket_gap_s'],.05)
+        self.meta['physics_step']=13
+        with self.assertRaisesRegex(CaptureError,'different physics step'):self.capture(**options)
+
 
 if __name__=='__main__':unittest.main()

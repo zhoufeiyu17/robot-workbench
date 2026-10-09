@@ -5,6 +5,21 @@ import subprocess
 import time
 
 
+def group_alive(pgid):
+    try:
+        os.killpg(pgid,0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Some macOS runtimes report EPERM for an already vanished group. Only
+        # accept that case after a read-only membership check of this exact PGID.
+        groups=subprocess.check_output(['ps','-axo','pgid=,stat='],text=True)
+        if any(parts[0]==str(pgid) and not parts[1].startswith('Z')
+               for line in groups.splitlines() if len(parts:=line.split())>=2):raise
+        return False
+
+
 def wait_owned(child, timeout, grace=30):
     """Caller must create child with start_new_session=True; never discover PIDs."""
     if timeout <= 0 or grace <= 0:
@@ -26,15 +41,14 @@ def wait_owned(child, timeout, grace=30):
             deadline = time.monotonic() + grace
             while time.monotonic() < deadline:
                 child.poll()  # Reap the leader, so it cannot keep an empty group alive.
-                try:
-                    os.killpg(child.pid, 0)
-                except ProcessLookupError:
+                if not group_alive(child.pid):
                     break
                 time.sleep(min(.05, max(0, deadline-time.monotonic())))
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if group_alive(child.pid):
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         child.wait(timeout=5)
     return 124 if timed_out else return_code
 

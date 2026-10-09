@@ -6,6 +6,7 @@ success. Plant truth is fixed at construction, independent of installed fits.
 from copy import deepcopy
 import json
 import math
+import secrets
 import time
 
 
@@ -17,10 +18,11 @@ class SimulationClock:
     def __call__(self):
         return self.index / 1200
 
-    def advance(self, owner, backend, *, physics=True):
+    def advance(self, owner, backend, *, physics=True, after_physics=None):
         self.index += 1
         if physics and self.index % 5 == 0:
             backend.advance(self())
+            if after_physics is not None:after_physics()
         if self.index % 12 == 0:
             owner.tick()
 
@@ -40,11 +42,14 @@ class PhysxBackend:
         self.owner = None
         self.command_guard = lambda: None
         self.sequence = self.physics_step = 0
+        self.source_clock_id = 'physx-' + secrets.token_hex(16)
         self.sample_time = 0.
         self.sample_wall_ns = time.time_ns()
         self.actual, self.velocity = self.plant.read()
         self.active = deepcopy(self.actual)
         self.pending = {}
+        self.pending_contexts = {}
+        self.applied_contexts = dict(left=None, right=None)
         self.applied_sequences = dict(left=None, right=None)
         self.sample_sequences = dict(self.applied_sequences)
         self.mode = 'simulated_measured_position_hold'
@@ -81,6 +86,8 @@ class PhysxBackend:
             v.append(speed*slope)
         return dict(qpos=q, qvel=v, sample_time_s=self.sample_time,
                     sample_wall_ns=self.sample_wall_ns, sdk_timestamps=[self.sample_time]*2,
+                    environment='fake', simulation_only=True, timestamp_kind='simulation_step',
+                    source_clock_id=self.source_clock_id, source_time_ns=self.physics_step*1_000_000_000//240,
                     clock_domain='simulation', physics_step=self.physics_step,
                     evidence_source=self.plant.evidence_source,
                     applied_command_sequences=dict(self.sample_sequences))
@@ -103,15 +110,30 @@ class PhysxBackend:
         offset = 0 if side == 'left' else 6
         target = [x+d for x, d in zip(q[start:start+6], self.offsets[offset:offset+6])]
         target.append(self.jaw.command_gap_mm(side, q[start+6])-self.gap_offset)
-        self.sequence += 1
         epoch = self.owner.epoch if self.owner is not None else None
+        runner = getattr(self.owner, 'runner', None)
+        context = None
+        if runner is not None and getattr(runner, 'runtime', None) is not None and hasattr(runner, 'frozen'):
+            index = runner.frozen.command_index
+            if type(index) is not int or not 0 <= index < len(runner.frozen.ticks):
+                raise ValueError('collection command has no current compiled tick')
+            row = runner.frozen.ticks[index]
+            context = dict(execution_id=runner.runtime['timeline_digest'], execution_tick=index,
+                execution_instance_id=getattr(self.owner,'execution_instance_id',None),
+                source_tick=row['source_tick'], stage=row['stage'],
+                runtime_nonce=getattr(self.owner, 'runtime_nonce', None), command_epoch=epoch)
+        self.sequence += 1
         self.pending[side] = (target, epoch, self.sequence)
+        self.pending_contexts[side] = context
         self.event('latched', side=side, sequence=self.sequence, epoch=epoch,
-                   physics_step=self.physics_step, target=target)
+                   physics_step=self.physics_step, target=target, command_context=deepcopy(context),
+                   source_clock_id=self.source_clock_id)
 
     def set_damping_hold(self, **kwargs):
         self._check()
         self.pending.clear()
+        self.pending_contexts.clear()
+        self.applied_contexts = dict(left=None, right=None)
         self.active = deepcopy(self.actual)
         self.applied_sequences = dict(left=None, right=None)
         self.mode = 'simulated_measured_position_hold'
@@ -120,15 +142,23 @@ class PhysxBackend:
 
     def advance(self, sim_time):
         self._check()
+        expected = (self.physics_step + 1)/240
+        if (type(sim_time) not in (int, float) or not math.isfinite(sim_time) or
+                not math.isclose(sim_time, expected, rel_tol=0., abs_tol=1e-12)):
+            raise ValueError('PhysX source time must advance exactly one 240 Hz step')
         for side, (target, epoch, sequence) in self.pending.items():
             revoked = self.owner is not None and (epoch != self.owner.epoch or
                         self.owner.stop_requested or self.owner.release_requested)
             if not revoked:
                 self.active[side] = target
                 self.applied_sequences[side] = sequence
+                self.applied_contexts[side] = self.pending_contexts.get(side)
             self.event('revoked' if revoked else 'applied', side=side, sequence=sequence,
-                       epoch=epoch, physics_step=self.physics_step+1)
+                       epoch=epoch, physics_step=self.physics_step+1,
+                       command_context=deepcopy(self.pending_contexts.get(side)),
+                       source_clock_id=self.source_clock_id,source_time_ns=(self.physics_step+1)*1_000_000_000//240)
         self.pending.clear()
+        self.pending_contexts.clear()
         self.plant.step(self.active)
         self.physics_step += 1
         self.actual, self.velocity = self.plant.read()
@@ -137,6 +167,8 @@ class PhysxBackend:
 
     def close(self):
         self.pending.clear()
+        self.pending_contexts.clear()
+        self.applied_contexts = dict(left=None, right=None)
         self.is_connected = False
 
 
@@ -162,6 +194,9 @@ class IsaacPlant:
         self.trace_reference = self.target.cpu().tolist()
         self.trace_started = False
         self.trace_context = lambda: {}
+        self.contact_status = dict(complete=False, reason='no resident physics step observed')
+        self.contact_error_count = 0
+        self.first_contact_error = None
 
     def _readback_snapshot(self):
         """Read only: do not force a sync or invalidate Isaac's lazy buffers."""
@@ -222,7 +257,36 @@ class IsaacPlant:
         self.robot.set_joint_position_target(self.target)
         self.env.scene.write_data_to_sim()
         self.env._sim_step_counter += 1
+        absolute_step = self.env._sim_step_counter
+        runtime = self.env._m2_runtime
+        runtime.absolute_step = absolute_step
+        reader = getattr(self.env, '_m2_contact_reader', None)
+        self.contact_status = dict(absolute_physics_step=absolute_step, complete=False,
+                                   contact_count=None, error=None)
+        try:
+            if reader is None:raise RuntimeError('native contact reader unavailable')
+            reader.begin_step(absolute_step)
+        except Exception as error:
+            self.contact_status['error'] = f'{type(error).__name__}: {error}'[:2000]
         self.env.sim.step(render=False)
+        runtime.latest_contacts = ()
+        try:
+            if self.contact_status['error'] is None:
+                contacts = reader.read(absolute_step)
+                runtime.latest_contacts = contacts
+                self.contact_status.update(complete=True, contact_count=len(contacts),
+                    native_statistics=dict(reader.last_statistics))
+        except Exception as error:
+            self.contact_status['error'] = f'{type(error).__name__}: {error}'[:2000]
+        finally:
+            # Native read normally drains this list itself. Also bound the error
+            # path; discarded callbacks are explicitly unverifiable, never success.
+            callbacks = getattr(reader, 'callback_reports', None)
+            if isinstance(callbacks, list):callbacks.clear()
+        if self.contact_status['error'] is not None:
+            self.contact_error_count = getattr(self, 'contact_error_count', 0) + 1
+            if getattr(self, 'first_contact_error', None) is None:
+                self.first_contact_error = dict(self.contact_status)
         self.env.scene.update(dt=self.env.physics_dt)
         render_due = self.env._sim_step_counter % self.env.cfg.sim.render_interval == 0
         if trace is not None:
@@ -235,9 +299,10 @@ class IsaacPlant:
         if trace is not None:
             trace['completed'] = True
 
-    def cameras(self):
+    def cameras(self, *, render=True):
         from isaac_lane import calibrated_camera_rgb, calibrated_camera_depth, calibrated_camera_k
-        self.env._m2_runtime._render()
+        if render:
+            self.env._m2_runtime._render()
         return {name: dict(rgb=calibrated_camera_rgb(self.env, name).cpu().numpy(),
                            depth=calibrated_camera_depth(self.env, name).cpu().numpy(),
                            intrinsics=calibrated_camera_k(self.env, name))

@@ -41,7 +41,9 @@ def validate_config(config, contract):
             raise ValueError('positive integer service budgets required')
     if type(s['max_lifetime_seconds']) is not int or s['max_lifetime_seconds'] < 0:
         raise ValueError('service lifetime must be nonnegative; zero means owned workbench lifetime')
-    if contract['resources'].get('max_workers_per_instance') != 2:
+    if config.get('execution') and s['max_lifetime_seconds']==0:
+        raise ValueError('local detector requires a finite resident-bounded lifetime')
+    if contract['resources'].get('max_workers_per_instance') != (config['execution']['max_processes'] if config.get('execution') else 2):
         raise ValueError('service needs explicit two-worker authorization')
     pins = {k:v for mapping in pinned_files(contract) for k,v in mapping.items()}
     files = {'adapter_sha256':config['detection_script'], 'service_sha256':str(PurePosixPath(config['detection_script']).with_name('isaac_detection_service.py')),
@@ -69,10 +71,29 @@ sys.exit(child.returncode or 0)
 '''
 
 
+LOCAL_SUPERVISOR = r'''import json,os,select,signal,subprocess,sys,time
+sys.path.insert(0,sys.argv[4])
+from owned_process import wait_owned
+args=json.loads(sys.argv[1]); lifetime=int(sys.argv[2]); hold_stdin=sys.argv[3]=='hold-stdin'
+assert lifetime>0,'local worker requires a finite lifetime'
+def stop(signum,frame):raise SystemExit(128+signum)
+signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
+child=subprocess.Popen(args,stdin=subprocess.PIPE if hold_stdin else subprocess.DEVNULL,start_new_session=True)
+end=time.monotonic()+lifetime
+try:
+ while child.poll() is None and time.monotonic()<end:
+  if select.select([sys.stdin],[],[],min(1,max(0,end-time.monotonic())))[0] and not os.read(sys.stdin.fileno(),1):break
+finally:
+ if hold_stdin:child.stdin.close()
+ wait_owned(child,.001,grace=20)
+sys.exit(child.returncode or 0)
+'''
+
+
 def launch_command(c):
-    from run_pipeline import python_command, AFFINITY_EXEC
+    from run_pipeline import python_command, AFFINITY_EXEC,lane
     s=c['detector_service']
-    args=['env','CUDA_VISIBLE_DEVICES=0','PYTHONPATH=','PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',
+    args=['env','CUDA_VISIBLE_DEVICES='+str(lane(c,'simulated-real')['gpu']),'PYTHONPATH=','PYTHONNOUSERSITE=1','PYTHONDONTWRITEBYTECODE=1',
           'OMP_NUM_THREADS=4','MKL_NUM_THREADS=4','MAX_JOBS=4','CUDA_HOME='+c['detection_cuda_home'],
           'PATH='+c['detection_cuda_home']+'/bin:'+str(PurePosixPath(c['detection_python']).parent)+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
           'python3','-B','-c',AFFINITY_EXEC,c['detection_python'],'-u','-B',c['detection_script'],
@@ -80,21 +101,31 @@ def launch_command(c):
           '--node-config',c['detection_node_config'],'--allowed-output-root',s['allowed_output_root']]
     for root in s['allowed_read_roots']:
         args += ['--allowed-read-root',root]
+    if c.get('execution'):
+        from local_execution import detector_environment
+        args[1:1]=['ROBOT_WORKBENCH_SESSION_ID='+c['execution']['session_id'],*[k+'='+v for k,v in detector_environment(c).items()]]
+        return python_command(LOCAL_SUPERVISOR,json.dumps(args),s['max_lifetime_seconds'],'no-stdin',c['workbench_code'])
     return python_command(SUPERVISOR,json.dumps(args),s['max_lifetime_seconds'])
 
 
-def wait_for_gpu_idle(side,*,cancel=lambda:False,progress=None):
+def wait_for_gpu_idle(side,*,cancel=lambda:False,progress=None,config=None,exclude=None):
     """Bounded read-only release wait; never stop another GPU occupant."""
-    from run_pipeline import ssh,python_command,GPU_CHECK
+    from run_pipeline import transport,python_command,GPU_CHECK
     deadline=time.monotonic()+30
     while True:
         if cancel():return False
         remaining=deadline-time.monotonic()
         if remaining<=0:raise RuntimeError('等待 GPU 释放超过 30 秒；未启动服务，也未停止占用进程')
-        checked=subprocess.run(ssh(side,python_command(GPU_CHECK,0)),capture_output=True,text=True,timeout=remaining)
+        if config and config.get('execution'):
+            from local_execution import check_command
+            command=check_command(config,exclude=exclude)
+        else:command=python_command(GPU_CHECK,0)
+        checked=subprocess.run(transport(config or {},side,command),capture_output=True,text=True,timeout=remaining)
         if checked.returncode==0:return True
         detail=checked.stderr[-1200:]
-        if not any(reason in detail for reason in ('selected GPU has a compute process','selected GPU is not idle')):
+        reasons=('selected GPU has a compute process','selected GPU is not idle')
+        if config and config.get('execution'):reasons+=('selected GPU has an unowned process',)
+        if not any(reason in detail for reason in reasons):
             raise RuntimeError('GPU preflight failed: '+detail)
         if cancel():return False
         remaining=max(0,deadline-time.monotonic())
@@ -110,6 +141,7 @@ class DetectorService:
     def start(self, config_path, state_directory):
         from run_pipeline import load_config
         c,contract,_=load_config(Path(config_path))
+        self._local=bool(c.get('execution'))
         if not c.get('detector_service'):
             self._state.update(status='ready',stage='legacy',message='按任务初始化检测器',progress=100)
             return
@@ -121,7 +153,7 @@ class DetectorService:
         self._thread.start()
 
     def _run(self,c,contract,directory):
-        from run_pipeline import ssh,python_command,GPU_CHECK,pinned_files
+        from run_pipeline import transport,python_command,GPU_CHECK,pinned_files
         check=r'''import hashlib,json,pathlib,sys
 c=json.loads(sys.argv[1]); s=c['detector_service']; assert not pathlib.Path(s['root']).exists(),'service root already exists'
 assert pathlib.Path(s['root']).parent.is_dir(),'service parent absent'
@@ -133,12 +165,16 @@ for pins in json.loads(sys.argv[2]):
   assert h.hexdigest()==sha,'service input hash mismatch '+name
 '''
         try:
-            if not self._wait_for_gpu():return
-            command=python_command(GPU_CHECK,0)+' && '+python_command(check,json.dumps(c),json.dumps(pinned_files(contract)))+' && '+launch_command(c)
+            if not self._wait_for_gpu(c):return
+            if c.get('execution'):
+                from local_execution import check_command
+                guard=check_command(c,exclude='detector')
+            else:guard=python_command(GPU_CHECK,0)
+            command=guard+' && '+python_command(check,json.dumps(c),json.dumps(pinned_files(contract)))+' && '+('exec ' if c.get('execution') else '')+launch_command(c)
             with (directory/'detector-service.stderr.log').open('a') as err, (directory/'detector-service.stdout.log').open('a') as log:
                 with self._lock:
                     if self._closed:return
-                    self._process=subprocess.Popen(ssh('simulated-real',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,bufsize=1)
+                    self._process=subprocess.Popen(transport(c,'simulated-real',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,text=True,bufsize=1)
                 budget_verified=False
                 for line in self._process.stdout:
                     log.write(line); log.flush()
@@ -149,7 +185,7 @@ for pins in json.loads(sys.argv[2]):
                     if any(data.get(k)!=spec[v] for k,v in [('owner_token','owner_token'),('identity','identity'),('service_root','root'),('socket','socket')]):
                         raise RuntimeError('Detector status ownership mismatch')
                     if data.get('status')=='ready' and not budget_verified:
-                        checked=subprocess.run(ssh('simulated-real',python_command(OWNED_GPU_CHECK,json.dumps(c))),capture_output=True,text=True,timeout=20)
+                        checked=subprocess.run(transport(c,'simulated-real',gpu_check_command(c,'simulated-real')),capture_output=True,text=True,timeout=20)
                         if checked.returncode:raise RuntimeError('Detector resource preflight failed: '+checked.stderr[-1200:])
                         budget_verified=True
                     state=dict(data['initialization']); state['status']=data.get('status',state.get('status','starting'))
@@ -169,7 +205,8 @@ for pins in json.loads(sys.argv[2]):
             with self._lock:
                 if not self._closed:self._state.update(status='failed',stage='failed',message=str(exc),error=str(exc))
 
-    def _wait_for_gpu(self):
+    def _wait_for_gpu(self,config=None):
+        config=config or {}
         """Allow prior shutdown to finish; never kill occupants or retry model launch."""
         def cancelled():
             with self._lock:
@@ -177,8 +214,10 @@ for pins in json.loads(sys.argv[2]):
         def progress(remaining):
             with self._lock:
                 self._state.update(status='starting',stage='preflight',progress=0,error=None,eta_s=remaining,
-                                   message='等待 GPU 释放（最多 30 秒，只读检查，不停止占用进程）')
-        return wait_for_gpu_idle('simulated-real',cancel=cancelled,progress=progress)
+                                   message='检查本 Session GPU1 进程与预算（最多 30 秒，不停止其他进程）' if config.get('execution') else
+                                   '等待 GPU 释放（最多 30 秒，只读检查，不停止占用进程）')
+        return wait_for_gpu_idle('simulated-real',cancel=cancelled,progress=progress,
+            **({'config':config,'exclude':'detector'} if config.get('execution') else {}))
 
     def status(self):
         with self._lock:
@@ -196,7 +235,7 @@ for pins in json.loads(sys.argv[2]):
             try:process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 process.terminate()
-                try:process.wait(timeout=5)
+                try:process.wait(timeout=30 if getattr(self,'_local',False) else 5)
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
 
 OWNED_GPU_CHECK = r'''import json,pathlib,subprocess,sys
@@ -222,6 +261,10 @@ print(json.dumps({'detector_owned':True,'gpu':0,'memory_mib':int(selected[0][2])
 
 def gpu_check_command(config, side):
     from run_pipeline import python_command,GPU_CHECK,PIPELINE_LANES
+    if config.get('execution'):
+        from local_execution import check_command
+        role='detector' if side=='simulated-real' else 'planner'
+        return check_command(config,require=role if config.get(role+'_service') else None)
     if side=='simulated-real' and config.get('detector_service'):
         return python_command(OWNED_GPU_CHECK,json.dumps(config))
     if side=='dsw-scene' and config.get('planner_service'):

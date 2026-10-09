@@ -2,6 +2,7 @@
 import argparse
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import shutil
 import xml.etree.ElementTree as ET
@@ -12,6 +13,12 @@ from model_adapt import digest, verify
 from physical_profile import rigid
 
 ROBOT = 'robots/arx_ac_one/v1/'
+
+
+def conversion_device(gpu):
+    if type(gpu) is not int or gpu not in (0,1):raise ValueError('explicit physical GPU index 0 or 1 required')
+    return dict(headless=True,device='cuda:0',active_gpu=gpu,multi_gpu=False,
+        kit_args=f'--/renderer/activeGpu={gpu} --/renderer/multiGpu/enabled=false --/renderer/multiGpu/autoEnable=false --/renderer/gpuEnumeration/glInterop/enabled=false')
 
 
 def calibrated_rig(rig, profile):
@@ -83,12 +90,14 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('bundle','base-assets','output'):p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--prepare-only',action='store_true')
+    p.add_argument('--gpu',type=int,choices=(0,1),default=0,help='physical CUDA mask and Vulkan adapter; logical CUDA device stays 0')
     args=p.parse_args()
     binding=prepare(args.bundle,args.base_assets,args.output)
     if args.prepare_only:
         print(json.dumps(binding,indent=2));return
+    os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)
     from isaaclab.app import AppLauncher
-    app=AppLauncher(headless=True,device='cuda:0',active_gpu=0,multi_gpu=False).app
+    app=AppLauncher(**conversion_device(args.gpu)).app
     try:
         from isaaclab.sim.converters import UrdfConverter,UrdfConverterCfg
         target=Path(binding['usd'])

@@ -22,7 +22,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'infra'))
 from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity
-from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices
+from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command
 
 
 def legacy_modules(source):
@@ -103,8 +103,7 @@ def hardware_backend(*, passive_left_jaw=False):
                 raise ValueError('measured begin pose changed')
             exact = list(physical14)
             exact[start:end], exact[end] = q, jaw
-            hold = exact.copy()
-            hold[end] = hold_command_sdk(side, feedback_gaps(exact)[0 if side == 'left' else 1])
+            hold = list(feedback_to_command(exact, np.asarray(self.get_bimanual_joint_position_limits(),dtype=float).tolist()))
             self.send(side, hold)  # Hold the measured physical gap in command units before position gains.
             gain = self._arx5.Gain(6)
             gain.kp()[:], gain.kd()[:] = cfg.default_kp, cfg.default_kd
@@ -224,6 +223,8 @@ class Owner:
         self.tick_gap_s = None
         self.evidence_logging_healthy = True
         self.current_feedback = None
+        self.feedback_clock = None
+        self.feedback_source_stamp = None
         self.review_press = None
         self.active_epoch = None
         self.backend.command_guard = self.command_gate
@@ -507,6 +508,14 @@ class Owner:
         self.feedback_read_duration_s = time.monotonic()-read_started
         now = self.control_time()
         q, v, sdk = feedback['qpos'], feedback['qvel'], feedback['sdk_timestamps']
+        if any(key in feedback for key in ('clock_domain','source_clock_id','source_time_ns','physics_step')):
+            from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp
+            environment=getattr(self,'environment',None) or 'physical'
+            clock=self.feedback_clock or clock_spec(environment,clock_domain=feedback.get('clock_domain'),
+                                                    source_clock_id=feedback.get('source_clock_id'))
+            point=sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+            assert_progress(self.feedback_source_stamp,point,allow_same=True)
+            self.feedback_clock,self.feedback_source_stamp=clock,point
         values = [*q, *v, *sdk, feedback['sample_time_s']]
         if (len(q) != 14 or len(v) != 14 or len(sdk) != 2
                 or not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in values)
@@ -546,6 +555,8 @@ class Owner:
                     feedback=feedback,tick_gap_s=self.tick_gap_s,feedback_read_duration_s=self.feedback_read_duration_s,
                     sdk_progress_age_s=[None if t is None else now-t for t in (self.sdk_progress or [])],
                     capture_ready_wall_ns=self.capture_wait['ready_wall_ns'] if self.capture_wait else None,
+                    capture_ready_source_ns=self.capture_wait.get('ready_source_ns') if self.capture_wait else None,
+                    capture_source_clock_id=self.capture_wait.get('source_clock_id') if self.capture_wait else None,
                     capture_ack_remaining_s=self.capture_wait['deadline']-now if self.capture_wait else None,
                     capture_recovery_deadline_monotonic_s=self.capture_recovery_deadline,
                     pedal=self.pedal_snapshot())
@@ -616,6 +627,10 @@ class Owner:
                     self.consumed.add(plan.sha256)
                     self.event('confirm_rejected', plan_sha256=plan.sha256, reason='owner/pedal/state changed')
                     continue
+                if not self.accept_review(plans):
+                    self.consumed.add(plan.sha256)
+                    self.event('confirm_rejected', plan_sha256=plan.sha256, reason='review revoked before execution')
+                    continue
                 self.active_epoch, self.review_press = epoch, press
                 self.sequence_remaining = list(plans[1:])
                 self.sequence_samples = list(samples[1:]);self.capture_sample = samples[0];self.capture_wait = None;self.capture_stable_since = None
@@ -659,6 +674,10 @@ class Owner:
                             capture_ready_wall_ns=self.capture_wait['ready_wall_ns'])):
                         self.event('capture_acknowledged',sample_id=self.capture_sample,diagnostic=self.diagnostic_sample(feedback))
                         self.last_capture_ack = dict(capture_ack)
+                        if getattr(self,'environment',None)=='fake':
+                            self.last_capture_ack.update(command_epoch=self.epoch,
+                                clock_domain=self.capture_wait['clock_domain'],source_clock_id=self.capture_wait['source_clock_id'],
+                                capture_ready_source_ns=self.capture_wait['ready_source_ns'])
                         self.capture_sample = None;self.capture_wait = None
                         self.capture_recovery_deadline = None
                     else:
@@ -669,6 +688,13 @@ class Owner:
                         if now-self.capture_stable_since >= .5:
                             self.last_capture_window_ns = max(time.time_ns(),self.last_capture_window_ns+1)
                             self.capture_wait = dict(sample_id=self.capture_sample,deadline=now+10.,ready_wall_ns=self.last_capture_window_ns,ack_queued=False)
+                            if getattr(self,'environment',None)=='fake':
+                                from robot_workbench.sample_clock import clock_spec, sample_stamp
+                                clock=self.feedback_clock or clock_spec('fake',clock_domain=feedback.get('clock_domain'),
+                                                                       source_clock_id=feedback.get('source_clock_id'))
+                                source_ns,step=sample_stamp(feedback,clock,wall_key='sample_wall_ns')
+                                self.capture_wait.update(ready_source_ns=source_ns,ready_physics_step=step,
+                                                         clock_domain='simulation',source_clock_id=clock['source_clock_id'])
                             self.event('awaiting_capture',sample_id=self.capture_sample,diagnostic=self.diagnostic_sample(feedback))
                     else:self.capture_stable_since = None
             if self.sequence_remaining and self.runner and self.runner.status == 'READY' and self.capture_sample is None:
@@ -714,6 +740,10 @@ class Owner:
                                   command_epoch=self.epoch,last_fault_diagnostic=self.last_fault_diagnostic)
                 if self.runner:self.cache['motion']={'status':self.runner.status,'reason':self.runner.reason,'sample_id':None}
         return self.control.state is not self.states.RELEASED
+
+    def accept_review(self, plans):
+        """Embedding runtimes may atomically revoke queued, not-yet-started reviews."""
+        return True
 
     def start_motion(self, plan, feedback, *, reviewed_deadline=None):
         self.plan_sequence += 1
@@ -778,6 +808,10 @@ class Owner:
                                                                  capture_recovery_deadline_monotonic_s=self.capture_recovery_deadline,
                                                                  capture_deadline_monotonic_s=self.capture_wait['deadline'] if self.capture_wait else None,
                                                                  capture_ready_wall_ns=self.capture_wait['ready_wall_ns'] if self.capture_wait else None,
+                                                                 capture_ready_source_ns=self.capture_wait.get('ready_source_ns') if self.capture_wait else None,
+                                                                 capture_ready_physics_step=self.capture_wait.get('ready_physics_step') if self.capture_wait else None,
+                                                                 capture_clock_domain=self.capture_wait.get('clock_domain') if self.capture_wait else None,
+                                                                 capture_source_clock_id=self.capture_wait.get('source_clock_id') if self.capture_wait else None,
                                                                  plan_sha256=self.runner.plan.sha256,
                                                                  active_arm=self.runner.plan.active_arm,
                                                                  target_error=self.runner.target_error),

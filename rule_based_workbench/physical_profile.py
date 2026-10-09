@@ -42,9 +42,16 @@ def build_profile(snapshot, template, environment_from_calibration_world):
                                     environment_from_calibration_world)
 
 
-def profile_from_calibration(calibration, intrinsics, active, template, environment_from_calibration_world):
+def profile_from_calibration(calibration, intrinsics, active, template, environment_from_calibration_world, *, environment='physical'):
     """Common profile boundary for legacy snapshots and sealed native A1-cal."""
     validate_profile(template)
+    if environment not in ('physical','fake'):
+        raise ValueError('explicit physical/fake profile environment required')
+    simulated=environment=='fake'
+    if (active.get('robot_source') != ('simulated' if simulated else 'physical')
+            or active.get('simulation_only') is not simulated
+            or not simulated and calibration.get('simulation_only') is True):
+        raise ValueError('installed calibration differs from trusted profile environment')
     registration = rigid(environment_from_calibration_world)
     camera = registration @ rigid(calibration['T_world_head_optical'])
     profile = deepcopy(template)
@@ -61,10 +68,12 @@ def profile_from_calibration(calibration, intrinsics, active, template, environm
     serials = [v['serial'] for v in profile['physical_calibration']['intrinsics'].values()]
     if len(set(serials)) != 3 or any(not s for s in serials):
         raise ValueError('three distinct camera serials required')
-    profile['source'] = {'kind': 'installed_physical_calibration', 'head_id': active['head']['id'],
+    profile['source'] = {'kind': 'installed_fake_calibration' if simulated else 'installed_physical_calibration',
+                         'simulation_only':simulated,'runtime_environment':environment,
+                         'robot_source':'simulated' if simulated else 'physical','head_id': active['head']['id'],
                          'wrist_id': active['wrist']['id'], 'acceptance': deepcopy(active['acceptance'])}
     profile.pop('profile_id', None)
-    profile['profile_id'] = 'physical-' + _digest(profile)[:16]
+    profile['profile_id'] = environment+'-' + _digest(profile)[:16]
     validate_profile(profile)
     return profile
 

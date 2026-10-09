@@ -281,7 +281,37 @@ def main(native_code):
         if expected=='success':
             assert finish_motiongen_replay_policy(runtime)['progress']['receiving_goal']['passed']
         else:rejected(lambda:finish_motiongen_replay_policy(runtime))
-    print('MotionGen replay policy: ramp-only budget, failure preservation, current final success, native substep endpoints: PASS')
+    # Owner scheduling includes an initialization prefix and variable step gaps.
+    # A source tick is taken from applied commands, never inferred from step/8.
+    runtime,plan,base=fixture({41:'success',43:'success'})
+    context=dict(execution_id='owner-one',source_tick=None,stage='initialize',final_sample=False)
+    policy=install_motiongen_replay_policy(runtime,plan,applied_context=lambda sample:dict(context))
+    assert policy['configuration']['final_physics_step'] is None
+    assert runtime.evaluator.observe(NS(physics_step=41)) is None
+    assert policy['progress']['last_observed_source_tick'] is None
+    context.update(source_tick=94,stage='home_hold')
+    assert runtime.evaluator.observe(NS(physics_step=42)) is None
+    runtime.loop.physics_steps=42;context['final_sample']=True
+    rejected(lambda:finish_motiongen_replay_policy(runtime))  # early success is insufficient
+    context['final_sample']=False
+    assert runtime.evaluator.observe(NS(physics_step=43)) is None
+    runtime.loop.physics_steps=43;context['final_sample']=True
+    assert finish_motiongen_replay_policy(runtime)['progress']['final_native_success']
+    context['execution_id']='other'
+    rejected(lambda:finish_motiongen_replay_policy(runtime))
+    for bad in (dict(source_tick=None,stage='open'),dict(source_tick=94,stage='open')):
+        runtime,plan,_=fixture()
+        context=dict(execution_id='owner-one',final_sample=False,**bad)
+        install_motiongen_replay_policy(runtime,plan,applied_context=lambda sample:dict(context))
+        rejected(lambda:runtime.evaluator.observe(NS(physics_step=41)))
+    runtime,plan,_=fixture({41:'success',42:'robot_forbidden_contact'})
+    context=dict(execution_id='owner-one',source_tick=94,stage='home_hold',final_sample=False)
+    policy=install_motiongen_replay_policy(runtime,plan,applied_context=lambda sample:dict(context))
+    assert runtime.evaluator.observe(NS(physics_step=41)) is None
+    assert runtime.evaluator.observe(NS(physics_step=42)).reason=='robot_forbidden_contact'
+    runtime.loop.physics_steps=42;context['final_sample']=True
+    rejected(lambda:finish_motiongen_replay_policy(runtime))
+    print('MotionGen replay policy: ramp-only budget, failure preservation, actual Owner stage, current final success: PASS')
 
 
 if __name__ == '__main__':

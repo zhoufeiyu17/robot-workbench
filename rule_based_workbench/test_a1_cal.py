@@ -44,8 +44,8 @@ def inputs(root, a1):
     return active, cameras['head'], identity
 
 
-def main():
-    a1 = Path(__file__).parent/'model_assets/ac_one_A1_pending_calibration_r2'
+def main(a1=None):
+    a1 = Path(a1) if a1 is not None else Path(__file__).parent/'model_assets/ac_one_A1_pending_calibration_r2'
     before = digest(a1/'SHA256SUMS.json')
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -98,4 +98,7 @@ def main():
     print('A1-cal: sealed native geometry, optical-only update, profile, model/reported roundtrip, provenance rejection PASS')
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    import argparse
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--a1',type=Path)
+    main(parser.parse_args().a1)

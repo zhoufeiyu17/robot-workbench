@@ -80,6 +80,56 @@ class RealMotionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 command_sdk('left', gap)
 
+    def test_numeric_arm_boundary_preserves_raw_and_rejects_requested_overflow(self):
+        bounds = limits();bounds[8] = [0., 2.]
+        raw = [0.]*14;raw[8] = -2.0976735626e-10
+        command = feedback_to_command(raw, bounds)
+        self.assertEqual(command[8], 0.)
+        self.assertLess(raw[8], 0.)
+        plan = make_workbench_plans(raw, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds, created_at_s=8500.)[0]
+        self.assertEqual(plan.q_start[8], raw[8])
+        self.assertEqual(plan.q_target[8], 0.)
+        sent=[]
+        runner=MotionRunner(plan, begin=lambda q:q, send=sent.append, stop=lambda reason:None)
+        runner.start(8500., feedback(8500.,raw))
+        for i in range(1,25):runner.tick(8500.+i*.05,feedback(8500.+i*.05,raw))
+        self.assertEqual(runner.status,'READY')
+        self.assertTrue(sent)
+        self.assertTrue(all(q[8]>=0. for q in sent))
+        target = raw[:];target[0] = .01
+        held = make_plan('left', raw, target, bounds)
+        self.assertEqual(held.q_target[8], 0.)
+        MotionRunner(held, begin=lambda q:q, send=lambda q:None, stop=lambda reason:None)
+        with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
+            make_plan('both', raw, raw, bounds, kind='workbench')
+        too_far = raw[:];too_far[8] = -1.001e-6
+        with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
+            make_workbench_plans(too_far, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds)
+        with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
+            make_plan('both', raw, [0.]*14, bounds, kind='workbench', q_start_is_command=True)
+
+    def test_quintic_endpoint_does_not_emit_a_negative_zero_limit_target(self):
+        bounds=limits();bounds[8]=[0.,2.]
+        raw=[0.]*14;raw[8]=1e-12
+        plan=make_plan('both',raw,[0.]*14,bounds,kind='workbench',duration_s=1.,created_at_s=8500.)
+        sent=[]
+        def send(q):
+            if not 0.<=q[8]<=raw[8]:raise ValueError('interpolation escaped approved endpoints')
+            sent.append(q)
+        runner=MotionRunner(plan,begin=lambda q:q,send=send,stop=lambda reason:None)
+        runner.start(8500.,feedback(8500.,raw))
+        for i in range(1,10):runner.tick(8500.+i*.05,feedback(8500.+i*.05,raw))
+        self.assertIsNotNone(runner.started)
+        while runner.previous < runner.started+.94:
+            stamp=runner.previous+.05
+            runner.tick(stamp,feedback(stamp,raw))
+            self.assertNotEqual(runner.status,'FAULT',runner.reason)
+        stamp=runner.started+.999999
+        runner.tick(stamp,feedback(stamp,raw))
+        self.assertNotEqual(runner.status,'FAULT',runner.reason)
+        self.assertGreater(len(sent),5)
+        self.assertTrue(all(0.<=q[8]<=raw[8] for q in sent))
+
     def test_both_jaws_share_trajectory_and_preserve_arms(self):
         start = [.01] * 14
         start[6], start[13] = .076, .077

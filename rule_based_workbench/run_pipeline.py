@@ -41,11 +41,13 @@ def below(path, root):
 def load_config(path):
     data = path.read_bytes()
     config = json.loads(data)
-    allowed = {*PATH_KEYS, "contract_path", "finger_envelope_sha256", "prompt_file", "opening_mm",
+    allowed = {*PATH_KEYS, "environment", "execution", "resident_deadline_wall_ns", "contract_path", "finger_envelope_sha256", "prompt_file", "opening_mm",
                "remote_run_root", "record_raw", "render_replay", "motion_profile", "force_diagnostic", "diagnostic_input_root", "detector_service",
-               "planning_backend", "curobo_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service"}
+               "planning_backend", "curobo_root", "detection_runtime_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("unknown pipeline configuration field")
+    from real_contract import namespace
+    namespace(config.get('environment', 'physical'))
     for key in (*PATH_KEYS, "remote_run_root", "contract_path"):
         config[key] = absolute(config.get(key))
     speed=config.get('simulation_speed_scale',1.)
@@ -65,7 +67,13 @@ def load_config(path):
     if planning_backend in ('curobo', 'motiongen') and not config.get('curobo_root'):
         raise ValueError('curobo planning_backend requires curobo_root')
     root = config["remote_run_root"]
-    if not below(root, "/mnt/data/feiyu.zhou/runs") or len(PurePosixPath(root).parts) < 7:
+    from local_execution import validate as validate_local
+    execution=validate_local(config)
+    if execution:
+        scope=execution['plant']['scope']
+        if root==scope or not below(root,scope):
+            raise ValueError('local output must be a strict child of the frozen resident plant scope')
+    elif not below(root, "/mnt/data/feiyu.zhou/runs") or len(PurePosixPath(root).parts) < 7:
         raise ValueError("remote output must be a unique personal project/run directory")
     if type(config.get("render_replay", True)) is not bool:
         raise ValueError("render_replay must be boolean")
@@ -91,7 +99,13 @@ def load_config(path):
     contract_bytes = Path(config["contract_path"]).read_bytes()
     contract = json.loads(contract_bytes)
     fs, resources = contract["filesystem"], contract["resources"]
-    lanes = {v["instance_id"]: [v["gpu"]] for v in PIPELINE_LANES.values()}
+    execution=validate_local(config,contract)
+    if execution and config.get('environment')=='fake':
+        deadline=config.get('resident_deadline_wall_ns')
+        if type(deadline) is not int or deadline<=0 or resources.get('resident_deadline_wall_ns')!=deadline:
+            raise ValueError('local fake execution requires the same frozen resident wall deadline in config and contract')
+    lanes = ({execution['instance_id']:[execution['gpu_index']]} if execution else
+             {v["instance_id"]: [v["gpu"]] for v in PIPELINE_LANES.values()})
     if (contract.get("schema_version") != "anyverse.dsw-codex-experiment.v1"
             or resources.get("lanes") != lanes or resources.get("max_gpu_count_per_instance") != 1
             or resources.get("require_gpu_idle_check") is not True
@@ -113,6 +127,13 @@ def load_config(path):
     if type(resources.get("max_cpu_threads")) is not int or resources["max_cpu_threads"] < 4:
         raise ValueError("native pipeline requires a contract CPU budget of at least four threads")
     read_roots = [absolute(p) for p in fs.get("readonly_roots", [])]
+    if execution:
+        runtime=absolute(config.get('detection_runtime_root'))
+        if not any(below(runtime,p) for p in read_roots):raise ValueError('detector runtime root must be declared readonly')
+        config['detection_runtime_root']=runtime
+        pins={k:v for group in pinned_files(contract) for k,v in group.items()}
+        if runtime+'/scripts/run_online_detection_episode.py' not in pins or not any(below(k,runtime+'/ros2/online_detection_ros') for k in pins):
+            raise ValueError('detector runtime scripts and ROS code must be SHA-pinned')
     if config.get('detection_input_root') and not config.get('observation_input_root'):
         raise ValueError('completed detection requires its frozen observation input')
     for key in ('observation_input_root','detection_input_root','planned_input_root'):
@@ -223,6 +244,24 @@ def ssh(side, command):
     return args + ["root@47.116.111.83", command]
 
 
+def lane(config, side):
+    if side not in PIPELINE_LANES:raise ValueError('unknown execution role')
+    from local_execution import validate
+    execution=validate(config)
+    return dict(instance_id=execution['instance_id'],gpu=execution['gpu_index']) if execution else PIPELINE_LANES[side]
+
+
+def transport(config, side, command, *, timeout=None):
+    """One stage API; a declared local deployment never falls back to SSH."""
+    from local_execution import validate
+    if side not in PIPELINE_LANES:raise ValueError('unknown execution role')
+    if validate(config) is None:return ssh(side,command)
+    argv=['bash','-c',command]
+    if timeout is not None:
+        argv=['python3','-B',config['workbench_code']+'/owned_process.py','--timeout',str(timeout),'--',*argv]
+    return argv
+
+
 def python_command(script, *args):
     values = list(map(str, args))
     command = shlex.join(["python3", "-I", "-B", "-c", script, *values])
@@ -238,14 +277,14 @@ def python_command(script, *args):
     return shlex.join(["python3", "-I", "-B", "-c", bootstrap, payload])
 
 
-def pull_telemetry(side, remote_path, local_path):
+def pull_telemetry(side, remote_path, local_path, config=None):
     """Best-effort read-only tail source; replay may still be writing the JSONL file."""
     script = ("import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
               "sys.stdout.buffer.write(p.read_bytes()) if p.is_file() else sys.exit(2)")
     temp = Path(str(local_path) + ".partial")
     try:
         with temp.open("wb") as stream:
-            result = subprocess.run(ssh(side, python_command(script, remote_path)), stdout=stream,
+            result = subprocess.run(transport(config or {},side, python_command(script, remote_path)), stdout=stream,
                                     stderr=subprocess.DEVNULL, timeout=12)
         if result.returncode == 0:
             temp.replace(local_path)
@@ -269,7 +308,7 @@ for name in ('failure', 'final', 'execution'):
 print(json.dumps(result))
 """
     command = python_command(script, config["remote_run_root"] + "/replay-" + label)
-    result = subprocess.run(ssh(side, "bash -c " + shlex.quote(command)), capture_output=True, text=True, timeout=20)
+    result = subprocess.run(transport(config,side, "bash -c " + shlex.quote(command)), capture_output=True, text=True, timeout=20)
     if result.returncode:
         raise RuntimeError("cannot read replay completion receipt: " + result.stderr[-2000:])
     receipt = json.loads(result.stdout)
@@ -295,7 +334,7 @@ def start_preview_stream(config, side, label, local_path, camera="base_0"):
     command = "cd " + shlex.quote(config["remote_run_root"]) + " && " + shlex.join([
         "env", "PYTHONPATH=" + workbench, "python3", "-B", workbench + "/live_preview.py", "stream",
         "--path", remote, "--hz", "30"])
-    process = subprocess.Popen(ssh(side, "bash -c " + shlex.quote(command)),
+    process = subprocess.Popen(transport(config,side, ("exec bash -c " if config.get('execution') else "bash -c ") + shlex.quote(command)),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return process, process.stdout
 
@@ -331,10 +370,10 @@ AFFINITY_EXEC = ("import os,sys; cores=sorted(os.sched_getaffinity(0))[:4]; "
 
 def isaac_environment(c,side):
     """Share native GPU acceptance dependencies across both workbench modes."""
-    settings={"CUDA_VISIBLE_DEVICES": str(PIPELINE_LANES[side]["gpu"]), "PYTHONNOUSERSITE": "1",
+    settings={"CUDA_VISIBLE_DEVICES": str(lane(c,side)["gpu"]), "PYTHONNOUSERSITE": "1",
         "PYTHONDONTWRITEBYTECODE": "1", "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4", "MAX_JOBS": "4",
         "ROBOT_SIM_ASSET_ROOT": c["assets"],
-        "PYTHONPATH": f"{c['deps']}:/workspace/isaaclab/source/isaaclab:{c['native_code']}/source/robot_sim:{c['workbench_code']}"}
+        "PYTHONPATH": f"{c['deps']}:/workspace/isaaclab/source/isaaclab:{c['native_code']}/source/robot_sim:{c['workbench_code']}:{PurePosixPath(c['workbench_code']).parent}"}
     if c.get('planning_backend')=='motiongen':
         install=c['curobo_root'];cache=c['remote_run_root']+'/cache/runtime-'+side
         settings.update(PYTHONPATH=install+'/python:'+install+'/deps:'+settings['PYTHONPATH'],
@@ -359,8 +398,8 @@ def build_plan(config, contract):
             if type(wall_budget) is not int or wall_budget<=45:raise ValueError('stage wall budget must reserve shutdown time')
             timeout_s=min(timeout_s,wall_budget-45)
         stages.append({"name": name, "side": side, "timeout_s": timeout_s,"wall_budget_s":wall_budget,
-                       "argv": ssh(side, f"timeout -k 30 {timeout_s} " +
-                       shlex.join(["bash", "-c" if output else "-lc", command])), "output": output, "group": group})
+                       "argv": transport(c,side, f"timeout -k 30 {timeout_s} " +
+                       shlex.join(["bash", "-c" if output else "-lc", command]),timeout=timeout_s), "output": output, "group": group})
 
     def env(side):
         return isaac_environment(c,side)
@@ -372,13 +411,19 @@ def build_plan(config, contract):
 
     def gpu_guard(side):
         guard=gpu_check_command(c,side)
-        expected=contract['resources'].get('expected_gpu_uuids',{}).get(PIPELINE_LANES[side]['instance_id'])
+        expected=contract['resources'].get('expected_gpu_uuids',{}).get(lane(c,side)['instance_id'])
         if expected:
-            check="import subprocess,sys; assert subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'],text=True).strip()==sys.argv[1], 'GPU identity changed'"
-            guard+=' && '+python_command(check,expected)
+            if c.get('execution'):
+                check="import subprocess,sys; assert subprocess.check_output(['nvidia-smi','-i',sys.argv[2],'--query-gpu=uuid','--format=csv,noheader'],text=True).strip()==sys.argv[1], 'GPU identity changed'"
+                guard+=' && '+python_command(check,expected,lane(c,side)['gpu'])
+            else:
+                check="import subprocess,sys; assert subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'],text=True).strip()==sys.argv[1], 'GPU identity changed'"
+                guard+=' && '+python_command(check,expected)
         return guard
 
     def gpu_stage(name, side, args, overrides=None):
+        if c.get('execution') and any(p in args for p in (wb+'/isaac_lane.py',wb+'/motiongen_plan.py')):
+            args=[*args,'--execution-json',json.dumps(c['execution'])]
         limits=contract['resources']
         if name in {"geometry", "place", "motiongen-scene", "motiongen-plan"}:
             owned_budget=limits.get('max_planning_time_seconds',570)
@@ -448,14 +493,14 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
         root + "/pipeline-config.json", json.dumps(c)))
     if c.get('planned_input_root'):
         stage('resume-plan','dsw-scene',python_command(
-            'import json,sys; sys.path.insert(0,sys.argv[1]); from run_pipeline import install_accepted_plan; print(json.dumps(install_accepted_plan(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
+            'import json,sys; sys.path[:0]=[sys.argv[1],sys.argv[1].rsplit("/",1)[0]]; from run_pipeline import install_accepted_plan; print(json.dumps(install_accepted_plan(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
             wb,json.dumps(c),json.dumps(contract)))
     isaac = ["/isaac-sim/python.sh", "-u", "-B"]
     if c.get("force_diagnostic"):
         for side, label in (("simulated-real", "source"), ("dsw-scene", "target")):
             suite = c["initial_suite"] if label == "source" else root + "/detection-bridge/suite.json"
-            args = [*isaac, wb + "/isaac_lane.py", "--mode", "replay", "--gpu", str(PIPELINE_LANES[side]["gpu"]),
-                    "--instance", PIPELINE_LANES[side]["instance_id"], "--side", side, "--run-id", run_id + "-" + label,
+            args = [*isaac, wb + "/isaac_lane.py", "--mode", "replay", "--gpu", str(lane(c,side)["gpu"]),
+                    "--instance", lane(c,side)["instance_id"], "--side", side, "--run-id", run_id + "-" + label,
                     "--suite", suite, "--assets", c["assets"], "--output", root + "/replay-" + label,
                     "--plan", root + "/plan.json", "--source", root + "/detection-bridge/source.json",
                     "--barrier", root + "/barrier", "--force-diagnostic-replay"]
@@ -469,20 +514,23 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
         return stages
     source_side = "simulated-real"
     if not c.get('observation_input_root'):
-        gpu_stage("observe", source_side, [*isaac, wb + "/isaac_lane.py", "--mode", "observe", "--gpu", "0",
-            "--instance", PIPELINE_LANES[source_side]["instance_id"], "--side", source_side, "--run-id", run_id + "-capture",
+        gpu_stage("observe", source_side, [*isaac, wb + "/isaac_lane.py", "--mode", "observe", "--gpu", str(lane(c,source_side)["gpu"]),
+            "--instance", lane(c,source_side)["instance_id"], "--side", source_side, "--run-id", run_id + "-capture",
             "--suite", c["initial_suite"], "--assets", c["assets"], "--output", capture,
             "--observation-seconds", "8", "--gripper-opening-mm", str(c["opening_mm"])])
     stage("observe-verify", source_side, python_command(
-        'import json,sys; sys.path.insert(0,sys.argv[1]); from run_pipeline import verify_observation; print(json.dumps(verify_observation(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
+        'import json,sys; sys.path[:0]=[sys.argv[1],sys.argv[1].rsplit("/",1)[0]]; from run_pipeline import verify_observation; print(json.dumps(verify_observation(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
         wb,json.dumps(c),json.dumps(contract)))
     fp_env = {"PYTHONPATH": "", "CUDA_HOME": c["detection_cuda_home"], "TORCH_EXTENSIONS_DIR": root + "/cache/torch-extensions",
               "XDG_CACHE_HOME": root + "/cache", "PATH": c["detection_cuda_home"] + "/bin:" +
               str(PurePosixPath(c["detection_python"]).parent) + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+    if c.get('execution'):
+        from local_execution import detector_environment
+        fp_env.update(detector_environment(c,contract))
     detection = c.get('detection_input_root') or root+'/detection'
     if c.get('detection_input_root'):
         stage('detect-verify',source_side,python_command(
-            'import json,sys; sys.path.insert(0,sys.argv[1]); from run_pipeline import verify_detection; print(json.dumps(verify_detection(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
+            'import json,sys; sys.path[:0]=[sys.argv[1],sys.argv[1].rsplit("/",1)[0]]; from run_pipeline import verify_detection; print(json.dumps(verify_detection(json.loads(sys.argv[2]),json.loads(sys.argv[3]))))',
             wb,json.dumps(c),json.dumps(contract)))
     elif c.get("detector_service"):
         service = c["detector_service"]
@@ -500,12 +548,12 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
     if c.get('planning_backend') == 'motiongen':
         scene_dir, plan_dir = root+'/motiongen-scene', root+'/motiongen-plan'
         gpu_stage('motiongen-scene', 'dsw-scene', [*isaac, wb+'/isaac_lane.py', '--mode', 'geometry-inputs',
-            '--gpu', '0', '--instance', PIPELINE_LANES['dsw-scene']['instance_id'], '--side', 'dsw-scene',
+            '--gpu', str(lane(c,'dsw-scene')['gpu']), '--instance', lane(c,'dsw-scene')['instance_id'], '--side', 'dsw-scene',
             '--run-id', run_id+'-motiongen-scene', '--suite', detected+'/suite.json', '--source', detected+'/source.json',
             '--assets', c['assets'], '--output', scene_dir, '--gripper-opening-mm', str(c['opening_mm']),
             '--finger-envelope', c['finger_envelope'], '--finger-envelope-sha256', c['finger_envelope_sha256']])
         install, cache = c['curobo_root'], root+'/cache/curobo'
-        settings = dict(PYTHONPATH=install+'/python:'+install+'/deps:'+c['deps']+':'+native+'/source/robot_sim:'+wb,
+        settings = dict(PYTHONPATH=install+'/python:'+install+'/deps:'+c['deps']+':'+native+'/source/robot_sim:'+wb+':'+str(PurePosixPath(wb).parent),
             CUDA_HOME=install+'/cuda-overlay', LD_LIBRARY_PATH=install+'/cuda-overlay/lib64',
             TORCH_EXTENSIONS_DIR=cache+'/torch', WARP_CACHE_PATH=cache+'/warp', XDG_CACHE_HOME=cache,
             TORCH_CUDA_ARCH_LIST='12.0', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
@@ -530,7 +578,7 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
                 "--suite", detected + "/suite.json", "--finger-envelope", c["finger_envelope"], "--finger-envelope-sha256",
                 c["finger_envelope_sha256"], "--output", root + "/" + mode, "--mode", mode,
                 "--motion-profile", c.get("motion_profile", "continuous-baseline"), "--gripper-opening-mm",
-                str(c["opening_mm"]), "--render-gpu", str(PIPELINE_LANES["dsw-scene"]["gpu"])])
+                str(c["opening_mm"]), "--render-gpu", str(lane(c,'dsw-scene')["gpu"])])
             if mode == "geometry":
                 stage("geometry-verify", "dsw-scene", python_command(
                     "import json,pathlib,sys; root=pathlib.Path(sys.argv[1]); "
@@ -546,8 +594,8 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
         # Preserve the observation's original reset configuration, including authored orientation/randomization.
         # capture/suite.json is an aggregated GT observation and is not the original physical configuration.
         suite = c["initial_suite"] if label == "source" else detected + "/suite.json"
-        args = [*isaac, wb + "/isaac_lane.py", "--mode", "replay", "--gpu", str(PIPELINE_LANES[side]["gpu"]),
-            "--instance", PIPELINE_LANES[side]["instance_id"], "--side", side, "--run-id", run_id + "-" + label,
+        args = [*isaac, wb + "/isaac_lane.py", "--mode", "replay", "--gpu", str(lane(c,side)["gpu"]),
+            "--instance", lane(c,side)["instance_id"], "--side", side, "--run-id", run_id + "-" + label,
             "--suite", suite, "--assets", c["assets"], "--output", root + "/replay-" + label,
             "--plan", root + "/plan.json", "--source", detected + "/source.json"]
         if c.get('planning_backend')=='motiongen':args += ['--independent-replay']
@@ -621,11 +669,14 @@ def bounded_command(stage, remaining):
         raise ValueError("unexpected remote timeout wrapper")
     remote[3] = str(seconds)
     argv[-1] = shlex.join(remote)
+    if len(argv)>5 and argv[2].endswith('/owned_process.py') and argv[3]=='--timeout':argv[4]=str(seconds)
     return argv, seconds
 
 
 def run(config_path, output, dry_run=False):
     config, contract, hashes = load_config(config_path)
+    if config.get('execution'):
+        raise ValueError('local deployment requires the device preparation/Playground entry; dual-DSW observation is disabled')
     stages = build_plan(config, contract)
     if output.exists():
         raise FileExistsError("local output already exists")
@@ -689,9 +740,9 @@ def run(config_path, output, dry_run=False):
                     try:
                         process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
                         while process.poll() is None:
-                            pull_telemetry(side, remote, local)
+                            pull_telemetry(side, remote, local, config)
                             time.sleep(1.0)
-                        pull_telemetry(side, remote, local)
+                        pull_telemetry(side, remote, local, config)
                         result = subprocess.CompletedProcess(argv, process.returncode)
                         replay_receipt(config, side, label, output)
                     finally:

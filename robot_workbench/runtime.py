@@ -43,7 +43,7 @@ class _Backend:
 
 class Runtime:
     def __init__(self, ref, safety, backend_factory, *, device_id, environment, lock_root,
-                 initial_holder='calibration', initialize_backend=None, **owner_options):
+                 initial_holder='calibration', initialize_backend=None, jaw_mapping_file=None, **owner_options):
         if environment not in {'fake', 'physical'} or initial_holder not in BUSINESSES:
             raise ValueError('explicit fake/physical environment and registered business required')
         if not isinstance(device_id, str) or not device_id.strip():
@@ -57,6 +57,8 @@ class Runtime:
         self.clients, self.calls, self.hold = {}, {}, {'left': None, 'right': None}
         self.hold_returns = {'left': None, 'right': None}
         self.call_sequence, self.preview_revision = 0, 0
+        self.calibration_revision, self.calibration_snapshot_id = 0, None
+        self.reviewed_plans, self.execution_calibration = {}, None
         self.last_return, self.stop_receipt, self.detached_hold = None, None, None
         self.initialization_error = None
         self.owner = None
@@ -69,9 +71,35 @@ class Runtime:
                 raise ValueError('device lock must be a regular file')
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             from real_control import classes
-            collection, _, _ = classes(ref)
+            collection, _, _ = classes(ref, jaw_mapping_file=jaw_mapping_file)
             runtime = self
             class ManagedOwner(collection):
+                def accept_review(self, plans):
+                    # This short section is the execution/install ordering point;
+                    # no SDK call, hashing, or trajectory compilation occurs here.
+                    hashes = tuple(plan.sha256 for plan in plans)
+                    with runtime.lock:
+                        binding = runtime.reviewed_plans.pop(hashes, None)
+                        if (binding is None or binding['calibration_revision'] != runtime.calibration_revision
+                                or binding['command_epoch'] != self.epoch
+                                or self.stop_requested or self.release_requested):
+                            return False
+                        self.execution_instance_id = secrets.token_hex(16)
+                        runtime.execution_calibration = dict(binding, plan_sha256=hashes,
+                            execution_instance_id=self.execution_instance_id,
+                            accepted_monotonic_s=time.monotonic())
+                        return True
+
+                def cache_state(self, feedback, limits):
+                    result = super().cache_state(feedback, limits)
+                    # The shared owner accepts both strategies. The standalone
+                    # collection service still advertises its narrower interface.
+                    with self.lock:
+                        self.cache['capabilities'] = list(dict.fromkeys(self.cache.get('capabilities', []) + [
+                            'workbench_trajectory_v1', 'calibration_capture_ack_v1',
+                            'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous']))
+                    return result
+
                 def start_motion(self, plan, feedback, *, reviewed_deadline=None):
                     runtime.detached_hold = None
                     if plan.sha256 in self.frozen_payloads or plan.sha256 in self.alignment_plans:
@@ -84,7 +112,8 @@ class Runtime:
 
             self.ref, self.collection = ref, collection
             backend = _Backend(backend_factory(), self)
-            self.owner = ManagedOwner(backend, safety, hardware=hardware, **owner_options)
+            self.owner = ManagedOwner(backend, safety, hardware=hardware, environment=environment, **owner_options)
+            self.owner.runtime_nonce = self.nonce
             if initialize_backend is not None:
                 # Caller owns connection/support authorization. No implicit connect/hold.
                 with self.tick_lock:
@@ -253,7 +282,33 @@ class Runtime:
             self.owner.frozen_payloads = compiler.frozen_payloads
             self.owner.alignment_plans = compiler.alignment_plans
             self.owner.review_wall_deadline = compiler.review_wall_deadline
+            self.reviewed_plans = {
+                tuple(plan.sha256 for plan in review[0]): dict(calibration_revision=self.calibration_revision,
+                    snapshot_id=self.calibration_snapshot_id, command_epoch=epoch, business=business)
+                for review in compiler.pending.values()}
             return dict(result, business=business, runtime_nonce=self.nonce, environment=self.environment)
+
+    def notify_calibration_installed(self, snapshot_id):
+        """Trusted installer callback after publishing the actual installed identity.
+
+        Running/accepted sequences retain their frozen payload and command epoch.
+        Pending reviews, queued confirms and compilers lose only their approval.
+        """
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip() or len(snapshot_id) > 512:
+            raise ValueError('actual installed calibration snapshot identity required')
+        with self.lock, self.owner.lock:
+            if self.fd is None:
+                raise RuntimeError('runtime closed')
+            if snapshot_id == self.calibration_snapshot_id:
+                return dict(snapshot_id=snapshot_id, calibration_revision=self.calibration_revision, revoked=False)
+            self.calibration_snapshot_id = snapshot_id
+            self.calibration_revision += 1
+            self.preview_revision += 1
+            self.owner.pending.clear()
+            self.reviewed_plans.clear()
+            # Do not clear frozen_payloads: a review accepted immediately before
+            # this callback may not yet have constructed its collection runner.
+            return dict(snapshot_id=snapshot_id, calibration_revision=self.calibration_revision, revoked=True)
 
     def handoff(self, credential, target):
         with self.lock:
@@ -311,8 +366,42 @@ class Runtime:
             # Use the cache: a stalled SDK/recording call must not block status.
             with self.owner.lock:
                 state = deepcopy(self.owner.cache)
+            owner=self.owner
+            state['recording_configured']=owner.recording_factory is not None
+            state['recording_error']=owner.recording_error
+            native=getattr(owner,'native_task_status',None)
+            state['native_task']=({key:deepcopy(native[key]) for key in (
+                'execution_instance_id','execution_timeline_digest','source_clock_id','task_outcome','task_qualified',
+                'receipt_path','receipt_sha256','runtime_nonce','physics_step','message') if key in native}
+                if isinstance(native,dict) else None)
+            recording=owner.recording
+            if recording is None:
+                state['recording']=None
+            else:
+                manifest=getattr(recording,'manifest',None)
+                root=getattr(recording,'root',None)
+                state['recording']=dict(ready=recording.ready.is_set(),done=recording.done.is_set(),
+                    error=recording.error,controller_result=deepcopy(getattr(recording,'controller_result',None)),
+                    directory=str(root) if root else None,
+                    manifest_path=str(root/'manifest.json') if root and manifest else None,
+                    manifest={k:deepcopy(v) for k,v in manifest.items() if k!='files'} if manifest else None)
+            raw=state.get('calibration_feedback')
+            if raw:
+                from arx_env.joint_head_jaw_mapping import feedback_gaps
+                state['sample_age_s']=max(0.,owner.control_time()-raw['sample_time_s'])
+                state['jaw_gap_mm']=feedback_gaps(raw['qpos'])
+            runner=owner.runner
+            if runner is not None and getattr(runner,'runtime',None) is not None:
+                timeline=runner.runtime
+                state['execution_timeline']=dict(path=str(getattr(runner,'runtime_path',None) or ''),
+                    timeline_digest=timeline['timeline_digest'],duration_s=timeline['duration_s'],
+                    initialization_duration_s=timeline['initialization_duration_s'],control_hz=timeline['control_hz'],
+                    command_count=len(timeline['commands']),parent_timeline_digest=timeline['parent_timeline_digest'])
             state.update(device_id=self.device_id, environment=self.environment, runtime_nonce=self.nonce,
                 holder=self.holder, command_epoch=self.owner.epoch, hold=deepcopy(self.hold),
+                calibration_revision=self.calibration_revision, calibration_snapshot_id=self.calibration_snapshot_id,
+                execution_calibration=deepcopy(self.execution_calibration),
+                execution_instance_id=getattr(self.owner,'execution_instance_id',None),
                 sdk_hold_returns=deepcopy(self.hold_returns),
                 sdk_calls_in_flight=deepcopy(list(self.calls.values())), last_sdk_return=deepcopy(self.last_return),
                 detached_hold=deepcopy(self.detached_hold), stop_receipt=deepcopy(self.stop_receipt),

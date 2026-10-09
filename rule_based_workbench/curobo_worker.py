@@ -47,7 +47,7 @@ def request_paths(line, read_roots, output_root):
         raise ValueError('request exceeds 65536 bytes')
     message = json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_constant)
     required = {'input', 'source', 'output'}
-    if not isinstance(message, dict) or not required <= message.keys() or message.keys()-required-{'speed_scale','physical_binding'}:
+    if not isinstance(message, dict) or not required <= message.keys() or message.keys()-required-{'speed_scale','physical_binding','environment'}:
         raise ValueError('request requires input/source/output, optional speed_scale/physical_binding')
     speed = message.get('speed_scale', .3)
     if type(speed) not in (int, float) or not math.isfinite(speed) or not .1 <= speed <= 1.:
@@ -65,7 +65,9 @@ def request_paths(line, read_roots, output_root):
     output = allowed_path(message['output'], (output_root,), exists=False)
     if output.exists() or Path(message['output']).is_symlink():
         raise FileExistsError(f'output already exists; refusing overwrite: {output}')
-    return dict(**paths, output=output, speed_scale=float(speed))
+    from real_contract import namespace
+    environment = namespace(message.get('environment','physical'))['environment']
+    return dict(**paths, output=output, speed_scale=float(speed), **({'environment':environment} if environment=='fake' else {}))
 
 
 @contextmanager
@@ -140,11 +142,12 @@ class Worker:
             provenance={key+'_sha256':hashlib.sha256(request[key].read_bytes()).hexdigest() for key in ('input','source')}
             provenance.update(parent_source_sha256=provenance['source_sha256'],planning_input_sha256=provenance['input_sha256'],parent_source_schema=parent['schema_version'])
             if self.formal:
-                physical=parent.get('schema_version')=='physical_collection_source.v1'
+                from real_contract import is_device_source
+                physical=is_device_source(parent)
                 if physical:
                     from real_contract import validate_real_source
                     from joint_space import validate_initial_state
-                    validate_real_source(parent,binding)
+                    validate_real_source(parent,binding,environment=request.get('environment','physical'))
                     validate_initial_state(parent.get('initial_state'),parent['calibration_profile'])
                 if (not physical and (parent.get('schema_version')!='dual_gpu_pipeline.v1' or parent.get('lane')!='simulated-real')
                         or any(parent.get(key) for key in ('offline_candidate','synthetic_fixture','test_fixture'))):
@@ -162,9 +165,14 @@ class Worker:
                 write_new(output/name,value)
             base,plan,evidence=plan_loaded(planner,observation,data,source,ac_one_asset_spec(self.assets).urdf_path,
                 speed_scale=request['speed_scale'],diagnostic=diagnostic,engine_cache=self.engine_cache,
-                physical_binding=binding if self.formal else None)
+                physical_binding=binding if self.formal else None,
+                **({'environment':request['environment']} if request.get('environment') else {}))
             if self.formal and (base.get('offline_candidate') or plan.get('offline_candidate')):
                 raise ValueError('formal worker cannot publish an offline candidate')
+            if getattr(self,'compute_resource',None):
+                from local_execution import stamp_plan
+                stamp_plan(base,self.compute_resource);stamp_plan(plan,self.compute_resource)
+                evidence['compute_resource']=dict(self.compute_resource,logical_cuda_index=0)
             write_new(output/'base-plan.json',base if self.formal else seal_offline(base,provenance))
             write_new(output/'plan.json',plan if self.formal else seal_offline(plan,provenance))
             if not self.formal:write_new(output/'planning-evidence.json',evidence)
@@ -333,6 +341,7 @@ def main():
             allowed_path(str(warm_input.with_name('result.json')), roots)
         with progress_to_stderr():
             worker = Worker(native_code, assets,formal=args.service_spec is not None)
+            worker.compute_resource=(args.service_spec or {}).get('compute_resource')
             warmup = worker.warmup(warm_input, warm_source)
         ready=dict(type='ready',passed=True,offline_candidate=args.service_spec is None,startup_seconds=time.perf_counter()-started,**warmup)
         if args.service_spec is not None:

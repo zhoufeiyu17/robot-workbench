@@ -10,10 +10,22 @@ from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 import test_joint_head_workbench_live_bridge as bridge_fixture
-from joint_head_workbench import Workbench
+from joint_head_workbench import Workbench, transport_environment
 
 
 class CaptureFlowTests(unittest.TestCase):
+    def test_transport_environment_requires_explicit_fake_configuration(self):
+        self.assertEqual(transport_environment({}),'physical')
+        self.assertEqual(transport_environment({'simulation_only':True}),'physical')
+        self.assertEqual(transport_environment({'environment':'fake','simulation_only':True,'robot_source':'simulated'}),'fake')
+        for config in ({'environment':'fake'},{'environment':'fake','simulation_only':True,'robot_source':'physical'},
+                       {'environment':'simulation'}):
+            with self.assertRaises(ValueError):transport_environment(config)
+        for config in ({'robot_id':'physical-a1','calibration_root':'/tmp/fake'},
+                       {'robot_id':'fake-a1','calibration_root':'/var/lib/anyverse/calibration/hardware'}):
+            with self.assertRaisesRegex(ValueError,'独立'):
+                Workbench({'environment':'fake','simulation_only':True,**config},'/unused')
+
     def setUp(self):
         bridge_fixture.BridgeTests.setUp(self)
         a=self.app;a.output=a.output.resolve();a.control_mode='hardware_sync'
@@ -75,6 +87,42 @@ class CaptureFlowTests(unittest.TestCase):
         self.app.queue[0]['jaw_gap_mm']=[54.,83.]
         with self.assertRaisesRegex(ValueError,'80 mm'):self.app.preview_calibration()
         self.assertEqual(self.calls,[])
+
+    def test_fake_capture_passes_source_readiness_and_keeps_wall_ack_nonce(self):
+        a=self.app;a.config.update(environment='fake',simulation_only=True,robot_source='simulated')
+        a.hardware_feedback={'owner':dict(mode='simulation',environment='fake',simulation_only=True)}
+        a.control_status['owner']['capabilities'].append('calibration_capture_window_v2')
+        original=self.gateway
+        def gateway(action,body=None,**kwargs):
+            if action=='state':
+                state=self.owner_state();owner=state['owner']
+                owner.update(mode='simulation',environment='fake',simulation_only=True,
+                    calibration_feedback=dict(sample_wall_ns=2_000_000_000,clock_domain='simulation',
+                        source_clock_id='fixture-plant',source_time_ns=75_000_000,physics_step=18))
+                owner['motion'].update(capture_ready_source_ns=50_000_000,capture_ready_physics_step=12,
+                    capture_clock_domain='simulation',capture_source_clock_id='fixture-plant')
+                if self.acknowledged:owner['last_capture_ack']=dict(sample_id=self.identity,capture_ready_wall_ns=1050000000,
+                    command_epoch=4,source_clock_id='fixture-plant',capture_ready_source_ns=50_000_000)
+                return state
+            if action=='capture-ack':
+                self.assertEqual(body['capture_ready_wall_ns'],1050000000)
+                self.acknowledged=True;return {'ok':True}
+            return original(action,body,**kwargs)
+        a.control_request=gateway
+        def capture(*args,**kwargs):
+            self.assertEqual(kwargs['environment'],'fake')
+            self.assertEqual(kwargs['source_clock_id'],'fixture-plant')
+            self.assertEqual(kwargs['not_before_source_ns'],50_000_000)
+            self.assertNotIn('not_before_ns',kwargs)
+            return self.sample(*args,**{**kwargs,'not_before_ns':1050000000})
+        with patch('arx_env.joint_head_workbench_capture.capture_sample',side_effect=capture):self.confirm()
+        self.assertEqual(a.status,'READY',a.reason)
+        dataset=next(a.output.glob('batch-hardware-*/capture'))
+        manifest=json.loads((dataset/'dataset.json').read_text())
+        self.assertEqual(manifest['runtime_environment'],'fake')
+        self.assertEqual(manifest['clock']['source_clock_id'],'fixture-plant')
+        self.assertTrue(manifest['simulation_only'])
+        self.assertEqual(manifest['frames'][0]['capture_ready_source_ns'],50_000_000)
 
     def test_head_and_wrist_share_hardware_capture_and_persist_before_ack(self):
         for kind in ('head','wrist'):

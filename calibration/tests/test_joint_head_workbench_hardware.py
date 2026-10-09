@@ -119,8 +119,65 @@ class HardwareReadTest(unittest.TestCase):
         adapter.http.open.return_value = io.BytesIO(b'x' * (4*1024*1024+1))
         self.assertIn('too large', adapter.read_state()['error'])
 
+    def fake_owner(self):
+        value=copy.deepcopy(self.owner)
+        value.update(mode='simulation',environment='fake',simulation_only=True,evidence_source='physx')
+        value['calibration_feedback'].update(clock_domain='simulation',source_clock_id='fixture-plant',
+                                            source_time_ns=1_000_000_000,physics_step=240)
+        return value
+
+    def test_fake_requires_trusted_namespace_and_keeps_simulation_identity(self):
+        owner=self.fake_owner()
+        self.assertFalse(self.normalize(owner)['feedback']['valid'])
+        result=self.normalize(owner,environment='fake')
+        self.assertTrue(result['feedback']['valid'])
+        self.assertEqual(result['backend'],'simulation')
+        self.assertEqual(result['owner']['mode'],'simulation')
+        self.assertEqual(result['raw_owner']['evidence_source'],'physx')
+        for key,value in [('mode','hardware'),('environment','physical'),('simulation_only',False)]:
+            with self.subTest(key=key):self.assertFalse(self.normalize({**owner,key:value},environment='fake')['feedback']['valid'])
+        previous=self.normalize(owner,environment='fake')
+        for key,value in [('source_clock_id','another-plant'),('physics_step',239),('source_time_ns',999_000_000)]:
+            changed=copy.deepcopy(owner);changed['calibration_feedback'][key]=value
+            self.assertFalse(self.normalize(changed,environment='fake',previous=previous)['feedback']['valid'])
+
+    def test_fake_reader_does_not_rebind_clock_after_transport_failure(self):
+        adapter=HardwareReadAdapter(8120,environment='fake');adapter.http=Mock()
+        owner=self.fake_owner()
+        with patch('time.time_ns',return_value=self.now):
+            adapter.http.open.return_value=io.BytesIO(json.dumps(owner).encode())
+            self.assertTrue(adapter.read_state()['feedback']['valid'])
+            adapter.http.open.side_effect=OSError('offline');self.assertFalse(adapter.read_state()['reachable'])
+            adapter.http.open.side_effect=None
+            owner['calibration_feedback']['source_clock_id']='restarted-plant'
+            adapter.http.open.return_value=io.BytesIO(json.dumps(owner).encode())
+            self.assertFalse(adapter.read_state()['feedback']['valid'])
+
+    def test_fake_reader_invalid_regression_cannot_lower_progress_baseline(self):
+        adapter=HardwareReadAdapter(8120,environment='fake');adapter.http=Mock()
+        owner=self.fake_owner()
+        with patch('time.time_ns',return_value=self.now):
+            for source,step,valid in [(1_000_000_000,240,True),(900_000_000,216,False),(950_000_000,228,False)]:
+                owner['calibration_feedback'].update(source_time_ns=source,physics_step=step)
+                adapter.http.open.return_value=io.BytesIO(json.dumps(owner).encode())
+                self.assertEqual(adapter.read_state()['feedback']['valid'],valid)
+        self.assertEqual(adapter.source_stamp,(1_000_000_000,240))
+
 
 class CameraReadTest(unittest.TestCase):
+    def test_fake_camera_keeps_wall_and_source_clocks_separate(self):
+        status={**self.status,'environment':'fake','simulation_only':True,'timestamp_kind':'simulation_step',
+                'clock_domain':'simulation','source_clock_id':'fixture-plant','source_time_ns':50_000_000,'physics_step':12,
+                'device_timestamp_ms':50.,'depth_device_timestamp_ms':50.,'timestamp_domain':'simulation'}
+        with self.assertRaisesRegex(ValueError,'physical'):self.adapter._accept_frame(self.jpeg,status)
+        camera=HardwareCameraAdapter(8114,environment='fake')
+        _,meta=camera._accept_frame(self.jpeg,status)
+        self.assertEqual(meta['frame_timestamp_ns'],10_000_000_000)
+        self.assertEqual(meta['source_time_ns'],50_000_000)
+        self.assertEqual(meta['timestamp_kind'],'simulation_step')
+        for key,value in [('source_clock_id','other'),('physics_step',11),('timestamp_kind','host_receive'),('environment','physical')]:
+            with self.subTest(key=key),self.assertRaises(ValueError):camera._accept_frame(self.jpeg,{**status,key:value})
+
     def test_rgbd_atomic_serial_binds_intrinsics_without_overwriting_mismatch(self):
         for intrinsics, expected in [({'fx':400},'camera-1'),({'serial':'other','fx':400},'other')]:
             meta=dict(self.status,raw=True,annotated=False,image_domain='raw',serial='camera-1',intrinsics=intrinsics)

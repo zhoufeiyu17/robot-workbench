@@ -1,5 +1,6 @@
 """Explicit model/reported boundary for physical plans; no implicit legacy conversion."""
 from copy import deepcopy
+from real_contract import is_device_source
 import math
 
 from integration import _digest
@@ -48,6 +49,10 @@ def validate_initial_state(initial, profile):
             or evidence[1]['sample_wall_ns'] <= evidence[0]['sample_wall_ns']
             or evidence[1]['sample_time_s'] <= evidence[0]['sample_time_s']):
         raise ValueError('owner identity/epoch changed or feedback did not progress during observation')
+    if 'clock' in initial:
+        from robot_workbench.sample_clock import clock_for_source, sample_stamp, assert_progress
+        clock=clock_for_source(initial,'fake')
+        assert_progress(sample_stamp(evidence[0],clock,wall_key='sample_wall_ns'),sample_stamp(evidence[1],clock,wall_key='sample_wall_ns'))
     validate_physical_feedback(initial.get('after_observation_reported'),profile)
     if not state_near(initial['after_observation_reported'], measured, joint_rad=.005):
         raise ValueError('robot moved during observation')
@@ -112,7 +117,7 @@ def contract(profile, native_actions):
 
 
 def validate(plan, source):
-    physical = source.get('schema_version') == 'physical_collection_source.v1'
+    physical = is_device_source(source)
     if physical:
         if not isinstance(plan.get('native_actions'), list) or len(plan['native_actions']) != len(plan['ticks']):
             raise ValueError('physical native actions must cover every tick')
@@ -149,7 +154,7 @@ def validate(plan, source):
 
 def freeze_reported(plan, source):
     """Called once on freshly exported model ticks, never on an existing physical plan."""
-    if source.get('schema_version') != 'physical_collection_source.v1':
+    if not is_device_source(source):
         if 'joint_space' in plan:
             raise ValueError('unexpected physical joint-space contract')
         return
@@ -159,9 +164,11 @@ def freeze_reported(plan, source):
     ticks = [{**tick, 'target': convert_state(tick['target'], source['calibration_profile'], to_reported=True)}
              for tick in plan['ticks']]
     plan.update(ticks=ticks, timeline_digest=_digest(ticks), joint_space=marker)
+    if source.get('environment') == 'fake':
+        plan.update(environment='fake', simulation_only=True)
 
 
 def replay_state(model_state, source):
-    if source.get('schema_version') == 'physical_collection_source.v1':
+    if is_device_source(source):
         return convert_state(model_state, source['calibration_profile'], to_reported=True)
     return model_state

@@ -14,13 +14,15 @@ import time
 import zipfile
 
 from integration import _digest, validate_profile
+from real_contract import namespace, validate_namespace, owner_matches_environment
+from robot_workbench.sample_clock import clock_spec, clock_for_source, sample_stamp, assert_progress, owner_identity
 
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def read_initial_sample(read_owner, *, wall_ns=time.time_ns):
+def read_initial_sample(read_owner, *, wall_ns=time.time_ns, environment='physical', clock=None):
     """Read-only owner snapshot; same-host wall timestamps also bound transport age."""
     from contract import validate_physical_feedback
     owner = read_owner()
@@ -28,7 +30,8 @@ def read_initial_sample(read_owner, *, wall_ns=time.time_ns):
     feedback = owner.get('calibration_feedback') or {}
     age = owner.get('sample_age_s')
     stamp = feedback.get('sample_wall_ns')
-    if (owner.get('mode') != 'hardware' or owner.get('connected') is not True
+    if (not owner_matches_environment(owner, environment) or owner.get('connected') is not True
+            or owner.get('holder', 'collection') != 'collection'
             or owner.get('feedback_healthy') is not True or owner.get('stationary') is not True
             or owner.get('automatic_enabled') is not False or owner.get('acquisition_pending')
             or owner.get('state') not in ('READY', 'STOPPED_DAMPING_HOLD', 'MANUAL_TAKEOVER')
@@ -40,6 +43,14 @@ def read_initial_sample(read_owner, *, wall_ns=time.time_ns):
     evidence = dict(pid=owner.get('pid'), command_epoch=owner.get('command_epoch'),
                     sample_time_s=feedback.get('sample_time_s'), sample_wall_ns=stamp,
                     received_wall_ns=received, sample_age_s=age)
+    if environment == 'fake':
+        identity=owner_identity(owner,pid_key='pid')
+        expected = clock or clock_spec('fake', clock_domain=feedback.get('clock_domain'), source_clock_id=feedback.get('source_clock_id'))
+        source_ns, step = sample_stamp(feedback, expected, wall_key='sample_wall_ns')
+        if abs(round(feedback['sample_time_s']*1e9)-source_ns) > 1:
+            raise ValueError('feedback sample_time_s differs from simulation source time')
+        evidence.update(clock_domain=expected['clock_domain'],source_clock_id=expected['source_clock_id'],
+                        source_time_ns=source_ns,physics_step=step,runtime_nonce=identity['runtime_nonce'])
     return state, evidence
 
 
@@ -55,13 +66,22 @@ def seal_initial_state(before, after, profile):
                  model=convert_state(planned, profile, to_reported=False),
                  jaw_normalization='clamp_to_model_command_limits_within_2mm',
                  owner_samples=[evidence, after[1]], after_observation_reported=after[0])
+    if evidence.get('clock_domain')=='simulation':
+        clock=clock_spec('fake',clock_domain=evidence['clock_domain'],source_clock_id=evidence['source_clock_id'])
+        assert_progress(sample_stamp(evidence,clock,wall_key='sample_wall_ns'),sample_stamp(after[1],clock,wall_key='sample_wall_ns'))
+        value['clock']=clock
+        if owner_identity(evidence,pid_key='pid')!=owner_identity(after[1],pid_key='pid'):
+            raise ValueError('Owner instance/epoch changed during observation')
     return validate_initial_state(value, profile)
 
 
-def validate_binding(profile, binding):
+def validate_binding(profile, binding, *, environment='physical'):
     validate_profile(profile)
+    validate_namespace(binding, environment)
+    if environment == 'fake' and profile['source'].get('simulation_only') is not True:
+        raise ValueError('fake-device requires a simulation-only calibration snapshot')
     serials = binding.get('camera_serials')
-    if (binding.get('calibration_accepted') is not True or binding.get('evidence_source') != 'physical_rgbd'
+    if (binding.get('calibration_accepted') is not True
             or not isinstance(binding.get('robot_id'), str) or not binding['robot_id'].strip()
             or not isinstance(serials, dict) or set(serials) != {'head','left','right'}
             or any(not isinstance(v,str) or not v.strip() for v in serials.values())
@@ -129,7 +149,8 @@ def remap_rgbd(rgb, depth, mapping):
     return color, distance
 
 
-def decode_snapshot(body, serial, profile):
+def decode_snapshot(body, serial, profile, *, environment='physical', clock=None, expected_owner=None):
+    namespace(environment)
     import numpy as np
     from PIL import Image
     if not isinstance(body, bytes) or len(body) > 32_000_000:
@@ -140,6 +161,8 @@ def decode_snapshot(body, serial, profile):
         if sum(item.file_size for item in archive.infolist()) > 32_000_000:
             raise ValueError('snapshot exceeds decoded transport size')
         metadata = json.loads(archive.read('metadata.json'))
+        if metadata.get('data_valid') is False:
+            raise ValueError('camera data invalid: '+str(metadata.get('recording_error') or 'producer rejected this frame'))
         color_bytes,depth_bytes=archive.read('color.png'),archive.read('depth.png')
         if (len(color_bytes)<26 or len(depth_bytes)<26 or color_bytes[24:26]!=bytes([8,2])
                 or depth_bytes[24:26]!=bytes([16,0])):
@@ -149,11 +172,23 @@ def decode_snapshot(body, serial, profile):
         if color_image.format != 'PNG' or color_image.mode != 'RGB' or depth_image.format != 'PNG' or depth_image.mode not in ('I;16','I;16B','I'):
             raise ValueError('lossless RGB8 and unsigned 16-bit depth PNG required')
         rgb, depth = np.asarray(color_image), np.asarray(depth_image)
+    if environment == 'fake':
+        validate_namespace(metadata, environment)
+        identity=owner_identity(metadata,require_available=True)
+        if expected_owner is not None and identity!=expected_owner:
+            raise ValueError('frame sampling-time Owner differs from observation Owner')
+        attached=metadata.get('frame_readback')
+        if attached is not None and (not isinstance(attached,dict) or any(attached.get(key)!=metadata.get(key)
+                for key in ('clock_domain','source_clock_id','source_time_ns','physics_step'))):
+            raise ValueError('RGB-D frame readback belongs to another source step')
+    elif (metadata.get('environment', 'physical') != 'physical' or metadata.get('simulation_only') is True
+          or metadata.get('evidence_source', 'physical_rgbd') != 'physical_rgbd'):
+        raise ValueError('fake camera frames cannot authorize physical RGB-D evidence')
     if (metadata.get('serial') != serial or metadata.get('camera_name') != 'head'
             or metadata.get('ready') is not True or metadata.get('rgbd_paired') is not True
             or metadata.get('raw') is not True or metadata.get('annotated') is not False
             or metadata.get('depth_aligned_to') != 'color' or metadata.get('depth_encoding') != 'uint16_png'
-            or metadata.get('timestamp_kind') != 'host_receive' or not metadata.get('pair_id')):
+            or metadata.get('timestamp_kind') != ('simulation_step' if environment=='fake' else 'host_receive') or not metadata.get('pair_id')):
         raise ValueError('snapshot identity or RGB-D pairing metadata invalid')
     stamp = metadata.get('host_receive_ns')
     if isinstance(stamp,str) and stamp.isdigit():
@@ -161,6 +196,10 @@ def decode_snapshot(body, serial, profile):
     frame, depth_frame = metadata.get('frame_number'), metadata.get('depth_frame_number')
     if any(type(v) is not int or v < 0 for v in (stamp,frame,depth_frame)) or stamp == 0:
         raise ValueError('positive host timestamp and camera frame counters required')
+    if environment=='fake':
+        metadata['host_receive_ns']=stamp
+        expected=clock or clock_spec('fake',clock_domain=metadata.get('clock_domain'),source_clock_id=metadata.get('source_clock_id'))
+        stamp,_=sample_stamp(metadata,expected)
     numbers=[metadata.get(k) for k in ('device_timestamp_ms','depth_device_timestamp_ms','capture_fps','depth_scale_m')]
     if any(type(v) not in (int,float) or not math.isfinite(v) or v < 0 for v in numbers) or min(numbers[2:]) <= 0:
         raise ValueError('finite camera timing, cadence and positive depth scale required')
@@ -213,24 +252,29 @@ def decode_snapshot(body, serial, profile):
 
 
 def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
-            timeout_s=30.0, monotonic=time.monotonic, sleep=time.sleep, cancel=None):
+            timeout_s=30.0, monotonic=time.monotonic, sleep=time.sleep, cancel=None, environment='physical'):
     """Read at least nine unique atomic pairs covering >=8s (tracking warmup included); seal only on success.
 
     Failed captures retain partial NPZ evidence, but never a manifest/receipt.
     The callback is task-owned, hardware-gated at its call site, and returns bytes.
     """
     import numpy as np
-    validate_binding(profile,accepted_binding)
+    spec = namespace(environment)
+    validate_binding(profile,accepted_binding,environment=environment)
+    clock=clock_for_source(accepted_binding,environment)
     if not 0 < interval_s <= 1 or not 8 < timeout_s <= 120:
         raise ValueError('capture cadence must be <=1s with bounded timeout >8s')
     output=Path(output);output.mkdir(parents=True,exist_ok=False)
-    start=monotonic();rows=[];previous=None;seen=set();intrinsics=None;domain=None;original_intrinsics=None
+    start=monotonic();rows=[];previous=None;previous_clock=None;seen=set();intrinsics=None;domain=None;original_intrinsics=None
     while True:
         if cancel is not None and cancel():
             raise InterruptedError('观测阶段已中断')
         if monotonic()-start >= timeout_s:
             raise TimeoutError('physical observation did not produce nine pairs spanning eight seconds')
-        meta,stamp,frame,depth_frame,arrays=decode_snapshot(read_snapshot(),accepted_binding['camera_serials']['head'],profile)
+        meta,stamp,frame,depth_frame,arrays=decode_snapshot(read_snapshot(),accepted_binding['camera_serials']['head'],profile,
+            environment=environment,clock=clock,expected_owner=accepted_binding.get('capture_owner'))
+        current_clock=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},clock)
+        assert_progress(previous_clock,current_clock);previous_clock=current_clock
         current=(stamp,frame,depth_frame,meta['device_timestamp_ms'],meta['depth_device_timestamp_ms'])
         if meta['pair_id'] in seen or previous and any(a<=b for a,b in zip(current,previous)):
             raise ValueError('camera pair/timestamps repeated or regressed')
@@ -241,14 +285,21 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
         rows.append(dict(path=name,sha256=sha(output/name),source_stamp_ns=stamp,capture_sequence_id=len(rows),
                          pair_id=meta['pair_id'],frame_number=frame,depth_frame_number=depth_frame,
                          device_timestamp_ms=meta['device_timestamp_ms'],depth_device_timestamp_ms=meta['depth_device_timestamp_ms']))
+        if environment=='fake':
+            rows[-1].update(host_receive_ns=meta['host_receive_ns'],clock_domain=clock['clock_domain'],
+                source_clock_id=clock['source_clock_id'],source_time_ns=stamp,physics_step=meta['physics_step'],
+                timestamp_domain=meta['timestamp_domain'],
+                **owner_identity(meta,require_available=True))
         if len(rows)>=9 and stamp-rows[0]['source_stamp_ns']>=8_000_000_000:
             break
         sleep(interval_s)
-    manifest=dict(frame_id='d405_base_0_color_optical_frame',evidence_source='physical_rgbd',
+    manifest=dict(frame_id='d405_base_0_color_optical_frame',evidence_source=spec['evidence'],
                   robot_id=accepted_binding['robot_id'],camera_serials=deepcopy(accepted_binding['camera_serials']),
                   source_clock='host_receive_wall_ns',capture_hz=1/interval_s,
                   depth_convention='optical_z_m',camera_pose_convention='world_from_ros_optical',
                   intrinsics=intrinsics,original_intrinsics=original_intrinsics,rectification=meta['rectification'],device_timestamp_domain=domain,frames=rows)
+    if environment == 'fake':
+        manifest.update(environment='fake', simulation_only=True,clock=clock,source_clock='simulation',source_clock_id=clock['source_clock_id'])
     for name,value in [('profile.json',profile),('rgbd-manifest.json',manifest)]:
         (output/name).write_text(json.dumps(value,indent=2,allow_nan=False)+'\n')
     binding=deepcopy(accepted_binding)

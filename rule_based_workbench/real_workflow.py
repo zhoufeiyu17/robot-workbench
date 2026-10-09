@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from integration import _digest, _validate_scene, validate_profile
-from real_contract import validate_real_plan
+from real_contract import validate_real_plan, validate_real_source, namespace, validate_namespace, owner_matches_environment
 
 CAMERAS = ('base_0', 'left_wrist_0', 'right_wrist_0')
 FILES = {f'{side}-{camera}.mp4' for side in ('source','target') for camera in CAMERAS}
@@ -21,6 +21,7 @@ def read_object(path):
 def load(config):
     """Independent stages remain visible; invalid evidence is never displayed as ready."""
     result = dict(binding=None,source=None,plan=None,blockers=[])
+    environment=namespace(config.get('environment','physical'))['environment']
     names = dict(hardware_binding='本台真机已验收的标定与观测绑定',source_path='本轮真实 RGB-D 观测与检测场景',
                  plan_path='基于本轮真实场景的仿真验证轨迹')
     values = {}
@@ -36,32 +37,22 @@ def load(config):
     try:
         cameras = dict(zip(('head','left','right'), (config['cameras'][c]['serial'] for c in CAMERAS)))
         if binding is not None:
-            if (binding.get('calibration_accepted') is not True or binding.get('evidence_source') != 'physical_rgbd'
+            validate_namespace(binding,environment)
+            if (binding.get('calibration_accepted') is not True
                     or binding.get('robot_id') != config['robot_id'] or binding.get('camera_serials') != cameras
                     or not binding.get('calibration_profile_digest')):
                 raise ValueError('真实标定尚未验收，或机器人/相机身份与当前配置不同')
             result['binding'] = binding
         source = values.get('source_path')
         if source is not None and result['binding'] is not None:
-            if (source.get('schema_version') != 'physical_collection_source.v1' or source.get('evidence_source') != 'physical_rgbd'
-                    or source.get('robot_id') != config['robot_id'] or source.get('camera_serials') != cameras
-                    or source.get('lane') not in (None,'physical-real') or 'gpu' in source or 'instance_id' in source
-                    or source.get('adapter') not in (None,'foundationpose')
-                    or not isinstance(source.get('run_id'),str) or not source['run_id'].strip()
-                    or type(source.get('sequence')) is not int or source['sequence'] < 0):
-                raise ValueError('观测缺少真实采集身份，不能使用历史双 DSW 观测')
-            validate_profile(source.get('calibration_profile'))
-            _validate_scene(source.get('scene'))
-            if (binding.get('source_digest') != _digest(source)
-                    or binding['calibration_profile_digest'] != _digest(source['calibration_profile'])):
-                raise ValueError('真实观测/标定内容与本轮可信绑定不一致')
+            validate_real_source(source,binding,environment=environment)
             result['source'] = source
         plan = values.get('plan_path')
         if plan is not None and result['source'] is not None:
-            validate_real_plan(plan,source,binding)
+            validate_real_plan(plan,source,binding,environment=environment)
             from frozen_executor import FrozenExecutor
             frozen = FrozenExecutor(plan,source,sink=lambda _:None,gate=lambda:True,stop=lambda _:None,
-                                    source_validator=lambda p,s:validate_real_plan(p,s,binding))
+                                    source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment))
             if plan['control']['physics_hz']/plan['control']['substeps'] != 30:
                 raise ValueError('真实采集轨迹必须使用 30 Hz 冻结指令')
             result['plan'] = plan
@@ -71,19 +62,20 @@ def load(config):
 
 
 def summary(config, owner):
+    spec=namespace(config.get('environment','physical'))
     data = load(config)
     source, plan = data['source'],data['plan']
     profile = source['calibration_profile'] if source else None
     frozen = owner.get('frozen') or {}
-    matching = bool(plan and owner.get('mode') == 'hardware' and frozen.get('timeline_digest') == plan['timeline_digest'])
+    matching = bool(plan and owner_matches_environment(owner,spec['environment']) and frozen.get('timeline_digest') == plan['timeline_digest'])
     execution = frozen.get('status','waiting') if matching else 'waiting'
-    actual = owner.get('physical_feedback') if owner.get('mode') == 'hardware' else None
+    actual = owner.get('physical_feedback') if owner_matches_environment(owner,spec['environment']) else None
     recording, lanes = {}, []
     raw = (owner.get('recording') or {}).get('manifest') or {}
     if matching and raw.get('source_run_id') == source['run_id'] and raw.get('plan_run_id') == plan['run_id'] and raw.get('timeline_digest') == plan['timeline_digest']:
-        recording['physical-real'] = {**raw, 'validation': (raw.get('validation') or {}).get('status')}
+        recording[spec['lane']] = {**raw, 'validation': (raw.get('validation') or {}).get('status')}
     if matching and execution == 'completed':
-        lanes.append('physical-real')
+        lanes.append(spec['lane'])
     target_rows = []
     if source and plan and config.get('artifact_dir') and config.get('render_replay', True) is not False:
         root = Path(config['artifact_dir'])
@@ -118,7 +110,7 @@ def summary(config, owner):
                      jaw_opening_mm=dict(left=actual['left_gripper'],right=actual['right_gripper']),
                      measured_state=actual,sample_age_s=owner.get('sample_age_s'),
                      event=frozen.get('reason'),grasp_state=None)]
-    return dict(state=actual,adapters={
+    result = dict(state=actual,adapters={
         'calibration':dict(status='ready' if data['binding'] else 'awaiting-profile',detail='已验收的真实标定' if data['binding'] else '等待本台真机标定验收'),
         'online_detection':dict(status='ready' if source else 'awaiting-5s-window',detail='真实 RGB-D 观测' if source else '等待真实观测与检测产物'),
         'simulation':dict(status='planned' if plan else 'awaiting-scene',detail='同一冻结指令' if plan else '等待真实场景仿真规划'),
@@ -140,8 +132,17 @@ def summary(config, owner):
                                          frozen=frozen if matching else None),
                            'target':dict(rows=target_rows[-180:],row_count=len(target_rows),latest=target_rows[-1] if target_rows else None,failure=None)},
         live_preview={'source':None,'target':None},pipeline_configured=bool(plan),evidence={},
-        workflow=dict(mode='real_robot',ready=not blockers and bool(plan),stages=stages,blockers=blockers,
+        workflow=dict(mode=spec['mode'],environment=spec['environment'],environment_label=spec['label'],ready=not blockers and bool(plan),stages=stages,blockers=blockers,
                       execution_requires_operator_confirmation=True))
+    if spec['environment']=='fake':
+        result['pipeline']['schema_version']='fake_device_collection_pipeline.v1'
+        result['pipeline']['source_lane']['adapter']='fake-device-rgbd'
+        result['pipeline']['alignment_scope']='同一份fake设备观测与冻结指令；不代表真机验收'
+        for value in result['adapters'].values():
+            value['detail']=value['detail'].replace('真实','fake设备').replace('真机','fake设备')
+        for stage in result['workflow']['stages']:
+            stage['label']=stage['label'].replace('真实','fake设备').replace('真机','fake设备')
+    return result
 
 
 @lru_cache(maxsize=24)
@@ -155,6 +156,7 @@ def file_digest(path, modified_ns, changed_ns, size):
 
 
 def playback(config):
+    spec=namespace(config.get('environment','physical'))
     data = load(config)
     source,plan = data['source'],data['plan']
     empty = dict(clock='elapsed',status='unavailable',run_id=None,timeline_digest=None,
@@ -171,13 +173,15 @@ def playback(config):
         manifest = read_object(manifest_path)
         source_only = config.get('render_replay', True) is False
         expected_files = {f'source-{c}.mp4' for c in CAMERAS} if source_only else FILES
-        provenance = {'source':'physical_rgbd'} if source_only else {'source':'physical_rgbd','target':'simulation'}
-        if (manifest.get('schema_version') != 'physical_workbench_playback.v1' or manifest.get('mode') != 'real_robot'
+        provenance = {'source':spec['evidence']} if source_only else {'source':spec['evidence'],'target':'simulation'}
+        if (manifest.get('schema_version') != spec['playback_schema'] or manifest.get('mode') != spec['mode']
                 or manifest.get('clock') != 'elapsed' or manifest.get('source_run_id') != source['run_id']
                 or manifest.get('plan_run_id') != plan['run_id'] or manifest.get('timeline_digest') != plan['timeline_digest']
                 or manifest.get('provenance') != provenance
                 or set(manifest.get('files',{})) != expected_files):
             raise ValueError('physical replay identity/provenance differs from this run')
+        if spec['environment']=='fake' and manifest.get('source_clock')!=source.get('clock'):
+            raise ValueError('fake playback source clock differs from this run')
         paths = {}
         for name,record in manifest['files'].items():
             path = root/name
@@ -226,6 +230,7 @@ def live_preview(config, side, camera='base_0'):
 
 
 def image_evidence(config, name):
+    spec=namespace(config.get('environment','physical'))
     if name not in ('source.png','target.png','detection.png') or not config.get('artifact_dir'):
         return None
     data = load(config)
@@ -235,11 +240,11 @@ def image_evidence(config, name):
     try:
         if (root/'evidence.json').is_symlink(): return None
         evidence = read_object(root/'evidence.json')
-        if evidence.get('schema_version') != 'physical_collection_evidence.v1': return None
+        if evidence.get('schema_version') != ('fake_device_collection_evidence.v1' if spec['environment']=='fake' else 'physical_collection_evidence.v1'): return None
         row = evidence['images'][name]
         if (row.get('source_run_id') != source['run_id'] or row.get('source_sequence') != source['sequence']
                 or row.get('scene_digest') != source['scene']['scene_digest']
-                or row.get('evidence_source') != ('simulation' if name == 'target.png' else 'physical_rgbd')
+                or row.get('evidence_source') != ('simulation' if name == 'target.png' else spec['evidence'])
                 or name == 'target.png' and row.get('plan_run_id') != plan['run_id']): return None
         path = root/row['path']
         if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file(): return None
@@ -278,7 +283,7 @@ def resolve_raw_source(config, owner_recording):
     if sealed.is_symlink() or not sealed.is_file():
         raise ValueError('本地 raw 尚未封存，或 manifest 是符号链接')
     manifest = read_object(sealed)
-    if (manifest.get('schema_version') != 'physical_raw_dataset.v1'
+    if (manifest.get('schema_version') != namespace(config.get('environment','physical'))['raw_schema']
             or type(manifest.get('sealed_wall_ns')) is not int or manifest['sealed_wall_ns'] <= 0
             or manifest.get('capture_status') not in ('complete', 'incomplete')):
         raise ValueError('本地 raw 缺少有效封存回执')
@@ -307,7 +312,8 @@ def finalize_collection(config, owner_recording, *, runner=None):
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:
             return dict(status='finalizing',task_outcome='unverified')
-        receipt=dict(schema_version='physical_collection_finalization.v1',status='failed',
+        environment=config.get('environment','physical')
+        receipt=dict(schema_version='fake_device_collection_finalization.v1' if environment=='fake' else 'physical_collection_finalization.v1',status='failed',
                      replay_ready=False,raw_complete=False,task_outcome='unverified',updated_wall_ns=time.time_ns())
         try:
             data=load(config)
@@ -316,7 +322,8 @@ def finalize_collection(config, owner_recording, *, runner=None):
             source,plan=data['source'],data['plan']
             receipt.update(source_run_id=source['run_id'],plan_run_id=plan['run_id'],timeline_digest=plan['timeline_digest'])
             raw_root=resolve_raw_source(config, owner_recording)
-            raw,recorded_source,recorded_plan=verify_raw(raw_root)
+            environment=config.get('environment','physical')
+            raw,recorded_source,recorded_plan=verify_raw(raw_root,environment=environment)
             if _digest(recorded_source)!=_digest(source) or _digest(recorded_plan)!=_digest(plan):
                 raise ValueError('本地 raw 与当前真实 source/plan 不一致')
             reported=owner_recording.get('manifest') or {}
@@ -345,7 +352,7 @@ def finalize_collection(config, owner_recording, *, runner=None):
                 if manifest.get('raw_manifest_sha256')!=raw_hash or manifest.get('target_manifest_sha256')!=target_hash:
                     raise ValueError('已有回放与本轮 raw/target manifest 不一致')
             else:
-                manifest=export_playback(raw_root,target,output,runner=runner or subprocess.run)
+                manifest=export_playback(raw_root,target,output,runner=runner or subprocess.run,environment=environment)
             receipt.update(status='ready' if raw_complete else 'failed',replay_ready=True,raw_complete=raw_complete,
                            playback_manifest=str(output/'manifest.json'),target_manifest_sha256=target_hash)
             if not raw_complete:

@@ -36,11 +36,12 @@ class UnifiedRuntimeTest(unittest.TestCase):
                     runtime.tick()
                 runtime.close()
 
-    def create(self, *, device='robot', environment='fake', initialize=True, q=None):
-        runtime = Runtime(calibration, Safety, lambda:ClockBackend(lambda:self.sim, q),
+    def create(self, *, device='robot', environment='fake', initialize=True, q=None, mapping=None, binding=None):
+        runtime = Runtime(calibration, Safety, lambda:ClockBackend(lambda:self.sim, q,
+            source_clock_id='cpu-fake-device-clock-v1' if environment=='fake' else None),
             device_id=device, environment=environment, lock_root=self.directory.name,
             initialize_backend=(lambda b:b.set_damping_hold(manual=True)) if initialize else None,
-            control_clock=lambda:self.sim)
+            control_clock=lambda:self.sim,jaw_mapping_file=mapping,hardware_binding=binding)
         credentials = {business:runtime.register_business(business) for business in ('calibration','collection')}
         self.runtimes.append((runtime, credentials))
         self.advance(runtime, 42)
@@ -63,12 +64,14 @@ class UnifiedRuntimeTest(unittest.TestCase):
             confirmation='START_REVIEWED_SINGLE_ARM', physical_clearance=True))
 
     def test_actual_calibration_then_collection_and_back_preserve_position_hold(self):
-        source, plan = fixture()
-        plan['stages'] = [dict(name='return_home', start_tick=0, end_tick=3)]
+        from test_collection_physx_protocol import protocol_fixture
+        _,source,plan,_,mapping=protocol_fixture(Path(self.directory.name))
         first = plan['ticks'][0]['target']
         q = [*first['left_arm_joints'], jaw.feedback_sdk('left', first['left_gripper']),
              *first['right_arm_joints'], jaw.feedback_sdk('right', first['right_gripper'])]
-        runtime, creds = self.create(q=q)
+        jaw.configure_mapping(mapping)
+        q[6],q[13]=jaw.feedback_sdk('left',first['left_gripper']),jaw.feedback_sdk('right',first['right_gripper'])
+        runtime, creds = self.create(q=q,mapping=mapping,binding=Path(self.directory.name)/'binding.json')
         self.confirm(runtime, creds['calibration'], self.preview(runtime, creds['calibration']))
         self.advance(runtime, 200)
         self.assertEqual(runtime.owner.runner.status, 'READY')
@@ -95,6 +98,34 @@ class UnifiedRuntimeTest(unittest.TestCase):
         self.advance(runtime, 40)
         self.assertEqual(len(events), before)
         self.assertEqual(runtime.snapshot(creds['calibration'])['hold'], dict(left='position', right='position'))
+
+    def test_same_trajectory_reapproval_has_a_new_execution_instance(self):
+        runtime,creds=self.create()
+        q=runtime.owner.cache['calibration_feedback']['qpos'][:]
+        ids=[]
+        for _ in range(2):
+            review=runtime.submit(creds['calibration'],dict(action='preview',active_arm='left',q_target=q))
+            self.confirm(runtime,creds['calibration'],review)
+            self.advance(runtime,150)
+            self.assertEqual(runtime.owner.runner.status,'READY')
+            bound=runtime.snapshot(creds['calibration'])['execution_calibration']
+            ids.append(bound['execution_instance_id'])
+            self.assertEqual(runtime.owner.execution_instance_id,ids[-1])
+            self.assertEqual(runtime.snapshot(creds['calibration'])['execution_instance_id'],ids[-1])
+        self.assertNotEqual(ids[0],ids[1])
+        self.assertEqual(runtime.owner.epoch,0)
+
+    def test_native_task_status_is_a_small_independent_snapshot(self):
+        runtime,creds=self.create()
+        runtime.owner.native_task_status=dict(execution_timeline_digest='current',source_clock_id='plant',
+            task_outcome='unverifiable',task_qualified=False,receipt_path=None,receipt_sha256=None,
+            large_observations=['not part of lightweight status'])
+        state=runtime.snapshot(creds['calibration'])
+        self.assertFalse(state['native_task']['task_qualified'])
+        self.assertNotIn('large_observations',state['native_task'])
+        state['native_task']['task_outcome']='changed'
+        self.assertEqual(runtime.owner.native_task_status['task_outcome'],'unverifiable')
+        self.assertEqual(runtime.owner.control.state,runtime.owner.states.READY)
 
     def test_identity_lock_namespace_and_stale_runtime_credential(self):
         runtime, creds = self.create()
@@ -205,8 +236,10 @@ class UnifiedRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.snapshot(creds['calibration'])['hold'], dict(left='damping', right='damping'))
 
     def test_collection_preview_cannot_restore_token_after_handoff(self):
-        source, plan = fixture()
-        runtime, creds = self.create()
+        from test_collection_physx_protocol import protocol_fixture
+        _,source,plan,_,mapping=protocol_fixture(Path(self.directory.name))
+        runtime, creds = self.create(mapping=mapping,binding=Path(self.directory.name)/'binding.json')
+        runtime.owner.source_validator(plan,source)
         runtime.handoff(creds['calibration'], 'collection')
         entered, resume = threading.Event(), threading.Event()
         original, result = runtime.owner.source_validator, []
@@ -222,8 +255,192 @@ class UnifiedRuntimeTest(unittest.TestCase):
             resume.set(); worker.join(2.)
         self.assertFalse(worker.is_alive())
         self.assertIsInstance(result[0], ValueError)
+        self.assertIn('revoked',str(result[0]))
         self.assertFalse(runtime.owner.pending)
         self.assertFalse(runtime.owner.frozen_payloads)
+
+    def collection_case(self, name):
+        from test_collection_physx_protocol import protocol_fixture
+        directory = Path(self.directory.name)/name
+        directory.mkdir()
+        _, source, plan, _, mapping = protocol_fixture(directory)
+        jaw.configure_mapping(mapping)
+        first = plan['ticks'][0]['target']
+        q = [*first['left_arm_joints'], jaw.feedback_sdk('left', first['left_gripper']),
+             *first['right_arm_joints'], jaw.feedback_sdk('right', first['right_gripper'])]
+        runtime, creds = self.create(device=name, q=q, mapping=mapping, binding=directory/'binding.json')
+        runtime.handoff(creds['calibration'], 'collection')
+        return runtime, creds, dict(action='preview_frozen', source=source, plan=plan)
+
+    def test_install_revokes_unconfirmed_preview_without_changing_epoch_or_hold(self):
+        runtime, creds = self.create()
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        review = self.preview(runtime, creds['calibration'])
+        epoch, hold, events = runtime.owner.epoch, deepcopy(runtime.hold), list(runtime.owner.backend.events)
+        receipt = runtime.notify_calibration_installed('fixture-installed-v2')
+        self.assertTrue(receipt['revoked'])
+        self.assertFalse(runtime.owner.pending)
+        with self.assertRaisesRegex(ValueError, 'unknown or consumed'):
+            self.confirm(runtime, creds['calibration'], review)
+        self.assertEqual(runtime.owner.epoch, epoch)
+        self.assertEqual(runtime.hold, hold)
+        self.assertEqual(runtime.owner.backend.events, events)
+        state = runtime.snapshot(creds['calibration'])
+        self.assertEqual(state['calibration_snapshot_id'], 'fixture-installed-v2')
+        self.assertIsNone(state['execution_calibration'])
+        fresh = self.preview(runtime, creds['calibration'])
+        self.assertFalse(runtime.notify_calibration_installed('fixture-installed-v2')['revoked'])
+        self.assertIn(fresh['token'], runtime.owner.pending, 'same installed identity is idempotent')
+
+    def test_install_fences_queued_confirm_for_both_motion_strategies(self):
+        for business in ('calibration','collection'):
+            with self.subTest(business=business):
+                if business == 'collection':
+                    runtime, creds, command = self.collection_case('queued-collection')
+                else:
+                    runtime, creds = self.create(device='queued-calibration')
+                runtime.notify_calibration_installed('fixture-installed-v1')
+                review = (runtime.submit(creds[business], command) if business == 'collection'
+                          else self.preview(runtime, creds[business]))
+                self.confirm(runtime, creds[business], review)
+                self.assertFalse(runtime.owner.commands.empty())
+                epoch, events = runtime.owner.epoch, list(runtime.owner.backend.events)
+                runtime.notify_calibration_installed('fixture-installed-v2')
+                self.advance(runtime, 50)
+                self.assertIsNone(runtime.owner.runner)
+                self.assertIsNone(runtime.execution_calibration)
+                self.assertEqual(runtime.owner.epoch, epoch)
+                self.assertEqual(runtime.owner.backend.events, events, 'queued old plan reached the SDK')
+
+    def test_install_preserves_running_calibration_sequence(self):
+        runtime, creds = self.create()
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        review = runtime.submit(creds['calibration'], dict(action='preview_workbench', waypoints=[
+            dict(q=[q]+[0.]*11, speeds=[.1]*12) for q in (.01,.02)]))
+        self.confirm(runtime, creds['calibration'], review)
+        self.advance(runtime, 45)
+        self.assertEqual(runtime.owner.runner.status, 'RUNNING')
+        first, remaining = runtime.owner.runner.plan, tuple(runtime.owner.sequence_remaining)
+        epoch, holding = runtime.owner.epoch, deepcopy(runtime.hold)
+        accepted = deepcopy(runtime.execution_calibration)
+        runtime.notify_calibration_installed('fixture-installed-v2')
+        self.assertIs(runtime.owner.runner.plan, first)
+        self.assertEqual(tuple(runtime.owner.sequence_remaining), remaining)
+        self.assertEqual(runtime.owner.epoch, epoch)
+        self.assertEqual(runtime.hold, holding)
+        self.advance(runtime, 500)
+        self.assertEqual(runtime.owner.runner.status, 'READY', runtime.owner.runner.reason)
+        self.assertEqual(runtime.owner.runner.plan.sha256, review['plans'][-1]['sha256'])
+        self.assertAlmostEqual(runtime.owner.backend.q[0], .02)
+        self.assertEqual(runtime.execution_calibration, accepted)
+        self.assertEqual(accepted['snapshot_id'], 'fixture-installed-v1')
+
+    def test_install_after_owner_checks_but_before_acceptance_rejects_execution(self):
+        runtime, creds = self.create()
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        self.confirm(runtime, creds['calibration'], self.preview(runtime, creds['calibration']))
+        entered, resume = threading.Event(), threading.Event()
+        original = runtime.owner.accept_review
+        def pause(plans):
+            entered.set(); self.assertTrue(resume.wait(2.)); return original(plans)
+        events = list(runtime.owner.backend.events)
+        with patch.object(runtime.owner, 'accept_review', pause):
+            worker = threading.Thread(target=lambda:self.advance(runtime)); worker.start()
+            self.assertTrue(entered.wait(1.))
+            runtime.notify_calibration_installed('fixture-installed-v2')
+            resume.set(); worker.join(2.)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(runtime.owner.runner)
+        self.assertIsNone(runtime.execution_calibration)
+        self.assertEqual(runtime.owner.backend.events, events)
+
+    def test_install_between_acceptance_and_collection_runner_keeps_frozen_payload(self):
+        runtime, creds, command = self.collection_case('accepted-collection')
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        review = runtime.submit(creds['collection'], command)
+        self.confirm(runtime, creds['collection'], review)
+        entered, resume = threading.Event(), threading.Event()
+        original = runtime.owner.start_motion
+        def pause(*args, **kwargs):
+            entered.set(); self.assertTrue(resume.wait(2.)); return original(*args, **kwargs)
+        with patch.object(runtime.owner, 'start_motion', pause):
+            worker = threading.Thread(target=lambda:self.advance(runtime)); worker.start()
+            self.assertTrue(entered.wait(1.))
+            accepted = deepcopy(runtime.execution_calibration)
+            epoch = runtime.owner.epoch
+            self.assertEqual(accepted['snapshot_id'], 'fixture-installed-v1')
+            before = time.monotonic()
+            runtime.notify_calibration_installed('fixture-installed-v2')
+            self.assertLess(time.monotonic()-before, .1, 'install waited for the owner tick')
+            resume.set(); worker.join(2.)
+        self.assertFalse(worker.is_alive())
+        runner = runtime.owner.runner
+        self.assertTrue(hasattr(runner, 'frozen'), 'accepted collection degraded to a calibration runner')
+        payload = deepcopy(runner.payload)
+        self.assertEqual(payload, command)
+        for _ in range(2000):
+            self.advance(runtime)
+            if runner.status == 'READY':break
+        self.assertEqual(runner.status, 'READY', runner.reason)
+        self.assertEqual(runner.frozen.status, 'completed')
+        self.assertEqual(runner.payload, payload)
+        self.assertEqual(runtime.owner.epoch, epoch)
+        self.assertEqual(runtime.execution_calibration, accepted)
+
+    def test_install_rejects_late_preview_without_waiting_for_compilation(self):
+        runtime, creds = self.create()
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        entered, resume = threading.Event(), threading.Event()
+        original, result = calibration.make_plan, []
+        def slow(*args, **kwargs):
+            entered.set(); self.assertTrue(resume.wait(2.)); return original(*args, **kwargs)
+        def preview():
+            try:result.append(self.preview(runtime, creds['calibration']))
+            except Exception as error:result.append(error)
+        with patch.object(calibration, 'make_plan', slow):
+            worker = threading.Thread(target=preview); worker.start()
+            self.assertTrue(entered.wait(1.))
+            epoch = runtime.owner.epoch
+            before = time.monotonic()
+            runtime.notify_calibration_installed('fixture-installed-v2')
+            self.assertLess(time.monotonic()-before, .1)
+            resume.set(); worker.join(2.)
+        self.assertFalse(worker.is_alive())
+        self.assertIsInstance(result[0], ValueError)
+        self.assertIn('revoked', str(result[0]))
+        self.assertFalse(runtime.owner.pending)
+        self.assertFalse(runtime.reviewed_plans)
+        self.assertEqual(runtime.owner.epoch, epoch)
+
+    def test_install_does_not_wait_for_sdk_and_stop_stays_independent(self):
+        runtime, creds = self.create()
+        runtime.notify_calibration_installed('fixture-installed-v1')
+        self.confirm(runtime, creds['calibration'], self.preview(runtime, creds['calibration']))
+        backend = runtime.owner.backend._backend
+        entered, resume = threading.Event(), threading.Event()
+        original = backend.send
+        def blocked(*args):
+            entered.set(); self.assertTrue(resume.wait(2.)); return original(*args)
+        def run_until_send():
+            for _ in range(60):
+                self.advance(runtime)
+                if entered.is_set():break
+        with patch.object(backend, 'send', blocked):
+            worker = threading.Thread(target=run_until_send); worker.start()
+            self.assertTrue(entered.wait(1.))
+            epoch = runtime.owner.epoch
+            before = time.monotonic()
+            runtime.notify_calibration_installed('fixture-installed-v2')
+            self.assertLess(time.monotonic()-before, .1)
+            self.assertEqual(runtime.owner.epoch, epoch)
+            receipt = runtime.submit(creds['collection'], dict(action='stop'))
+            self.assertFalse(receipt['stop']['stop_hold_return_confirmed'])
+            self.assertEqual(receipt['stop']['in_flight_calls'][0]['operation'], 'send')
+            resume.set(); worker.join(2.)
+        self.assertFalse(worker.is_alive())
+        self.advance(runtime)
+        self.assertTrue(runtime.snapshot(creds['calibration'])['stop_receipt']['stop_hold_return_confirmed'])
+        self.assertEqual(runtime.hold, dict(left='damping', right='damping'))
 
     def test_one_hundred_fixed_request_tick_handoff_schedules(self):
         # Replay the first 100 lexicographic orderings; two blocking-thread tests

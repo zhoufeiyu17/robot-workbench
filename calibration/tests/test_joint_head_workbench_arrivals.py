@@ -18,3 +18,11 @@ class ArrivalAssociationTest(unittest.TestCase):
         self.assertEqual(rows[0]['batch_id'],'batch/capture')
         self.assertEqual(rows[0]['workflow'],'head')
         self.assertEqual(rows[0]['status'],'success')
+
+    def test_arrival_capability_uses_full_owner_not_normalized_identity(self):
+        host=SimpleNamespace(calibration_root=Path('/isolated'),robot_source=lambda:'simulated',
+            hardware_feedback={'owner':{'pid':10},'raw_owner':{'pid':10,'arrival_events':[]}},
+            arrival_store=lambda source:SimpleNamespace(summary=lambda:{'total_count':0}))
+        self.assertTrue(Workbench.arrival_state(host)['recording_supported'])
+        host.hardware_feedback['raw_owner']={'pid':10}
+        self.assertFalse(Workbench.arrival_state(host)['recording_supported'])

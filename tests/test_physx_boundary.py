@@ -31,20 +31,53 @@ class LaggingPlant:
 
 
 class BoundaryTest(unittest.TestCase):
+    def test_collection_context_is_atomic_and_describes_only_applied_targets(self):
+        from types import SimpleNamespace as NS
+        backend=PhysxBackend(LaggingPlant(),joint_offsets=[0.]*12)
+        row=dict(source_tick=None,stage='initialize')
+        runner=NS(runtime={'timeline_digest':'execution-one'},frozen=NS(command_index=0,ticks=[row]))
+        backend.owner=NS(epoch=3,runtime_nonce='runtime-one',runner=runner,stop_requested=False,release_requested=False)
+        q=[0.]*14;q[6]=command_sdk('left',40.);q[13]=command_sdk('right',40.)
+        backend.send('left',q);backend.send('right',q)
+        self.assertEqual(backend.applied_contexts,dict(left=None,right=None))
+        backend.advance(1/240)
+        expected=dict(execution_id='execution-one',execution_tick=0,source_tick=None,stage='initialize',
+                      execution_instance_id=None,
+                      runtime_nonce='runtime-one',command_epoch=3)
+        self.assertEqual(backend.applied_contexts,dict(left=expected,right=expected))
+        runner.frozen.command_index=1
+        before=backend.sequence
+        with self.assertRaises(ValueError):backend.send('left',q)
+        self.assertEqual((backend.sequence,backend.pending,backend.pending_contexts),(before,{},{}))
+        runner.frozen.command_index=0
+        backend.send('left',q);backend.owner.epoch+=1;backend.advance(2/240)
+        self.assertEqual(backend.applied_contexts['left'],expected)
+        backend.set_damping_hold()
+        self.assertEqual(backend.applied_contexts,dict(left=None,right=None))
+
     def test_readback_trace_is_bounded_and_preserves_steps_targets_and_rendering(self):
         import json
         import numpy as np
         from types import SimpleNamespace
         class Tensor(np.ndarray):
             def cpu(self): return self
-        def exercise(limit):
+        def exercise(limit, initial_step=0, failed_step=None):
             plant = IsaacPlant.__new__(IsaacPlant)
             state = np.zeros((1, 16)).view(Tensor)
             data = SimpleNamespace(joint_pos=state, joint_vel=state.copy(),
                                    joint_pos_target=state.copy(), _sim_timestamp=0.,
                                    _joint_pos=SimpleNamespace(timestamp=0.),
                                    _joint_vel=SimpleNamespace(timestamp=0.))
-            sent, renders, steps = [], [], []
+            sent, renders, steps, contacts = [], [], [], []
+            reader = SimpleNamespace(callback_reports=[], last_statistics={})
+            def begin(step):
+                contacts.append(('begin', step));reader.callback_reports.clear()
+            def read(step):
+                contacts.append(('read', step))
+                if step == failed_step:raise ValueError('contact transport failure fixture')
+                reader.last_statistics = dict(physics_step=step, available=True)
+                return ('contact-fixture',)
+            reader.begin_step,reader.read = begin,read
             def send(target):
                 data.joint_pos_target[:] = target
                 sent.append(target.copy())
@@ -52,6 +85,7 @@ class BoundaryTest(unittest.TestCase):
             def step(*, render):
                 self.assertFalse(render)
                 steps.append(True)
+                reader.callback_reports.append({'fixture':True})
                 data.joint_vel[:] = (data.joint_pos_target-data.joint_pos)*240
                 data.joint_pos[:] = data.joint_pos_target
                 sim.current_time += 1/240
@@ -64,7 +98,8 @@ class BoundaryTest(unittest.TestCase):
                 root_physx_view=SimpleNamespace(get_dof_positions=lambda: data.joint_pos.copy(),
                                                get_dof_velocities=lambda: data.joint_vel.copy()))
             plant.env = SimpleNamespace(scene=SimpleNamespace(write_data_to_sim=lambda: None, update=update),
-                _sim_step_counter=0, physics_dt=1/240, sim=sim,
+                _sim_step_counter=initial_step, physics_dt=1/240, sim=sim,
+                _m2_contact_reader=reader,
                 cfg=SimpleNamespace(sim=SimpleNamespace(render_interval=8)),
                 _m2_runtime=SimpleNamespace(_render=lambda: renders.append(True), absolute_step=0))
             plant.projection = SimpleNamespace(indices={'left': list(range(8)), 'right': list(range(8,16))})
@@ -73,6 +108,7 @@ class BoundaryTest(unittest.TestCase):
             plant.trace_reference, plant.trace_context = state.tolist(), lambda: {}
             for i in range(84):
                 plant.step({'left': ([0.] if i < 4 else [.01+(i-4)*.001])+[0.]*6, 'right': [0.]*7})
+            plant.contact_calls=contacts
             return plant, sent, renders, steps
         traced, sent, renders, steps = exercise(48)
         plain, plain_sent, plain_renders, plain_steps = exercise(0)
@@ -86,6 +122,15 @@ class BoundaryTest(unittest.TestCase):
         np.testing.assert_array_equal(sent, plain_sent)
         self.assertEqual(plain.readback_trace, [])
         json.dumps(traced.readback_trace, allow_nan=False)
+        resident, _, _, _ = exercise(0, initial_step=60, failed_step=66)
+        self.assertEqual(resident.contact_calls,[(kind,step) for step in range(61,145) for kind in ('begin','read')])
+        self.assertEqual(resident.env._m2_runtime.absolute_step,144)
+        self.assertEqual(resident.env._m2_contact_reader.callback_reports,[])
+        self.assertEqual(resident.contact_error_count,1)
+        self.assertEqual(resident.first_contact_error['absolute_physics_step'],66)
+        self.assertFalse(resident.first_contact_error['complete'])
+        self.assertTrue(resident.contact_status['complete'])
+        self.assertEqual(resident.env._m2_runtime.latest_contacts,('contact-fixture',))
 
     def test_two_latches_one_step_measured_feedback_and_revocation(self):
         plant = LaggingPlant()
@@ -127,6 +172,22 @@ class BoundaryTest(unittest.TestCase):
         for _ in range(240):clock.advance(owner,backend,physics=False)
         self.assertEqual(backend.read_calibration_state(),last)
         self.assertGreater(clock()-last['sample_time_s'],.1)
+
+    def test_source_identity_and_integer_step_clock_cannot_restart_or_skip(self):
+        backend = PhysxBackend(LaggingPlant(), joint_offsets=[0.]*12)
+        other = PhysxBackend(LaggingPlant(), joint_offsets=[0.]*12)
+        self.assertNotEqual(backend.source_clock_id, other.source_clock_id)
+        for step in range(1, 11):
+            backend.advance(step/240)
+            row = backend.read_calibration_state()
+            self.assertEqual(row['source_clock_id'], backend.source_clock_id)
+            self.assertEqual(row['source_time_ns'], step*1_000_000_000//240)
+            self.assertEqual(row['physics_step'], step)
+            self.assertEqual(row['timestamp_kind'], 'simulation_step')
+        before = backend.read_calibration_state()
+        for invalid in (0., 10/240, 12/240, float('nan'), True):
+            with self.assertRaises(ValueError):backend.advance(invalid)
+            self.assertEqual(backend.read_calibration_state(), before)
 
 
 if __name__ == '__main__':
