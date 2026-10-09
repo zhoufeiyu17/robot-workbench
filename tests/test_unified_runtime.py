@@ -75,6 +75,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
         self.confirm(runtime, creds['calibration'], self.preview(runtime, creds['calibration']))
         self.advance(runtime, 200)
         self.assertEqual(runtime.owner.runner.status, 'READY')
+        self.assertTrue(runtime.snapshot(creds['calibration'])['position_hold_active'])
         old_runner, events = runtime.owner.runner, runtime.owner.backend.events
         before = len(events)
         runtime.handoff(creds['calibration'], 'collection')
@@ -83,6 +84,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
             self.advance(runtime, 50)
         self.assertEqual(len(events), before, 'handoff sent targets, damping or release')
         self.assertEqual(runtime.snapshot(creds['collection'])['hold']['left'], 'position')
+        self.assertFalse(runtime.snapshot(creds['collection'])['position_hold_active'])
         review = runtime.submit(creds['collection'], dict(action='preview_frozen', source=source, plan=plan))
         self.confirm(runtime, creds['collection'], review)
         for _ in range(2000):
@@ -92,6 +94,12 @@ class UnifiedRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.owner.runner.status, 'READY', runtime.owner.runner.reason)
         self.assertTrue(hasattr(runtime.owner.runner, 'frozen'))
         self.assertEqual(runtime.owner.runner.frozen.status, 'completed')
+        state=runtime.snapshot(creds['collection'])
+        self.assertTrue(state['position_hold_active']);self.assertGreater(state['maximum_control_gap_s'],0)
+        self.assertEqual(state['physical_feedback']['left_arm_joints'],state['calibration_feedback']['qpos'][:6])
+        self.assertEqual(state['execution_timeline']['timeline_digest'],runtime.owner.runner.runtime['timeline_digest'])
+        from jaw_mapping_v2 import MAPPING_ID
+        self.assertEqual(state['collection_jaw_mapping'],MAPPING_ID)
         self.advance(runtime, 40)
         before = len(events)
         runtime.handoff(creds['collection'], 'calibration')

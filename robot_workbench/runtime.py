@@ -367,8 +367,7 @@ class Runtime:
             with self.owner.lock:
                 state = deepcopy(self.owner.cache)
             owner=self.owner
-            state['recording_configured']=owner.recording_factory is not None
-            state['recording_error']=owner.recording_error
+            state=owner.cached_snapshot_fields(state)
             native=getattr(owner,'native_task_status',None)
             state['native_task']=({key:deepcopy(native[key]) for key in (
                 'execution_instance_id','execution_timeline_digest','source_clock_id','task_outcome','task_qualified',
@@ -385,18 +384,6 @@ class Runtime:
                     directory=str(root) if root else None,
                     manifest_path=str(root/'manifest.json') if root and manifest else None,
                     manifest={k:deepcopy(v) for k,v in manifest.items() if k!='files'} if manifest else None)
-            raw=state.get('calibration_feedback')
-            if raw:
-                from arx_env.joint_head_jaw_mapping import feedback_gaps
-                state['sample_age_s']=max(0.,owner.control_time()-raw['sample_time_s'])
-                state['jaw_gap_mm']=feedback_gaps(raw['qpos'])
-            runner=owner.runner
-            if runner is not None and getattr(runner,'runtime',None) is not None:
-                timeline=runner.runtime
-                state['execution_timeline']=dict(path=str(getattr(runner,'runtime_path',None) or ''),
-                    timeline_digest=timeline['timeline_digest'],duration_s=timeline['duration_s'],
-                    initialization_duration_s=timeline['initialization_duration_s'],control_hz=timeline['control_hz'],
-                    command_count=len(timeline['commands']),parent_timeline_digest=timeline['parent_timeline_digest'])
             state.update(device_id=self.device_id, environment=self.environment, runtime_nonce=self.nonce,
                 holder=self.holder, command_epoch=self.owner.epoch, hold=deepcopy(self.hold),
                 calibration_revision=self.calibration_revision, calibration_snapshot_id=self.calibration_snapshot_id,

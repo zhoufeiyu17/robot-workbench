@@ -1,9 +1,13 @@
 """Existing calibration HTTP protocol uses the shared Owner and fake reader."""
 from pathlib import Path
+from copy import deepcopy
 import json
 import sys
+import threading
 import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from tempfile import TemporaryDirectory
 from urllib.request import Request,build_opener,ProxyHandler
 from urllib.error import HTTPError
@@ -16,6 +20,75 @@ from arx_env.joint_head_workbench_hardware import HardwareReadAdapter
 
 
 class SharedBridgeTest(unittest.TestCase):
+    def test_collection_initial_sample_after_handoff_uses_cached_feedback_while_IO_blocks(self):
+        with TemporaryDirectory() as folder:
+            device=protocol_fake(Path(folder))
+            tokens={'calibration':'c'*40,'collection':'d'*40}
+            server,thread=start_control_gateway(device,tokens)
+            url='http://127.0.0.1:'+str(server.server_port);http=build_opener(ProxyHandler({}));seen=[]
+            sdk_entered,sdk_resume,record_entered,record_resume=(threading.Event() for _ in range(4))
+            recorder_thread=None
+            def read_owner():
+                value=json.loads(http.open(url+'/state',timeout=.5).read());seen.append(value);return value
+            try:
+                request=Request(url+'/api/acquire',json.dumps({'confirmation':'ARMS_SUPPORTED_CONNECT'}).encode(),
+                    headers={'Authorization':'Bearer '+tokens['calibration'],'Content-Type':'application/json'})
+                http.open(request,timeout=1).read()
+                from real_observation import read_initial_sample
+                from arx_env.joint_head_jaw_mapping import feedback_gaps,mapping_identity
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline and not read_owner().get('stationary'):time.sleep(.01)
+                with self.assertRaisesRegex(ValueError,'stationary'):
+                    read_initial_sample(read_owner,environment='fake')
+                while True:
+                    try:device.runtime.handoff(device.credentials['calibration'],'collection');break
+                    except ValueError:
+                        if time.monotonic()>=deadline:raise
+                        time.sleep(.005)
+                owner=device.runtime.owner
+                with patch.object(owner,'snapshot',side_effect=AssertionError('full Owner snapshot is forbidden')):
+                    physical,evidence=read_initial_sample(read_owner,environment='fake')
+                    raw=seen[-1]['calibration_feedback']
+                    self.assertEqual(physical['left_arm_joints'],raw['qpos'][:6])
+                    self.assertEqual(physical['right_arm_joints'],raw['qpos'][7:13])
+                    self.assertEqual([physical['left_gripper'],physical['right_gripper']],feedback_gaps(raw['qpos']))
+                    for key in ('source_clock_id','source_time_ns','physics_step','sample_wall_ns','sample_time_s'):
+                        self.assertEqual(evidence[key],raw[key])
+                    self.assertEqual(evidence['runtime_nonce'],device.runtime.nonce)
+                    self.assertEqual(seen[-1]['collection_jaw_mapping'],mapping_identity()['version'])
+                    self.assertFalse(seen[-1]['position_hold_active']);self.assertIsNone(seen[-1]['maximum_control_gap_s'])
+                    self.assertIsNone(owner.runner);self.assertIsNone(device.runtime.execution_calibration)
+                    backend=owner.backend._backend;original=backend.read_calibration_state
+                    def stuck_read():
+                        sdk_entered.set();sdk_resume.wait(3);return original()
+                    def stuck_record_snapshot():
+                        record_entered.set();record_resume.wait(3);return {}
+                    recorder=SimpleNamespace(ready=threading.Event(),done=threading.Event(),error=None,
+                        root=Path(folder)/'recording',manifest={'files':{},'capture_status':'running'},controller_result=None,
+                        snapshot=stuck_record_snapshot)
+                    recorder_thread=threading.Thread(target=recorder.snapshot);recorder.thread=recorder_thread
+                    owner.recording=recorder;recorder_thread.start();self.assertTrue(record_entered.wait(.5))
+                    with patch.object(backend,'read_calibration_state',stuck_read):
+                        self.assertTrue(sdk_entered.wait(.5))
+                        cached=deepcopy(owner.cache['calibration_feedback']);started=time.monotonic();blocked=read_owner()
+                        self.assertLess(time.monotonic()-started,.2,'status must not wait for SDK or recorder locks')
+                        self.assertEqual(blocked['calibration_feedback'],cached)
+                        self.assertEqual(blocked['physical_feedback']['left_arm_joints'],cached['qpos'][:6])
+                        self.assertTrue(blocked['sdk_calls_in_flight']);self.assertFalse(blocked['recording']['done'])
+                        time.sleep(.12)
+                        with self.assertRaisesRegex(ValueError,'fresh healthy'):
+                            read_initial_sample(read_owner,environment='fake')
+                        self.assertEqual(seen[-1]['calibration_feedback'],cached,'reading status must not refresh a frozen source clock')
+                        sdk_resume.set()
+            finally:
+                sdk_resume.set();record_resume.set()
+                if recorder_thread:recorder_thread.join(1)
+                if device.runtime:
+                    device.runtime.owner.recording=None
+                    device.submit(device.runtime.holder,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
+                    device.thread.join(1);device.runtime.close()
+                device.closed.set();server.shutdown();server.server_close();thread.join(1)
+
     def test_old_calibration_client_reads_fake_and_cannot_cross_business(self):
         with TemporaryDirectory() as folder:
             device=protocol_fake(Path(folder));device.connect({})

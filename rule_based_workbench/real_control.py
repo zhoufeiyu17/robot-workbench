@@ -392,8 +392,8 @@ def classes(ref, *, jaw_mapping_file=None):
         def tick(self):
             return self.timing_probe.call('owner_tick', super().tick)
 
-        def snapshot(self):
-            result = super().snapshot()
+        def cached_snapshot_fields(self, result):
+            """Derive collection fields from copied feedback; no SDK or recorder IO."""
             raw = result.get('calibration_feedback')
             if raw:
                 result['sample_age_s'] = max(0., self.control_time()-raw['sample_time_s'])
@@ -401,11 +401,10 @@ def classes(ref, *, jaw_mapping_file=None):
                 result['jaw_gap_mm'] = feedback_gaps(raw['qpos'])
             result['recording_configured'] = self.recording_factory is not None
             result['collection_jaw_mapping'] = mapping_id
-            result['recording'] = self.recording.snapshot() if self.recording else None
             result['recording_error'] = self.recording_error
             runner=self.runner
             result['position_hold_active']=bool(runner is not None and runner.status=='READY'
-                and self.backend.is_connected and self.control.state is self.states.READY)
+                and result.get('connected') is True and result.get('state')==self.states.READY.value)
             result['maximum_control_gap_s']=getattr(runner,'maximum_control_gap_s',None)
             if runner is not None and getattr(runner,'runtime',None) is not None:
                 result['execution_timeline']=dict(path=str(getattr(runner,'runtime_path',None) or ''),
@@ -413,6 +412,11 @@ def classes(ref, *, jaw_mapping_file=None):
                     initialization_duration_s=runner.runtime['initialization_duration_s'],
                     control_hz=runner.runtime['control_hz'],command_count=len(runner.runtime['commands']),
                     parent_timeline_digest=runner.runtime['parent_timeline_digest'])
+            return result
+
+        def snapshot(self):
+            result = self.cached_snapshot_fields(super().snapshot())
+            result['recording'] = self.recording.snapshot() if self.recording else None
             return result
 
         def recording_failed(self, reason):
