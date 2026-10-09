@@ -49,7 +49,12 @@ class Session:
         self.stopped = threading.Event()
         self.pending = None
         self.preview = None
+        self.last_preview_pose = None
         self.preview_revision = -1
+        self.renderer_instance_id = uuid.uuid4().hex
+        self.frame_metadata = {}
+        self.overview_revision = 0
+        self.overview_requested_revision = 0
         self.last_preview_received = float('-inf')
         self.last_overlay_started = float('-inf')
         self.last_wrist_overlay_started = float('-inf')
@@ -102,6 +107,7 @@ class Session:
             self.client_seen = time.monotonic()
             self.expire_mirror()
             return {'mode': 'simulation', 'mesh_rendering_enabled':self.mesh_rendering_enabled, 'state': self.status, 'status': self.status,
+                    'renderer_instance_id':self.renderer_instance_id,'overview_revision':self.overview_revision,
                     **self.asset_identity,
                     'jaw_gap_mm':self.jaw_mm.tolist(), 'q': self.q.tolist(), 'qpos12': self.q.tolist(), 'timestamp_s': self.updated,
                     'age_s': max(0, time.time()-self.updated), 'preview_revision': self.preview_revision,
@@ -175,8 +181,13 @@ class Session:
             return {'enabled':self.mesh_rendering_enabled}
         if endpoint == '/overview-view':
             view=validate_overview_view(body)
-            with self.lock:self.overview_view=view
-            return {'queued':True}
+            with self.lock:
+                revision=body.get('revision',self.overview_requested_revision+1)
+                if type(revision) is not int or not 0<=revision<=2**53:raise ValueError('invalid overview revision')
+                if revision>self.overview_requested_revision:
+                    self.overview_requested_revision=revision
+                    self.overview_view=(view,revision)
+            return {'queued':True,'overview_revision':revision}
         if endpoint == '/mirror':
             return self.mirror_feedback(body)
         if endpoint == '/wrist-config':
@@ -457,7 +468,12 @@ class Session:
             self.preview = None
         with self.lock:
             view=self.overview_view;self.overview_view=None
-        if view is not None:renderer.set_overview_view(view)
+        if view is not None:
+            renderer.set_overview_view(view[0])
+            self.overview_revision=view[1]
+            if preview is None:preview=self.last_preview_pose
+            render_actual=True
+        overview_revision=self.overview_revision
         if hasattr(renderer, 'configure_wrist'):
             renderer.configure_wrist(self.wrist_contract)
         # No lock around RTX: stop and health requests remain responsive.
@@ -480,6 +496,8 @@ class Session:
                 self.actual_head = head.copy() if hasattr(head, 'copy') else head
                 self.jpeg['actual'] = jpeg
                 self.frame_timestamp['actual'] = time.time()
+                self.frame_metadata['actual']=self.display_metadata('actual',q,gaps,self.frame_timestamp['actual'],
+                    self.frame_sequence+1,overview_revision)
                 if 'preview' not in self.jpeg:
                     self.jpeg['preview'] = jpeg
                     self.frame_timestamp['preview'] = self.frame_timestamp['actual']
@@ -529,6 +547,9 @@ class Session:
                 self.jpeg['preview'] = jpeg
                 self.frame_timestamp['preview'] = time.time()
                 self.preview_revision = preview[1]
+                self.last_preview_pose=preview
+                self.frame_metadata['preview']=self.display_metadata('preview',preview[0],preview[2],
+                    self.frame_timestamp['preview'],preview[1],overview_revision)
                 self.render_times['preview'].append(time.monotonic())
                 self.render_ms['preview'] = (time.monotonic()-started)*1000
                 self.render_stages['preview'] = dict(getattr(renderer, 'last_timings', {}))
@@ -568,6 +589,15 @@ class Session:
         if wrist_work:
             threading.Thread(target=self.update_wrist_calibration, args=wrist_args, daemon=True).start()
         return render_actual or preview is not None
+
+    def display_metadata(self,view,q,gaps,timestamp,sequence,overview_revision):
+        stamp=int(timestamp*1_000_000_000)
+        return dict(schema='target_preview_frame.v1',renderer_instance_id=self.renderer_instance_id,
+            view=view,source='kinematic_target' if view=='preview' else 'kinematic_overview',
+            target_revision=sequence if view=='preview' else None,overview_revision=overview_revision,
+            frame_id=f'{self.renderer_instance_id}:{view}:{sequence}:{stamp}',source_timestamp_ns=stamp,
+            timestamp_basis='renderer host wall publication; not an actual camera observation',
+            q_reported_rad=q.tolist(),jaw_gap_mm=gaps.tolist(),display_only=True,measurement_qualified=False)
 
     def update_wrist_calibration(self, renderer, images, q, gaps, candidates, contract, revision, sequence, timestamp):
         results = {}
@@ -907,8 +937,9 @@ class RTXRenderer:
     def set_overview_view(self, view):
         camera=overview_camera(self.g,view)
         pose=np.asarray(camera['T_world_optical'])@np.diag([1,-1,-1,1])
-        op=self.UsdGeom.Xformable(self.stage.GetPrimAtPath('/World/Overview')).GetOrderedXformOps()[0]
-        op.Set(self.Gf.Matrix4d(*pose.T.ravel().tolist()))
+        for root in ('/World','/Preview'):
+            op=self.UsdGeom.Xformable(self.stage.GetPrimAtPath(root+'/Overview')).GetOrderedXformOps()[0]
+            op.Set(self.Gf.Matrix4d(*pose.T.ravel().tolist()))
 
     def actual_updates(self, enabled):
         for product in [*self.actual_products, *self.wrist_products.values()]:
@@ -1148,13 +1179,18 @@ def serve(session, token, port):
                     frame_id = parse_qs(url.query).get('frame_id', [None])[0]
                     candidate_id = parse_qs(url.query).get('candidate_id', [None])[0]
                     wrist_side = view.split('-')[0] if view in ('left-calibration','left-calibration-original','right-calibration','right-calibration-original') else None
-                    if wrist_side and candidate_id is not None and candidate_id != session.wrist_overlay_state.get(wrist_side,{}).get('id'):
+                    display_meta=session.frame_metadata.get(view) if view in ('actual','preview') else None
+                    requested={key:parse_qs(url.query).get(key,[None])[0] for key in ('renderer_instance_id','target_revision','overview_revision')}
+                    if view in ('actual','preview') and any(value is not None and (not display_meta or str(display_meta.get(key))!=value) for key,value in requested.items()):
+                        response=(409,{'error':'display frame revision differs; wait for current renderer frame'})
+                    elif wrist_side and candidate_id is not None and candidate_id != session.wrist_overlay_state.get(wrist_side,{}).get('id'):
                         response = (409, {'error': 'wrist calibration changed; refresh state'})
                     elif view in ('calibration', 'calibration-original') and frame_id is not None and frame_id != session.calibration_state.get('calibration_frame_id'):
                         response = (409, {'error': 'calibration frame advanced; refresh state'})
                     elif image:
                         response = (200, image, 'image/jpeg')
-                        if view in ('head', 'left', 'right'):
+                        if display_meta is not None:response+=(copy.deepcopy(display_meta),)
+                        elif view in ('head', 'left', 'right'):
                             camera = (session.camera if view == 'head' or session.wrist_contract is None
                                       else session.wrist_contract['cameras'][view])
                             response += ({'source': 'dsw_rtx_kinematic_simulation', 'view': view,
@@ -1189,13 +1225,16 @@ def serve(session, token, port):
                     with session.frame_ready:
                         session.frame_ready.wait_for(lambda: session.frame_timestamp.get(view) != last, timeout=1.)
                         stamp, frame = session.frame_timestamp.get(view), session.jpeg.get(view)
+                        metadata=copy.deepcopy(session.frame_metadata.get(view))
                     if frame is None:
                         continue
                     # Send idle previews as heartbeats so disconnected viewers are
                     # detected by write(), rather than leaking an SSH channel forever.
                     time.sleep(max(0., 1/30-(time.monotonic()-sent)))
                     self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '+str(len(frame)).encode()+
-                                     b'\r\nX-Frame-Timestamp: '+str(stamp).encode()+b'\r\n\r\n'+frame+b'\r\n')
+                                     b'\r\nX-Frame-Timestamp: '+str(stamp).encode()+
+                                     (b'\r\nX-Rendered-Frame: '+json.dumps(metadata,allow_nan=False,separators=(',',':')).encode() if metadata else b'')+
+                                     b'\r\n\r\n'+frame+b'\r\n')
                     self.wfile.flush()
                     last, sent = stamp, time.monotonic()
             except (OSError, TimeoutError):

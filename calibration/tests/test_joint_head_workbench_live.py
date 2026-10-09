@@ -417,6 +417,9 @@ class LiveProtocol(unittest.TestCase):
             self.assertEqual(response.readline(), b'Content-Type: image/jpeg\r\n')
             self.assertEqual(response.readline(), b'Content-Length: 4\r\n')
             self.assertTrue(response.readline().startswith(b'X-Frame-Timestamp:'))
+            metadata=json.loads(response.readline().decode().removeprefix('X-Rendered-Frame: '))
+            self.assertEqual(metadata['view'],'actual')
+            self.assertEqual(metadata['renderer_instance_id'],s.renderer_instance_id)
             self.assertEqual(response.readline(), b'\r\n')
             self.assertEqual(response.read(4), b'jpeg')
         finally:
