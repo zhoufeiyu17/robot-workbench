@@ -67,6 +67,16 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertFalse(workflow.allowed('generate_plan')['allowed'])
         with self.assertRaises(ValueError):workflow.action('generate_plan',{})
 
+    def test_running_calibration_description_tracks_phase_not_initial_guidance(self):
+        workflow=self.calibration()
+        for phase,expected in [('头部采集','正在逐点采集头部'),('腕半场采集','正在逐点采集双腕'),
+                               ('头部求解','求解并验收头部'),('腕半场求解','贴纸观测求解')]:
+            workflow.app.runtime_state.return_value={'status':'CAPTURING','pipeline':{'running':True,'phase':phase}}
+            workflow.refresh();self.assertIn(expected,workflow.snapshot()['message'])
+            self.assertNotIn('先生成计划',workflow.snapshot()['message'])
+        workflow.app.runtime_state.return_value['pipeline']['aborted']='本次真实失败原因'
+        workflow.refresh();self.assertEqual(workflow.snapshot()['message'],'本次真实失败原因')
+
     def test_head_and_wrist_route_separately_and_quality_does_not_block_replay(self):
         workflow=self.calibration();workflow.refresh()
         self.assertEqual([row['kind'] for row in workflow.results()],['head','wrist','capture'])

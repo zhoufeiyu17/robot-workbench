@@ -107,9 +107,18 @@ class CalibrationWorkflow:
                 dict(current=fraction,total=1,unit=sub.get('label','阶段工作量'),kind='fraction'))
         primary=dict(id='generate_plan',label='生成完整标定计划',allowed=not busy,reason='标定任务正在进行' if busy else None)
         if review:primary=dict(id='generate_plan',label='重新生成本批执行预览',allowed=True,reason=None)
+        message=('等待审阅本批姿态并确认执行。' if review else
+            '本轮已停止；已完成的采集与结果保留，重新执行前需要重新审阅。' if status=='stopped' else
+            '先生成计划，再审阅本批并执行。' if status=='idle' and not busy else
+            '本轮标定未通过；请查看本阶段的失败原因。' if status=='failed' else
+            {'head.plan':'正在生成头部采集计划。','head.capture':'正在逐点采集头部图像。',
+             'head.solve':'正在使用已采集图像求解并验收头部标定。','wrist.plan':'正在生成双腕采集计划。',
+             'wrist.capture':'正在逐点采集双腕图像。','wrist.solve':'正在使用贴纸观测求解并验收双腕标定。',
+             'install':'正在校验并安装本轮头部与双腕结果。',
+             'calibration.complete':'头部与双腕标定已完成，安装组已核验。'}.get(stage_id,'先生成计划，再审阅本批并执行。'))
         value=dict(id=getattr(self.app,'pipeline_run_id',None),status=status,busy=busy,
             stage_id=stage_id,title=report.get('phase') or '头部与双腕标定',
-            message=report.get('aborted') or state.get('reason') or '先生成计划，再审阅本批并执行。',
+            message=report.get('aborted') or state.get('reason') or message,
             progress=progress,primary_action=primary,outcomes={},
             overall_progress=dict(current=completed+fraction,total=7,unit='阶段',completed_stages=completed,
                 indeterminate=working and not measured,stage_ids=list(CALIBRATION_STAGES)),
@@ -175,7 +184,7 @@ class CalibrationWorkflow:
         value['calibration_tools']=dict(available=True,workflow=state.get('workflow') or {'kind':'head','head_result_id':None},
             fit_source_id=state.get('selected_batch'),counts=state.get('counts') or {},plan=plan,
             queue_revision=queue.get('revision'),waypoints=queue.get('waypoints',[]),
-            preview_message='逐姿态图像预览尚未接入；下方列出冻结的采样点与过渡点。',
+            preview_message='下方按执行顺序列出冻结的采样点与过渡点；查看图像只预览，不执行动作。',
             **deepcopy(getattr(self,'tool_catalog',{})))
         with self.lock:
             value.update(replay=deepcopy(self.replay),replay_context=deepcopy(self.replay_context))
