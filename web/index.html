@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>统一机器人工作台</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header class="device-bar">
+    <div class="device-title"><span class="eyebrow">ROBOT WORKBENCH</span><h1 id="device-name">机器人工作台</h1></div>
+    <label class="environment-label" for="environment">设备环境<select id="environment"><option value="fake">Fake · 开发设备</option><option value="physical">Physical · 物理设备</option></select></label>
+    <div class="ownership"><span class="muted">当前控制权</span><strong id="holder">尚未核验</strong></div>
+    <div class="action-cell"><button id="handoff" aria-describedby="handoff-reason" disabled>交接控制权</button><small id="handoff-reason">等待后端状态</small></div>
+    <div class="action-cell stop-cell"><button id="stop" class="danger" aria-describedby="stop-reason" disabled>停止当前设备任务</button><small id="stop-reason">等待后端状态</small></div>
+    <div class="health-row" aria-label="设备运行状态"><span id="connection">连接：未知</span><span id="feedback">反馈：未知</span><span id="hold">保持：未知</span><span id="motion">动作：未知</span><span id="stop-state"></span><span id="state-age">状态尚未核验</span></div>
+  </header>
+
+  <main>
+    <div id="alert" class="alert" role="alert" hidden></div>
+    <p id="request-status" class="request-status" role="status" aria-live="polite">正在读取设备与任务状态…</p>
+    <nav class="tabs" aria-label="工作台栏目">
+      <button data-tab="calibration" aria-current="page">标定</button><button data-tab="collection">数采</button><button data-tab="results">结果与回放</button><button data-tab="diagnostics">设备诊断</button>
+    </nav>
+
+    <section id="work-pane" class="workspace">
+      <section class="panel observation" aria-labelledby="observation-title">
+        <div class="panel-heading"><h2 id="observation-title">共同观察区</h2><span class="muted">查看画面不会执行动作</span></div>
+        <div class="camera-grid">
+          <article class="camera-card" id="media-head"><h3>头部相机</h3><div class="image-box"><img alt="头部相机实际画面" hidden><p class="empty">等待可核验画面</p></div><p class="media-meta">实际画面 · 来源未知</p></article>
+          <article class="camera-card" id="media-left"><h3>左腕相机</h3><div class="image-box"><img alt="左腕相机实际画面" hidden><p class="empty">等待可核验画面</p></div><p class="media-meta">实际画面 · 来源未知</p></article>
+          <article class="camera-card" id="media-right"><h3>右腕相机</h3><div class="image-box"><img alt="右腕相机实际画面" hidden><p class="empty">等待可核验画面</p></div><p class="media-meta">实际画面 · 来源未知</p></article>
+        </div>
+        <article class="preview-card" id="media-preview"><div class="panel-heading"><h3>目标姿态 / 当前计划预览</h3><span class="muted">只读</span></div><div class="image-box"><img alt="目标姿态预览，不代表实际运动" hidden><p class="empty">生成计划后查看后端提供的预览</p></div><p class="media-meta">目标预览 · 来源未知</p></article>
+        <div class="mesh-row"><label><input type="checkbox" id="mesh" aria-describedby="mesh-warning mesh-reason" disabled> 启用实时 mesh 叠加</label><span id="mesh-state" class="muted">请求：未知 · 后端：未知</span></div>
+        <p id="mesh-warning" class="hint">开启会占用渲染资源，降低预览性能；关闭仅停止实时叠加，原始画面保持独立。</p><p id="mesh-reason" class="action-reason">等待后端状态</p>
+      </section>
+
+      <section class="panel task-card" aria-labelledby="task-title">
+        <div class="panel-heading"><h2 id="task-title">当前任务 · 标定</h2><span id="task-status" class="badge">尚未核验</span></div>
+        <p id="run-identity" class="identity">Run：未知</p>
+        <div class="stage-heading"><span class="eyebrow">当前阶段</span><h3 id="stage-title">等待任务状态</h3><code id="stage-id">—</code></div>
+        <p id="task-message" class="task-message">尚未取得后端任务回执。</p>
+        <div id="overall-panel" hidden><progress id="overall-progress" aria-label="整体已完成阶段"></progress><p id="overall-label" class="muted"></p></div><progress id="task-progress" aria-label="当前阶段实际计数进度" hidden></progress><p id="progress-label" class="muted">尚无可计数进度</p>
+        <dl id="task-details" class="detail-list"></dl>
+        <section id="review-panel" class="review" hidden><h3>本次执行摘要</h3><div id="review-summary"></div><p id="review-id" class="identity"></p><label id="clearance-label" class="check-label" hidden><input type="checkbox" id="clearance">我已审阅本条轨迹和现场净空，确认可以执行</label></section>
+        <label id="support-label" class="check-label" hidden><input type="checkbox" id="supported">我已可靠支撑双臂，允许本次接入控制</label>
+        <div class="primary-action"><button id="primary" class="primary" aria-describedby="primary-reason" disabled>等待可用操作</button><p id="primary-reason" class="action-reason">等待后端提供主动作</p></div>
+        <div class="secondary-actions"><div class="action-cell"><button id="connect" aria-describedby="connect-reason" disabled>接入设备</button><small id="connect-reason">等待后端状态</small></div><div class="action-cell"><button id="cancel" aria-describedby="cancel-reason" disabled>取消当前阶段</button><small id="cancel-reason">等待后端状态</small></div><div class="action-cell"><button id="recover" aria-describedby="recover-reason" disabled>恢复就绪</button><small id="recover-reason">等待后端状态</small></div></div>
+        <details id="collection-tools" hidden><summary>计划工具</summary><button id="replan" aria-describedby="replan-reason" disabled>重新观测并规划</button><p id="replan-reason" class="action-reason"></p></details>
+        <p class="hint">恢复不会自动续跑。交接保留设备连接与保持；浏览栏目不会转移控制权。</p>
+      </section>
+
+      <section class="panel outcomes" aria-label="本轮独立结果"><div><span>运动执行</span><strong id="outcome-motion">未知</strong></div><div><span>数据完整性</span><strong id="outcome-data">未知</strong></div><div><span>仿真验收</span><strong id="outcome-simulation">未知</strong></div><div><span>业务任务结果</span><strong id="outcome-task">未知</strong></div></section>
+      <details id="calibration-tools" class="panel manual" hidden><summary>标定分步工具 <span class="muted">仅重做双腕 / 独立批次 / 指定批次重算</span></summary><div class="manual-body">
+        <p id="calibration-tools-status" class="hint"></p>
+        <div class="calibration-fields"><label>标定类型<select id="calibration-kind"><option value="head">头部相机</option><option value="wrist">双腕相机</option></select></label><label>双腕依赖的头部结果<select id="calibration-head"><option value="">选择已通过的头部结果</option></select></label></div>
+        <div class="manual-actions"><button id="configure-calibration" disabled>应用类型与依赖</button><button id="wrist-redo" disabled>仅重做双腕并安装</button></div><p id="configure-calibration-reason" class="action-reason"></p><p id="wrist-redo-reason" class="action-reason"></p>
+        <p class="hint">仅重做双腕固定指定头部结果；各采集批次仍需明确审阅。完整头部与双腕流程使用上方主按钮。</p>
+        <h3>独立规划与采集</h3><div class="manual-actions"><button id="plan-batch" disabled>生成当前类型的标定计划</button><button id="preview-batch" disabled>生成本批采集预览</button></div><p id="plan-batch-reason" class="action-reason"></p><p id="preview-batch-reason" class="action-reason"></p>
+        <p id="calibration-plan-summary" class="hint"></p><p id="calibration-preview-message" class="hint"></p><div id="calibration-coverage" class="coverage-grid"></div>
+        <details><summary>逐姿态审阅 · 采样点与过渡点</summary><ol id="calibration-waypoints"></ol></details>
+        <p class="hint">本批采集每点到位并保存成功后才继续；人工动作队列的普通执行不采集标定图像。</p>
+        <h3>对已采集批次重新求解</h3><label>当前类型的求解来源<select id="fit-source"></select></label><div class="manual-actions"><button id="apply-fit-source" disabled>设为求解来源</button><button id="clear-fit-source" disabled>清空求解来源</button><button id="fit-batch" disabled>对当前来源重新求解</button></div><p id="apply-fit-source-reason" class="action-reason"></p><p id="clear-fit-source-reason" class="action-reason"></p><p id="fit-batch-reason" class="action-reason"></p><p id="fit-source-state" class="hint"></p>
+      </div></details>
+      <details id="manual-tools" class="panel manual"><summary>人工规划工具 <span class="muted">单姿态 / 标定动作队列 / 回零目标</span></summary><div class="manual-body">
+        <p class="hint">关节位置 rad、速度 rad/s；夹爪为金属内间距 mm。填写与加入队列不执行动作；整队预览后仍须审阅确认。范围与路径检查沿用标定路径校验与设备控制器。</p>
+        <div class="manual-actions"><label>统一关节速度 · rad/s<input id="manual-speed" type="number" min="0.001" step="0.01" value="0.2"></label><button id="apply-manual-speed" disabled>应用到12关节</button></div>
+        <div id="joint-inputs" class="joint-grid"></div><div class="jaw-grid"><label>左夹爪 · mm<input id="jaw-left" type="number" min="0" max="83" step="0.5" disabled></label><label>右夹爪 · mm<input id="jaw-right" type="number" min="0" max="83" step="0.5" disabled></label><label>夹爪速度 · mm/s<input id="jaw-speed" type="number" min="0.001" step="0.5" value="10" disabled></label></div>
+        <div class="manual-actions"><button id="use-feedback" disabled>填入当前实测姿态</button><button id="zero-preview" disabled>填入回零目标 · 夹爪83mm</button><button id="manual-preview" aria-describedby="manual-preview-reason" disabled>生成单姿态预览</button><button id="queue-add" aria-describedby="queue-add-reason" disabled>加入 标定动作队列</button></div><p id="manual-preview-reason" class="action-reason">等待可用关节定义与后端权限</p><p id="queue-add-reason" class="action-reason"></p><p id="manual-error" role="alert" hidden></p>
+        <h3>标定动作队列</h3><p id="queue-status" class="muted">尚未读取标定动作队列</p><ol id="manual-queue-list"></ol><div class="manual-actions"><button id="queue-preview" aria-describedby="queue-preview-reason" disabled>整队生成执行预览</button><button id="queue-clear" aria-describedby="queue-clear-reason" disabled>清空队列</button></div><p id="queue-preview-reason" class="action-reason"></p><p id="queue-clear-reason" class="action-reason"></p><p class="hint">队列编辑、停止或取消后须重新预览；恢复不续跑旧队列。路径点按当前冻结速度整体提交，不逐点跳过审阅。</p>
+      </div></details>
+    </section>
+
+    <section id="results-pane" class="panel full-pane" hidden><div class="panel-heading"><h2>结果与回放</h2><span id="results-context" class="muted"></span></div><p class="hint">结果归属所显示的业务与设备环境。回放不会执行动作，选择结果不会自动安装；质量未通过的结果仍可只读检查。</p><details id="installed-group" hidden><summary>当前安装组与 active 文件校验</summary><dl id="installed-details" class="detail-list"></dl></details><div id="results-list"></div><div id="replay-controls" class="replay-controls" hidden><label>相机<select id="replay-camera" aria-label="回放相机"></select></label><label>帧<input id="replay-index" type="number" min="0" step="1" aria-label="回放帧索引"></label><button id="replay-open" aria-describedby="replay-open-reason">查看这一帧</button><label><input id="replay-overlay" type="checkbox">历史 mesh 叠加</label><p id="replay-context" class="muted"></p><p id="replay-open-reason" class="action-reason"></p><p id="replay-overlay-reason" class="action-reason"></p></div><div id="replay-media" class="replay-grid"></div><p id="select-result-reason" class="action-reason"></p></section>
+    <section id="diagnostics-pane" class="panel full-pane" hidden><div class="panel-heading"><h2>设备诊断</h2><span id="diagnostics-context" class="muted"></span></div><dl id="diagnostics-list" class="detail-list"></dl><details id="arrival-panel"><summary>关节到位误差 · 标定采样统计</summary><p id="arrival-status" role="status"></p><p class="hint">实际反馈 − 本次目标；沿标定路径点口径，仅统计到位并稳定后的样本。中途停止不算到位，不将这些统计直接当作几何零偏。</p><div class="arrival-table"><table><thead><tr><th>关节</th><th>样本数</th><th>均值 °</th><th>标准差 °</th><th>RMS °</th><th>|误差| P95 °</th><th>|误差| 最大 °</th></tr></thead><tbody id="arrival-rows"></tbody></table></div><p id="arrival-path" class="identity"></p></details><details><summary>停止回执与保持证据</summary><pre id="stop-details">尚无回执</pre></details><details><summary>当前状态原始回执</summary><pre id="raw-state">尚未核验</pre></details></section>
+    <footer>实际 / 目标 / 回放分别标注；未知状态不代表通过。<span id="footer-context">Fake · 标定</span></footer>
+  </main>
+  <script type="module" src="/web/app.js"></script>
+</body>
+</html>
