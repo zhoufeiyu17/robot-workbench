@@ -243,6 +243,18 @@ function previewSnapshot(){
 }
 const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringify({environment:'fake',view,revision,view_revision:3,renderer_id:'renderer-one',frame_id:'frame-'+revision,source_wall_ns:10e9,...extra})});
 {
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;value.preview.frames.target.source_wall_ns=4e9;
+  h.reply(0,value);await settle();h.reply(1,{},previewHeaders('target',7,{source_wall_ns:4e9}));await settle();
+  assert.equal(h.get('media-preview').classList.contains('stale'),false,'a matching static target remains valid after its original frame is three seconds old');
+  assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/静态目标 · 生成于 6.0 s 前/);
+  h.advance(3100);h.intervals[1]();assert(h.get('media-preview').classList.contains('stale'),'a static target still expires when state is not refreshed');
+  value.revision=2;value.server_wall_ns=14e9;h.app.poll();h.reply(2,value);await settle();
+  assert.equal(h.get('media-preview').classList.contains('stale'),false,'fresh matching state revalidates the static target without repainting');
+  assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/生成于 10.0 s 前/);assert.equal(h.app.state.preview.frames.target.source_wall_ns,4e9,'state freshness must not rewrite the original generation time');
+  h.app.poll();h.requests[3].resolve({ok:false,status:503});await settle();assert(h.get('media-preview').classList.contains('stale'),'state connection failure greys a static target');
+  value.revision=3;value.preview.connected=false;h.app.poll();h.reply(4,value);await settle();assert(h.get('media-preview').classList.contains('stale'),'renderer disconnection also invalidates a static target');h.app.destroy();
+}
+{
   const media={preview_view:'mesh',revision:3,renderer_id:'one',camera:'left',candidate_id:'poor'};
   const meta={view:'mesh',revision:3,renderer_id:'one',environment:'fake',camera:'left',candidate_id:'poor',source_wall_ns:10e9};
   assert.equal(verifyPreviewFrame(media,meta,'fake'),meta);

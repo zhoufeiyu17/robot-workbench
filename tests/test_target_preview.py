@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+from urllib.parse import parse_qs,urlsplit
 from unittest.mock import Mock
 import numpy as np
 
@@ -126,6 +127,39 @@ class TargetPreviewTests(unittest.TestCase):
             self.assertEqual(client.request.call_count,before)
         bad=deepcopy(inputs);bad[1].pop('pair_id')
         with self.assertRaises(ValueError):observed_mesh(client,bad,'poor-but-viewable')
+
+    def test_unchanged_frame_skips_jpeg_without_skipping_new_target_or_view(self):
+        remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0,
+                    frame_timestamp_s={'actual':1.,'preview':1.})
+        reads=[];rounds=[]
+        def request(path,body=None,**kwargs):
+            if path=='/state':return deepcopy(remote)
+            if path=='/preview':remote['preview_revision']=body['revision'];return {}
+            if path=='/overview-view':remote['overview_revision']=body['revision'];return {}
+            query=parse_qs(urlsplit(path).query);view=query['view'][0];reads.append(view)
+            return b'jpeg',dict(schema='target_preview_frame.v1',frame_id=view+str(remote['frame_timestamp_s'][view]),
+                renderer_instance_id='preview',view=view,source='kinematic_target' if view=='preview' else 'kinematic_overview',
+                overview_revision=remote['overview_revision'],target_revision=remote['preview_revision'] if view=='preview' else None,
+                source_timestamp_ns=int(remote['frame_timestamp_s'][view]*1_000_000_000))
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.target_pose([.1]*12,[80.,80.])
+        def next_iteration(delay):
+            self.assertLessEqual(delay,.025)  # Leave headroom above the required 20 fps.
+            rounds.append(len(reads))
+            if len(rounds)==2:remote['frame_timestamp_s']['actual']=2.
+            elif len(rounds)==3:adapter.overview(.3,.4,1.)
+            elif len(rounds)==4:adapter.target_pose([.2]*12,[80.,80.])
+            elif len(rounds)==5:adapter.closed.set()
+        adapter.changed.wait=next_iteration
+        adapter._preview_loop()
+        self.assertEqual(rounds,[2,2,3,5,6])
+        self.assertEqual(reads,['actual','preview','actual','actual','preview','preview'])
+        self.assertEqual(adapter.frames['target'][1]['client_revision'],2)
+        self.assertEqual(adapter.frames['target'][1]['client_view_revision'],1)
+        mesh=TargetPreview(SimpleNamespace(),'preview')
+        def stop_mesh(delay):
+            self.assertLessEqual(delay,.05)  # Leave headroom above the required 10 fps.
+            mesh.closed.set()
+        mesh.closed.wait=stop_mesh;mesh._mesh_loop()
 
 
 if __name__=='__main__':unittest.main()

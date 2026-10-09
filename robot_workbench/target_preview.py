@@ -207,6 +207,15 @@ class TargetPreview:
                     query=dict(view=renderer_view,renderer_instance_id=self.instance,
                                overview_revision=view_revision if view_revision is not None else remote.get('overview_revision',0))
                     if name=='target':query['target_revision']=target_revision
+                    stamp=(remote.get('frame_timestamp_s') or {}).get(renderer_view)
+                    with self.lock:cached=self.frames.get(name)
+                    if (cached and type(stamp) in (int,float) and math.isfinite(stamp)
+                            and cached[1]['source_timestamp_ns']==int(stamp*1_000_000_000)
+                            and cached[1]['renderer_instance_id']==self.instance
+                            and cached[1]['overview_revision']==query['overview_revision']
+                            and remote.get('overview_revision',0)==query['overview_revision']
+                            and (name!='target' or cached[1]['target_revision']==target_revision==remote.get('preview_revision'))):
+                        continue
                     try:raw,metadata=self.client.request('/frame.jpg?'+urlencode(query),frame=True)
                     except PendingFrame:continue
                     if (metadata.get('schema')!='target_preview_frame.v1' or not metadata.get('frame_id')
@@ -224,7 +233,7 @@ class TargetPreview:
                 with self.lock:self.last_health=time.monotonic();self.error=None
             except Exception as error:
                 with self.lock:self.error=str(error)
-            self.changed.wait(max(0.,.05-(time.monotonic()-started)));self.changed.clear()
+            self.changed.wait(max(0.,.025-(time.monotonic()-started)));self.changed.clear()
 
     def _mesh_loop(self):
         while not self.closed.is_set():
@@ -243,4 +252,4 @@ class TargetPreview:
                 except Exception as error:
                     with self.lock:
                         if revision==self.revisions['mesh']:self.mesh_error=str(error)
-            self.closed.wait(max(0.,.1-(time.monotonic()-started)))
+            self.closed.wait(max(0.,.05-(time.monotonic()-started)))

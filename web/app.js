@@ -285,9 +285,14 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     for(const slot of mediaSlots.values())updateMediaLabel(slot);
   }
   function updateMediaLabel(slot) {
-    const m=slot.media, age=frameAgeSeconds(m,state,clock.now()-receivedAt), stale=age===null||age>3||!online||!!slot.error;
+    const m=slot.media, age=frameAgeSeconds(m,state,clock.now()-receivedAt),staticTarget=m?.preview_view==='target',preview=state?.preview;
+    const currentTarget=preview?.connected===true&&options().fresh&&!!m?.renderer_id&&m.renderer_id===preview.renderer_id
+      &&m.revision===preview.revisions?.target&&m.view_revision===preview.revisions?.overview;
+    const stale=!online||!!slot.error||(staticTarget?!currentTarget:age===null||age>3);
+    const ageLabel=staticTarget?(age===null?'生成时间未知':'静态目标 · 生成于 '+age.toFixed(1)+' s 前'):
+      age===null?'源时间未知':(age>3?'画面冻结 · ':'源帧龄 ')+age.toFixed(1)+' s';
     slot.card.classList.toggle('stale',stale);
-    slot.card.querySelector('.media-meta').textContent=[ENVIRONMENT[context.environment],{actual:'实际画面',target:'目标预览',overview:'整机视角',mesh:'实际图像上的 mesh',replay:'录制回放'}[m?.kind]||'来源未知',m?.preview_view==='mesh'&&m.candidate_id?'候选 '+m.candidate_id.slice(0,12):'',age===null?'源时间未知':(age>3?'画面冻结 · ':'源帧龄 ')+age.toFixed(1)+' s',slot.error||m?.error].filter(Boolean).join(' · ');
+    slot.card.querySelector('.media-meta').textContent=[ENVIRONMENT[context.environment],{actual:'实际画面',target:'目标预览',overview:'整机视角',mesh:'实际图像上的 mesh',replay:'录制回放'}[m?.kind]||'来源未知',m?.preview_view==='mesh'&&m.candidate_id?'候选 '+m.candidate_id.slice(0,12):'',ageLabel,slot.error||m?.error].filter(Boolean).join(' · ');
   }
   function cancelMediaRequest(slot) {
     slot.controller?.abort();slot.controller=null;slot.version++;
