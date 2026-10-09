@@ -416,6 +416,10 @@ def main():
             nominal['asset_geometry_id']!=binding['geometry_id']):
         raise ValueError('nominal estimator assets differ from this frozen plant A1 identity')
     checked=preflight(base)
+    if args.collection_spec:
+        from detector_adapter.preflight_release import preflight_release
+        checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
+            args.collection_spec['collection_setup']['detection_runtime_root'])
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)

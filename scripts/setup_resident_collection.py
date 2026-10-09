@@ -87,9 +87,13 @@ def run(args):
     # is read from the resident; this command cannot create a new lifetime.
     contract=load_collection_contract(args.contract,output,1,0)
     parent=live_parent(root,contract);service=parent['service'];execution=parent['execution']
+    from detector_adapter.preflight_release import preflight_release
+    release=preflight_release(parent['base']['pipeline_config'],
+        contract['collection_setup']['detection_runtime_root'])
     output.mkdir(mode=0o700);(output/'raw-unused').mkdir()
     save(output/'parent-readonly.json',dict(execution=execution,installed=parent['installed'],
-        frozen=parent['frozen'],resident_deadline_wall_ns=parent['deadline'],movement_allowed=False))
+        frozen=parent['frozen'],resident_deadline_wall_ns=parent['deadline'],movement_allowed=False,
+        detector_release_preflight=release))
     base=deepcopy(parent['base']['pipeline_config'])
     base['detection_script']=str(ROOT/'detector_adapter/isaac_rgbd_detection.py')
     settings=contract['collection_setup']
