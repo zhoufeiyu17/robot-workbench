@@ -1,0 +1,39 @@
+{
+  "status": "s0-partial-s1-s2-candidate",
+  "date": "2026-10-09T16:19:46.891897+00:00",
+  "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
+  "cpu": {
+    "calibration_tests": 454,
+    "calibration_skipped": 4,
+    "skip_reason": "three sealed native-asset fixtures and one local mesh fixture absent; no implicit GPU fixture",
+    "clock_tests": 8,
+    "physx_boundary_tests": 3,
+    "unified_runtime_tests": 7,
+    "fixed_race_schedules": 100,
+    "playground_entry_tests": 8,
+    "related_prepare_scripts": 10,
+    "all_checks_exit_code": 0,
+    "log_sha256": "b283ac3de2b9ca8f217f739cc51e77af35976ebe4e447ea106ce297d080803ac"
+  },
+  "l2_probe": {
+    "status": "calibration-control-causality-passed",
+    "attempts_preserved": 6,
+    "last_attempt": "s0-20261009-234300-r6",
+    "source_readback_rows": 48,
+    "non_render_rows_changed": 42,
+    "raw_vs_cached_max_difference": 0,
+    "paired_rgbd_samples": 6,
+    "full_business_qualified": false,
+    "collection_strategy_qualified": false,
+    "hardware_qualified": false,
+    "gpu_released": true
+  },
+  "remaining": [
+    "L2 collection and complete calibration/data workflows",
+    "shared runtime HTTP/UI/media integration",
+    "recording and camera lifecycle/load isolation",
+    "approved normal/fault/performance matrix",
+    "single-writer deployment cutover"
+  ],
+  "versioning": "current Git branch identifies implementation; no deployment implied"
+}
