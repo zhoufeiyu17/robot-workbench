@@ -4,7 +4,10 @@ import argparse
 from dataclasses import replace
 import hashlib
 import json
+import os
 from pathlib import Path
+import secrets
+import stat
 import sys
 import time
 import traceback
@@ -15,7 +18,22 @@ sys.path[:0] = [str(ROOT), str(ROOT/'calibration'), str(ROOT/'calibration/infra'
 
 
 def save(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2)+'\n')
+    """Publish one complete JSON file; a failed save keeps the previous file."""
+    payload=json.dumps(value,ensure_ascii=False,allow_nan=False,indent=2)+'\n'
+    path=Path(path)
+    try:mode=stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:mode=None
+    temporary=path.with_name('.'+path.name+'.'+secrets.token_hex(12)+'.tmp')
+    # os.open applies the normal 0666/umask policy to new files. Existing file
+    # permissions are retained before any payload is written to the sibling.
+    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o666)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as stream:
+            if mode is not None:os.fchmod(stream.fileno(),mode)
+            stream.write(payload)
+        os.replace(temporary,path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def preflight(base):
