@@ -389,10 +389,15 @@ class CalibrationWorkflow:
         if camera not in ('head','left','right'):raise ValueError('请选择头部或左右腕相机')
         overlay=body.get('overlay',False)
         if type(overlay) is not bool:raise ValueError('overlay 必须是布尔值')
-        overlay_available=bool(frames) and not raw_deleted and (kind=='head' and camera=='head' or kind=='wrist' and camera in ('left','right'))
+        overlay_id=identity
+        if kind=='wrist' and camera=='head':
+            overlay_id=self.app.wrist_head_id(row)
+            if overlay_id not in {r['id'] for r in view.get('results',[]) if r.get('kind')=='head'}:overlay_id=None
+        overlay_available=bool(frames) and not raw_deleted and (kind=='head' and camera=='head' or
+            kind=='wrist' and (camera in ('left','right') or camera=='head' and overlay_id is not None))
         if overlay:
             if not overlay_available:raise ValueError('当前相机需要匹配的头部或双腕结果')
-            image=self.app.historical_overlay(dict(batch_id=batch,frame_index=index,camera=camera,result_id=identity))['image_url']
+            image=self.app.historical_overlay(dict(batch_id=batch,frame_index=index,camera=camera,result_id=overlay_id))['image_url']
         else:image=image_urls.get(camera)
         replay=[];files={}
         if image:
@@ -413,6 +418,7 @@ class CalibrationWorkflow:
             message=reply.get('message','已选择标定结果')
         context=dict(result_id=identity,batch_id=batch,frame_index=index,frame_count=len(frames),camera=camera,
             cameras=sorted(image_urls),overlay=overlay,overlay_available=overlay_available,
+            overlay_result_id=overlay_id if overlay_available else None,
             message='原始批次已删除；版本参数与依赖快照保留，无法回放原始图像' if raw_deleted else '本帧没有所选相机图像' if frames and not image else '尚无采集帧' if not frames else '')
         with self.lock:
             self.media_files=files;self.replay=replay;self.replay_context=context
@@ -492,7 +498,7 @@ class CollectionWorkflow:
         self.playground,self.device,self.service=playground,device,service
         self.lock=threading.Lock();self.closed=threading.Event()
         self.value=dict(status='connecting',busy=False,stage_id='connecting',title='数采',primary_action=None,outcomes={})
-        self.catalog=[];self.review_key=None
+        self.catalog=[];self.review_key=None;self.speed_scale=None
         self.generation=0
         self.media_files={}
         self.thread=threading.Thread(target=self.monitor,daemon=True,name='collection-view');self.thread.start()
@@ -517,6 +523,9 @@ class CollectionWorkflow:
             if instance and native.get('execution_instance_id')==instance else None)
         ready=state.get('environment',{}).get('ready')
         busy=state.get('busy',False)
+        speed=getattr(self,'speed_scale',None) or plan.get('speed_scale',.3)
+        title=progress.get('label') or '数采任务'
+        if not busy:title={'completed':'本次数采流程已完成','failed':'本次数采流程失败','stopped':'本次数采流程已停止'}.get(state.get('status'),title)
         recording=state.get('recording') or {}
         validation=(recording.get('manifest') or {}).get('validation') or {}
         data_error=recording.get('error') or recording.get('seal_error') or recording.get('diagnostics_error')
@@ -527,33 +536,65 @@ class CollectionWorkflow:
                      allowed=not busy,reason='数采任务正在进行' if busy else None)
         review_request=None
         if plan.get('validated') and state.get('can_execute') and not busy:
-            key=(plan.get('timeline_digest'),plan.get('output'),plan.get('speed_scale'))
+            key=(plan.get('timeline_digest'),plan.get('output'),speed)
             with self.lock:needs_review=key!=self.review_key
             if needs_review:
                 owner=self.device.snapshot('collection')
                 review_request=(dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],
-                    expires_in_s=30,workflow_generation=generation),
-                    plan.get('summary') or f"冻结轨迹 {plan.get('duration_s',0):.2f} 秒；当前起点变化时使用慢初始化段")
+                    expires_in_s=30,workflow_generation=generation,speed_scale=speed),
+                    (plan.get('summary') or '当前起点变化时使用慢初始化段')+f'；执行速度 {speed*100:g}%，静止等待不缩放')
             primary.update(label='重新预览冻结计划',allowed=True)
         value=dict(id=state.get('output'),status=state.get('status','idle'),busy=busy,
-            stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=progress.get('label') or '数采任务',
+            stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=title,
             message=state.get('error') or state.get('capture_warning') or state.get('message',''),
-            primary_action=primary,progress=None,execution_binding=execution_binding,outcomes=dict(motion=state.get('physical_outcome','未执行'),
+            primary_action=primary,progress=None,speed_scale=speed,execution_binding=execution_binding,outcomes=dict(motion=state.get('physical_outcome','未执行'),
                 data=data_outcome,
                 simulation=state.get('simulation','未验证'),task=state.get('task_outcome','未验证')),
             replan_action=dict(id='generate_plan',label='重新观测并规划',allowed=not busy,reason='数采任务正在进行' if busy else None) if plan.get('validated') else None,
             details=[{'label':'已耗时','value':f"{progress.get('elapsed_s',0):.1f} 秒"},
                      {'label':'计划身份','value':plan.get('timeline_digest','尚未生成')}])
+        diagnostics=[]
+        if state.get('environment',{}).get('checks'):diagnostics.append(dict(label='数采环境检查',value=state['environment']['checks']))
+        if progress.get('stages'):
+            diagnostics.append(dict(label='数采分阶段耗时',value=[{key:row[key] for key in ('label','status','elapsed_s','estimate_s') if key in row} for row in progress['stages']]))
+        manifest=recording.get('manifest') or {}
+        if manifest:diagnostics.append(dict(label='本轮录制封存',value={key:manifest[key] for key in ('capture_status','validation','command_count','feedback_count','camera_frames','execution_timeline_digest') if key in manifest}))
+        if native:
+            detail={key:native[key] for key in ('execution_instance_id','source_clock_id','execution_timeline_digest','task_outcome','task_qualified','receipt_verified','receipt_path','scope') if key in native}
+            failure=native.get('first_failure')
+            if failure:detail['first_failure']={key:failure[key] for key in ('reason','detail','physics_step','absolute_physics_step') if key in failure}
+            diagnostics.append(dict(label='本轮原生任务回执',value=detail))
+        simulation=state.get('simulation')
+        if isinstance(simulation,dict):diagnostics.append(dict(label='本轮辅助回放',value={key:simulation[key] for key in ('status','scope','same_plant','task_success_evidence','timeline_digest','error') if key in simulation}))
+        value['diagnostics']=diagnostics
         catalog=[];files={}
+        if plan.get('plan_path') and (plan.get('validated') or state.get('action')=='execute'):
+            try:
+                path=result_file(self.playground.directory,plan['plan_path'])
+                identity=hashlib.sha256((str(path)+'\0'+str(plan.get('timeline_digest'))).encode()).hexdigest();files[identity]=path
+                value['trajectory']=dict(id=identity,url=media_url(self.device.environment,'collection',identity),
+                    timeline_digest=plan.get('timeline_digest'),speed_scale=plan.get('speed_scale',.3),duration_s=plan.get('duration_s'))
+                if plan.get('first_frame_path'):
+                    try:
+                        path=result_file(self.playground.directory,plan['first_frame_path'])
+                        identity=hashlib.sha256(str(path).encode()).hexdigest();files[identity]=path
+                        value['trajectory']['first_frame_url']=media_url(self.device.environment,'collection',identity)
+                    except (OSError,ValueError) as error:value['trajectory']['first_frame_error']=str(error)
+            except (OSError,ValueError) as error:value['trajectory']=dict(error=str(error))
         for row in state.get('videos',[]):
             url=urlsplit(row['url'])
             path=self.playground.media(url.path.rsplit('/',1)[-1],parse_qs(url.query).get('v',[None])[0])
             if path is None:continue
             path=result_file(self.playground.directory,path)
             identity=hashlib.sha256(row['url'].encode()).hexdigest();files[identity]=path
+            replay_identity={}
+            for prefix,role in (('source-','source'),('sim-','target')):
+                camera=path.stem.removeprefix(prefix)
+                if path.stem.startswith(prefix) and camera in ('base_0','left_wrist_0','right_wrist_0'):
+                    replay_identity=dict(camera=camera,role=role)
             catalog.append(dict(id=identity,label=row.get('label','录制视频'),kind='recording',status=state.get('status','unknown'),
                 media=dict(id=identity,label=row.get('label','录制视频'),kind='replay',ready=True,mime_type='video/mp4',
-                    url=media_url(self.device.environment,'collection',identity))))
+                    url=media_url(self.device.environment,'collection',identity),**replay_identity)))
         with self.lock:
             if generation!=self.generation:return
             self.value=value;self.catalog=catalog;self.media_files=files
@@ -595,24 +636,33 @@ class CollectionWorkflow:
         if action=='generate_plan':
             state=self.playground.snapshot()
             plan=state.get('plan') or {}
+            speed=body.get('speed_scale',getattr(self,'speed_scale',None) or plan.get('speed_scale',.3))
+            if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1:
+                raise ValueError('运动速度必须在 10% 至 100% 之间')
             replan=body.get('replan',False)
             if type(replan) is not bool:raise ValueError('replan 必须是布尔值')
             if not replan and plan.get('validated') and state.get('can_execute'):
                 owner=self.device.snapshot('collection')
                 with self.lock:
+                    self.speed_scale=speed
                     self.generation+=1
-                    self.review_key=(plan.get('timeline_digest'),plan.get('output'),plan.get('speed_scale'))
+                    self.review_key=(plan.get('timeline_digest'),plan.get('output'),speed)
                     generation=self.generation
                 return dict(preview=dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],expires_in_s=30,
-                    workflow_generation=generation),
-                    summary=plan.get('summary') or f"冻结轨迹 {plan.get('duration_s',0):.2f} 秒；重新审阅，不重新规划")
+                    workflow_generation=generation,speed_scale=speed),
+                    summary=(plan.get('summary') or '重新审阅冻结路径，不重新观测')+f'；执行速度 {speed*100:g}%，静止等待不缩放')
             with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
             stage='plan' if state.get('environment',{}).get('ready') else 'prepare'
-            return self.accepted(self.playground.start(dict(action=stage)),stage)
+            result=self.playground.start(dict(action=stage,speed_scale=speed))
+            with self.lock:self.speed_scale=speed
+            return self.accepted(result,stage)
         if action=='execute':
             plan=self.playground.snapshot().get('plan') or {}
             if plan.get('timeline_digest')!=body['token']:raise ValueError('本轮计划身份已变化，请重新审阅')
-            return self.accepted(self.playground.start({'action':'execute'}),'execute')
+            speed=body.get('speed_scale',getattr(self,'speed_scale',None) or plan.get('speed_scale',.3))
+            if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1:
+                raise ValueError('运动速度必须在 10% 至 100% 之间')
+            return self.accepted(self.playground.start({'action':'execute','speed_scale':speed}),'execute')
         if action=='cancel':return self.cancel()
         raise ValueError('未知数采操作')
     def invalidate(self):

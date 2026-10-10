@@ -13,6 +13,8 @@ python tests/test_recording_io.py
 python tests/test_physx_boundary.py
 python tests/test_unified_runtime.py
 python tests/test_http_service.py
+python tests/test_device_release.py
+python tests/test_release_races.py
 python tests/test_shared_bridges.py
 python tests/test_workflow_adapter.py
 python tests/test_physx_camera.py

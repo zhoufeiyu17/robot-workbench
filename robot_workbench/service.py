@@ -36,6 +36,7 @@ class Device:
         self.collection_preparation = None
         self.stop_latched = False
         self.connecting = False
+        self.release_receipt = None
 
     def connect(self, body):
         if self.environment == 'physical' and body.get('arms_supported') is not True:
@@ -46,12 +47,19 @@ class Device:
             self.connecting = True
             if self.runtime is not None:
                 raise ValueError('设备已连接；控制权交接不会断开设备')
+            if self.thread is not None and self.thread.is_alive():
+                raise ValueError('上次设备连接仍在收尾，请等待断开确认')
             if self.factory is None:
                 raise ValueError('设备控制后端尚未配置')
             runtime = self.factory()
+            installed = (self.release_receipt or {}).get('calibration_snapshot_id')
+            if installed and runtime.calibration_snapshot_id is None:
+                runtime.notify_calibration_installed(installed)
             credentials = {name: runtime.register_business(name) for name in BUSINESSES}
             self.credentials = credentials
             self.runtime = runtime
+            self.release_receipt = None
+            self.error = None
             if self.stop_latched:
                 runtime.submit(credentials[runtime.holder], {'action':'stop'})
             self.closed.clear()
@@ -68,6 +76,19 @@ class Device:
                 except Exception as error:
                     self.error = str(error)
                     runtime.submit(self.credentials[runtime.holder], {'action': 'stop'})
+                finally:
+                    if runtime.release_receipt is not None:
+                        try:
+                            if runtime.fd is not None:
+                                runtime.close()
+                            self.closed.set()
+                            with self.lock:
+                                if self.runtime is runtime:
+                                    self.runtime = None
+                                    self.credentials = {}
+                        except Exception as error:
+                            runtime.release_receipt.update(status='unconfirmed', message='连接收尾未确认：'+str(error))
+                        self.release_receipt = deepcopy(runtime.release_receipt)
             self.thread = threading.Thread(target=loop, daemon=True, name='device-owner-'+self.environment)
             self.thread.start()
             return {'message': '设备已连接，等待健康反馈；尚未执行运动'}
@@ -78,18 +99,42 @@ class Device:
     def submit(self, business, command):
         if command.get('action') == 'stop':
             self.stop_latched = True
-        if self.runtime is None:
+        runtime, credentials = self.runtime, self.credentials
+        if runtime is None:
             if command == {'action': 'stop'}:
                 return {'message': '设备未连接，没有可发送的运动命令'}
             raise ValueError('请先连接设备')
-        return self.runtime.submit(self.credentials[business], command)
+        try:
+            return runtime.submit(credentials.get(business), command)
+        except PermissionError:
+            if runtime.fd is not None and runtime is self.runtime:
+                raise
+            if command == {'action':'stop'}:
+                return {'message':'设备连接已撤权或正在收尾，没有新的运动命令'}
+            raise ValueError('设备控制连接已变化，请重新核验状态')
 
     def snapshot(self, business):
-        if self.runtime is None:
+        runtime = self.runtime
+        if runtime is None:
             return dict(connected=False, state='CONNECTING' if self.connecting else 'DISCONNECTED', holder=None, feedback_healthy=False,
+                        release_receipt=deepcopy(self.release_receipt),
                         allowed_operations={key: dict(allowed=key == 'stop', reason='请先连接设备')
                                             for key in ('stop','preview','confirm','handoff')})
-        result = self.runtime.snapshot(self.credentials[business])
+        credential = self.credentials.get(business)
+        if self.runtime is not runtime:
+            return self.snapshot(business)
+        try:
+            result = runtime.snapshot(credential)
+        except PermissionError:
+            if runtime.fd is not None:
+                raise
+            return dict(connected=False,state='DISCONNECTED',holder=None,feedback_healthy=False,
+                release_receipt=deepcopy(runtime.release_receipt),
+                allowed_operations={key:dict(allowed=key=='stop',reason='设备连接正在收尾')
+                                    for key in ('stop','preview','confirm','handoff')})
+        receipt = result.get('release_receipt')
+        if receipt and receipt['status']=='requested' and time.monotonic()-receipt['requested_monotonic_s']>=2:
+            receipt.update(status='unconfirmed',message='释放超过 2 秒仍未确认；请查看设备诊断，不能重新连接')
         result['sample_wall_ns'] = (result.get('calibration_feedback') or {}).get('sample_wall_ns')
         result['motion_status'] = (result.get('motion') or {}).get('status')
         if result.get('motion') is None and result.get('connected') and result.get('automatic_enabled') is False:
@@ -244,6 +289,7 @@ class Application:
                     self.manual_tasks.pop((environment,business),None)
         if review:
             value['review'] = {key:review[key] for key in ('id','summary','physical_clearance_required')}
+            if review.get('speed_scale') is not None:value['review']['speed_scale']=review['speed_scale']
             execution_gate=runtime['allowed_operations']['confirm' if review['owner_preview'] else 'preview']
             value['primary_action'] = dict(id=review['action'],label='审阅并执行本批',
                 allowed=execution_gate['allowed'],reason=execution_gate['reason'])
@@ -254,8 +300,13 @@ class Application:
                 if value.get('primary_action'):
                     value['primary_action'].update(allowed=False,reason='当前请求仍在处理')
         allowed = runtime.setdefault('allowed_operations',{})
-        allowed['connect'] = dict(allowed=not runtime['connected'] and device.factory is not None,
-                                  reason=None if device.factory else '设备控制后端尚未配置')
+        connect_ready=device.runtime is None and not device.connecting and not (device.thread and device.thread.is_alive())
+        allowed['connect'] = dict(allowed=bool(connect_ready and device.factory is not None),
+                                  reason=('设备控制后端尚未配置' if device.factory is None else
+                                          None if connect_ready else '设备仍连接或正在收尾，请等待明确断开'))
+        allowed.setdefault('release',dict(allowed=False,reason='请先连接设备'))
+        if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+            allowed['release']=dict(allowed=False,reason='请先结束或取消业务任务，再释放设备连接')
         holder = runtime.get('holder')
         # This is an explicit operator handoff endpoint, not an application
         # pretending to be the current holder when sending a motion command.
@@ -320,7 +371,10 @@ class Application:
             revision=revision,server_wall_ns=time.time_ns(),csrf=self.csrf,
             device=dict(id=device.id,label=device.label,environment=environment),runtime=runtime,
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
-            results=workflow.results() if workflow else [],diagnostics=[{'label':'控制循环','value':device.error or '未报告错误'}],
+            results=workflow.results() if workflow else [],diagnostics=[
+                {'label':'控制器状态','value':runtime.get('state','未知')},
+                {'label':'控制器当前原因','value':runtime.get('reason') or '未提供当前状态原因'},
+                {'label':'服务线程异常','value':device.error or '未报告服务线程异常'},*value.get('diagnostics',[])],
             mesh=workflow.mesh() if workflow and hasattr(workflow,'mesh') else {'requested':False,'applied':False},manual=manual,
             arrival_statistics=arrival,preview=preview)
 
@@ -397,6 +451,24 @@ class Application:
             result=runtime.handoff(device.credentials[runtime.holder],body.get('target_business'))
             self.invalidate(environment,clear_manual=True)
             return {'message':'控制权限已交接，保持连接',**result}
+        if action=='release':
+            if set(body)-{'environment','business','request_id','arms_supported'}:
+                raise ValueError('unknown release field')
+            if environment=='physical' and body.get('arms_supported') is not True:
+                raise ValueError('释放前请确认此刻双臂已可靠支撑；释放会撤掉保持')
+            if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+                raise ValueError('请先结束或取消业务任务，再释放设备连接')
+            runtime=device.runtime
+            if runtime is None:raise ValueError('设备未连接')
+            with self.lock:
+                if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
+                    raise ValueError('当前请求尚未结束，请等待收尾后释放连接')
+                result=runtime.request_release(device.credentials[business])
+                result={**result,'message':'释放已受理；请等待设备连接已释放的确认'}
+                self.requests[key]=dict(body=original_body,action=action,response=result)
+                while len(self.requests)>256:self.requests.popitem(last=False)
+            self.invalidate(environment,clear_manual=True)
+            return result
         if action=='prepare_collection':
             if business!='collection' or set(body)!={'environment','business','request_id'} or device.collection_preparation is None:
                 raise ValueError('当前数采后台准备入口未配置')
@@ -415,6 +487,9 @@ class Application:
                     raise ValueError('审批已过期或不属于当前任务，请重新生成计划')
                 if body.get('physical_clearance') is not True:
                     raise ValueError('执行前必须明确确认本批轨迹与净空')
+                if review.get('speed_scale') is not None and (type(body.get('speed_scale',review['speed_scale'])) not in (int,float)
+                        or body.get('speed_scale',review['speed_scale'])!=review['speed_scale']):
+                    raise ValueError('执行速度已变化，请重新审阅')
             workflow=device.workflows.get(business)
             if workflow and review.get('workflow_revision') is not None and review['workflow_revision']!=workflow.manual_revision():
                 raise ValueError('标定计划或求解来源已变化，请重新审阅')
@@ -441,6 +516,7 @@ class Application:
                     with self.lock:self.manual_tasks.pop((environment,business),None)
                     raise
             body={**body,'token':review['token']}
+            if review.get('speed_scale') is not None:body['speed_scale']=review['speed_scale']
         if action not in {'connect','prepare_collection','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
         if action not in ('connect','prepare_collection','mesh','select_result','cancel',*HISTORY_ACTIONS):
@@ -577,6 +653,7 @@ class Application:
                 if device.collection_preparation.snapshot()['status']!='ready':return
             review=dict(id=secrets.token_hex(16),action=action,
                 token=preview['token'],summary=summary,physical_clearance_required=device.environment=='physical',
+                speed_scale=preview.get('speed_scale') if business=='collection' else None,
                 owner_preview=bool(preview.get('owner_pid')),
                 manual_revision=manual_revision,
                 workflow_revision=workflow.manual_revision() if business=='calibration' and workflow and hasattr(workflow,'manual_revision') else None,
@@ -636,11 +713,14 @@ def handler(app):
                     business=query.get('business',['calibration'])[0]
                     if business not in BUSINESSES:raise ValueError('未知业务')
                     workflow=device.workflows.get(business)
-                    file=workflow.media(query.get('result_id',[''])[0]) if workflow else None
+                    result_id=query.get('result_id',[''])[0]
+                    file=workflow.media(result_id) if workflow else None
                     if file is None:return self.send(404,{'error':'本轮媒体尚未就绪'})
                     from robot_workbench.http_media import serve_file
                     kind=mimetypes.guess_type(str(file))[0]
-                    if kind not in ('video/mp4','image/png','image/jpeg'):raise ValueError('不支持的回放媒体类型')
+                    current_plan=(kind=='application/json' and business=='collection'
+                        and (workflow.snapshot().get('trajectory') or {}).get('id')==result_id)
+                    if kind not in ('video/mp4','image/png','image/jpeg') and not current_plan:raise ValueError('不支持的回放媒体类型')
                     return serve_file(self,file,content_type=kind)
                 if path.path.startswith('/api/media/'):
                     device=app.device(query.get('environment',['fake'])[0])
@@ -744,7 +824,9 @@ def main():
         # No implicit physical release. This CLI owns only its explicit L1 fake.
         device=app.devices['fake']
         if device.runtime:
-            device.submit(device.runtime.holder,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
+            runtime=device.runtime
+            if not runtime.release_receipt or runtime.release_receipt.get('sdk_close_returned'):
+                runtime.owner.submit({'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
             device.closed.wait(.05)
             device.closed.set()
 

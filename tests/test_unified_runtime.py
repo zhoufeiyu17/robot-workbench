@@ -32,7 +32,8 @@ class UnifiedRuntimeTest(unittest.TestCase):
             if runtime.fd is not None:
                 runtime.owner.recording = None
                 if runtime.owner.backend.is_connected:
-                    runtime.submit(credentials[runtime.holder], dict(action='release', confirmation='ARMS_SUPPORTED_RELEASE'))
+                    # Test-owned backend teardown may end an intentionally unfinished synthetic motion.
+                    runtime.owner.submit(dict(action='release', confirmation='ARMS_SUPPORTED_RELEASE'))
                     runtime.tick()
                 runtime.close()
 

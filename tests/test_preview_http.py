@@ -71,8 +71,9 @@ class PreviewHTTPTests(unittest.TestCase):
     def test_display_tolerates_position_noise_with_raw_correction_receipt(self):
         self.device.connect({})
         def close_device():
-            self.device.submit(self.device.runtime.holder,dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
-            self.device.thread.join(1);self.device.runtime.close();self.device.closed.set()
+            runtime=self.device.runtime
+            runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
+            self.device.thread.join(1);runtime.close();self.device.closed.set()
         self.addCleanup(close_device)
         q=[0.]*12;q[0]=3.144
         result=self.post('preview_target',q12=q,jaw_gap_mm=[80.,80.])

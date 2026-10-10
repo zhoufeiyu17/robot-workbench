@@ -331,6 +331,8 @@ def run(args, base, nominal):
                 return dict(owner_available=owner.feedback_healthy,owner_pid=os.getpid(),
                             command_epoch=owner.epoch,runtime_nonce=runtime.nonce)
         def release(runtime):
+            if runtime.release_receipt and not runtime.release_receipt.get('sdk_close_returned'):
+                raise RuntimeError('previous SDK release is unconfirmed; automatic retry forbidden')
             runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
             runtime.tick();runtime.close()
         def observe(method,owner,**options):
@@ -409,6 +411,8 @@ def run(args, base, nominal):
         if device and device.runtime:
             try:
                 runtime=device.runtime
+                if runtime.release_receipt and not runtime.release_receipt.get('sdk_close_returned'):
+                    raise RuntimeError('previous SDK release is unconfirmed; teardown will not retry it')
                 runtime.owner.submit(dict(action='stop'));runtime.tick()
                 if task_observer:task_observer.after_advance(runtime.owner,physics_advanced=False)
                 runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'));runtime.tick()

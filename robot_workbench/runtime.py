@@ -62,6 +62,7 @@ class Runtime:
         self.calibration_revision, self.calibration_snapshot_id = 0, None
         self.reviewed_plans, self.execution_calibration = {}, None
         self.last_return, self.stop_receipt, self.detached_hold = None, None, None
+        self.release_receipt = None
         self.initialization_error = None
         self.owner = None
         root = Path(lock_root).resolve(); root.mkdir(parents=True, exist_ok=True)
@@ -170,6 +171,11 @@ class Runtime:
         except BaseException as error:
             with self.lock:
                 call['error'] = str(error)
+                if name == 'close':
+                    if self.release_receipt is None:
+                        self.release_receipt = dict(runtime_nonce=self.nonce, sdk_close_returned=False)
+                    self.release_receipt.update(status='unconfirmed', message='SDK 释放失败：'+str(error))
+                    self.owner.release_requested = False  # A failed explicit release needs a new operator request.
                 if name in {'begin', 'send', 'begin_collection', 'set_damping_hold', 'close'}:
                     self.hold = dict(left=None, right=None)
                     self.hold_returns = dict(left=None, right=None)
@@ -188,12 +194,50 @@ class Runtime:
                 elif name == 'close':
                     self.hold = dict(left=None, right=None)
                     self.hold_returns = dict(left=None, right=None)
+                    if self.release_receipt is not None:
+                        self.release_receipt['sdk_close_returned'] = True
             return result
         finally:
             with self.lock:
                 call['returned_monotonic_s'] = time.monotonic()
                 self.last_return = call
                 self.calls.pop(call['id'])
+
+    def _release_reason(self):
+        owner = self.owner
+        if self.tick_lock.locked() or self.calls:
+            return '控制调用尚未结束，暂不能释放连接'
+        if not owner.backend.is_connected:
+            return '设备已断开，等待连接收尾'
+        if owner.release_requested:
+            return '释放已受理，等待 SDK 断开确认'
+        if (owner.runner is not None and owner.runner.status not in {'READY','STOPPED','FAULT'}
+                or owner.sequence_remaining or owner.capture_sample):
+            return '请先停止运动和采图，再释放设备连接'
+        recording = owner.recording
+        if recording is not None and (not recording.done.is_set() or getattr(recording,'thread',None) is None or recording.thread.is_alive()):
+            return '录制尚未完成收尾，暂不能释放连接'
+        return None
+
+    def request_release(self, credential, command=None):
+        command = {'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'} if command is None else command
+        if command != {'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'}:
+            raise ValueError('explicit supported-arm release required')
+        with self.lock:
+            business = self._authenticate(credential)
+            if business != self.holder:
+                raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
+            reason = self._release_reason()
+            if reason:
+                raise ValueError(reason)
+            self.preview_revision += 1
+            method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
+            result = method(self.owner, command)
+            self.release_receipt = dict(status='requested', runtime_nonce=self.nonce,
+                calibration_snapshot_id=self.calibration_snapshot_id,
+                requested_monotonic_s=time.monotonic(), requested_wall_ns=time.time_ns(),
+                sdk_close_returned=False, message='释放已受理，等待 SDK 断开与设备锁收尾')
+            return dict(result, release_receipt=deepcopy(self.release_receipt))
 
     def _idle_reason(self):
         owner = self.owner
@@ -226,6 +270,8 @@ class Runtime:
         if not isinstance(command, dict):
             raise ValueError('command object required')
         action = command.get('action')
+        if action == 'release':
+            return self.request_release(credential, command)
         with self.lock:
             business = self._authenticate(credential)
             if action == 'stop':
@@ -395,8 +441,11 @@ class Runtime:
                 sdk_hold_returns=deepcopy(self.hold_returns),
                 sdk_calls_in_flight=deepcopy(list(self.calls.values())), last_sdk_return=deepcopy(self.last_return),
                 detached_hold=deepcopy(self.detached_hold), stop_receipt=deepcopy(self.stop_receipt),
+                release_receipt=deepcopy(self.release_receipt),
                 initialization_error=self.initialization_error,
                 allowed_operations={'stop':dict(allowed=True, reason=None),
+                    'release':dict(allowed=business == self.holder and self._release_reason() is None,
+                        reason='请先交接控制权限：当前由 '+self.holder+' 持有' if business != self.holder else self._release_reason()),
                     'preview':dict(allowed=reason is None, reason=reason),
                     'handoff':dict(allowed=reason is None, reason=reason),
                     'confirm':dict(allowed=reason is None and bool(self.owner.pending),
@@ -408,5 +457,10 @@ class Runtime:
         with self.lock:
             if self.tick_lock.locked() or self.calls or self.owner.backend.is_connected:
                 raise RuntimeError('explicit supported release and completed SDK calls required before closing runtime')
+            if self.release_receipt is not None and not self.release_receipt['sdk_close_returned']:
+                raise RuntimeError('SDK release return remains unconfirmed')
             if self.fd is not None:
                 os.close(self.fd); self.fd = None
+            if self.release_receipt is not None:
+                self.release_receipt.update(status='released', confirmed_wall_ns=time.time_ns(),
+                    message='设备连接已释放；再次接入需要显式连接')

@@ -3,7 +3,7 @@ const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理
 const CALIBRATION_TOOLS=['configure_calibration','plan_batch','preview_batch','fit_source','fit_batch'];
 const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','preview_recover'];
 const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
-const reasonText=value=>value==='motion or capture is still active'?'当前动作或采集尚未结束':value;
+const reasonText=value=>({'motion or capture is still active':'当前动作或采集尚未结束','holding/control state is not confirmed':'保持/控制状态尚未确认，请查看设备诊断'}[value]||value);
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',diagnostic_readonly:'只读诊断',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
 const outcomeStatus = value => typeof value === 'object' && value ? value.status : value;
@@ -66,6 +66,8 @@ export function actionPermission(state, action, options = {}) {
   }
   if (action === 'connect' && state.device?.environment === 'physical' && !options.supported)
     return {allowed:false, reason:'请先确认当前双臂已可靠支撑'};
+  if(action==='release'&&state.device?.environment==='physical'&&!options.releaseSupported)
+    return {allowed:false,reason:'释放前请再次确认当前双臂已可靠支撑'};
   if(action==='delete_confirm'){
     if(!state.workflow?.deletion_preview?.id||state.workflow.deletion_preview.valid!==true)return {allowed:false,reason:state.workflow?.deletion_preview?.reason||'请先预览具体删除范围'};
     if(!options.deleteClearance)return {allowed:false,reason:'请先勾选确认本次预览中的删除范围'};
@@ -123,6 +125,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
   let resultActions=[],queueActions=[],replayControlsKey='',manualQueueKey='';
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
+  let speedKey='',trajectoryKey='',trajectory=null,trajectoryRequest=null;
+  let replayVideos=[],pairedCamera='',pairedPosition=0,pairedStarted=0,pairedPlaying=false,pairedRate=1,pairVersion=0;
   let deletionKey='';const confirmedDeletions=new Set();
   let previewView='target',meshCamera='head',meshCandidate='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
   let overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0},overviewDirty=false,overviewSending=false,overviewPointer=null;
@@ -139,7 +143,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return {q12,jaw_gap_mm};
   }
   const key = () => context.environment + '/' + context.business;
-  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked,deleteClearance:el('delete-clearance').checked});
+  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked,releaseSupported:el('release-supported').checked,deleteClearance:el('delete-clearance').checked});
   const permission = action => ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
     ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
     ? {allowed:false,reason:'本次删除确认已提交，请查看删除回执；旧预览不能重复确认'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
@@ -267,11 +271,86 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el(id).setAttribute('aria-disabled',String(el(id).disabled));
     setText(id+'-reason',reason);
   }
+  const trajectoryBinding=()=>JSON.stringify([key(),serverInstance,state?.workflow?.id,state?.workflow?.trajectory?.id]);
+  function renderTrajectory(){
+    const view=state?.workflow?.trajectory,binding=trajectoryBinding();
+    el('trajectory-panel').hidden=context.business!=='collection'||!view;
+    if(binding!==trajectoryKey){
+      trajectoryRequest?.abort();trajectoryRequest=null;trajectoryKey=binding;trajectory=null;
+      el('trajectory-view').hidden=true;el('trajectory-tick').value=0;
+      setText('trajectory-status',view?.error||'点击加载当前冻结轨迹；只读，不执行。');
+      const url=safeMediaUrl(view?.first_frame_url,location.href);el('trajectory-first-frame').hidden=!url;
+      if(url)el('trajectory-first-frame').src=url;else el('trajectory-first-frame').removeAttribute('src');
+    }
+    el('trajectory-load').disabled=!view?.url||!!trajectoryRequest;
+  }
+  async function loadTrajectory(){
+    const view=state?.workflow?.trajectory,url=safeMediaUrl(view?.url,location.href);if(!url)return;
+    const binding=trajectoryBinding(),controller=new AbortController();trajectoryRequest?.abort();trajectoryRequest=controller;
+    setText('trajectory-status','正在读取当前冻结轨迹…');renderTrajectory();
+    try{
+      const response=await request(url,{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('轨迹接口 '+response.status);
+      const value=await response.json();if(binding!==trajectoryBinding()||controller.signal.aborted)return;
+      const ticks=value?.ticks;
+      if(value?.timeline_digest!==view.timeline_digest||!Array.isArray(ticks)||!ticks.length||ticks.some((row,index)=>
+        row.tick!==index||!Number.isFinite(row.time_s)||row.time_s<0||index&&row.time_s<=ticks[index-1].time_s||
+        ['left','right'].some(side=>!Array.isArray(row.target?.[side+'_arm_joints'])||row.target[side+'_arm_joints'].length!==6||
+          !row.target[side+'_arm_joints'].every(Number.isFinite)||!Number.isFinite(row.target[side+'_gripper']))))throw Error('轨迹身份、序列或目标字段无效');
+      trajectory=value;el('trajectory-view').hidden=false;el('trajectory-tick').max=ticks.length-1;
+      const stages=(Array.isArray(value.stages)?value.stages:[]).filter(row=>Number.isInteger(row.start_tick)&&row.start_tick>=0&&row.start_tick<ticks.length);
+      el('trajectory-stage').replaceChildren();for(const row of stages){const option=make('option',row.name);option.value=row.start_tick;el('trajectory-stage').append(option);}
+      setText('trajectory-status',`${ticks.length} 个目标 · 父计划速度 ${100*(view.speed_scale??.3)}% · ${view.timeline_digest}`);
+      renderTrajectoryTick();renderTrajectoryPlots();
+    }catch(error){if(binding===trajectoryBinding()&&!controller.signal.aborted)setText('trajectory-status','只读轨迹加载失败：'+error.message);}
+    finally{if(trajectoryRequest===controller){trajectoryRequest=null;renderTrajectory();}}
+  }
+  function renderTrajectoryTick(){
+    if(!trajectory)return;const index=Math.max(0,Math.min(trajectory.ticks.length-1,Number(el('trajectory-tick').value)||0)),row=trajectory.ticks[index];
+    setText('trajectory-position',`tick ${index} / ${trajectory.ticks.length-1} · ${row.time_s.toFixed(3)} s`);
+    setText('trajectory-target',['left','right'].map(side=>`${side==='left'?'左臂':'右臂'} · rad：${row.target[side+'_arm_joints'].map(value=>value.toFixed(5)).join(', ')}\n夹爪金属内间距：${row.target[side+'_gripper'].toFixed(3)} mm`).join('\n'));
+  }
+  function renderTrajectoryPlots(){
+    if(!trajectory)return;const ticks=trajectory.ticks,side=el('trajectory-arm').value==='right'?'right':'left';
+    const draw=(id,series,height)=>{
+      const svg=el(id),all=series.flat(),low=all.reduce((a,b)=>Math.min(a,b),Infinity),high=all.reduce((a,b)=>Math.max(a,b),-Infinity),span=high-low||1,end=ticks.at(-1).time_s||1;
+      svg.replaceChildren();series.forEach((values,index)=>{const line=doc.createElementNS('http://www.w3.org/2000/svg','polyline');
+        line.setAttribute('points',values.map((value,i)=>`${10+ticks[i].time_s/end*580},${height-10-(value-low)/span*(height-20)}`).join(' '));
+        line.setAttribute('fill','none');line.setAttribute('stroke',['#356894','#b05d35','#568348','#805ba6','#b18a22','#498886'][index]);line.setAttribute('stroke-width','1.5');svg.append(line);});
+      svg.setAttribute('aria-label',`${id==='trajectory-joints'?'六关节 rad':'左右夹爪 mm'} · 范围 ${low.toFixed(3)} 至 ${high.toFixed(3)} · 0 至 ${end.toFixed(3)} 秒`);
+    };
+    draw('trajectory-joints',Array.from({length:6},(_,i)=>ticks.map(row=>row.target[side+'_arm_joints'][i])),160);
+    draw('trajectory-jaws',['left','right'].map(side=>ticks.map(row=>row.target[side+'_gripper'])),120);
+  }
+  const pair=()=>replayVideos.filter(row=>row.camera===pairedCamera&&['source','target'].includes(row.role)).map(row=>row.node);
+  const pairDuration=()=>Math.max(0,...pair().map(node=>Number.isFinite(node.duration)?node.duration:0));
+  const pairTime=()=>Math.min(pairDuration(),pairedPosition+(pairedPlaying?(clock.now()-pairedStarted)/1000*pairedRate:0));
+  function pausePair(){pairVersion++;pairedPosition=pairTime();pairedPlaying=false;for(const node of pair())node.pause?.();setText('collection-replay-toggle','播放两侧');}
+  function seekPair(value){pairedPosition=Math.max(0,Math.min(pairDuration(),value));pairedStarted=clock.now();for(const node of pair())if(Number.isFinite(node.duration))node.currentTime=Math.min(pairedPosition,node.duration);renderPairClock();}
+  async function playPair(){
+    if(pair().length!==2||pair().some(node=>!Number.isFinite(node.duration)))return;
+    if(pairedPlaying){pausePair();return;}if(pairTime()>=pairDuration())seekPair(0);
+    const version=pairVersion;pairedStarted=clock.now();pairedPlaying=true;setText('collection-replay-toggle','暂停两侧');
+    try{await Promise.all(pair().filter(node=>node.currentTime<node.duration).map(node=>{node.playbackRate=pairedRate;return node.play();}));}
+    catch(error){if(version===pairVersion){pausePair();setText('collection-replay-status','回放播放失败：'+error.message);}}
+  }
+  function renderPairClock(){
+    const nodes=pair(),ready=nodes.length===2&&nodes.every(node=>Number.isFinite(node.duration)&&node.duration>0),position=pairTime();
+    el('collection-replay-toggle').disabled=!ready;el('collection-replay-time').disabled=!ready;el('collection-replay-time').max=pairDuration();el('collection-replay-time').value=position;
+    if(ready)setText('collection-replay-status',`${position.toFixed(2)} / ${pairDuration().toFixed(2)} s · 各自首帧对齐，短视频保留末帧；L3 辅助回放不证明实际任务成功。`);
+    else if(nodes.length===1)setText('collection-replay-status','此相机仅有单侧视频，可独立回放；不补造另一侧结果。');
+    if(pairedPlaying){const version=pairVersion;for(const node of nodes){if(position>=node.duration){node.pause();node.currentTime=node.duration;}else{if(Math.abs(node.currentTime-position)>.12)node.currentTime=position;if(node.paused)void node.play().catch(error=>{if(version===pairVersion){pausePair();setText('collection-replay-status','回放播放失败：'+error.message);}});}}if(position>=pairDuration())pausePair();}
+  }
+  function selectPair(){
+    pausePair();pairedCamera=el('collection-replay-camera').value;pairedPosition=0;
+    const paired=pair().length===2;for(const row of replayVideos){row.figure.hidden=!!row.camera&&row.camera!==pairedCamera;row.node.controls=!paired||row.camera!==pairedCamera;}
+    seekPair(0);
+  }
   function renderGates() {
     const primary = state?.workflow?.primary_action;
     setText('primary',primary?.label || '等待可用操作');
     gate('primary',primary?.id || 'unknown',primary ? '' : '等待后端提供当前阶段主动作');
-    for (const action of ['handoff','stop','connect','cancel','recover']) gate(action,action);
+    for (const action of ['handoff','stop','connect','cancel','recover','release']) gate(action,action);
+    el('release-support-label').hidden=context.environment!=='physical'||state?.runtime?.connected!==true;
     if ([...pending.values()].some(p=>p.action==='stop' && p.context===key())) {
       el('stop').disabled=true; setText('stop-reason','停止请求已发送，等待停止回执');
     }
@@ -300,6 +379,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('replay-overlay').disabled=cameraChanged||!replay?.overlay_available||!permission('select_result').allowed;
     setText('replay-overlay-reason',cameraChanged?'先查看所选相机，再启用匹配结果的叠加':replay?.overlay_available?'':replay?'历史叠加需要与当前相机匹配的头部或双腕结果':'');
     el('collection-tools').hidden=!state?.workflow?.replan_action;
+    el('collection-speed-tools').hidden=context.business!=='collection'||!state?.workflow?.stage_id?.startsWith('collection.');
+    el('collection-speed').disabled=state?.workflow?.busy===true||options().fresh===false;
+    gate('review-speed','generate_plan',state?.workflow?.trajectory?.url?'':'请先生成可审阅的冻结计划');
     gate('replan','generate_plan',state?.workflow?.replan_action?.allowed===false?(state.workflow.replan_action.reason||'当前不能重新规划'):'');
     const tools=state?.workflow?.calibration_tools,selectedKind=el('calibration-kind').value,selectedHead=el('calibration-head').value;
     const dirty=selectedKind!==tools?.workflow?.kind || selectedKind==='wrist'&&selectedHead!==tools?.workflow?.head_result_id;
@@ -448,11 +530,19 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('device-name',s?.device?.label||s?.device?.id||'机器人工作台');
     setText('holder',BUSINESS[r.holder] || (r.holder ? String(r.holder) : '未分配 / 未知'));
     setText('connection','连接：'+(r.connected===true?'已连接':r.connected===false?'未连接':'未知'));
+    const controlState=String(r.state||'unknown').toUpperCase(),controlFault=['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(controlState);
+    setText('control-state','控制：'+({READY:'就绪',STOPPED_DAMPING_HOLD:'已停止，阻尼保持',MANUAL_TAKEOVER:'人工接管',FAULT:'故障锁定',FAULT_STOP_UNCONFIRMED:'故障锁定（停止未确认）',EMERGENCY:'紧急故障锁定',DISCONNECTED:'未连接',RELEASED:'已释放',CONNECTING:'连接中'}[controlState]||statusText(r.state)));
+    el('control-state').className=controlFault?'tone-bad':'';el('control-state').title=controlState;
+    el('control-fault').hidden=!controlFault;
+    const fault=r.last_fault_diagnostic||{},faultReasons=[r.reason,fault.error,...(Array.isArray(fault.reasons)?fault.reasons:[])].filter(Boolean).map(textValue);
+    setText('control-fault-reason',controlFault?controlState+' · '+([...new Set(faultReasons)].join('；')||'后端尚未提供故障原因，请查看原始状态回执。'):'');
+    setText('control-fault-guidance',controlFault?(context.environment==='physical'?'请先可靠支撑双臂并核对设备诊断；':'请先核对设备诊断；')+'仅在释放操作允许时显式释放，确认断开后再连接。释放未确认时不要重试；不会自动续跑旧轨迹。':'');
     setText('feedback','反馈：'+(r.feedback_healthy===true?'健康':r.feedback_healthy===false?'不可用':'未知'));
     const hold=typeof r.hold==='object'&&r.hold?Object.entries(r.hold).map(([side,value])=>({left:'左',right:'右'}[side]||side)+' '+statusText(value)).join(' / '):statusText(r.hold);
     setText('hold','保持：'+hold);setText('motion','动作：'+(r.motion_status==='no_automatic_task'?'无自动任务':statusText(r.motion_status)));
     el('motion').title=r.motion_status==='no_automatic_task'?'当前没有自动动作任务；此状态不代表物理静止，仍需核对设备反馈。':'';
     setText('stop-state',r.stop_receipt?(r.stop_receipt.stop_hold_return_confirmed===true?'停止：保持调用已确认':'停止：已受理，尚未确认'):'');
+    setText('release-state',r.release_receipt?({requested:'释放：已受理，等待设备断开',released:'释放：设备连接已断开',unconfirmed:'释放：尚未确认'}[r.release_receipt.status]||'释放：状态待核验')+(r.release_receipt.message?' · '+r.release_receipt.message:''):'');
     setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',statusText(w.status));
     setText('run-identity','Run：'+textValue(w.id));setText('stage-title',w.title||'等待任务状态');setText('stage-id',w.stage_id||'—');
     setText('task-message',w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理请求：'+textValue(w.request.action)+'。'+(w.message||''):w.message||'尚未取得当前任务回执。');
@@ -463,6 +553,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const overall=countedProgress(w.overall_progress);el('overall-panel').hidden=!overall;
     if(overall){el('overall-progress').max=overall.total;if(overall.indeterminate)el('overall-progress').removeAttribute('value');else el('overall-progress').value=overall.current;setText('overall-label',`${overall.indeterminate?'当前阶段工作量未知':'整体 '+(100*overall.current/overall.total).toFixed(1)+'%'} · ${overall.completed_stages??overall.current} / ${overall.total} 阶段已完成 · 阶段等权，不代表剩余时间`);}
     renderDetails('task-details',w.details);
+    const reviewedSpeed=w.review?.speed_scale??w.speed_scale??.3,nextSpeedKey=JSON.stringify([key(),w.id,reviewedSpeed]);
+    if(nextSpeedKey!==speedKey){speedKey=nextSpeedKey;el('collection-speed').value=100*reviewedSpeed;setText('collection-speed-value',el('collection-speed').value+'%');}
+    renderTrajectory();
     const nextReviewKey=JSON.stringify([key(),w.id,w.revision,w.review?.id]);
     if(nextReviewKey!==reviewKey){reviewKey=nextReviewKey;clearReview();}
     el('review-panel').hidden=!w.review;
@@ -681,8 +774,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     }
     const allMedia=[...(state?.media||[]),...(state?.workflow?.replay||[]),...results.map(r=>r.media).filter(Boolean)];
     const media=[...new Map(allMedia.filter(m=>m.kind==='replay').map(m=>[m.id||m.url,m])).values()],nextKey=JSON.stringify([key(),media]);
-    if(nextKey===replayKey)return;replayKey=nextKey;const replay=el('replay-media');replay.replaceChildren();
-    for(const m of media){const url=safeMediaUrl(m.url,location.href);if(!m.ready||!url)continue;const figure=make('figure'),video=/\.(mp4|webm)(\?|$)/i.test(url)||m.mime_type?.startsWith('video/');const node=make(video?'video':'img');node.src=url;if(video){node.controls=true;node.preload='metadata';node.playsInline=true;}else node.alt=m.label||'录制回放';figure.append(make('figcaption',(m.label||'录制回放')+' · 回放'),node);replay.append(figure);}
+    if(nextKey===replayKey)return;pausePair();replayKey=nextKey;replayVideos=[];const replay=el('replay-media');replay.replaceChildren();
+    for(const m of media){const url=safeMediaUrl(m.url,location.href);if(!m.ready||!url)continue;const figure=make('figure'),video=/\.(mp4|webm)(\?|$)/i.test(url)||m.mime_type?.startsWith('video/');const node=make(video?'video':'img');node.src=url;if(video){node.controls=true;node.preload='metadata';node.playsInline=true;node.addEventListener('loadedmetadata',renderPairClock);replayVideos.push({node,figure,camera:m.camera,role:m.role});}else node.alt=m.label||'录制回放';figure.append(make('figcaption',(m.label||'录制回放')+' · 回放'),node);replay.append(figure);}
+    const cameras=[...new Set(replayVideos.filter(row=>['source','target'].includes(row.role)).map(row=>row.camera))];
+    el('collection-replay-controls').hidden=!cameras.length;el('collection-replay-camera').replaceChildren();
+    for(const camera of cameras){const option=make('option',{base_0:'头部',left_wrist_0:'左腕',right_wrist_0:'右腕'}[camera]||camera);option.value=camera;el('collection-replay-camera').append(option);}
+    if(cameras.length){el('collection-replay-camera').value=cameras.includes(pairedCamera)?pairedCamera:cameras[0];selectPair();}
   }
   async function poll() {
     if(stopped||polling)return;
@@ -828,8 +925,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(action==='delete_confirm'){body.delete_preview_id=state.workflow.deletion_preview.id;body.confirmed=el('delete-clearance').checked;confirmedDeletions.add(key()+'/'+body.delete_preview_id);}
     if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?el('clearance').checked:true;}
     if(action==='connect'&&context.environment==='physical')body.arms_supported=el('supported').checked;
+    if(action==='release')body.arms_supported=el('release-supported').checked;
+    if(context.business==='collection'&&['generate_plan','execute'].includes(action))body.speed_scale=Number(el('collection-speed').value)/100;
     const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),requestInstance=serverInstance,controller=new AbortController();
-    if(state.workflow?.review?.id&&['stop','cancel','handoff','generate_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
+    if(state.workflow?.review?.id&&['stop','cancel','handoff','release','generate_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     barrier();const at=generation;displayedRequest=sequence;pending.set(sequence,{action,context:requestContext,controller});
     notice(action==='stop'?'正在请求停止；等待后端停止回执。':'请求已发送，等待后端受理；尚未确认完成。',true);renderGates();
@@ -838,10 +937,11 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       const result=await response.json();if(!response.ok)throw Error(result.message||result.error||result.reason||'请求被拒绝');
       if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice(result.message||(action==='stop'?'停止请求已受理；以停止回执为准。':'请求已受理；以任务回执为准。'));
     } catch(error) {if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice('请求结果未确认：'+error.message+'；不会自动重试，请核对状态。');}
-    finally {pending.delete(sequence);if(requestContext===key()&&requestInstance===serverInstance){el('supported').checked=false;renderGates();if(at===generation)void poll();}}
+    finally {pending.delete(sequence);if(requestContext===key()&&requestInstance===serverInstance){el('supported').checked=false;el('release-supported').checked=false;renderGates();if(at===generation)void poll();}}
   }
   function switchContext(next) {
     if(next.environment===context.environment&&next.business===context.business)return;
+    pausePair();el('release-supported').checked=false;
     finishAudit('设备环境或业务变化');
     barrier();for(const p of pending.values())p.controller.abort();pending.clear();clearMedia();
     for(const controller of displayRequests.values())controller.abort();displayRequests.clear();previewFloors.clear();previewErrors.clear();
@@ -850,6 +950,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     notice('正在核验'+ENVIRONMENT[context.environment]+' / '+BUSINESS[context.business]+'；浏览不会交接控制权。',false,true);render();void poll();
   }
   function selectTab(next) {
+    if(next!=='results')pausePair();
     if(next!==context.business)finishAudit('目标图像离开当前可见工作区');
     tab=next;for(const button of doc.querySelectorAll('[data-tab]')){if(button.dataset.tab===next)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
     el('work-pane').hidden=!BUSINESS[next];el('results-pane').hidden=next!=='results';el('diagnostics-pane').hidden=next!=='diagnostics';
@@ -872,6 +973,20 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     for(const button of doc.querySelectorAll('[data-tab]'))button.addEventListener('click',()=>selectTab(button.dataset.tab));
     el('primary').addEventListener('click',()=>{if(state?.workflow?.primary_action)void send(state.workflow.primary_action.id);});
     el('replan').addEventListener('click',()=>send('generate_plan',{replan:true}));
+    el('review-speed').addEventListener('click',()=>send('generate_plan'));
+    el('collection-speed').addEventListener('input',()=>{
+      setText('collection-speed-value',el('collection-speed').value+'%');
+      if(state?.workflow?.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
+      clearReview();renderGates();
+    });
+    el('trajectory-load').addEventListener('click',loadTrajectory);
+    el('trajectory-tick').addEventListener('input',renderTrajectoryTick);
+    el('trajectory-stage').addEventListener('change',()=>{el('trajectory-tick').value=el('trajectory-stage').value;renderTrajectoryTick();});
+    el('trajectory-arm').addEventListener('change',renderTrajectoryPlots);
+    el('collection-replay-camera').addEventListener('change',selectPair);
+    el('collection-replay-toggle').addEventListener('click',playPair);
+    el('collection-replay-time').addEventListener('input',()=>seekPair(Number(el('collection-replay-time').value)||0));
+    el('collection-replay-speed').addEventListener('change',()=>{const value=Number(el('collection-replay-speed').value);if(![.25,.5,1,2].includes(value))return;pairedPosition=pairTime();pairedStarted=clock.now();pairedRate=value;for(const node of pair())node.playbackRate=value;});
     for(const id of ['calibration-kind','calibration-head','fit-source'])el(id).addEventListener('change',renderGates);
     el('configure-calibration').addEventListener('click',()=>send('configure_calibration',{kind:el('calibration-kind').value,head_result_id:el('calibration-kind').value==='wrist'?el('calibration-head').value:null}));
     el('wrist-redo').addEventListener('click',()=>send('generate_plan',{mode:'wrist',head_result_id:el('calibration-head').value}));
@@ -886,7 +1001,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       void send('select_result',{result_id:view.result_id,frame_index:index,camera:el('replay-camera').value,overlay:el('replay-overlay').checked});
     });
     el('replay-camera').addEventListener('change',()=>{el('replay-overlay').checked=false;renderGates();});
-    for(const action of ['stop','connect','cancel','recover'])el(action).addEventListener('click',()=>send(action));
+    for(const action of ['stop','connect','cancel','recover','release'])el(action).addEventListener('click',()=>send(action));
+    el('control-fault-diagnostics').addEventListener('click',()=>selectTab('diagnostics'));
     el('handoff').addEventListener('click',()=>send('handoff',{target_business:el('handoff').dataset.target}));
     el('preview-view').addEventListener('change',()=>{finishAudit('观察视图变化');cancelTarget('观察视图变化');previewView=el('preview-view').value==='overview'?'overview':'target';renderPreview();renderMedia();renderGates();if(previewView==='overview')void sendOverview();else{try{const pose=displayPose();void showTarget(pose.q12,pose.jaw_gap_mm);}catch(error){notice(error.message);}}});
     el('show-target').addEventListener('click',()=>{
@@ -913,7 +1029,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('delete-clearance').addEventListener('change',renderGates);
     el('delete-confirm').addEventListener('click',()=>send('delete_confirm'));
     el('delete-cancel').addEventListener('click',()=>send('delete_cancel'));
-    for(const id of ['clearance','supported'])el(id).addEventListener('change',renderGates);
+    for(const id of ['clearance','supported','release-supported'])el(id).addEventListener('change',renderGates);
     for(const id of ['jaw-left','jaw-right','jaw-speed'])el(id).addEventListener('input',editManual);
     el('manual-preview').addEventListener('click',()=>manualPreview());
     el('queue-add').addEventListener('click',()=>manualPreview(true));
@@ -923,9 +1039,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('use-feedback').addEventListener('click',()=>{if(!manualReady())return;fillFeedbackInputs();editManual();});
     el('zero-preview').addEventListener('click',()=>{for(const input of jointInputs('position'))input.value=0;el('jaw-left').value=83;el('jaw-right').value=83;editManual();});
     doc.addEventListener('visibilitychange',()=>{if(doc.hidden){finishAudit('页面进入后台');cancelTarget('页面进入后台');clearMedia();}else{renderMedia();void poll();}});
-    render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250));
+    render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250),setInterval(renderPairClock,100));
   }
-  function destroy(){finishAudit('页面关闭');if(auditDownload)urls.revokeObjectURL(auditDownload);stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}
+  function destroy(){pausePair();trajectoryRequest?.abort();finishAudit('页面关闭');if(auditDownload)urls.revokeObjectURL(auditDownload);stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}
   return {start,poll,send,switchContext,selectTab,destroy,get state(){return state;},get context(){return {...context};}};
 }
 

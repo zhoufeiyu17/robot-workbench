@@ -7,7 +7,9 @@ const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
 const {createWorkbench,actionPermission,countedProgress,collectionExecutionView,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
-  constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
+  constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
+  play(){this.paused=false;return Promise.resolve();}
+  pause(){this.paused=true;}
   append(...children){this.children.push(...children);}
   replaceChildren(...children){this.children=children;}
   setAttribute(name,value){this.attributes[name]=String(value);}
@@ -22,7 +24,7 @@ function documentStub(){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Element()]));
   for(const id of ['head','left','right','preview','mesh']){const card=nodes.get('media-'+id),image=new Element('img'),empty=new Element('p'),meta=new Element('p');empty.className='empty';meta.className='media-meta';card.append(image,empty,meta);}
   const tabs=['calibration','collection','results','diagnostics'].map(tab=>{const button=new Element('button');button.dataset.tab=tab;return button;});
-  return {hidden:false,nodes,tabs,events:{},getElementById(id){assert(nodes.has(id),'Missing UI node '+id);return nodes.get(id);},createElement(tag){return new Element(tag);},querySelectorAll(selector){return selector==='[data-tab]'?tabs:[];},addEventListener(name,callback){this.events[name]=callback;}};
+  return {hidden:false,nodes,tabs,events:{},getElementById(id){assert(nodes.has(id),'Missing UI node '+id);return nodes.get(id);},createElement(tag){return new Element(tag);},createElementNS(namespace,tag){return new Element(tag);},querySelectorAll(selector){return selector==='[data-tab]'?tabs:[];},addEventListener(name,callback){this.events[name]=callback;}};
 }
 const response=(value,headers={})=>({ok:true,status:200,headers:{get:key=>headers[key]??null},json:async()=>value,blob:async()=>new Blob(['fixture'])});
 const settle=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
@@ -623,4 +625,70 @@ function deletionSnapshot(){
   const bad=harness();bad.app.start();value.manual.positions[0]=1.006;bad.reply(0,value);await settle();bad.get('show-target').events.click();
   assert.equal(bad.requests.filter(row=>row.options.method==='POST').length,0,'beyond-tolerance position stays rejected');bad.app.destroy();
 }
-console.log('PASS unified web: instance/media guards, bounded display-only browser presentation audit and uncensored latency evidence.');
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=collectionSnapshot();Object.assign(value.workflow,{busy:false,status:'ready',speed_scale:.3,review:{id:'speed-30',speed_scale:.3},primary_action:{id:'execute',allowed:true},trajectory:{id:'plan-one',timeline_digest:'frozen-plan',url:'/api/result-media?result_id=plan-one',speed_scale:.3}});
+  value.runtime.allowed_operations.generate_plan={allowed:true};h.reply(1,value);await settle();
+  h.get('collection-speed').value='50';h.get('collection-speed').events.input();assert.equal(h.get('primary').disabled,true);
+  const update=h.get('review-speed').events.click();assert.equal(JSON.parse(h.requests[2].options.body).speed_scale,.5);
+  h.reply(2,{message:'新速度已审阅'});await update;value.revision++;value.workflow.speed_scale=.5;value.workflow.review={id:'speed-50',speed_scale:.5};h.reply(3,value);await settle();
+  assert.equal(h.get('primary').disabled,false);assert.equal(h.get('collection-speed-value').textContent,'50%');
+  const target={left_arm_joints:Array(6).fill(0),right_arm_joints:Array(6).fill(.1),left_gripper:65,right_gripper:83};
+  const plan={timeline_digest:'frozen-plan',ticks:[{tick:0,time_s:0,target},{tick:1,time_s:.033,target}],stages:[{name:'close',start_tick:1}]};
+  const load=h.get('trajectory-load').events.click();h.reply(4,plan);await load;
+  assert.equal(h.get('trajectory-view').hidden,false);assert.equal(h.get('trajectory-joints').children.length,6);assert.equal(h.get('trajectory-jaws').children.length,2);
+  h.get('trajectory-stage').value='1';h.get('trajectory-stage').events.change();assert.match(h.get('trajectory-position').textContent,/tick 1.*0.033/);assert.match(h.get('trajectory-target').textContent,/65.000 mm/);
+  const stale=h.get('trajectory-load').events.click();h.app.poll();value.revision++;value.workflow.trajectory={...value.workflow.trajectory,id:'plan-two'};h.reply(6,value);await settle();
+  assert.equal(h.requests[5].options.signal.aborted,true);h.reply(5,plan);await stale;assert.equal(h.get('trajectory-view').hidden,true);
+  const bad=h.get('trajectory-load').events.click();h.reply(7,{...plan,timeline_digest:'another-plan'});await bad;
+  assert.match(h.get('trajectory-status').textContent,/身份/);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'trajectory inspection never issues motion');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=snapshot();
+  value.results=[['source','base_0'],['target','base_0'],['source','left_wrist_0']].map(([role,camera],i)=>({id:String(i),kind:'recording',media:{id:String(i),kind:'replay',ready:true,mime_type:'video/mp4',url:'/api/result-media?id='+i,role,camera}}));
+  h.reply(0,value);await settle();h.app.selectTab('results');const videos=h.get('replay-media').querySelectorAll('video');
+  videos.forEach((node,i)=>node.duration=[2,4,3][i]);videos[0].events.loadedmetadata();
+  assert.equal(h.get('collection-replay-toggle').disabled,false);await h.get('collection-replay-toggle').events.click();
+  h.advance(1000);h.intervals[2]();assert.equal(videos[0].currentTime,1);assert.equal(videos[1].currentTime,1);
+  h.get('collection-replay-speed').value='.5';h.get('collection-replay-speed').events.change();h.advance(2000);h.intervals[2]();
+  assert.equal(videos[0].currentTime,2);assert.equal(videos[0].paused,true);assert.equal(videos[1].currentTime,2);assert.equal(videos[1].paused,false);
+  h.get('collection-replay-time').value='1';h.get('collection-replay-time').events.input();await settle();assert.equal(videos[0].paused,false,'seeking back resumes a shorter video');
+  h.get('collection-replay-camera').value='left_wrist_0';h.get('collection-replay-camera').events.change();
+  assert.equal(h.get('collection-replay-toggle').disabled,true);assert.equal(videos[2].controls,true);assert.match(h.get('collection-replay-status').textContent,/仅有单侧/);
+  h.get('collection-replay-camera').value='base_0';h.get('collection-replay-camera').events.change();
+  let rejectOldPlay;videos[0].play=()=>new Promise((resolve,reject)=>{rejectOldPlay=reject;});
+  const oldPlay=h.get('collection-replay-toggle').events.click();h.app.selectTab('calibration');rejectOldPlay(Error('old playback failed'));
+  await oldPlay;assert.doesNotMatch(h.get('collection-replay-status').textContent,/old playback failed/,'late play errors cannot replace a different view');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.switchContext({environment:'physical',business:'calibration'});
+  const value=snapshot({device:{id:'physical-fixture',environment:'physical'}});value.runtime.allowed_operations.release={allowed:true};
+  h.reply(1,value);await settle();assert.equal(h.get('release').disabled,true);h.get('release-supported').checked=true;h.get('release-supported').events.change();
+  assert.equal(h.get('release').disabled,false);const release=h.get('release').events.click();assert.equal(h.requests[2].url,'/api/actions/release');assert.equal(JSON.parse(h.requests[2].options.body).arms_supported,true);
+  h.reply(2,{message:'释放已受理'});await release;value.revision++;value.runtime.release_receipt={status:'unconfirmed',message:'SDK 尚未断开'};value.runtime.allowed_operations.release={allowed:false};value.runtime.allowed_operations.connect={allowed:false};
+  h.reply(3,value);await settle();assert.match(h.get('release-state').textContent,/尚未确认.*SDK/);assert.equal(h.get('release-supported').checked,false);
+  assert.equal(h.requests.filter(row=>row.url==='/api/actions/connect').length,0);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=collectionSnapshot();Object.assign(value.workflow,{busy:false,status:'ready',speed_scale:.3,review:{id:'expiring',speed_scale:.3}});
+  h.reply(1,value);await settle();h.get('collection-speed').value='50';h.get('collection-speed').events.input();
+  value.revision++;delete value.workflow.review;h.app.poll();h.reply(2,value);await settle();
+  assert.equal(h.get('collection-speed').value,'50','review expiry must not overwrite an unsent local speed draft');
+  assert.equal(h.get('collection-speed-value').textContent,'50%');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=snapshot();
+  value.runtime.state='FAULT_STOP_UNCONFIRMED';value.runtime.reason='SDK feedback age 0.1996s exceeds bound';value.runtime.last_fault_diagnostic={reasons:['feedback_age'],error:'original control failure'};
+  value.runtime.allowed_operations.handoff={allowed:false,reason:'holding/control state is not confirmed'};
+  h.reply(0,value);await settle();assert.equal(h.get('feedback').textContent,'反馈：健康');
+  assert.match(h.get('control-state').textContent,/故障锁定/);assert.equal(h.get('control-fault').hidden,false);
+  assert.match(h.get('control-fault-reason').textContent,/SDK feedback age.*original control failure.*feedback_age/);
+  assert.match(h.get('handoff-reason').textContent,/保持\/控制状态尚未确认/);
+  const count=h.requests.length;h.get('control-fault-diagnostics').events.click();assert.equal(h.get('diagnostics-pane').hidden,false);assert.equal(h.requests.length,count,'diagnostic navigation must not recover or reconnect');
+  value.revision++;value.runtime.state='READY';h.app.poll();h.reply(count,value);await settle();assert.equal(h.get('control-fault').hidden,true,'historical diagnostic must not imply a current fault');h.app.destroy();
+  const physical=harness();physical.app.start();physical.app.switchContext({environment:'physical',business:'calibration'});value.device.environment='physical';value.runtime.state='FAULT';physical.reply(1,value);await settle();
+  assert.match(physical.get('control-fault-guidance').textContent,/可靠支撑双臂.*确认断开后再连接.*未确认时不要重试/);physical.app.destroy();
+}
+console.log('PASS unified web: reviewed speed, readonly trajectory, paired replay, release confirmation, latched fault visibility, instance/media guards and preview evidence.');

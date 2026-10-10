@@ -34,9 +34,10 @@ class HTTPTest(unittest.TestCase):
 
     def cleanup(self):
         if self.device.runtime:
-            self.device.submit(self.device.runtime.holder,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
+            runtime=self.device.runtime
+            runtime.owner.submit({'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
             self.device.thread.join(1)
-            self.device.runtime.close()
+            runtime.close()
         self.device.closed.set()
         self.server.shutdown();self.server.server_close();self.thread.join(1)
 
@@ -100,6 +101,24 @@ class HTTPTest(unittest.TestCase):
             self.action('execute',business='collection',review_id=review['id'],physical_clearance=True)
         self.assertIn('数采任务已变化',json.loads(rejected.exception.read())['error'])
         workflow.action.assert_not_called()
+
+    def test_collection_execution_speed_is_server_bound_to_the_review(self):
+        self.connect();self.action('handoff',target_business='collection')
+        workflow=SimpleNamespace(generation=2,snapshot=lambda:dict(status='ready',busy=False,primary_action=None),
+            results=lambda:[],action=Mock(return_value={'message':'CPU route fixture accepted'}))
+        self.device.workflows['collection']=workflow;owner=self.device.snapshot('collection')
+        self.app.add_review(self.device,'collection',dict(token='frozen-plan',command_epoch=owner['command_epoch'],
+            workflow_generation=2,speed_scale=1.),'execute','执行速度 100%')
+        review=self.state('collection')['workflow']['review'];self.assertEqual(review['speed_scale'],1.)
+        for invalid in (.5,True,'1',None):
+            with self.assertRaises(HTTPError) as error:
+                self.action('execute',business='collection',review_id=review['id'],physical_clearance=True,speed_scale=invalid)
+            self.assertIn('速度已变化',json.loads(error.exception.read())['error'])
+        workflow.action.assert_not_called()
+        self.action('execute',business='collection',review_id=review['id'],physical_clearance=True)
+        self.wait(lambda _:workflow.action.called)
+        self.assertEqual(workflow.action.call_args.args[1]['speed_scale'],1.)
+        self.assertEqual(workflow.action.call_args.args[1]['token'],'frozen-plan')
 
     def test_declared_browser_port_preserves_Host_Origin_and_CSRF_checks(self):
         self.assertEqual(self.server.allowed_hosts,{f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'})
@@ -396,6 +415,20 @@ class HTTPTest(unittest.TestCase):
             calls.clear()
         self.assertIsNone(self.device.runtime)
 
+    def test_diagnostics_separate_latched_controller_fault_from_service_thread_error(self):
+        owner=self.device.snapshot('calibration')
+        owner.update(state='FAULT_STOP_UNCONFIRMED',reason='SDK feedback age 0.1996s exceeds bound',feedback_healthy=True)
+        with patch.object(self.device,'snapshot',return_value=owner):
+            rows={row['label']:row['value'] for row in self.state()['diagnostics']}
+            self.assertEqual(rows['控制器状态'],'FAULT_STOP_UNCONFIRMED')
+            self.assertEqual(rows['控制器当前原因'],owner['reason'])
+            self.assertEqual(rows['服务线程异常'],'未报告服务线程异常')
+            self.assertNotIn('控制循环',rows)
+            self.device.error='CPU service thread failure'
+            rows={row['label']:row['value'] for row in self.state()['diagnostics']}
+            self.assertEqual(rows['服务线程异常'],'CPU service thread failure')
+            self.assertEqual(rows['控制器当前原因'],owner['reason'])
+
     def test_result_media_streams_ranges_without_exposing_paths(self):
         path=Path(self.temp.name)/'result.mp4';path.write_bytes(b'0123456789')
         class Workflow:
@@ -410,6 +443,29 @@ class HTTPTest(unittest.TestCase):
             with self.assertRaises(HTTPError) as error:self.http.open(Request(url+ident,headers=headers))
             self.assertEqual(error.exception.code,code)
         self.assertFalse(self.device.runtime)
+
+    def test_result_media_JSON_is_limited_to_the_registered_current_collection_plan(self):
+        from robot_workbench.workflows import CollectionWorkflow
+        root=Path(self.temp.name);path=root/'plan.json';payload={'timeline_digest':'current-plan','ticks':[]}
+        path.write_text(json.dumps(payload));config=root/'config.json';config.write_text('{"not_a_plan":true}')
+        state={'plan':{'validated':True,'timeline_digest':'current-plan','plan_path':str(path)},'can_execute':False}
+        flow=CollectionWorkflow(SimpleNamespace(directory=root,snapshot=lambda:state),self.device,self.app)
+        flow.closed.set();flow.thread.join(1);flow.refresh()
+        self.device.workflows['collection']=flow
+        trajectory=flow.snapshot()['trajectory'];url=self.url+trajectory['url']
+        with self.http.open(url) as response:
+            self.assertEqual(response.status,200);self.assertEqual(response.headers['Content-Type'],'application/json')
+            self.assertEqual(json.loads(response.read()),payload)
+        with flow.lock:flow.media_files['registered-config']=config
+        for suffix,code in [('registered-config',409),('../config.json',404),('unknown-plan',404)]:
+            with self.assertRaises(HTTPError) as error:self.http.open(url.replace(trajectory['id'],suffix))
+            self.assertEqual(error.exception.code,code)
+        self.device.workflows['calibration']=flow
+        with self.assertRaises(HTTPError) as error:self.http.open(url.replace('business=collection','business=calibration'))
+        self.assertEqual(error.exception.code,409)
+        state['plan']={};flow.refresh()
+        with self.assertRaises(HTTPError) as error:self.http.open(url)
+        self.assertEqual(error.exception.code,404);self.assertIsNone(self.device.runtime)
 
     def test_calibration_JSON_export_uses_original_version_store_without_connect(self):
         sys.path[:0]=[str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'calibration/examples/scripts/debug'),str(ROOT/'calibration/tests')]

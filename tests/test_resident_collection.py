@@ -156,7 +156,7 @@ class ResidentCollectionTest(unittest.TestCase):
                 self.assertEqual(runtime.owner.native_task_status['task_outcome'],'unverifiable')
                 self.assertFalse(runtime.owner.stop_requested)
             finally:
-                runtime.submit(credentials[runtime.holder],dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
+                runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
                 runtime.tick();runtime.close()
 
 

@@ -478,7 +478,7 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertEqual(result['preview']['token'],'frozen');self.assertEqual(result['preview']['command_epoch'],5)
         workflow.playground.start.assert_not_called()
         workflow.action('generate_plan',{'replan':True})
-        workflow.playground.start.assert_called_once_with({'action':'plan'})
+        workflow.playground.start.assert_called_once_with({'action':'plan','speed_scale':.3})
         self.assertNotIn(('fake','collection'),workflow.service.reviews)
 
     def test_collection_binding_requires_this_run_instance_and_clears_on_acceptance(self):
@@ -507,6 +507,79 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.refresh()
         self.assertEqual(workflow.snapshot()['outcomes']['data'],
             {'status':'invalid','message':'camera source queue overflow'})
+
+    def test_collection_terminal_title_does_not_reuse_a_running_claim(self):
+        workflow,state=self.collection();state.update(action='execute',busy=False,physical_outcome='completed',task_outcome='success',
+            recording={'done':True,'manifest':{'validation':{'status':'passed'}}},error='physical_export: duration differs',
+            progress={'label':'视频已核验，等待 L3'})
+        for status,label in [('failed','本次数采流程失败'),('stopped','本次数采流程已停止'),('completed','本次数采流程已完成')]:
+            state['status']=status;workflow.refresh();value=workflow.snapshot()
+            self.assertEqual(value['title'],label);self.assertEqual(value['message'],state['error'])
+            self.assertEqual(value['outcomes']['motion'],'completed');self.assertEqual(value['outcomes']['data'],'valid')
+            self.assertEqual(value['outcomes']['task'],'success')
+        state.update(status='running',busy=True);workflow.refresh()
+        self.assertEqual(workflow.snapshot()['title'],'视频已核验，等待 L3')
+
+    def test_collection_diagnostics_preserve_cached_evidence_without_full_frame_logs(self):
+        workflow,state=self.collection();state.update(environment={'ready':False,'checks':[{'key':'camera','status':'failed','message':'source stale'}]},
+            progress={'stages':[{'label':'观测','status':'failed','elapsed_s':12,'estimate_s':8,'internal':'omit'}]},
+            recording={'manifest':{'validation':{'status':'failed','errors':['missing frame']},'command_count':4,'camera_frames':{'base_0':2},'files':{'large':'omit'}}},
+            native_task={'task_outcome':'failed','execution_instance_id':'this-run','first_failure':{'reason':'contact','physics_step':4,'last_observation':{'full':'omit'}}},
+            simulation={'status':'completed','scope':'L3_auxiliary_independent_target','task_success_evidence':False,'frames':['omit']})
+        workflow.refresh();rows={row['label']:row['value'] for row in workflow.snapshot()['diagnostics']}
+        self.assertEqual(rows['数采环境检查'][0]['message'],'source stale')
+        self.assertEqual(rows['本轮录制封存']['validation']['errors'],['missing frame']);self.assertNotIn('files',rows['本轮录制封存'])
+        self.assertEqual(rows['本轮原生任务回执']['first_failure'],{'reason':'contact','physics_step':4})
+        self.assertFalse(rows['本轮辅助回放']['task_success_evidence']);self.assertNotIn('frames',rows['本轮辅助回放'])
+
+    def test_collection_speed_preview_is_bound_and_reuses_original_retime_entry(self):
+        workflow,state=self.collection();workflow.refresh()
+        result=workflow.action('generate_plan',{'speed_scale':.5})
+        self.assertEqual(result['preview']['speed_scale'],.5);self.assertIn('50%',result['summary'])
+        workflow.refresh();self.assertEqual(workflow.snapshot()['speed_scale'],.5)
+        workflow.playground.start.assert_not_called()
+        workflow.action('execute',{'token':'frozen','speed_scale':.5})
+        workflow.playground.start.assert_called_once_with({'action':'execute','speed_scale':.5})
+        for value in (True,'0.5',float('nan'),.09,1.01):
+            state.update(busy=False,status='ready');workflow.refresh()
+            with self.assertRaisesRegex(ValueError,'10%'):
+                workflow.action('generate_plan',{'speed_scale':value})
+
+    def test_collection_readonly_plan_and_replay_metadata_are_current_and_bounded(self):
+        workflow,state=self.collection();plan=self.root/'plan.json';plan.write_text('{"timeline_digest":"frozen","ticks":[]}')
+        image=self.root/'first.png';image.write_bytes(b'CPU readonly frame fixture')
+        state['plan'].update(plan_path=str(plan),first_frame_path=str(image))
+        source=self.root/'source-base_0.mp4';target=self.root/'sim-base_0.mp4'
+        source.write_bytes(b'CPU source fixture');target.write_bytes(b'CPU target fixture')
+        workflow.playground.media.side_effect=lambda name,version:{'video-0':source,'video-1':target}[name]
+        state['videos']=[dict(url=f'/api/playground/media/video-{i}?v=job-1') for i in range(2)]
+        workflow.refresh();view=workflow.snapshot()['trajectory']
+        self.assertEqual(workflow.media(view['id']),plan);self.assertEqual(view['timeline_digest'],'frozen')
+        self.assertEqual([row['media']['role'] for row in workflow.results()],['source','target'])
+        self.assertTrue(all(row['media']['camera']=='base_0' for row in workflow.results()))
+        state['plan']['plan_path']=str(self.root.parent/'outside-plan.json');workflow.refresh()
+        self.assertIn('error',workflow.snapshot()['trajectory']);self.assertIsNone(workflow.media(view['id']))
+        state.update(action='plan',plan={},videos=[]);workflow.refresh()
+        self.assertNotIn('trajectory',workflow.snapshot());self.assertEqual(workflow.results(),[])
+
+    def test_wrist_batch_head_replay_uses_only_its_frozen_head_dependency(self):
+        legacy,workflow=self.legacy_library();head,wrist=legacy.pair();a=legacy.app
+        batch=str(Path(wrist['file']).parent);path=a.output/batch
+        dataset=json.loads((path/'dataset.json').read_text());dataset['frames']=[{'id':'frame','image':'head.png','q_reported_rad':[0.]*12}]
+        (path/'dataset.json').write_text(json.dumps(dataset));(path/'head.png').write_bytes(b'CPU frame fixture')
+        original_source=a.selected_batch;view=a.review_batch(batch)
+        with patch.object(a,'historical_overlay',return_value={'image_url':view['frames'][0]['image_urls']['head']}) as overlay:
+            workflow.action('select_result',{'result_id':wrist['id'],'camera':'head','overlay':True})
+            overlay.assert_called_once_with(dict(batch_id=batch,frame_index=0,camera='head',result_id=head['id']))
+        context=workflow.snapshot()['replay_context']
+        self.assertEqual(context['batch_id'],batch);self.assertEqual(context['result_id'],wrist['id'])
+        self.assertEqual(context['overlay_result_id'],head['id']);self.assertEqual(a.selected_batch,original_source)
+        with patch.object(a,'wrist_head_id',return_value='unrelated-head'):
+            with self.assertRaisesRegex(ValueError,'匹配'):
+                workflow.action('select_result',{'result_id':wrist['id'],'camera':'head','overlay':True})
+        with patch.object(a,'review_batch',return_value={**view,'results':[]}):
+            with self.assertRaisesRegex(ValueError,'匹配'):
+                workflow.action('select_result',{'result_id':wrist['id'],'camera':'head','overlay':True})
 
     def test_collection_media_is_current_and_cancel_uses_real_interrupt(self):
         workflow,state=self.collection();path=self.root/'recording.mp4';path.write_bytes(b'CPU video route fixture')

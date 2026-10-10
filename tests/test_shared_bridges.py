@@ -128,8 +128,9 @@ class SharedBridgeTest(unittest.TestCase):
                 if recorder_thread:recorder_thread.join(1)
                 if device.runtime:
                     device.runtime.owner.recording=None
-                    device.submit(device.runtime.holder,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
-                    device.thread.join(1);device.runtime.close()
+                    runtime=device.runtime
+                    runtime.owner.submit({'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
+                    device.thread.join(1);runtime.close()
                 device.closed.set();server.shutdown();server.server_close();thread.join(1)
 
     def test_old_calibration_client_reads_fake_and_cannot_cross_business(self):
@@ -167,8 +168,9 @@ class SharedBridgeTest(unittest.TestCase):
                     post('/api/motion-confirm',dict(token=review['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
                 self.assertFalse(get('/api/state')['motion_enabled'])
             finally:
-                device.submit(device.runtime.holder,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
-                device.thread.join(1);device.runtime.close();device.closed.set()
+                runtime=device.runtime
+                runtime.owner.submit({'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'})
+                device.thread.join(1);runtime.close();device.closed.set()
                 server.shutdown();server.server_close();thread.join(1)
 
     def test_camera_fanout_preserves_source_time_and_rejects_header_injection(self):

@@ -242,7 +242,7 @@ class Harness:
             session.finish('stopped','L1 fixture cleanup');session.done.wait(2);session.thread.join(1)
         if self.runtime and self.runtime.fd is not None:
             if self.runtime.owner.backend.is_connected:
-                self.runtime.submit(self.credentials[self.runtime.holder],dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
+                self.runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
                 if self.device.thread:self.device.thread.join(2)
             self.runtime.close()
         self.device.closed.set();self.server.shutdown();self.server.server_close();self.thread.join(1)
