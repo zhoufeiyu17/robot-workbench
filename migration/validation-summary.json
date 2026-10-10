@@ -1,9 +1,9 @@
 {
   "status": "l1-qualified-full-l2-incomplete",
-  "updated_at": "2026-10-10T14:18:11.162233+08:00",
+  "updated_at": "2026-10-10T16:28:27.815418+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "c26020f",
+  "candidate_commit_before_summary": "75539d4",
   "qualification_scope": "Original C/D cores reused. full-123915 completed C capture/solve/install and fresh D model/observation/detection/scene; planning failed at cup-reference URDF identity. No complete D/native/raw/replay or physical qualification. Cold suite remains 0/3.",
   "cpu": {
     "calibration_tests": 476,
@@ -12,9 +12,9 @@
     "runtime_tests": 16,
     "http_tests": 15,
     "workflow_adapter_tests": 14,
-    "target_preview_tests": 6,
+    "target_preview_tests": 11,
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "c6aad731dd754905dd707b4c7de9d11001750ea1b2663439a042eb235b51649a",
+    "full_check_log_sha256": "3af051db9199ac2dbc01302c33a2c8444e2173232dcab03a7aecbfe418371663",
     "preview_http_tests": 9,
     "preview_lifecycle_tests": 3,
     "collection_setup_role_variants": [
@@ -22,8 +22,8 @@
       5
     ],
     "collection_preparation_http_tests": 4,
-    "full_check_log": ".evidence/s2/warm-cup-integration-full-cpu.log",
-    "full_check_commit": "c26020f minus final D setup admission-root removal, separately checked in 4/5-role tests",
+    "full_check_log": ".evidence/s2/event-driven-preview-full-cpu.log",
+    "full_check_commit": "99e99b8",
     "detector_release_preflight_tests": 4,
     "real_release_fixture_explicitly_enabled": true,
     "local_execution_tests": 12,
@@ -31,10 +31,11 @@
     "atomic_evidence_save_tests": 2,
     "plant_bias_serve_tests": 5,
     "sample_clock_tests": 17,
-    "warm_diagnostic_tests": 9,
+    "warm_diagnostic_tests": 12,
     "a1_supplement_log": ".evidence/s2/warm-cup-a1-cpu.log",
     "a1_supplement_tests": 4,
-    "cup_reference_tests": 9
+    "cup_reference_tests": 9,
+    "preview_subscription_tests": 4
   },
   "l1": {
     "status": "passed",
@@ -42,13 +43,13 @@
     "matrix_passed": 27,
     "matrix_total": 27,
     "source_unchanged": true,
-    "receipt_sha256": "cbcfe5725f6092946310f62eab01c4158571c6e7c6173e1d686c25c290200410",
+    "receipt_sha256": "b28b51c360a8ba29d757f0288dd4524271e23afbd6ad150335ed9d6106c83112",
     "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 6.765957921743393,
-    "stop_request_to_software_barrier_max_ms": 30.422250274568796,
+    "stop_request_to_software_barrier_p95_ms": 20.995874889194965,
+    "stop_request_to_software_barrier_max_ms": 35.90870788320899,
     "physical_stop_qualified": false,
-    "tested_functional_commit": "SHA-pinned c26020f integration before final D setup admission-root removal",
-    "receipt": ".evidence/s2/l1-warm-cup-integration/l1-fault-matrix.json"
+    "tested_functional_commit": "99e99b8",
+    "receipt": ".evidence/s2/l1-event-driven-preview/l1-fault-matrix.json"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -520,20 +521,13 @@
     "verification": ".evidence/s2/full-123915-artifact-verification.json",
     "teardown": ".evidence/s2/full-20261010-123915-teardown.json"
   },
-  "pending_warm_diagnostic": {
-    "run": "warm-20261010-141556",
-    "frozen_commit": "c26020f",
-    "dry_run_passed": true,
-    "gpu_started": false,
-    "fresh_C_completed": false,
-    "diagnostic_only": true
-  },
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
-    "gpu_measured": false,
+    "gpu_measured": true,
     "accepted_slots": 3,
-    "thresholds_changed": false
+    "thresholds_changed": false,
+    "result": "throughput improved; both modes fail P95; off also fails FPS"
   },
   "recording_source_freshness": {
     "commit": "684abe1",
@@ -541,5 +535,336 @@
     "actual_raw_qualified": false,
     "evidence": ".evidence/s2/full-123915-camera-status-25s.json",
     "physical_policy_unchanged": true
+  },
+  "latest_warm_diagnostic": {
+    "run": "warm-20261010-153813",
+    "source_commit": "3f2f60a",
+    "fresh_C_completed": false,
+    "diagnostic_only": true,
+    "source_origin_verified": true,
+    "new_D_profile_model_verified": true,
+    "execution_identity_verified": true,
+    "motion_outcome": "completed",
+    "execution_tick_count": 3692,
+    "capture_status": "incomplete",
+    "task_outcome": "unverifiable",
+    "auxiliary_replay": "failed-model-prefix-limit",
+    "artifacts": ".evidence/s2/warm-153813-artifact-verification.json",
+    "teardown": ".evidence/s2/warm-153813-teardown.json",
+    "released": true,
+    "source_replay_scope": "four-frame incomplete recording fragments; verifier source_replay pass does not establish complete episode replay"
+  },
+  "preview_three_slot_measurement": {
+    "off": {
+      "evidence": ".evidence/s2/warm-142108-browser-mesh-off.json",
+      "viewport": {
+        "width": 1280,
+        "height": 720,
+        "device_pixel_ratio": 1
+      },
+      "windows": [
+        {
+          "raw_inputs": 1502,
+          "dispatched_inputs": 659,
+          "coalesced_inputs": 843,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 659,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 656,
+          "duplicate_frames": 43,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.933333333333334,
+          "latency_p95_ms": 364.40000009536743,
+          "latency_p99_ms": 393.80000019073486,
+          "latency_max_ms": 454.7000002861023,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1502,
+          "dispatched_inputs": 653,
+          "coalesced_inputs": 849,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 653,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 649,
+          "duplicate_frames": 39,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.816666666666666,
+          "latency_p95_ms": 370.90000009536743,
+          "latency_p99_ms": 395.19999980926514,
+          "latency_max_ms": 445.8999996185303,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1499,
+          "dispatched_inputs": 659,
+          "coalesced_inputs": 840,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 659,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 655,
+          "duplicate_frames": 40,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.916666666666666,
+          "latency_p95_ms": 365,
+          "latency_p99_ms": 403.59999990463257,
+          "latency_max_ms": 523.8000001907349,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        }
+      ],
+      "qualified": false
+    },
+    "on": {
+      "evidence": ".evidence/s2/warm-142108-browser-mesh-on.json",
+      "viewport": {
+        "width": 1280,
+        "height": 720,
+        "device_pixel_ratio": 1
+      },
+      "windows": [
+        {
+          "raw_inputs": 1506,
+          "dispatched_inputs": 643,
+          "coalesced_inputs": 863,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 643,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 639,
+          "duplicate_frames": 42,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.65,
+          "latency_p95_ms": 374,
+          "latency_p99_ms": 415,
+          "latency_max_ms": 433.59999990463257,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1508,
+          "dispatched_inputs": 638,
+          "coalesced_inputs": 870,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 638,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 634,
+          "duplicate_frames": 37,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.566666666666666,
+          "latency_p95_ms": 378.6000003814697,
+          "latency_p99_ms": 416.09999990463257,
+          "latency_max_ms": 507.19999980926514,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1518,
+          "dispatched_inputs": 635,
+          "coalesced_inputs": 883,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 635,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 631,
+          "duplicate_frames": 36,
+          "unattributed_frames": 0,
+          "new_display_fps": 10.516666666666667,
+          "latency_p95_ms": 383.90000009536743,
+          "latency_p99_ms": 427.30000019073486,
+          "latency_max_ms": 661.5999999046326,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        }
+      ],
+      "qualified": false
+    },
+    "renderer_gap_diagnostic": ".evidence/s2/warm-142108-frame-gaps.json"
+  },
+  "gpu_allocation": {
+    "agreed_at": "2026-10-10T14:28:01+08:00",
+    "unified_workbench": "734 both GPUs as one isolated host; computation on GPU1, incidental graphics contexts on GPU0",
+    "simulation_correction": "739 + 741 available; source task reserved only 739 at 14:32",
+    "legacy_collection_workers": "released by original owner; original CPU webpage/replay/deadline retained",
+    "physical_hardware": false
+  },
+  "event_driven_preview": {
+    "commit": "99e99b8",
+    "cpu_passed": true,
+    "gpu_measurement": "passed-both-modes-three-windows",
+    "thresholds_changed": false,
+    "evidence_scope": "warm-145124, 1280x720 DPR1, same-plant source and display, D workers idle/ready; not all deployment hosts",
+    "qualified": true,
+    "off": {
+      "evidence": ".evidence/s2/warm-145124-browser-mesh-off.json",
+      "thresholds": {
+        "new_display_fps": 20,
+        "latency_p95_ms": 200
+      },
+      "windows": [
+        {
+          "raw_inputs": 1507,
+          "dispatched_inputs": 1409,
+          "coalesced_inputs": 98,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1409,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1405,
+          "duplicate_frames": 47,
+          "unattributed_frames": 0,
+          "new_display_fps": 23.416666666666668,
+          "latency_p95_ms": 169.80000019073486,
+          "latency_p99_ms": 184.59999990463257,
+          "latency_max_ms": 240.7000002861023,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1506,
+          "dispatched_inputs": 1414,
+          "coalesced_inputs": 92,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1414,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1411,
+          "duplicate_frames": 48,
+          "unattributed_frames": 0,
+          "new_display_fps": 23.516666666666666,
+          "latency_p95_ms": 169.69999980926514,
+          "latency_p99_ms": 182.09999990463257,
+          "latency_max_ms": 217.89999961853027,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1508,
+          "dispatched_inputs": 1394,
+          "coalesced_inputs": 114,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1394,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1390,
+          "duplicate_frames": 45,
+          "unattributed_frames": 0,
+          "new_display_fps": 23.166666666666668,
+          "latency_p95_ms": 173.5,
+          "latency_p99_ms": 189.30000019073486,
+          "latency_max_ms": 287.3999996185303,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        }
+      ],
+      "passed": true
+    },
+    "on": {
+      "evidence": ".evidence/s2/warm-145124-browser-mesh-on.json",
+      "thresholds": {
+        "new_display_fps": 10,
+        "latency_p95_ms": 300
+      },
+      "windows": [
+        {
+          "raw_inputs": 1517,
+          "dispatched_inputs": 1341,
+          "coalesced_inputs": 176,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1341,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1338,
+          "duplicate_frames": 48,
+          "unattributed_frames": 0,
+          "new_display_fps": 22.3,
+          "latency_p95_ms": 182.09999990463257,
+          "latency_p99_ms": 197.90000009536743,
+          "latency_max_ms": 635.2999997138977,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1504,
+          "dispatched_inputs": 1351,
+          "coalesced_inputs": 153,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1351,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1348,
+          "duplicate_frames": 47,
+          "unattributed_frames": 0,
+          "new_display_fps": 22.466666666666665,
+          "latency_p95_ms": 183.69999980926514,
+          "latency_p99_ms": 198.19999980926514,
+          "latency_max_ms": 265.80000019073486,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1511,
+          "dispatched_inputs": 1358,
+          "coalesced_inputs": 153,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 1358,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 1355,
+          "duplicate_frames": 47,
+          "unattributed_frames": 0,
+          "new_display_fps": 22.583333333333332,
+          "latency_p95_ms": 180.80000019073486,
+          "latency_p99_ms": 193,
+          "latency_max_ms": 205.90000009536743,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        }
+      ],
+      "passed": true
+    },
+    "preserved_receipt": ".evidence/s2/warm-20261010-145124-browser-evidence-qualified-preserved.json"
+  },
+  "pending_behavior_decisions": {
+    "fake_lease_prepare_before_verify": {
+      "proposed_wall_budget_s": 1,
+      "approval": "not_yet_user_requested_explanation"
+    },
+    "explicit_L3_initialization_derivation": {
+      "existing_limit_rad": 0.005,
+      "actual_adjustment_rad": 0.000678260787791217,
+      "affected_ticks": 1,
+      "approval": "not_yet_user_requested_explanation"
+    }
   }
 }
