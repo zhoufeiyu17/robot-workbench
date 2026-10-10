@@ -85,8 +85,16 @@ class CalibrationWorkflow:
     def refresh(self):
         state=self.app.runtime_state()
         report=state.get('pipeline') or {}
+        live_run=getattr(self.app,'pipeline_run_id',None)
+        report_run=report.get('run_id')
+        if live_run and report_run and live_run!=report_run:
+            # A new job may be queued before it replaces the prior report. No
+            # previous failure, successful install or fraction belongs to it.
+            report={'run_id':live_run,'running':True}
+            state={**state,'pipeline':report,'status':'PIPELINE','reason':None}
+        run_id=live_run or report.get('run_id')
         review=report.get('review')
-        key=(getattr(self.app,'pipeline_run_id',None),str(review))
+        key=(run_id,str(review))
         if self.active and review and key!=self.preview_key:
             self.preview_key=key
             preview=self.app.preview_calibration()
@@ -98,7 +106,21 @@ class CalibrationWorkflow:
         stage_id,completed=calibration_stage(state)
         status='stopped' if report.get('stopped') else 'failed' if report.get('aborted') or state.get('status')=='REJECTED' else 'running' if running else 'completed' if completed==7 else 'idle'
         working=running and not review and status=='running' and completed<7
-        measured=(working and sub.get('stage')==completed and type(sub.get('fraction')) in (int,float)
+        capture_batch=None;completion=None
+        with self.app.lock if hasattr(self.app,'lock') else self.lock:
+            active=deepcopy(getattr(self.app,'active_capture',None))
+            if (run_id and isinstance(active,dict) and active.get('pipeline_run_id')==run_id
+                    and stage_id.startswith(str(active.get('kind'))+'.')
+                    and isinstance(active.get('batch_id'),str)):
+                capture_batch=active['batch_id']
+                if state.get('selected_batch')==capture_batch==getattr(self.app,'selected_batch',None):
+                    completion=deepcopy((getattr(self.app,'batch',None) or {}).get('completion'))
+        if stage_id.endswith('.capture') and capture_batch and (working or status=='failed'):
+            current=completion.get('accepted',completion.get('captured')) if isinstance(completion,dict) else active.get('captured')
+            total=active.get('expected_count')
+            if type(current) is int and type(total) is int and 0<=current<=total and total>0:
+                sub=dict(stage=completed,fraction=current/total,completed=current,total=total,label='已确认采集图像')
+        measured=((working or status=='failed') and sub.get('stage')==completed and type(sub.get('fraction')) in (int,float)
                   and math.isfinite(sub['fraction']))
         fraction=max(0.,min(.99,sub['fraction'])) if measured else 0.
         progress=dict(indeterminate=True,unit='当前阶段') if working and not measured else None
@@ -118,14 +140,18 @@ class CalibrationWorkflow:
              'wrist.capture':'正在逐点采集双腕图像。','wrist.solve':'正在使用贴纸观测求解并验收双腕标定。',
              'install':'正在校验并安装本轮头部与双腕结果。',
              'calibration.complete':'头部与双腕标定已完成，安装组已核验。'}.get(stage_id,'先生成计划，再审阅本批并执行。'))
-        value=dict(id=getattr(self.app,'pipeline_run_id',None),status=status,busy=busy,
-            stage_id=stage_id,title=report.get('phase') or '头部与双腕标定',
+        value=dict(id=run_id,status=status,busy=busy,
+            stage_id=stage_id,title=report.get('phase') or report.get('failed_phase') or '头部与双腕标定',
             message=report.get('aborted') or state.get('reason') or message,
-            progress=progress,primary_action=primary,outcomes={},
+            progress=progress,primary_action=primary,outcomes={},capture_batch_id=capture_batch,
+            failed_stage=stage_id if status=='failed' else None,
             overall_progress=dict(current=completed+fraction,total=7,unit='阶段',completed_stages=completed,
                 indeterminate=working and not measured,stage_ids=list(CALIBRATION_STAGES)),
             details=[{'label':'当前模型','value':self.app.config.get('asset_geometry_id','未知')},
-                     {'label':'运行身份','value':getattr(self.app,'pipeline_run_id',None) or '尚未生成'}])
+                     {'label':'运行身份','value':run_id or '尚未生成'}])
+        if capture_batch:value['details'].append({'label':'采集批次','value':capture_batch})
+        if status=='failed' and isinstance(completion,dict):
+            value['outcomes']['data']='valid' if completion.get('passed') is True else 'invalid'
         value['manual_queue']=self.manual_queue_state()
         if time.monotonic()-self.last_catalog>5:
             groups={row['id']:row for row in self.app.calibration_groups()}
@@ -172,6 +198,8 @@ class CalibrationWorkflow:
             value.update(id=operation['id'],status=status,stage_id=f'{kind}.{phase}',title=titles[phase],
                 message=state.get('reason') or (operation.get('message') if busy or phase=='review' else '本次操作已结束；采集完整性与标定质量请分别查看批次及结果详情。'),
                 overall_progress=None,progress={'indeterminate':True} if busy else None,
+                capture_batch_id=operation['id'] if phase=='capture' else None,
+                failed_stage=f'{kind}.{phase}' if status=='failed' else None,
                 outcomes={'task':status},details=[{'label':'求解来源','value':state.get('selected_batch') or '尚未选择'}])
             if phase in ('plan','review'):
                 queue_rows=value['manual_queue'].get('waypoints')

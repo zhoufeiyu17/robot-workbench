@@ -906,7 +906,9 @@ class Workbench:
                         asset_seal_sha256=self.config.get('asset_seal_sha256'),jaw_mapping=mapping_identity())
         if pending['contract']:manifest['wrist_contract']=pending['contract']
         (dataset/'dataset.json').write_text(json.dumps(manifest,allow_nan=False))
-        self.active_capture={'batch_id':str(dataset.relative_to(self.output)),'captured':0}
+        self.active_capture={'batch_id':str(dataset.relative_to(self.output)),'captured':0,
+                             'pipeline_run_id':pending.get('pipeline_run_id'),'kind':pending['workflow']['kind'],
+                             'expected_count':sum(row.get('capture') is not False for row in pending['queue'])}
         self.status='CAPTURING';self.reason=None
         if not getattr(self,'pipeline_running',False):self.stop.clear()
         self.tokens.clear()
@@ -1080,7 +1082,9 @@ class Workbench:
                             self.stop.wait(.03)
                         if tentative is None:continue
                     seen.add(identity);tentative=None;created.clear()
-                    with self.lock:self.active_capture={'batch_id':str(dataset.relative_to(self.output)),'captured':len(seen)}
+                    with self.lock:self.active_capture={'batch_id':str(dataset.relative_to(self.output)),'captured':len(seen),
+                                                       'pipeline_run_id':pending.get('pipeline_run_id'),'kind':pending['workflow']['kind'],
+                                                       'expected_count':len(expected)}
                 elif len(seen)==len(expected) and owner.get('state')=='READY' and not owner.get('automatic_enabled'):
                     break
                 self.stop.wait(.03)
@@ -2821,7 +2825,7 @@ class Workbench:
 
         def job():
             self.pipeline_thread=threading.get_ident()
-            report={'schema':'joint-head-calibration-pipeline-v2','mode':mode,'rounds_requested':rounds,
+            report={'schema':'joint-head-calibration-pipeline-v2','run_id':self.pipeline_run_id,'mode':mode,'rounds_requested':rounds,
                     'auto_confirm':bool(self.config.get('pipeline_auto_confirm')),'steps':[],'aborted':None,'stopped':False}
             if capture_only:report.update(capture_only=True,capture_completed=False)
             if resume_head:

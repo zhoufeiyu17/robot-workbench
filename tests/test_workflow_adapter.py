@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock,patch
@@ -317,6 +318,131 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertEqual(value['stage_id'],'wrist.solve')
         self.assertEqual(value['overall_progress']['current'],5,'stale head fraction cannot advance a wrist stage')
         self.assertTrue(value['progress']['indeterminate'])
+
+    def capture_progress_fixture(self):
+        flow=self.calibration();flow.last_catalog=time.monotonic();flow.app.lock=threading.RLock()
+        flow.app.selected_batch='head-batch/capture'
+        flow.app.active_capture=dict(batch_id=flow.app.selected_batch,pipeline_run_id='run',kind='head',
+            captured=32,expected_count=34)
+        flow.app.batch={'completion':None}
+        state=dict(status='CAPTURING',workflow={'kind':'head'},selected_batch=flow.app.selected_batch,
+            counts=dict(capture_points=34,captured=32),pipeline=dict(run_id='run',running=True,phase='头部：采集',
+                subprogress=dict(stage=1,completed=32,total=34,fraction=32/34,label='已采集图像')))
+        flow.app.runtime_state.side_effect=lambda:deepcopy(state)
+        return flow,state
+
+    def test_failed_capture_retains_run_batch_stage_and_frozen_count_after_cleanup(self):
+        flow,state=self.capture_progress_fixture()
+        for terminal in ('running','rejected','cleaned'):
+            if terminal=='rejected':state.update(status='REJECTED',reason='真机采集超时')
+            if terminal=='cleaned':
+                flow.app.pipeline_run_id=None
+                state['pipeline'].update(running=False,phase=None,failed_phase='头部：采集',
+                    aborted='ValueError：头部采集 失败：真机采集超时')
+                # A newer acknowledged completion beats the active counter, while
+                # subsequent queue editing must never rewrite this batch's total.
+                flow.app.active_capture['captured']=31
+                flow.app.batch={'completion':dict(passed=False,captured=32,reason='真机采集超时')}
+                state['counts']['capture_points']=2
+            flow.refresh();value=flow.snapshot()
+            with self.subTest(terminal=terminal):
+                self.assertEqual(value['id'],'run')
+                self.assertEqual(value['capture_batch_id'],'head-batch/capture')
+                self.assertEqual(value['stage_id'],'head.capture')
+                self.assertEqual(value['title'],'头部：采集')
+                self.assertEqual(value['progress']['current'],32);self.assertEqual(value['progress']['total'],34)
+                self.assertAlmostEqual(value['overall_progress']['current'],1+32/34)
+                self.assertEqual(value['overall_progress']['completed_stages'],1)
+                self.assertEqual(value['failed_stage'],None if terminal=='running' else 'head.capture')
+                if terminal!='running':
+                    self.assertEqual(value['status'],'failed');self.assertIn('采集超时',value['message'])
+        self.assertFalse(value['busy']);self.assertEqual(value['outcomes']['data'],'invalid')
+        flow.app.history.assert_not_called();flow.app.calibration_results.assert_not_called()
+
+    def test_terminal_capture_cold_refresh_uses_report_identity_and_matching_cached_completion(self):
+        flow,state=self.capture_progress_fixture();flow.app.pipeline_run_id=None
+        state.update(status='REJECTED',counts={'capture_points':99})
+        state['pipeline'].update(running=False,phase=None,failed_phase='头部：采集',aborted='采集失败')
+        state['pipeline'].pop('subprogress')
+        flow.app.active_capture['captured']=31
+        flow.app.batch={'completion':dict(passed=False,accepted=32,captured=33)}
+        flow.refresh();value=flow.snapshot()
+        self.assertEqual(value['id'],'run');self.assertEqual(value['progress']['current'],32)
+        self.assertEqual(value['progress']['total'],34)
+        # runtime_state and the later locked batch snapshot can straddle a selection.
+        flow.app.selected_batch='another/capture'
+        flow.app.batch={'completion':dict(passed=True,captured=34)}
+        flow.refresh();value=flow.snapshot()
+        self.assertEqual(value['progress']['current'],31)
+        self.assertNotIn('data',value['outcomes'])
+        flow.app.history.assert_not_called()
+
+    def test_new_pipeline_does_not_inherit_failed_or_installed_prior_report(self):
+        flow,state=self.capture_progress_fixture();flow.app.pipeline_run_id='new-run'
+        state.update(status='REJECTED',reason='上一轮失败')
+        for prior in ({'aborted':'上一轮失败','failed_phase':'头部：采集'},
+                      {'installed':{'verified':True}}):
+            state['pipeline']={**state['pipeline'],**prior}
+            flow.refresh();value=flow.snapshot()
+            with self.subTest(prior=prior):
+                self.assertEqual(value['id'],'new-run');self.assertEqual(value['status'],'running')
+                self.assertEqual(value['stage_id'],'head.plan');self.assertIsNone(value['capture_batch_id'])
+                self.assertIsNone(value['failed_stage']);self.assertNotIn('上一轮',value['message'])
+                self.assertEqual(value['overall_progress']['current'],0)
+                self.assertTrue(value['progress']['indeterminate'])
+
+    def test_capture_retry_starts_at_zero_and_ignores_prior_batch_completion(self):
+        flow,state=self.capture_progress_fixture()
+        flow.app.batch={'completion':dict(passed=False,captured=32)}
+        flow.app.active_capture.update(batch_id='retry/capture',captured=0,expected_count=12)
+        flow.refresh();value=flow.snapshot()
+        self.assertEqual(value['capture_batch_id'],'retry/capture')
+        self.assertEqual(value['progress']['current'],0);self.assertEqual(value['progress']['total'],12)
+        self.assertEqual(value['overall_progress']['current'],1)
+        self.assertIsNone(value['failed_stage']);self.assertNotIn('data',value['outcomes'])
+        # Neither a prior run nor a head batch may supply progress for this wrist failure.
+        state.update(status='REJECTED');state['pipeline'].pop('subprogress')
+        for run,phase in [('old-run','头部：采集'),('run','腕半场：采集')]:
+            flow.app.active_capture['pipeline_run_id']=run;state['pipeline']['phase']=phase
+            flow.refresh();value=flow.snapshot()
+            self.assertIsNone(value['capture_batch_id']);self.assertIsNone(value['progress'])
+
+    def test_original_C_terminal_report_keeps_run_id_after_live_cleanup(self):
+        root=Path(__file__).resolve().parents[1]
+        sys.path[:0]=[str(root/'calibration'),str(root/'calibration/infra'),
+                      str(root/'calibration/examples/scripts/debug'),str(root/'calibration/tests')]
+        from test_joint_head_workbench_pipeline import PipelineHost
+        host=PipelineHost();seen=[]
+        def fail_capture(report,label):
+            seen.append(host.pipeline_run_id)
+            raise ValueError('采集32/34后失败')
+        host.capture_batch=fail_capture
+        with self.assertRaisesRegex(ValueError,'32/34'):host.run(mode='full')
+        self.assertIsNone(host.pipeline_run_id);self.assertFalse(host.pipeline_running)
+        self.assertEqual(host.pipeline_report['run_id'],seen[0]);self.assertTrue(seen[0])
+        self.assertIn('采集',host.pipeline_report['failed_phase'])
+        self.assertIn('32/34',host.pipeline_report['aborted'])
+
+    def test_original_C_capture_freezes_run_batch_and_expected_count_through_ack(self):
+        root=Path(__file__).resolve().parents[1]
+        sys.path[:0]=[str(root/'calibration'),str(root/'calibration/infra'),
+                      str(root/'calibration/examples/scripts/debug'),str(root/'calibration/tests')]
+        from test_joint_head_workbench_capture_flow import CaptureFlowTests
+        legacy=CaptureFlowTests();legacy.setUp();self.addCleanup(legacy.doCleanups)
+        c=legacy.app;c.pipeline_run_id='capture-run';original=c.control_request;initial=[]
+        def gateway(action,body=None,**kwargs):
+            if action=='motion-confirm':initial.append(deepcopy(c.active_capture))
+            return original(action,body,**kwargs)
+        c.control_request=gateway
+        with patch('arx_env.joint_head_workbench_capture.capture_sample',side_effect=legacy.sample):
+            legacy.confirm()
+        self.assertEqual(c.status,'READY',c.reason)
+        c.queue=[]
+        self.assertEqual(initial[0]['captured'],0);self.assertEqual(c.active_capture['captured'],1)
+        for value in (initial[0],c.active_capture):
+            self.assertEqual(value['pipeline_run_id'],'capture-run')
+            self.assertEqual(value['expected_count'],1);self.assertEqual(value['kind'],'head')
+            self.assertEqual(value['batch_id'],c.active_capture['batch_id'])
 
     def test_independent_batch_stages_do_not_reuse_old_pipeline_completion(self):
         flow=self.calibration();flow.app.lock=threading.RLock();flow.app.queue=[{'q':[0.]*12,'capture':True}]
