@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -11,7 +12,7 @@ from control_motion import validate_control
 from execution_timeline import build
 from integration import _digest
 from physical_motiongen import freeze_physical
-from real_recording import RecordingSession,CAMERAS,SIDES,verify_raw,_renew_recording_lease
+from real_recording import RecordingSession,RealRecorder,CAMERAS,SIDES,verify_raw,_renew_recording_lease
 from real_rgbd import RawSpool,pair_metadata
 from test_fake_device_pipeline import fake_inputs,fake_metadata,FAKE_CLOCK_ID,FAKE_RUNTIME_NONCE
 from test_physical_motiongen import fake_inputs as physical_inputs
@@ -38,7 +39,7 @@ class RecordingWallClockTest(unittest.TestCase):
             if time.monotonic()>=deadline:self.fail('CPU recorder fixture did not progress')
             time.sleep(.001)
 
-    def setup_session(self,root,count=300,environment='fake',budget=900):
+    def setup_session(self,root,count=300,environment='fake',budget=900,recorder_factory=RealRecorder):
         self.wall=[1_000_000_000_000];self.start=self.wall[0]
         self.source,self.plan,self.binding,self.timeline=plan_fixture(count,environment)
         for camera in CAMERAS:(root/camera).mkdir()
@@ -48,6 +49,7 @@ class RecordingWallClockTest(unittest.TestCase):
         owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
         self.session=RecordingSession(root/'raw',self.source,self.plan,self.binding,
             environment=environment,execution_timeline=self.timeline,execution_owner=owner if environment=='fake' else None,
+            recorder_factory=recorder_factory,
             camera_directories=self.directories,clock_ns=lambda:self.wall[0],on_fault=self.faults.append,
             **({'resident_deadline_wall_ns':self.start+round((budget+45)*1e9)} if environment=='fake' else {}))
         self.addCleanup(self.close_session)
@@ -82,6 +84,15 @@ class RecordingWallClockTest(unittest.TestCase):
         self.session.submit('feedback',tick=min(index,len(self.plan['ticks'])-1),
             state=self.plan['ticks'][min(index,len(self.plan['ticks'])-1)]['target'],
             sample_monotonic_s=raw['source_time_ns']/1e9,sample_wall_ns=self.wall[0],raw=raw)
+
+    def submit_command(self,index):
+        source_ns=100_000_000_000+index*1_000_000_000//30
+        sample=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
+            source_time_ns=source_ns,physics_step=24_000+index*8,sample_wall_ns=self.wall[0])
+        self.session.submit('command',tick=index,target=self.plan['ticks'][index]['target'],
+            send_monotonic_s=source_ns/1e9,send_wall_ns=self.wall[0],send_source_time_ns=source_ns,
+            physics_step=None,feedback_at_send=sample,clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
+            owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
 
     def test_slow_source_and_cross_six_hundred_wall_seconds_keep_complete_raw_and_one_spool(self):
         for count,slowdown in ((300,4),(300,24),(4530,4)):
@@ -182,6 +193,65 @@ class RecordingWallClockTest(unittest.TestCase):
                     'wrong_feedback_clock':'source clock differs','feedback_regression':'repeated or regressed'}[cause],self.session.error)
                 self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
                 self.assertEqual(self.session.manifest['capture_status'],'incomplete')
+                diagnostic=json.loads((Path(temp)/'raw/recording-diagnostics.json').read_text())
+                self.assertEqual(diagnostic['error'],self.session.error)
+                self.assertEqual(diagnostic['queue']['capacity'],512)
+                self.assertIn('recording-diagnostics.json',self.session.manifest['files'])
+                if cause=='source_lag':
+                    camera=diagnostic['cameras'][CAMERAS[0]]
+                    self.assertEqual(camera['checked_spool_index'],1)
+                    self.assertEqual(camera['checked_spool_head']['source_time_ns'],100_000_000_000)
+                    self.assertEqual(diagnostic['checked_reference']['source_time_ns'],100_600_000_000)
+
+    def test_fake_writer_backlog_is_not_source_lag_and_both_inputs_get_bounded_turns(self):
+        entered=threading.Event();release=threading.Event();camera_turns=[];test=self
+        class DelayedRecorder(RealRecorder):
+            def record_rgbd(self,camera,blob):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5):raise TimeoutError('CPU fixture did not release archive writer')
+                camera_turns.append((len(self.feedback),test.session.events.qsize()))
+                return super().record_rgbd(camera,blob)
+        with TemporaryDirectory() as temp:
+            count=120;root=Path(temp)
+            self.setup_session(root,count=count,recorder_factory=DelayedRecorder)
+            self.publish(0);self.submit_feedback(0)
+            self.assertTrue(entered.wait(5),self.session.error)
+            try:
+                for index in range(count+1):
+                    self.wall[0]=self.start+index*200_000_000
+                    if index:self.publish(index)
+                    if index<count:self.submit_command(index)
+                    if index:self.submit_feedback(index)
+                self.assertGreater(self.session.events.qsize(),64)
+            finally:release.set()
+            self.wait_for(lambda:len(self.session.recorder.feedback)==count+1
+                and len(self.session.recorder.commands)==count
+                and all(len(rows)==count+1 for rows in self.session.recorder.frames.values()),self.session)
+            self.assertTrue(any(feedback>2 and pending>0 for feedback,pending in camera_turns),camera_turns)
+            for camera,rows in self.session.recorder.frames.items():
+                self.assertEqual([row['frame_number'] for row in rows],list(range(count+1)))
+                self.assertEqual(self.session.spool_heads[camera]['index'],count+1)
+            self.session.finish('completed');self.assertTrue(self.session.done.wait(5),self.session.error)
+            self.assertFalse(self.faults);self.assertEqual(self.session.manifest['capture_status'],'complete')
+            verify_raw(root/'raw',environment='fake')
+
+    def test_fresh_spool_does_not_hide_missing_execution_start_coverage(self):
+        with TemporaryDirectory() as temp:
+            count=30;first_frame=6;self.setup_session(Path(temp),count=count)
+            for index in range(count+1):
+                self.wall[0]=self.start+index*50_000_000
+                if index>=first_frame:self.publish(index)
+                if index<count:self.submit_command(index)
+                self.submit_feedback(index)
+            self.wait_for(lambda:len(self.session.recorder.feedback)==count+1
+                and all(len(rows)==count-first_frame+1 for rows in self.session.recorder.frames.values()),self.session)
+            self.session.finish('completed');self.assertTrue(self.session.done.wait(5),self.session.error)
+            self.assertFalse(self.faults)
+            self.assertEqual(self.session.manifest['capture_status'],'incomplete')
+            self.assertEqual(set(self.session.manifest['validation']['problems']),
+                {camera+': RGB-D does not bracket execution' for camera in CAMERAS})
+            self.assertEqual(self.session.manifest['controller_outcome'],'completed')
 
     def test_fake_camera_source_stall_is_bounded_even_when_owner_keeps_advancing(self):
         with TemporaryDirectory() as temp:
@@ -196,6 +266,66 @@ class RecordingWallClockTest(unittest.TestCase):
                 time.sleep(.02)
             self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
             self.assertIn('native RGB-D source stalled for 30 wall seconds',self.session.error)
+
+    def test_camera_stays_ahead_but_owner_reaches_each_previously_pending_frame(self):
+        # Reproduce the ordering of each IO round: freeze actual Owner feedback,
+        # then observe a newer camera frame while the other cameras were written.
+        session=object.__new__(RecordingSession)
+        session.clock=fake_inputs()[0]['clock'];session.pending_reference={}
+        wall=[1_000_000_000_000];session.clock_ns=lambda:wall[0]
+        def stamp(index):return (100_000_000_000+index*1_000_000_000//30,24_000+index*8)
+        for index in range(1,41):
+            wall[0]+=2_000_000_000
+            current=stamp(index)
+            meta=dict(host_receive_ns=wall[0],clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
+                source_time_ns=current[0],physics_step=current[1])
+            reference=(stamp(index-1),wall[0],time.monotonic())
+            self.assertEqual(session.check_fake_head(CAMERAS[-1],meta,reference),current)
+            self.assertEqual(session.pending_reference[CAMERAS[-1]][0],current)
+        session.check_fake_head(CAMERAS[-1],meta,(stamp(40),wall[0],time.monotonic()))
+        self.assertFalse(session.pending_reference)
+
+    def test_owner_advancement_short_of_fixed_pending_frame_cannot_restart_its_timeout(self):
+        session=object.__new__(RecordingSession)
+        session.clock=fake_inputs()[0]['clock'];session.pending_reference={}
+        wall=[1_000_000_000_000];session.clock_ns=lambda:wall[0]
+        for index in range(16):
+            wall[0]+=2_000_000_000
+            current=(101_000_000_000+index*1_000_000_000//30,24_240+index*8)
+            meta=dict(host_receive_ns=wall[0],clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
+                source_time_ns=current[0],physics_step=current[1])
+            reference=((100_000_000_000+index*1_000_000_000//240,24_000+index),wall[0],time.monotonic())
+            if index<15:session.check_fake_head(CAMERAS[-1],meta,reference)
+            else:
+                with self.assertRaisesRegex(ValueError,'did not reach frame within 30 wall seconds'):
+                    session.check_fake_head(CAMERAS[-1],meta,reference)
+            self.assertEqual(session.pending_reference[CAMERAS[-1]][0],(101_000_000_000,24_240))
+
+    def test_diagnostic_write_failure_keeps_primary_error_and_still_attempts_seal(self):
+        for fail_seal in (False,True):
+            with self.subTest(fail_seal=fail_seal),TemporaryDirectory() as temp:
+                class FailedDiagnosticRecorder(RealRecorder):
+                    def write_json(self,name,value):
+                        if name=='recording-diagnostics.json':raise OSError('diagnostic storage failure')
+                        if name=='manifest.json' and fail_seal:raise OSError('manifest storage failure')
+                        return super().write_json(name,value)
+                    def record_rgbd(self,camera,blob):raise ValueError('original frame failure')
+                self.setup_session(Path(temp),recorder_factory=FailedDiagnosticRecorder)
+                self.publish(0);self.submit_feedback(0)
+                self.assertTrue(self.session.done.wait(5),self.session.snapshot())
+                self.assertEqual(self.session.error,'original frame failure')
+                self.assertEqual(self.faults,['original frame failure'])
+                self.assertEqual(self.session.snapshot()['diagnostics_error'],'OSError: diagnostic storage failure')
+                if fail_seal:
+                    self.assertIsNone(self.session.manifest)
+                    self.assertEqual(self.session.snapshot()['seal_error'],'OSError: manifest storage failure')
+                else:
+                    self.assertIsNone(self.session.seal_error)
+                    self.assertEqual(self.session.manifest['recording_error'],'original frame failure')
+                    self.assertEqual(self.session.manifest['capture_status'],'incomplete')
+                    self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
+                    verify_raw(Path(temp)/'raw',environment='fake')
+                self.assertTrue(all(not (Path(path)/'recording-request.json').exists() for path in self.directories.values()))
 
     def test_physical_first_frame_and_running_freshness_remain_five_hundred_wall_ms(self):
         for stale_at_start in (False,True):

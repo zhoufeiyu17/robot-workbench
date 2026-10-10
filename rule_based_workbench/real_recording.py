@@ -90,6 +90,14 @@ def bundle(blob, serial, *, environment='physical', clock=None):
             raise ValueError('RGB-D bundle decompressed size exceeds limit')
         meta = json.loads(archive.read('metadata.json'))
         color,depth = archive.read('color.png'),archive.read('depth.png')
+    validate_rgbd_metadata(meta,serial,environment=environment,clock=clock)
+    if png_shape(color) != png_shape(depth,depth=True):
+        raise ValueError('RGB and aligned depth dimensions differ')
+    return meta,color,depth
+
+
+def validate_rgbd_metadata(meta,serial,*,environment,clock):
+    """Shared provenance checks; a spool watermark never qualifies PNG payloads."""
     if meta.get('data_valid') is False:
         raise ValueError('camera data invalid: '+str(meta.get('recording_error') or 'producer rejected this frame'))
     if environment=='fake':
@@ -114,9 +122,6 @@ def bundle(blob, serial, *, environment='physical', clock=None):
                   depth_ms=meta['depth_device_timestamp_ms'],color_domain=meta['timestamp_domain'],
                   depth_domain=meta['timestamp_domain'],host_receive_ns=int(meta['host_receive_ns']),
                   depth_scale_m=meta['depth_scale_m'],intrinsics=meta['intrinsics'],fps=meta['capture_fps'])
-    if png_shape(color) != png_shape(depth,depth=True):
-        raise ValueError('RGB and aligned depth dimensions differ')
-    return meta,color,depth
 
 
 class RealRecorder:
@@ -476,6 +481,13 @@ class RecordingSession:
         self.recorder=None
         self.execution_timeline=execution_timeline
         self.feedback_progress=None
+        self.spool_heads={}
+        self.pending_reference={}
+        self.checked_reference=None
+        self.writer_stage='starting'
+        self.last_event_write=None
+        self.diagnostics=None
+        self.diagnostics_error=self.seal_error=None
         self.thread=threading.Thread(target=self._run,args=(source,plan,binding,recorder_factory),daemon=True)
         self.thread.start()
 
@@ -506,15 +518,14 @@ class RecordingSession:
                         raise ValueError('feedback control time differs from source time')
                     assert_progress(self.feedback_progress[0] if self.feedback_progress else None,stamp)
                     self.feedback_progress=(stamp,self.clock_ns(),time.monotonic())
-                self.events.put_nowait((kind,fields))
+                self.events.put_nowait((kind,fields,self.clock_ns(),time.monotonic()))
             except queue.Full:error='bounded recording queue overflow'
             except ValueError as exc:error=str(exc)
         if error:
             self.fail(error)
             raise ValueError(self.error)
 
-    def fake_frame_stamp(self,meta):
-        with self.lock:reference=self.feedback_progress
+    def fake_frame_stamp(self,meta,reference,*,check_lag=True):
         if reference is None:return None
         stamp=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},self.clock)
         # A camera may sample between Owner ticks; compare actual steps without
@@ -522,9 +533,91 @@ class RecordingSession:
         first,last=sorted((stamp,reference[0]))
         assert_progress(first,last,allow_same=True)
         if stamp[0]>reference[0][0]:return None
-        if reference[0][0]-stamp[0]>500_000_000:
+        if check_lag and reference[0][0]-stamp[0]>500_000_000:
             raise ValueError('native RGB-D source lag exceeds 0.5 seconds')
         return stamp
+
+    def check_fake_head(self,camera,meta,reference):
+        stamp=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},self.clock)
+        pending=self.pending_reference.get(camera)
+        # Complete the previous wait against its fixed frame, even when a newer
+        # camera head stays ahead of the reference captured before this IO round.
+        if pending and reference and reference[0][0]>=pending[0][0]:
+            assert_progress(pending[0],reference[0],allow_same=True)
+            self.pending_reference.pop(camera)
+        if self.fake_frame_stamp(meta,reference) is None:
+            pending=self.pending_reference.setdefault(camera,(stamp,self.clock_ns(),time.monotonic()))
+            if self.clock_ns()-pending[1]>=30_000_000_000 or time.monotonic()-pending[2]>=30:
+                raise ValueError(camera+': actual Owner reference did not reach frame within 30 wall seconds')
+        else:self.pending_reference.pop(camera,None)
+        return stamp
+
+    def spool_head(self,camera,directory):
+        # Only this writer reclaims ZIPs; the producer atomically adds them.
+        # Read metadata, not PNGs, and keep the last committed watermark after
+        # consuming it. Historical frames still pass full validation in order.
+        latest=max(directory.glob('[0-9]'*9+'.zip'),default=None)
+        previous=self.spool_heads.get(camera)
+        if latest is not None and (previous is None or int(latest.stem)>previous['index']):
+            if latest.stat().st_size>16*1024*1024:raise ValueError('bounded spool ZIP required')
+            with zipfile.ZipFile(latest) as archive:
+                if archive.getinfo('metadata.json').file_size>256*1024:raise ValueError('bounded RGB-D metadata required')
+                meta=json.loads(archive.read('metadata.json'))
+            validate_rgbd_metadata(meta,self.recorder.source['camera_serials'][SIDES[camera]],
+                environment=self.environment,clock=self.clock)
+            self.recorder._check_owner(meta,frame=True)
+            if meta.get('recording_run_id')!=directory.name or meta.get('recording_enabled') is not True:
+                raise ValueError(camera+': raw recording lease differs')
+            if previous:assert_progress(self.recorder._stamp(previous['metadata'],'rgbd'),self.recorder._stamp(meta,'rgbd'))
+            previous=dict(index=int(latest.stem),metadata=meta,observed_wall_ns=self.clock_ns(),observed_monotonic_s=time.monotonic())
+            self.spool_heads[camera]=previous
+        return previous
+
+    def failure_diagnostics(self,cursors):
+        def reference(value):
+            return (dict(source_time_ns=value[0][0],physics_step=value[0][1],submitted_wall_ns=value[1],
+                submitted_monotonic_s=value[2]) if value else None)
+        def frame(row):
+            return {key:row.get(key) for key in ('source_clock_id','source_time_ns','physics_step','host_receive_ns',
+                'frame_number','depth_frame_number','recording_run_id','path')}
+        with self.lock:latest_reference=self.feedback_progress
+        now=self.clock_ns();mono=time.monotonic()
+        with self.events.mutex:
+            pending=list(self.events.queue)
+        oldest=None
+        if pending:
+            kind,fields,wall,queued=pending[0]
+            raw=fields.get('raw') or {}
+            oldest=dict(kind=kind,tick=fields.get('tick'),queued_wall_ns=wall,queued_monotonic_s=queued,
+                queue_wait_wall_s=(now-wall)/1e9,queue_wait_monotonic_s=mono-queued,
+                source_time_ns=fields.get('send_source_time_ns',fields.get('source_time_ns',raw.get('source_time_ns'))))
+        cameras={}
+        for camera,(directory,index) in cursors.items():
+            rows=self.recorder.frames[camera] if self.recorder else []
+            head=self.spool_heads.get(camera)
+            waiting=self.pending_reference.get(camera)
+            pending_indices=sorted(int(p.stem) for p in directory.glob('[0-9]'*9+'.zip'))
+            cameras[camera]=dict(next_archive_index=index,archived_count=len(rows),
+                archived_first=frame(rows[0]) if rows else None,archived_tail=frame(rows[-1]) if rows else None,
+                checked_spool_index=head['index'] if head else None,checked_spool_head=frame(head['metadata']) if head else None,
+                checked_spool_observed_wall_ns=head['observed_wall_ns'] if head else None,
+                pending_reference=(dict(source_time_ns=waiting[0][0],physics_step=waiting[0][1],
+                    wait_started_wall_ns=waiting[1],wait_started_monotonic_s=waiting[2]) if waiting else None),
+                spool_pending_count=len(pending_indices),spool_first_index=pending_indices[0] if pending_indices else None,
+                spool_last_index=pending_indices[-1] if pending_indices else None)
+        return dict(schema='recording_failure_diagnostics.v1',error=self.error,writer_stage=self.writer_stage,
+            captured_wall_ns=now,captured_monotonic_s=mono,checked_reference=reference(self.checked_reference),
+            latest_submitted_reference=reference(latest_reference),queue=dict(depth=len(pending),capacity=self.events.maxsize,oldest=oldest),
+            last_event_write=self.last_event_write,command_count=len(self.recorder.commands) if self.recorder else 0,
+            feedback_count=len(self.recorder.feedback) if self.recorder else 0,cameras=cameras)
+
+    def save_failure_diagnostics(self,cursors):
+        if self.error:
+            try:
+                self.diagnostics=self.failure_diagnostics(cursors)
+                self.recorder.write_json('recording-diagnostics.json',self.diagnostics)
+            except Exception as error:
+                self.diagnostics_error=f'{type(error).__name__}: {error}'
 
     def finish(self,status,reason=None):
         if status not in ('completed','failed','stopped'):raise ValueError('terminal status required')
@@ -536,13 +629,14 @@ class RecordingSession:
         return dict(ready=self.ready.is_set(),done=self.done.is_set(),error=self.error,
                     controller_result=self.controller_result,
                     directory=str(self.root),manifest_path=str(self.root/'manifest.json') if self.manifest else None,
+                    diagnostics=deepcopy(self.diagnostics),
+                    diagnostics_error=self.diagnostics_error,seal_error=self.seal_error,
                     manifest={k:v for k,v in self.manifest.items() if k!='files'} if self.manifest else None)
 
     def _run(self,source,plan,binding,factory):
         import queue
         cursors={}
         camera_progress={}
-        pending_reference={}
         leases=[]
         lease_deadline_wall_ns=None
         recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
@@ -582,10 +676,12 @@ class RecordingSession:
                     cursors[camera]=(directory/token,1)
                 ready_deadline=time.monotonic()+5
                 while True:
+                    self.writer_stage='awaiting_first_frames'
                     if recording_deadline_wall_ns is not None and (self.clock_ns()>=recording_deadline_wall_ns
                             or time.monotonic()>=recording_deadline_monotonic):
                         raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
-                    first=[]
+                    with self.lock:self.checked_reference=self.feedback_progress
+                    first=[];first_referenced=True
                     for camera,(directory,index) in cursors.items():
                         path=directory/f'{index:09d}.zip'
                         if path.is_file():
@@ -593,10 +689,17 @@ class RecordingSession:
                             if meta.get('recording_run_id') != directory.name or not meta.get('recording_enabled'):
                                 raise ValueError(camera+': raw recording lease differs')
                             first.append(meta)
-                    if len(first)==3 and (self.environment!='fake' or all(self.fake_frame_stamp(meta) is not None for meta in first)):break
+                            if self.environment=='fake':
+                                head=self.spool_head(camera,directory)
+                                self.fake_frame_stamp(head['metadata'],self.checked_reference)
+                                # The first historical frame need only be covered
+                                # by actual feedback; freshness belongs to the head.
+                                first_referenced &= self.fake_frame_stamp(meta,self.checked_reference,check_lag=False) is not None
+                    if len(first)==3 and first_referenced:break
                     with self.lock:terminal=self.terminal
                     if terminal:
                         status,reason,_=terminal
+                        self.save_failure_diagnostics(cursors)
                         self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         return
                     if time.monotonic()>=ready_deadline:
@@ -626,13 +729,24 @@ class RecordingSession:
                     else:
                         lease_deadline_wall_ns=renewed
                         renew_at_wall_ns=now+(renewed-now)//2
-                try:
-                    kind,fields=self.events.get(timeout=.01)
-                except queue.Empty:pass
-                else:
+                self.writer_stage='event_batch'
+                batch_started=time.monotonic()
+                # Bound both count and wall time so camera IO gets a turn,
+                # without making 100 Hz feedback wait behind every PNG batch.
+                for event_index in range(64):
+                    try:kind,fields,queued_wall,queued_mono=self.events.get(timeout=.01 if event_index==0 else 0)
+                    except queue.Empty:break
                     getattr(self.recorder,'record_'+kind)(**fields)
+                    self.last_event_write=dict(kind=kind,tick=fields.get('tick'),queued_wall_ns=queued_wall,
+                        written_wall_ns=self.clock_ns(),enqueue_to_write_monotonic_s=time.monotonic()-queued_mono)
                     self.events.task_done()
+                    if time.monotonic()-batch_started>=.02:break
+                # Snapshot Owner first: a later publication may be ahead of it,
+                # but a writer delay must not make this reference race forward.
+                with self.lock:self.checked_reference=self.feedback_progress
                 for camera,(directory,index) in list(cursors.items()):
+                    self.writer_stage='camera:'+camera
+                    head=self.spool_head(camera,directory) if self.environment=='fake' else None
                     # Bounded batch prevents a fast camera from starving command evidence.
                     for _ in range(4):
                         path=directory/f'{index:09d}.zip'
@@ -641,6 +755,7 @@ class RecordingSession:
                         # The recorder has persisted both frame and index before reclaiming our spool copy.
                         path.unlink()
                         index+=1
+                        cursors[camera]=(directory,index)
                     cursors[camera]=(directory,index)
                     rows=self.recorder.frames[camera]
                     if rows:
@@ -648,12 +763,8 @@ class RecordingSession:
                             # A frame ahead of the last Owner tick remains pending
                             # that feedback; its actual source advance is still
                             # liveness evidence, never a fabricated fresh reference.
-                            if self.fake_frame_stamp(rows[-1]) is None:
-                                pending=pending_reference.setdefault(camera,(self.clock_ns(),time.monotonic()))
-                                if self.clock_ns()-pending[0]>=30_000_000_000 or time.monotonic()-pending[1]>=30:
-                                    raise ValueError(camera+': actual Owner reference did not reach frame within 30 wall seconds')
-                            else:pending_reference.pop(camera,None)
-                            stamp=self.recorder._stamp(rows[-1],'rgbd');previous=camera_progress.get(camera)
+                            stamp=self.check_fake_head(camera,head['metadata'],self.checked_reference)
+                            previous=camera_progress.get(camera)
                             if previous is None or stamp!=previous[0]:
                                 assert_progress(previous[0] if previous else None,stamp)
                                 camera_progress[camera]=(stamp,self.clock_ns(),time.monotonic())
@@ -668,13 +779,16 @@ class RecordingSession:
                     endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
                     covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
                     if not cursors or covered or time.monotonic()-requested>=1:
+                        self.save_failure_diagnostics(cursors)
                         self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         break
         except Exception as error:
             self.fail(error)
             if self.recorder and not self.recorder.closed:
-                try:self.manifest=self.recorder.seal('recording_failed' if self.execution_timeline else 'failed',self.error)
-                except Exception as seal_error:self.error+=f'; seal failed: {seal_error}'
+                try:
+                    self.save_failure_diagnostics(cursors)
+                    self.manifest=self.recorder.seal('recording_failed' if self.execution_timeline else 'failed',self.error)
+                except Exception as seal_error:self.seal_error=f'{type(seal_error).__name__}: {seal_error}'
         finally:
             for request,token in leases:
                 try:
