@@ -1,32 +1,38 @@
 {
-  "status": "v31_contact_preview_fixes_CPU_passed_warm_D_starting",
-  "updated_at": "2026-10-11T05:11:18.740570+08:00",
+  "status": "96e7f71_CPU_L1_passed_suitev5_nominal_head_capture_running",
+  "updated_at": "2026-10-11T06:43:47.363022+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
-  "qualification_scope": "c06ae64 dynamic normal-v31 with source-frame convex geometry and live/idle preview guards: full CPU and L1 27/27 passed, fixed040630 input GPU plan independently verified. warm-20261011-050624 reuses read-only040630 calibration and is currently preparing new D; it never counts as a cold pass. Complete empty-store suite remains0/3. Historical failures and snapshot-specific image/warm/raw/replay qualifications are retained. No real hardware qualification.",
+  "candidate_commit_before_summary": "96e7f711fee3a9f9acfdf776482ab5a545463f34",
+  "qualification_scope": "96e7f71 capability declaration and wrist preview error-persistence fixes committed/pushed;783 CPU executions782pass/1oldfixture skip and L1 27/27 passed with unchanged source/native/detector. suite-v5 has the same three cases; full064034 startup and empty-store preflight are confirmed; head capture is running, with no new completed C/D/full-chain qualification. c06 warm050624 original workflow+8checks passed but reusedC and never counts cold;060418 was terminated without original driver-completed and its failure remains preserved. Cold0/3; L4 hardware unqualified.",
   "cpu": {
-    "source_equivalent_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
-    "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/receipt.json",
+    "source_equivalent_commit": "96e7f711fee3a9f9acfdf776482ab5a545463f34",
+    "evidence": ".evidence/s2/capability-review-full-cpu-20261011-v1/receipt.json",
     "full_check_exit_code": 0,
-    "unittest_executions_in_full_log": 780,
-    "unittest_passed_in_full_log": 779,
+    "unittest_executions_in_full_log": 783,
+    "unittest_passed_in_full_log": 782,
     "unittest_skipped_in_full_log": 1,
     "source_files": 374,
     "source_unchanged": true,
     "native_unchanged": true,
-    "detector_unchanged": true
+    "detector_unchanged": true,
+    "current_source_matches_tested_hashes": true,
+    "finished_at": "2026-10-11T06:40:07.863714+08:00",
+    "git_head_at_test_start": "338cd64a5abbe4fef8c721ebd031045a6b2e7d44",
+    "qualification_binding": "96e7f71 source-equivalent completed CPU/L1; new cold run not yet qualified",
+    "skip_detail": "explicit old local mesh fixture only",
+    "count_note": "execution counts, not unique tests; do not sum with L1"
   },
   "l1": {
-    "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/l1/l1-fault-matrix.json",
+    "evidence": ".evidence/s2/capability-review-full-cpu-20261011-v1/l1/l1-fault-matrix.json",
     "cases_passed": 27,
     "cases_total": 27,
     "exit_code": 0,
     "source_unchanged": true,
     "python_source_files": 327,
     "stop_barrier_samples": 30,
-    "stop_barrier_p95_ms": 4.900124855339527,
-    "stop_barrier_max_ms": 5.38845919072628,
+    "stop_barrier_p95_ms": 4.122041165828705,
+    "stop_barrier_max_ms": 4.549708683043718,
     "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
     "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
     "physical_stop": "unverified",
@@ -49,10 +55,10 @@
     "status": "full_pipeline_not_qualified",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "latest_cold_attempt": "full-20261011-040630",
+    "latest_cold_attempt": "full-20261011-064034",
     "latest_diagnostic": "warm-20261011-050624",
     "meaning": "0/3 counts complete empty-store calibration-to-successful-collection/raw/playback cases; calibration subpipeline has passed",
-    "latest_cold_attempt_status": "D_planning_failed_IK_4_candidates"
+    "latest_cold_attempt_status": "running_fresh_head_capture"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
@@ -123,10 +129,10 @@
     "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json"
   },
   "remaining": [
-    "完成当前warm D执行、native任务、raw、源录像和L3辅助回放独立审计；复用C不计冷全链。",
-    "在冻结suite-v4完成nominal、scene-xy、device-j1三个新空库全链；当前0/3，失败不恢复冒充通过。",
-    "补充实际轨迹/回放视觉证据，更新最终文档并清退自有资源；浏览器自动化不可用时明确证据范围。",
-    "实体SDK、现场止动、时延、载荷与单writer切换属于独立L4验收。"
+    "完成suite-v5新nominal full-20261011-064034的空库C→安装→D执行/native/raw/source录像/L3及独立审计；当前头部采集中，不计通过。",
+    "继续相同定义的scene-xy与device-j1两个新空库全链；完整冷仍0/3，warm与旧失败不替代。",
+    "完成最终文档及可取得的实际轨迹/回放证据、资源核账与授权交付；旧UI对照/封存导出性能已完成。",
+    "L4真机SDK、实体止动、时延、载荷与正式单writer切换独立验收。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -457,8 +463,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": "warm-20261011-050624",
-  "last_gpu_run": "full-20261011-040630",
+  "current_gpu_run": "full-20261011-064034",
+  "last_gpu_run": "full-20261011-060418",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -478,13 +484,49 @@
   "latest_warm_diagnostic": {
     "run": "warm-20261011-050624",
     "source_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
-    "status": "D_setup_initializing_detector",
+    "status": "warm_D_full_diagnostic_passed",
     "fresh_C_completed": false,
     "diagnostic_only": true,
     "source_spec": ".evidence/s2/warm-source-040630.json",
     "full_pipeline_qualified": false,
     "qualifies_cold_case": false,
-    "released": false
+    "released": true,
+    "execution_tick_count": 3425,
+    "execution_instance_id": "93c50733366ddde01385a7374db43576",
+    "motion_outcome": "completed",
+    "native_task_outcome": "success",
+    "native_task_qualified": true,
+    "observed_physics_samples": 27401,
+    "recording_sealed": true,
+    "original_terminal": ".evidence/s2/warm-20261011-050624-terminal.json",
+    "native_evidence": ".evidence/s2/warm-20261011-050624-native-task-receipt.json",
+    "original_workflow": "completed",
+    "artifact_audit": ".evidence/s2/warm-20261011-050624-audit.json",
+    "raw_complete": true,
+    "command_count": 3425,
+    "feedback_count": 11418,
+    "camera_frames": {
+      "base_0": 3436,
+      "left_wrist_0": 3436,
+      "right_wrist_0": 3436
+    },
+    "sealed_files_verified": 10319,
+    "sealed_bytes": 3827158790,
+    "auxiliary_replay": "passed",
+    "source_replay": "passed",
+    "teardown": ".evidence/s2/warm-20261011-050624-teardown.json",
+    "artifacts_preserved": ".evidence/s2/warm-20261011-050624-artifacts-after-teardown.json",
+    "source_head_video": ".evidence/s2/warm-20261011-050624-source-head.mp4",
+    "audit_complete": true,
+    "warm_D_diagnostic_qualified": true,
+    "audit_checks_passed": 8,
+    "audit_checks_total": 8,
+    "source_video_max_frame_pts_error_s": 0.0003333330000003798,
+    "original_source_replay_verified": true,
+    "future_recovery_excluded": true,
+    "released_at": "2026-10-11T06:04:17+08:00",
+    "owned_processes_exited": 14,
+    "both_gpu_process_lists_empty": true
   },
   "preview_three_slot_measurement": {
     "off": {
@@ -1383,6 +1425,42 @@
       "source_unchanged": true,
       "native_unchanged": true,
       "detector_unchanged": true
+    },
+    {
+      "source_equivalent_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+      "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/receipt.json",
+      "full_check_exit_code": 0,
+      "unittest_executions_in_full_log": 780,
+      "unittest_passed_in_full_log": 779,
+      "unittest_skipped_in_full_log": 1,
+      "source_files": 374,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true,
+      "current_source_matches_tested_hashes": false,
+      "qualification_binding": "completed c06ae64 snapshot; current capability/publication WIP is not covered by this historical receipt",
+      "untested_changed_source_files": [
+        "robot_workbench/runtime.py",
+        "robot_workbench/workflows.py",
+        "tests/test_unified_runtime.py",
+        "tests/test_workflow_adapter.py"
+      ],
+      "l1": {
+        "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/l1/l1-fault-matrix.json",
+        "cases_passed": 27,
+        "cases_total": 27,
+        "exit_code": 0,
+        "source_unchanged": true,
+        "python_source_files": 327,
+        "stop_barrier_samples": 30,
+        "stop_barrier_p95_ms": 4.900124855339527,
+        "stop_barrier_max_ms": 5.38845919072628,
+        "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
+        "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
+        "physical_stop": "unverified",
+        "firmware_ack": "unsupported"
+      },
+      "superseded_at": "2026-10-11T06:42:45.842482+08:00"
     }
   ],
   "grasp_contact_reserve": {
@@ -1526,20 +1604,37 @@
     "scope": "CPU-only postprocessing of one complete archived three-camera raw input on the measured host/load/storage; not GPU/live collection throughput, new cold-case success or universal storage performance."
   },
   "latest_cold_attempt": {
-    "run": "full-20261011-040630",
-    "status": "D_planning_failed_IK_4_candidates",
-    "product_commit": "44f68beb545e6fa8d52b6d6cdf0d072afee3a32a",
-    "fresh_C_completed": true,
-    "group_installed": true,
+    "run": "full-20261011-064034",
+    "case": "nominal",
+    "status": "running_fresh_head_capture",
+    "product_commit": "96e7f711fee3a9f9acfdf776482ab5a545463f34",
+    "fresh_C_completed": false,
+    "group_installed": false,
     "D_motion_started": false,
     "full_pipeline_qualified": false,
-    "released": true,
-    "launch_evidence": ".evidence/s2/full-20261011-040630-launch-receipt.json",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-040630-contract.json",
-    "C_results": ".evidence/s2/full-20261011-040630-C-results.json",
-    "artifact_audit": ".evidence/s2/full-20261011-040630-failed-audit.json",
-    "accepted_D_executions": 0,
-    "teardown": ".evidence/s2/full-20261011-040630-teardown.json"
+    "launch_metadata": ".evidence/s2/current-full.json",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-064034-contract.json",
+    "source_files": 375,
+    "startup_confirmed_by_launch_metadata": true,
+    "preparation_snapshot_at": "2026-10-11T06:42:45.842482+08:00",
+    "gpu_record": "unified-full-20261011-064034",
+    "released": false,
+    "scope": "confirmed original cold startup and head capture; later C/install/D/terminal qualification pending",
+    "empty_store_driver_preflight_passed": true,
+    "head_reviewed": true,
+    "head_capture_started": true,
+    "actual_start": "2026-10-11T06:42:18+08:00",
+    "supervisor": {
+      "pid": 273071,
+      "start_ticks": "31970676"
+    },
+    "resource_evidence": ".evidence/s2/full-20261011-064034-resources-064209.json",
+    "resource_window": {
+      "expected_start": "2026-10-11T06:41:19+08:00",
+      "expected_end": "2026-10-11T08:36:19.890367+08:00",
+      "service_deadline": "2026-10-11T08:31:26+08:00",
+      "next_actual_check_by": "2026-10-11T07:30:00+08:00"
+    }
   },
   "base_alignment": {
     "status": "owner_reply_read_back_dynamic_recipe_implemented",
@@ -1596,17 +1691,22 @@
     "released": true
   },
   "current_cold_suite": {
-    "id": "cold-suite-normal-v31-20261011-v4",
-    "evidence": ".evidence/s2/cold-suite-freeze-20261011-v4.json",
-    "sha256": "1a55e6d2db3f198db04f87e1143c04bb9eee22e104cf5cd83a19f7a464d7b618",
-    "product_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+    "id": "cold-suite-normal-v31-20261011-v5",
+    "evidence": ".evidence/s2/cold-suite-freeze-20261011-v5.json",
+    "sha256": "7693b3418d03c3c8be00635f2f5d30ebbdb75207a9f5b3b792c1feb471805d35",
+    "product_commit": "96e7f711fee3a9f9acfdf776482ab5a545463f34",
     "source_files": 375,
     "motion_recipe": "normal-v31-dynamic-targets",
     "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "current_run": null,
-    "status": "awaiting_warm_D_smoke_before_new_cold_runs"
+    "current_run": "full-20261011-064034",
+    "status": "nominal_head_capture_running",
+    "predeclared_cases_unchanged": [
+      "nominal",
+      "scene-xy",
+      "device-j1"
+    ]
   },
   "historical_cold_attempts": {
     "full-20261011-031842": {
@@ -1734,6 +1834,58 @@
           }
         }
       }
+    },
+    "full-20261011-040630": {
+      "run": "full-20261011-040630",
+      "status": "D_planning_failed_IK_4_candidates",
+      "product_commit": "44f68beb545e6fa8d52b6d6cdf0d072afee3a32a",
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": false,
+      "full_pipeline_qualified": false,
+      "released": true,
+      "launch_evidence": ".evidence/s2/full-20261011-040630-launch-receipt.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-040630-contract.json",
+      "C_results": ".evidence/s2/full-20261011-040630-C-results.json",
+      "artifact_audit": ".evidence/s2/full-20261011-040630-failed-audit.json",
+      "accepted_D_executions": 0,
+      "teardown": ".evidence/s2/full-20261011-040630-teardown.json"
+    },
+    "full-20261011-060418": {
+      "run": "full-20261011-060418",
+      "case": "nominal",
+      "status": "interrupted_after_wrist_preview_publication_failure_no_original_driver_completed",
+      "product_commit": "c06ae64",
+      "package_git_head": "338cd64",
+      "fresh_C_completed": false,
+      "group_installed": false,
+      "D_motion_started": false,
+      "full_pipeline_qualified": false,
+      "released": true,
+      "launch_evidence": ".evidence/s2/full-20261011-060418-launch-receipt.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-060418-contract.json",
+      "head_frames": 34,
+      "expected_head_frames": 34,
+      "head_fit_completed": true,
+      "wrist_motion_started": false,
+      "original_driver_completed": false,
+      "driver_terminated": true,
+      "driver_identity": {
+        "pid": 127196,
+        "start_ticks": "31757582"
+      },
+      "observed_workflow_stage": "wrist.review",
+      "original_error_erased_by_refresh": true,
+      "driver_log": ".evidence/s2/full-20261011-060418-driver.log",
+      "state_evidence": ".evidence/s2/wrist-review-060418-state.json",
+      "explicit_preview_only_diagnostic": ".evidence/s2/wrist-review-060418-explicit-reprepare.log",
+      "explicit_preview_only_error": "workbench trajectory owner required; connect updated owner",
+      "diagnostic_did_not_resume_original_run_as_qualified": true,
+      "teardown": ".evidence/s2/full-20261011-060418-teardown.json",
+      "resource_verified_at": "2026-10-11T06:34:57+08:00",
+      "released_at": "2026-10-11T06:35:08+08:00",
+      "owned_processes_exited": 9,
+      "both_gpu_process_lists_empty": true
     }
   },
   "preview_compilation_budget_fix": {
@@ -1782,5 +1934,46 @@
     "original_failure_preserved": true,
     "commit": "612408a",
     "full_receipt": ".evidence/s2/tick-contact-full-cpu-20261011-v2/receipt.json"
-  }
+  },
+  "wrist_preview_publication_failure": {
+    "run": "full-20261011-060418",
+    "status": "fix_committed_CPU_L1_passed_pending_new_cold_qualification",
+    "field_observation": {
+      "preview_publication_failed": true,
+      "error_lost_after_refresh": true,
+      "original_driver_completed": false,
+      "explicit_preview_only_error": "workbench trajectory owner required; connect updated owner",
+      "wrist_motion_started": false,
+      "D_motion_started": false
+    },
+    "CPU_reproductions": {
+      "publication_refresh": ".evidence/s2/wrist-review-060418-publication-probe.json",
+      "capability_window": ".evidence/s2/wrist-review-060418-capability-window.json",
+      "capability_window_scope": "deterministic ManagedOwner non-atomic capability-cache window reproduces the same error with healthy recent feedback",
+      "field_call_entered_reproduced_window_proven": false
+    },
+    "candidate_modules": [
+      "robot_workbench/runtime.py",
+      "robot_workbench/workflows.py"
+    ],
+    "new_product_frozen": true,
+    "CPU_qualified": true,
+    "hardware_qualified": false,
+    "commit": "96e7f711fee3a9f9acfdf776482ab5a545463f34",
+    "CPU_evidence": ".evidence/s2/capability-review-full-cpu-20261011-v1/receipt.json",
+    "L1_passed": 27,
+    "L1_total": 27
+  },
+  "latest_resource_release": {
+    "run": "full-20261011-060418",
+    "record": "unified-full-20261011-060418",
+    "teardown": ".evidence/s2/full-20261011-060418-teardown.json",
+    "verified_at": "2026-10-11T06:34:57+08:00",
+    "released_at": "2026-10-11T06:35:08+08:00",
+    "all_owned_exited": true,
+    "owned_process_count": 9,
+    "both_gpu_process_lists_empty": true,
+    "dynamic_authority": "/Users/wujie/Developer/work/anyverse/_context/projects/gpu-usage.md"
+  },
+  "preparing_gpu_run": null
 }
