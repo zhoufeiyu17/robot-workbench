@@ -1,20 +1,20 @@
 {
   "status": "current-cpu-l1-passed-full-l2-incomplete",
-  "updated_at": "2026-10-10T17:35:04.342327+08:00",
+  "updated_at": "2026-10-10T18:30:14.615319+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "7d1a5dd",
-  "qualification_scope": "Latest warm-153813 completed Owner motion but raw/native task/L3 failed. Approved position-boundary, L3 and fake lease fixes pass CPU/L1; new DSW run still required. Cold suite 0/3; no hardware qualification.",
+  "candidate_commit_before_summary": "900673e",
+  "qualification_scope": "Current CPU and L1 passed. Warm173414 qualified first-frame coverage but raw event starvation and native contact failure prevent full acceptance. Diagnostic run stopped and all owned GPU processes released. Cold suite remains 0/3; hardware unqualified.",
   "cpu": {
     "calibration_tests": 479,
     "calibration_skipped": 4,
     "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
     "runtime_tests": 16,
-    "http_tests": 15,
-    "workflow_adapter_tests": 14,
+    "http_tests": 21,
+    "workflow_adapter_tests": 24,
     "target_preview_tests": 11,
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "c0da41a2dbb7685e862f91a463c1bbf415d0ae87d1e4726065e0cd669e009aa7",
+    "full_check_log_sha256": "324a7fd9849ef0a6bc6b4cf09e289a0a94a7fe9e95e7d771d1fa071a073cc706",
     "preview_http_tests": 10,
     "preview_lifecycle_tests": 3,
     "collection_setup_role_variants": [
@@ -22,7 +22,7 @@
       5
     ],
     "collection_preparation_http_tests": 4,
-    "full_check_log": ".evidence/s2/position-and-recording-final-cpu.log",
+    "full_check_log": ".evidence/s2/post-warm173414-final-cpu.log",
     "full_check_commit": "99e99b8",
     "detector_release_preflight_tests": 4,
     "real_release_fixture_explicitly_enabled": true,
@@ -39,7 +39,8 @@
     "position_boundaries_tests": 5,
     "recording_preparation_tests": 9,
     "recording_clock_tests": 14,
-    "final_renewal_scope": "targeted real-recorder/producer checks plus final unchanged-source L1; full check preceded renewal increment"
+    "final_renewal_scope": "Included with all current product fixes in final whole check and unchanged-source L1",
+    "recording_io_tests": 5
   },
   "l1": {
     "status": "passed",
@@ -47,13 +48,13 @@
     "matrix_passed": 27,
     "matrix_total": 27,
     "source_unchanged": true,
-    "receipt_sha256": "359729facc1ed532bc7bd3b0ad7d79fd5700627eb844995d3d5efc39fd2212ed",
+    "receipt_sha256": "e1c4a2205a05a667dd39e794a1c5e85c63b36658028876c32818c03e130d63fd",
     "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 1.2332499027252197,
-    "stop_request_to_software_barrier_max_ms": 1.2515410780906677,
+    "stop_request_to_software_barrier_p95_ms": 2.2887499071657658,
+    "stop_request_to_software_barrier_max_ms": 3.095125313848257,
     "physical_stop_qualified": false,
-    "tested_functional_commit": "7d1a5dd",
-    "receipt": ".evidence/s2/l1-deferred-renewal-final/l1-fault-matrix.json"
+    "tested_functional_commit": "900673e",
+    "receipt": ".evidence/s2/l1-io-and-state-final/l1-fault-matrix.json"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -513,25 +514,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": {
-    "run": "warm-20261010-173414",
-    "source_commit": "7d1a5dd",
-    "phase": "preparing fresh D environment",
-    "qualified": false,
-    "hardware": false
-  },
-  "last_gpu_run": {
-    "run": "full-20261010-123915",
-    "status": "terminated_and_released",
-    "full_pipeline_qualified": false,
-    "head_captures": 34,
-    "wrist_captures": 29,
-    "group_installed": true,
-    "manifest_sha256": "2c7420bda31c720de80188db13ef331b8e82badba026b4563e8a091c54af8a61",
-    "failure": "cup-relative reference does not match current cup/A1-cal geometry",
-    "verification": ".evidence/s2/full-123915-artifact-verification.json",
-    "teardown": ".evidence/s2/full-20261010-123915-teardown.json"
-  },
+  "current_gpu_run": null,
+  "last_gpu_run": "warm-20261010-173414",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -866,7 +850,21 @@
     },
     "preserved_receipt": ".evidence/s2/warm-20261010-145124-browser-evidence-qualified-preserved.json"
   },
-  "pending_behavior_decisions": {},
+  "pending_behavior_decisions": {
+    "grasp_height_reserve": {
+      "status": "awaiting user decision",
+      "proposed_reserve_m": 0.002,
+      "scope": "new planning parameter and regenerated closing evidence; not native acceptance relaxation",
+      "constraints_unchanged": {
+        "accepted_contact_band_m": [
+          0.035,
+          0.1
+        ],
+        "numeric_height_tolerance_m": 0.0001,
+        "grasp_depth_m": 0.016
+      }
+    }
+  },
   "approved_behavior_contracts": {
     "source": "user approvals in current session; _context design 06",
     "fake_lease_preparation": "<=1 wall second after confirmation, then original .3 source-second stationary gate; never recording.ready",
@@ -881,5 +879,37 @@
       "7d1a5dd"
     ],
     "gpu_revalidated": false
+  },
+  "warm_173414": {
+    "commit": "7d1a5dd",
+    "first_frame_coverage_passed": true,
+    "first_frame_vs_command_source_s": [
+      -0.41,
+      -0.376666667,
+      -0.343333334
+    ],
+    "lease_prepare_wall_s": 0.324622182,
+    "raw_complete": false,
+    "native_task_qualified": false,
+    "diagnostic_stop": true,
+    "gpu_released": true,
+    "failures": [
+      "20ms event scheduling quota starves command/feedback writes on CPFS",
+      "StepEvent.status typo masks native event; exact-source reconstruction finds pad contact .816mm below valid band"
+    ],
+    "subsequent_fixes": [
+      "a8665bc",
+      "403ee29",
+      "900673e"
+    ],
+    "evidence": [
+      ".evidence/s2/warm-173414-first-frame-check.json",
+      ".evidence/s2/warm-173414-recording-failure.json",
+      ".evidence/s2/warm-173414-recording-io-probe.json",
+      ".evidence/s2/warm-173414-native-failure.json",
+      ".evidence/s2/warm-173414-grasp-geometry-comparison.json",
+      ".evidence/s2/warm-173414-artifact-verification.json",
+      ".evidence/s2/warm-173414-teardown.json"
+    ]
   }
 }
