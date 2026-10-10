@@ -55,6 +55,8 @@ class CameraProducer:
         self.drop_history_before_ns = 0
         self.dropped_batches = 0
         self.error = None
+        self.last_drop = self.last_publish = None
+        self.maximum_queue_wait_s = self.maximum_publish_s = 0.
         self.last_step = None
         self.frame_sequence = 0
         self.clock_id = None
@@ -101,18 +103,23 @@ class CameraProducer:
                       images={name: {key: values[key].copy() for key in ('rgb','depth')}
                               for name, values in images.items()})
         self.frame_sequence += 1
+        packet['queued_monotonic_s'] = time.monotonic()
         try:
             self.queue.put_nowait(packet)
             return True
         except queue.Full:
-            self._record_drop(sampled_wall_ns)
+            self._record_drop(packet, 'camera source queue overflow')
             return False
 
-    def _record_drop(self, wall_ns):
+    def _record_drop(self, packet, reason):
         with self.lock:
-            if len(self.drops) == self.drops.maxlen:self.drop_history_before_ns = max(self.drop_history_before_ns,self.drops[0])
-            self.drops.append(wall_ns)
+            if len(self.drops) == self.drops.maxlen:self.drop_history_before_ns = max(self.drop_history_before_ns,self.drops[0]['sample_wall_ns'])
             self.dropped_batches += 1
+            self.last_drop = dict(reason=reason, sample_wall_ns=packet['wall_ns'], detected_wall_ns=time.time_ns(),
+                frame_sequence=packet['frame_sequence'], queue_size=self.queue.qsize(), queue_capacity=self.queue.maxsize,
+                **{key:packet['feedback'][key] for key in ('source_clock_id','source_time_ns','physics_step')},
+                last_publish=deepcopy(self.last_publish))
+            self.drops.append(self.last_drop)
 
     def _lease_drop_error(self, spool):
         request = spool.root/'recording-request.json'
@@ -123,20 +130,30 @@ class CameraProducer:
         if type(start) is not int or type(end) is not int:return 'invalid recording lease'
         with self.lock:
             # ponytail: bounded drop history; older leases are unverifiable rather than silently complete.
-            dropped = start <= self.drop_history_before_ns or any(start <= stamp < end for stamp in self.drops)
-        return 'camera source queue overflow during recording lease' if dropped else None
+            if start <= self.drop_history_before_ns:return 'camera source drop history unavailable for recording lease'
+            dropped = next((row for row in self.drops if start <= row['sample_wall_ns'] < end),None)
+        return dropped['reason']+' during recording lease' if dropped else None
 
     def _encode_loop(self):
         while not self.closed.is_set() or not self.queue.empty():
             try:packet = self.queue.get(timeout=.1)
             except queue.Empty:continue
-            try:self._publish(packet)
+            started=time.monotonic();queue_wait=started-packet['queued_monotonic_s']
+            cameras=None
+            try:cameras=self._publish(packet)
             except Exception as error:
-                self._record_drop(packet['wall_ns'])
+                self._record_drop(packet, f'{type(error).__name__}: {error}')
                 with self.lock:self.error = f'{type(error).__name__}: {error}'
                 for frame in self.frames.values():
                     frame.publish(status=dict(ready=False, data_valid=False, error=self.error))
-            finally:self.queue.task_done()
+            finally:
+                elapsed=time.monotonic()-started
+                with self.lock:
+                    self.last_publish=dict(physics_step=packet['feedback']['physics_step'],queue_wait_s=queue_wait,
+                        publish_wall_s=elapsed,cameras=cameras)
+                    self.maximum_queue_wait_s=max(self.maximum_queue_wait_s,queue_wait)
+                    self.maximum_publish_s=max(self.maximum_publish_s,elapsed)
+                self.queue.task_done()
 
     def _publish(self, packet):
         # Each camera keeps its own ordered spool; three encoders share only the
@@ -144,12 +161,13 @@ class CameraProducer:
         futures = [self.encoders.submit(self._publish_camera, packet, role, name)
                    for role, name in CAMERAS.items()]
         wait(futures)
-        for future in futures:future.result()
+        return {name:future.result() for name,future in zip(CAMERAS.values(),futures)}
 
     def _publish_camera(self, packet, role, name):
         import numpy as np
         from PIL import Image
         from real_rgbd import pair_metadata
+        started=time.monotonic()
         feedback, actor = packet['feedback'], packet['actor']
         source_fields = {key: feedback[key] for key in
             ('clock_domain','source_clock_id','source_time_ns','physics_step')}
@@ -164,6 +182,7 @@ class CameraProducer:
         Image.fromarray(rgb).save(png, format='PNG', compress_level=1)
         Image.fromarray(quantized).save(zpng, format='PNG', compress_level=1)
         Image.fromarray(rgb).save(jpeg, format='JPEG', quality=95, subsampling=0)
+        encoded=time.monotonic()
         number = packet['frame_sequence']
         ms = feedback['source_time_ns']/1e6
         status = pair_metadata(serial=k['serial'], camera_name=role, color_number=number,
@@ -182,24 +201,32 @@ class CameraProducer:
             note='zero-distortion simulated raw pinhole; separate Owner history pairing is required',
             data_valid=True, camera_sample_hz=30)
         spool = self.spools[name]
+        lease_started=time.monotonic()
         error = self._lease_drop_error(spool)
+        spool_started=time.monotonic()
         if error:status.update(data_valid=False, recording_error=error)
+        with self.lock:status['dropped_preview_batches'] = self.dropped_batches
         try:
             spool.write(status, png.getvalue(), zpng.getvalue())
         except Exception as exc:
-            error = str(exc)
+            error = error or str(exc)
+        error = error or status.get('recording_error')
+        spool_finished=time.monotonic()
         if error:
             spool.error = error
             status.update(data_valid=False, recording_enabled=False, recording_error=error)
-        with self.lock:status['dropped_preview_batches'] = self.dropped_batches
         self.frames[name].publish(status=status, jpeg=jpeg.getvalue(),
                                  color_png=png.getvalue(), depth_png=zpng.getvalue())
+        return dict(encode_wall_s=encoded-started,lease_check_wall_s=spool_started-lease_started,
+                    spool_write_wall_s=spool_finished-spool_started,total_wall_s=time.monotonic()-started)
 
     def snapshot(self):
         with self.lock:
             return dict(source_clock_id=self.clock_id, last_submitted_physics_step=self.last_step,
                         dropped_batches=self.dropped_batches, error=self.error,
-                        queue_size=self.queue.qsize(), worker_alive=self.worker.is_alive())
+                        queue_size=self.queue.qsize(), queue_capacity=self.queue.maxsize,worker_alive=self.worker.is_alive(),
+                        last_drop=deepcopy(self.last_drop),last_publish=deepcopy(self.last_publish),
+                        maximum_queue_wait_s=self.maximum_queue_wait_s,maximum_publish_s=self.maximum_publish_s)
 
     def close(self):
         self.closed.set()

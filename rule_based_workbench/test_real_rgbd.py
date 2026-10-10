@@ -18,6 +18,26 @@ from rule_based_workbench.real_rgbd import RawSpool, FrameProgress, Frames, main
 
 
 class RGBDTest(unittest.TestCase):
+    def test_first_invalid_spooled_frame_preserves_producer_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);now=1_000_000_000
+            spool=RawSpool(root,clock_ns=lambda:now,min_free_bytes=0)
+            (root/'recording-request.json').write_text(json.dumps(dict(run_id='a'*32,start_wall_ns=now,
+                deadline_wall_ns=now+1_000_000_000)))
+            status={'data_valid':False,'recording_error':'camera source queue overflow during recording lease'}
+            spool.write(status,b'color',b'depth')
+            path=next(root.rglob('*.zip'))
+            with zipfile.ZipFile(path) as archive:
+                raw=json.loads(archive.read('metadata.json'))
+            self.assertFalse(raw['data_valid'])
+            self.assertEqual(raw['recording_error'],'camera source queue overflow during recording lease')
+            self.assertEqual(status['recording_error'],raw['recording_error'])
+            with patch('rule_based_workbench.real_rgbd.shutil.disk_usage',return_value=SimpleNamespace(free=0)):
+                spool.write(status,b'color',b'depth')
+            self.assertFalse(status['recording_enabled'])
+            self.assertEqual(status['recording_error'],raw['recording_error'])
+            self.assertIn('disk reserve',spool.error,'a later storage failure must not erase the first producer error')
+
     def test_raw_lease_idle_expiry_and_disk_reserve(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

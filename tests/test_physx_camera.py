@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 from urllib.request import build_opener,ProxyHandler
 import zipfile
 import numpy as np
@@ -47,11 +49,11 @@ class PhysxCameraTest(unittest.TestCase):
         self.backend.advance((self.backend.physics_step+1)/240)
         return producer.collect(self.plant,self.backend,actor or self.actor)
 
-    def wait(self,producer):
+    def wait(self,producer,expected_error=None):
         deadline=time.monotonic()+3
         while producer.queue.unfinished_tasks and time.monotonic()<deadline:time.sleep(.005)
         self.assertEqual(producer.queue.unfinished_tasks,0)
-        self.assertIsNone(producer.error)
+        self.assertEqual(producer.error,expected_error)
 
     def lease(self,producer):
         now=time.time_ns();request=dict(run_id='a'*32,start_wall_ns=now-1_000_000,
@@ -87,23 +89,37 @@ class PhysxCameraTest(unittest.TestCase):
         self.assertFalse(producer.collect(self.plant,self.backend,self.actor))
         self.lease(producer);self.collect(producer);self.wait(producer)
         self.assertEqual(len(list(self.root.rglob('*.zip'))),3)
+        timings=producer.snapshot()['last_publish']
+        self.assertEqual(set(timings['cameras']),set(CAMERAS.values()))
+        self.assertGreaterEqual(timings['queue_wait_s'],0)
+        for row in timings['cameras'].values():
+            self.assertGreaterEqual(row['total_wall_s'],row['encode_wall_s']+row['spool_write_wall_s'])
 
     def test_overflow_invalidates_recording_but_does_not_change_plant(self):
         producer=self.producer(queue_capacity=1)
         entered,release=threading.Event(),threading.Event()
         publish=producer._publish
         def blocked(packet):
-            entered.set();release.wait(3);publish(packet)
+            entered.set();release.wait(3);return publish(packet)
         producer._publish=blocked
         self.addCleanup(release.set)
         self.lease(producer)
         self.collect(producer);self.assertTrue(entered.wait(1))
         self.assertTrue(self.collect(producer))
+        started=time.monotonic()
         self.assertFalse(self.collect(producer))
+        self.assertLess(time.monotonic()-started,.2,'full camera queue must not wait for encoding or storage')
         self.assertEqual(self.backend.physics_step,3)
         self.assertEqual(self.backend.sequence,0)
         release.set();self.wait(producer)
         self.assertEqual(producer.snapshot()['dropped_batches'],1)
+        drop=producer.snapshot()['last_drop']
+        self.assertEqual(drop['reason'],'camera source queue overflow')
+        self.assertEqual(drop['physics_step'],3)
+        self.assertEqual(drop['source_clock_id'],self.backend.source_clock_id)
+        self.assertEqual(drop['queue_capacity'],1)
+        self.assertEqual(drop['queue_size'],1)
+        self.assertGreaterEqual(drop['detected_wall_ns'],drop['sample_wall_ns'])
         for name,frame in producer.frames.items():
             status=frame.snapshot()['status']
             self.assertTrue(status['ready'])
@@ -111,7 +127,52 @@ class PhysxCameraTest(unittest.TestCase):
             self.assertIn('overflow',status['recording_error'])
         for path in self.root.rglob('*.zip'):
             with zipfile.ZipFile(io.BytesIO(path.read_bytes())) as archive:
-                self.assertFalse(json.loads(archive.read('metadata.json'))['data_valid'])
+                meta=json.loads(archive.read('metadata.json'))
+                self.assertFalse(meta['data_valid'])
+                self.assertEqual(meta['dropped_preview_batches'],1)
+                self.assertIn('camera source queue overflow',meta['recording_error'])
+                with self.assertRaisesRegex(ValueError,'camera source queue overflow'):
+                    bundle(path.read_bytes(),meta['serial'],environment='fake')
+
+    def test_encoder_failure_keeps_its_reason_without_poisoning_a_later_lease(self):
+        producer=self.producer();self.lease(producer)
+        publish=producer._publish
+        def fail_once(packet):
+            producer._publish=publish
+            raise ValueError('encoder fixture failure')
+        producer._publish=fail_once
+        self.collect(producer);self.wait(producer,'ValueError: encoder fixture failure')
+        self.collect(producer);self.wait(producer,'ValueError: encoder fixture failure')
+        for path in self.root.rglob('*.zip'):
+            with zipfile.ZipFile(path) as archive:
+                status=json.loads(archive.read('metadata.json'))
+            self.assertFalse(status['data_valid'])
+            self.assertIn('encoder fixture failure',status['recording_error'])
+            self.assertNotIn('overflow',status['recording_error'])
+        now=time.time_ns()
+        for path in producer.directories.values():
+            (Path(path)/'recording-request.json').write_text(json.dumps(dict(run_id='b'*32,
+                start_wall_ns=now,deadline_wall_ns=now+30_000_000_000)))
+        self.collect(producer);self.wait(producer,'ValueError: encoder fixture failure')
+        for frame in producer.frames.values():
+            status=frame.snapshot()['status']
+            self.assertTrue(status['data_valid']);self.assertTrue(status['recording_enabled'])
+            self.assertIsNone(status['recording_error'])
+
+    def test_reported_spool_failure_invalidates_data_and_secondary_io_keeps_first_error(self):
+        producer=self.producer();self.lease(producer)
+        with patch('real_rgbd.shutil.disk_usage',return_value=SimpleNamespace(free=0)):
+            self.collect(producer);self.wait(producer)
+        for frame in producer.frames.values():
+            status=frame.snapshot()['status']
+            self.assertFalse(status['data_valid']);self.assertFalse(status['recording_enabled'])
+            self.assertIn('disk reserve',status['recording_error'])
+        def fail(*args):raise OSError('secondary IO failure')
+        for spool in producer.spools.values():spool.write=fail
+        producer._lease_drop_error=lambda spool:'original camera queue overflow'
+        self.collect(producer);self.wait(producer)
+        for frame in producer.frames.values():
+            self.assertEqual(frame.snapshot()['status']['recording_error'],'original camera queue overflow')
 
     def test_unconnected_actor_is_explicit_and_other_threads_cannot_sample(self):
         producer=self.producer()

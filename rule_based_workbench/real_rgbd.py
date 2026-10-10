@@ -93,7 +93,7 @@ class RawSpool:
         if not lease:
             self.active = None
         status.update(recording_enabled=bool(lease) and not self.error,
-                      recorded_frames=self.count, recording_error=self.error,
+                      recorded_frames=self.count, recording_error=status.get('recording_error') or self.error,
                       recording_run_id=self.active,
                       recording_duration_s=(lease['deadline_wall_ns']-lease['start_wall_ns'])/1e9 if lease else 0,
                       recording_deadline_wall_ns=lease['deadline_wall_ns'] if lease else None)
@@ -101,7 +101,7 @@ class RawSpool:
             blob = snapshot_bundle(status, color, depth)
             if shutil.disk_usage(self.root).free < self.min_free_bytes+len(blob) or self.size+len(blob)>4*1024**3:
                 self.error = 'raw recording disk reserve or 4 GiB session limit reached'
-                status.update(recording_enabled=False, recording_error=self.error)
+                status.update(recording_enabled=False, recording_error=status.get('recording_error') or self.error)
                 return
             self.count += 1
             destination = self.root/self.active/f'{self.count:09d}.zip'
