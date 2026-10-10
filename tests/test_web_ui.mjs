@@ -4,7 +4,7 @@ import {webcrypto} from 'node:crypto';
 
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
-const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createWorkbench,actionPermission,countedProgress,collectionExecutionView,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -54,6 +54,80 @@ const review=snapshot({device:{environment:'physical'},workflow:{primary_action:
 assert.match(actionPermission(review,'execute').reason,/净空/);
 assert.equal(actionPermission(review,'execute',{clearance:true}).allowed,true);
 assert.equal(actionPermission(snapshot(),'stop',{pending:true,fresh:false}).allowed,true);
+
+function collectionSnapshot(){
+  const value=snapshot(),binding={execution_instance_id:'current-instance',runtime_nonce:'owner',source_clock_id:'clock',
+    execution_timeline_digest:'initialized-plan',timeline_digest:'frozen-plan',device_id:value.device.id,environment:'fake'};
+  Object.assign(value.workflow,{status:'running',busy:true,stage_id:'collection.execute',execution_binding:binding,
+    outcomes:{motion:'未执行',data:'未录制',task:'未验证',simulation:'未验证'}});
+  Object.assign(value.runtime,{holder:'collection',environment:'fake',device_id:value.device.id,runtime_nonce:'owner',command_epoch:4,
+    motion_status:'RUNNING',execution_instance_id:'current-instance',calibration_feedback:{source_clock_id:'clock'},
+    execution_calibration:{business:'collection',execution_instance_id:'current-instance',command_epoch:4},
+    native_task:{execution_instance_id:'current-instance',runtime_nonce:'owner',source_clock_id:'clock',execution_timeline_digest:'initialized-plan',task_outcome:'running',first_failure:null},
+    frozen:{status:'running',timeline_digest:'frozen-plan',execution_timeline_digest:'initialized-plan',send_count:4233,submitted_command_ticks:1270,execution_tick_count:3671},
+    execution_timeline:{timeline_digest:'initialized-plan',parent_timeline_digest:'frozen-plan',command_count:3671},
+    recording:{ready:true,done:false,error:null,seal_error:null,diagnostics_error:null}});
+  return value;
+}
+{
+  const context={business:'collection',environment:'fake'},value=collectionSnapshot(),original=structuredClone(value);
+  const live=collectionExecutionView(value,context);
+  assert.deepEqual(live.progress,{current:1270,total:3671,scope:'motion'},'repeated 100 Hz sink calls cannot inflate frozen command progress');
+  assert.equal(live.outcomes.motion.status,'running');assert.equal(live.outcomes.data.status,'recording');
+  assert.equal(live.outcomes.task.status,'running');assert.deepEqual(value,original,'rendering must not rewrite server evidence');
+  for(const change of [
+    s=>delete s.workflow.execution_binding,s=>s.workflow.execution_binding.execution_instance_id='old-instance',
+    s=>s.runtime.execution_instance_id='new-instance',s=>s.runtime.execution_calibration.execution_instance_id='old-instance',
+    s=>s.runtime.native_task.execution_instance_id='old-instance',s=>s.runtime.native_task.runtime_nonce='old-owner',
+    s=>s.workflow.execution_binding.runtime_nonce='old-owner',s=>s.runtime.native_task.source_clock_id='old-clock',
+    s=>s.runtime.calibration_feedback.source_clock_id='old-clock',s=>s.runtime.frozen.timeline_digest='old-plan',
+    s=>s.runtime.execution_timeline.parent_timeline_digest='old-plan',s=>s.runtime.frozen.execution_timeline_digest='old-execution',
+    s=>s.runtime.native_task.execution_timeline_digest='old-execution',s=>s.runtime.execution_timeline.timeline_digest='old-execution',
+    s=>s.runtime.environment='physical',s=>s.runtime.device_id='other-device',s=>s.runtime.holder='calibration',
+    s=>s.runtime.execution_calibration.business='calibration',s=>s.runtime.command_epoch=5,
+    s=>s.workflow.stage_id='collection.plan',s=>s.workflow.status='failed',s=>s.workflow.busy=false]){
+    const other=structuredClone(original);change(other);assert.equal(collectionExecutionView(other,context),null,'missing or mismatched identities and terminal workflows must not be overlaid');
+  }
+  assert.equal(collectionExecutionView(value,{...context,business:'calibration'}),null);
+  assert.equal(collectionExecutionView(value,{...context,environment:'physical'}),null);
+  for(const invalid of [{submitted_command_ticks:undefined},{submitted_command_ticks:3672},{submitted_command_ticks:-1},
+    {submitted_command_ticks:1.5},{submitted_command_ticks:true},{execution_tick_count:undefined},{execution_tick_count:3670}]){
+    value.runtime.frozen={...original.runtime.frozen,...invalid};assert.equal(collectionExecutionView(value,context).progress,null);
+  }
+  value.runtime.frozen={...original.runtime.frozen,submitted_command_ticks:3671};
+  let complete=collectionExecutionView(value,context);assert.equal(complete.progress.current,complete.progress.total);
+  assert.equal(complete.outcomes.motion.status,'running');assert.equal(complete.outcomes.data.status,'recording');
+  assert.equal(complete.outcomes.task.status,'running');assert.equal(complete.outcomes.simulation,'未验证');
+  value.runtime.frozen.status='completed';value.runtime.recording.done=true;value.runtime.native_task.task_outcome='success';
+  complete=collectionExecutionView(value,context);assert.equal(complete.outcomes.motion.status,'completed');
+  assert.equal(complete.outcomes.data.status,'pending');assert.equal(complete.outcomes.task.status,'pending','native success still needs business receipt validation');
+  for(const field of ['error','seal_error','diagnostics_error']){
+    const bad=structuredClone(original);bad.runtime.recording[field]='disk full';
+    assert.match(collectionExecutionView(bad,context).outcomes.data.message,/disk full/);
+  }
+  const bad=structuredClone(original);bad.runtime.recording_error='queue overflow';bad.runtime.native_task.first_failure={reason:'contact height'};
+  let failed=collectionExecutionView(bad,context);assert.equal(failed.outcomes.data.status,'invalid');assert.equal(failed.outcomes.task.status,'failed');
+  assert.match(failed.outcomes.task.message,/contact height/);assert.equal(failed.outcomes.motion.status,'running');
+  bad.runtime.native_task.first_failure=null;bad.runtime.native_task.task_outcome='unverifiable';bad.runtime.native_task.message='receipt write failed';
+  assert.match(collectionExecutionView(bad,context).outcomes.task.message,/receipt write failed/);
+  bad.runtime.recording_error=null;bad.runtime.recording.manifest={validation:{status:'failed',reason:'missing frames'}};
+  assert.match(collectionExecutionView(bad,context).outcomes.data.message,/missing frames/);
+  bad.runtime.frozen.status='failed';bad.runtime.frozen.reason='control fault';assert.equal(collectionExecutionView(bad,context).outcomes.motion.status,'failed');
+  bad.workflow.outcomes={motion:{status:'stopped',message:'operator stop'},data:{status:'invalid',message:'validated raw failure'},task:'failed',simulation:'failed'};
+  assert.deepEqual(collectionExecutionView(bad,context).outcomes,bad.workflow.outcomes,'runtime must preserve explicit outcome receipts');
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=collectionSnapshot();h.reply(1,value);await settle();
+  assert.equal(h.get('outcome-motion').textContent,'进行中');assert.equal(h.get('outcome-data').textContent,'录制中');
+  assert.equal(h.get('task-progress').value,1270);assert.equal(h.get('task-progress').max,3671);
+  assert.match(h.get('progress-label').textContent,/1270 \/ 3671.*34.6%.*仅运动指令进度/);assert.equal(h.get('overall-panel').hidden,true);
+  value.revision++;value.runtime.recording.error='raw queue overflow';h.app.poll();h.reply(2,value);await settle();
+  assert.match(h.get('outcome-data').textContent,/无效.*raw queue overflow/);assert.match(h.get('alert').textContent,/录制失败，动作仍在执行/);
+  value.revision++;value.workflow.status='failed';value.workflow.busy=false;value.workflow.outcomes={motion:'completed',data:'invalid',task:'failed'};
+  h.app.poll();h.reply(3,value);await settle();assert.equal(h.get('task-status').textContent,'失败');
+  assert.equal(h.get('outcome-task').textContent,'失败');assert.equal(h.get('outcome-motion').textContent,'已完成');h.app.destroy();
+}
 
 for(const [status,message,label] of [['running','本轮准备仍在运行','进行中'],['failed','实际任务失败：场景检测错误','失败']]){
   const h=harness();h.app.start();const value=snapshot();

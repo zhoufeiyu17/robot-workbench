@@ -390,8 +390,8 @@ def main():
         owner_fields.clear();recording_fields.clear();actions.clear()
         owner_fields.update(feedback_healthy=True,execution_timeline={'command_count':20},
                             native_task={'task_outcome':'success','task_qualified':True,'receipt_path':'unverified-owner-pointer'})
-        owner_sequence.extend([dict(frozen={'status':'running','send_count':i},automatic_enabled=True) for i in range(16)])
-        owner_sequence.append(dict(frozen={'status':'completed','send_count':20},automatic_enabled=False))
+        owner_sequence.extend([dict(frozen={'status':'running','send_count':4*i,'submitted_command_ticks':i,'execution_tick_count':20},automatic_enabled=True) for i in range(16)])
+        owner_sequence.append(dict(frozen={'status':'completed','send_count':80,'submitted_command_ticks':20,'execution_tick_count':20},automatic_enabled=False))
         raw_verify.return_value=(dict(controller_outcome='completed',validation={'status':'passed'},
             camera_frames=dict.fromkeys(('base_0','left_wrist_0','right_wrist_0'),2)),source,plan)
         clock=[0.];events=[]
@@ -408,6 +408,11 @@ def main():
         assert result['native_task']['receipt_verified'] is False
         waits=[row['execution_wait'] for row in events if row.get('execution_wait')]
         assert waits[-1]['budget_s']==600 and waits[-1]['commands_sent']==20 and waits[-1]['percent']==100
+        assert any(row['commands_sent']==10 and row['percent']==50 for row in waits)
+        for frozen in ({'send_count':20},{'submitted_command_ticks':21,'execution_tick_count':20},
+                       {'submitted_command_ticks':True,'execution_tick_count':20},
+                       {'submitted_command_ticks':1,'execution_tick_count':None}):
+            assert pipeline.resident_wait_progress({'frozen':frozen,'execution_timeline':{'command_count':20}},0,600)['percent'] is None
         assert all(row.get('estimate_s') is None for row in events if 'estimate_s' in row)
         assert all(video['label'].startswith('L3 辅助') for video in result['videos'][3:])
         # Expiring resident wins over the job budget; absent lifetime is never an infinite wait.

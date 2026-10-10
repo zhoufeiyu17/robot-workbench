@@ -18,6 +18,40 @@ export function countedProgress(value) {
   return value && Number.isFinite(value.current) && Number.isFinite(value.total) && value.total > 0 && value.current >= 0 && value.current <= value.total ? value : null;
 }
 
+export function collectionExecutionView(state, context) {
+  const w=state?.workflow, r=state?.runtime, b=w?.execution_binding, n=r?.native_task, f=r?.frozen, t=r?.execution_timeline, a=r?.execution_calibration;
+  const same=(value,...others)=>typeof value==='string'&&value.length>0&&others.every(other=>other===value);
+  if(context.business!=='collection'||w?.stage_id!=='collection.execute'||w.status!=='running'||w.busy!==true||!w.id
+      ||!same(b?.environment,context.environment,state?.device?.environment,r?.environment)
+      ||!same(b?.device_id,state?.device?.id,r?.device_id)||r?.holder!=='collection'||a?.business!=='collection'
+      ||!same(b?.execution_instance_id,r?.execution_instance_id,a?.execution_instance_id,n?.execution_instance_id)
+      ||!same(b?.runtime_nonce,r?.runtime_nonce,n?.runtime_nonce)
+      ||!same(b?.source_clock_id,n?.source_clock_id,r?.calibration_feedback?.source_clock_id)
+      ||!same(b?.timeline_digest,f?.timeline_digest,t?.parent_timeline_digest)
+      ||!same(b?.execution_timeline_digest,f?.execution_timeline_digest,t?.timeline_digest,n?.execution_timeline_digest)
+      ||!Number.isInteger(r?.command_epoch)||a?.command_epoch!==r.command_epoch)return null;
+  const outcomes={...w.outcomes},recording=r.recording;
+  const replace=(name,placeholders,value)=>{if(value&&(outcomes[name]==null||placeholders.includes(outcomeStatus(outcomes[name]))))outcomes[name]={...value,message:[outcomes[name]?.message,value.message].filter(Boolean).join('；')};};
+  const motion=['FAULT','STOPPED'].includes(r.motion_status)?{FAULT:'failed',STOPPED:'stopped'}[r.motion_status]
+    :{running:'running',awaiting_final_feedback:'verifying',completed:'completed',failed:'failed',cancelled:'stopped'}[f.status];
+  replace('motion',['未执行','unknown','not_started','running','executing','verifying'],motion?{status:motion,message:f.reason||f.stop_error||r.reason||null}:null);
+  const validation=recording?.manifest?.validation;
+  const errors=[r.recording_error,recording?.error,recording?.seal_error,recording?.diagnostics_error,
+    ['failed','invalid'].includes(validation?.status)?validation:null].filter(Boolean);
+  const data=errors.length?{status:'invalid',message:[...new Set(errors.map(textValue))].join('；')}
+    :recording?.done===true?{status:'pending',message:'录制已结束，等待封存与完整性核验'}
+    :recording?.ready===true?{status:'recording'}:null;
+  replace('data',['未录制','unknown','not_started','pending','recording'],data);
+  const task=n.first_failure?{status:'failed',message:textValue(n.first_failure)}
+    :['success','pending_receipt'].includes(n.task_outcome)?{status:'pending',message:'等待原生任务回执核验'}
+    :n.task_outcome?{status:n.task_outcome,message:n.message}:null;
+  replace('task',['未验证','unverified','unknown','not_started','pending','running'],task);
+  // send_count includes repeated control-loop submissions, not distinct trajectory commands.
+  const progress=Number.isInteger(f.submitted_command_ticks)&&Number.isInteger(f.execution_tick_count)
+    &&f.execution_tick_count===t.command_count?countedProgress({current:f.submitted_command_ticks,total:f.execution_tick_count,scope:'motion'}):null;
+  return {outcomes,progress};
+}
+
 export function actionPermission(state, action, options = {}) {
   const operation = state?.workflow?.primary_action?.id === action && action !== 'stop'
     ? state.workflow.primary_action : state?.runtime?.allowed_operations?.[action];
@@ -422,10 +456,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',statusText(w.status));
     setText('run-identity','Run：'+textValue(w.id));setText('stage-title',w.title||'等待任务状态');setText('stage-id',w.stage_id||'—');
     setText('task-message',w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理请求：'+textValue(w.request.action)+'。'+(w.message||''):w.message||'尚未取得当前任务回执。');
-    const p=countedProgress(w.progress);el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
+    const live=collectionExecutionView(s,context),p=countedProgress(w.progress)||live?.progress;el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
     if(p){el('task-progress').max=p.total;el('task-progress').value=p.current;}
     else el('task-progress').removeAttribute('value');
-    setText('progress-label',p?(p.kind==='fraction'?`${(100*p.current/p.total).toFixed(1)}% · ${p.unit||'当前阶段'} · 后端工作量`:`${p.current} / ${p.total} ${p.unit||''} · 后端实际计数`):'尚无可计数进度；不估算完成比例');
+    setText('progress-label',p?(p.scope==='motion'?`${p.current} / ${p.total} 条运动命令已提交 · ${(100*p.current/p.total).toFixed(1)}% · 仅运动指令进度；数据、任务与回放分别核验`:p.kind==='fraction'?`${(100*p.current/p.total).toFixed(1)}% · ${p.unit||'当前阶段'} · 后端工作量`:`${p.current} / ${p.total} ${p.unit||''} · 后端实际计数`):'尚无可计数进度；不估算完成比例');
     const overall=countedProgress(w.overall_progress);el('overall-panel').hidden=!overall;
     if(overall){el('overall-progress').max=overall.total;if(overall.indeterminate)el('overall-progress').removeAttribute('value');else el('overall-progress').value=overall.current;setText('overall-label',`${overall.indeterminate?'当前阶段工作量未知':'整体 '+(100*overall.current/overall.total).toFixed(1)+'%'} · ${overall.completed_stages??overall.current} / ${overall.total} 阶段已完成 · 阶段等权，不代表剩余时间`);}
     renderDetails('task-details',w.details);
@@ -434,7 +468,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('review-panel').hidden=!w.review;
     setText('review-summary',w.review?.summary||'尚无执行摘要');setText('review-id','审阅身份：'+textValue(w.review?.id));
     el('clearance-label').hidden=!w.review || !(context.environment==='physical'||w.review.physical_clearance_required);
-    const outcomes=w.outcomes||{};
+    const outcomes=live?.outcomes||w.outcomes||{};
     for(const name of ['motion','data','simulation','task']) {
       const outcome=outcomes[name],value=outcomeStatus(outcome),target=el('outcome-'+name);
       target.textContent=statusText(value)+(outcome?.message?' · '+outcome.message:'');

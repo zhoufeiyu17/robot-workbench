@@ -53,7 +53,7 @@ class WorkflowAdapterTest(unittest.TestCase):
             return dict(status='accepted',action=payload['action'],output=state['output'])
         workflow.playground=SimpleNamespace(snapshot=Mock(side_effect=lambda:deepcopy(state)),start=Mock(side_effect=start),
             directory=self.root,media=Mock(),invalidate_checkpoint=Mock(),lock=threading.Lock(),state=state)
-        workflow.device=SimpleNamespace(environment='fake',snapshot=Mock(return_value={'command_epoch':5}))
+        workflow.device=SimpleNamespace(id='fixture-device',environment='fake',snapshot=Mock(return_value={'command_epoch':5}))
         workflow.service=SimpleNamespace(add_review=Mock(),lock=threading.Lock(),reviews={('fake','collection'):{'id':'old'}})
         return workflow,state
 
@@ -480,6 +480,20 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.action('generate_plan',{'replan':True})
         workflow.playground.start.assert_called_once_with({'action':'plan'})
         self.assertNotIn(('fake','collection'),workflow.service.reviews)
+
+    def test_collection_binding_requires_this_run_instance_and_clears_on_acceptance(self):
+        workflow,state=self.collection()
+        state.update(action='execute',busy=True,progress={'execution_instance_id':'current-instance'},
+            native_task=dict(execution_instance_id='current-instance',runtime_nonce='owner',source_clock_id='clock',
+                             execution_timeline_digest='initialized-plan'))
+        workflow.refresh();binding=workflow.snapshot()['execution_binding']
+        self.assertEqual(binding,dict(execution_instance_id='current-instance',device_id='fixture-device',environment='fake',
+            runtime_nonce='owner',source_clock_id='clock',execution_timeline_digest='initialized-plan',timeline_digest='frozen'))
+        workflow.accepted({'output':'next-run'},'execute')
+        self.assertIsNone(workflow.snapshot()['execution_binding'])
+        for progress in ({},{'execution_instance_id':'next-instance'}):
+            state['progress']=progress;workflow.refresh()
+            self.assertIsNone(workflow.snapshot()['execution_binding'],'old native status cannot bind another job, even for the same plan')
 
     def test_collection_media_is_current_and_cancel_uses_real_interrupt(self):
         workflow,state=self.collection();path=self.root/'recording.mp4';path.write_bytes(b'CPU video route fixture')

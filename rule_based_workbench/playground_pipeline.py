@@ -401,11 +401,12 @@ def resident_wait_budget(config,contract):
 
 
 def resident_wait_progress(owner,started,budget):
-    frozen=owner.get('frozen') or {};total=(owner.get('execution_timeline') or {}).get('command_count')
-    sent=frozen.get('send_count');elapsed=max(0.,time.monotonic()-started)
+    frozen=owner.get('frozen') or {};total=frozen.get('execution_tick_count')
+    sent=frozen.get('submitted_command_ticks');elapsed=max(0.,time.monotonic()-started)
     qualified=type(sent) is int and type(total) is int and 0<=sent<=total and total>0
     return dict(clock='wall',budget_s=budget,elapsed_s=elapsed,remaining_s=max(0.,budget-elapsed),
-                commands_sent=sent if type(sent) is int else None,total_commands=total,
+                commands_sent=sent if type(sent) is int and sent>=0 else None,
+                total_commands=total if type(total) is int and total>0 else None,
                 percent=100*sent/total if qualified else None)
 
 

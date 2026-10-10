@@ -509,6 +509,12 @@ class CollectionWorkflow:
     def refresh(self):
         with self.lock:generation=self.generation
         state=self.playground.snapshot();plan=state.get('plan') or {};progress=state.get('progress') or {}
+        native=state.get('native_task') or {}
+        instance=progress.get('execution_instance_id') or state.get('execution_instance_id')
+        execution_binding=(dict(execution_instance_id=instance,device_id=self.device.id,environment=self.device.environment,
+            timeline_digest=plan.get('timeline_digest'),**{key:native.get(key) for key in
+            ('runtime_nonce','source_clock_id','execution_timeline_digest')})
+            if instance and native.get('execution_instance_id')==instance else None)
         ready=state.get('environment',{}).get('ready')
         busy=state.get('busy',False)
         primary=dict(id='generate_plan',label='采集新观测并生成计划' if ready else '准备数采环境',
@@ -526,7 +532,7 @@ class CollectionWorkflow:
         value=dict(id=state.get('output'),status=state.get('status','idle'),busy=busy,
             stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=progress.get('label') or '数采任务',
             message=state.get('error') or state.get('capture_warning') or state.get('message',''),
-            primary_action=primary,progress=None,outcomes=dict(motion=state.get('physical_outcome','未执行'),
+            primary_action=primary,progress=None,execution_binding=execution_binding,outcomes=dict(motion=state.get('physical_outcome','未执行'),
                 data=(state.get('recording') or {}).get('status','未录制'),
                 simulation=state.get('simulation','未验证'),task=state.get('task_outcome','未验证')),
             replan_action=dict(id='generate_plan',label='重新观测并规划',allowed=not busy,reason='数采任务正在进行' if busy else None) if plan.get('validated') else None,
@@ -561,7 +567,7 @@ class CollectionWorkflow:
             self.generation+=1;self.review_key=None
             self.value.update(id=result['output'],status='running',busy=True,stage_id='collection.'+action,
                 title={'prepare':'准备数采环境','plan':'采集新观测并生成计划','execute':'执行与录制'}[action],
-                message='本轮任务已启动，正在更新阶段进度。',progress={'indeterminate':True},outcomes={},replan_action=None,
+                message='本轮任务已启动，正在更新阶段进度。',progress={'indeterminate':True},execution_binding=None,outcomes={},replan_action=None,
                 primary_action=dict(id='generate_plan',label='采集新观测并生成计划',allowed=False,reason='数采任务正在进行'))
             self.value.pop('view_error',None)
         with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
