@@ -3,6 +3,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
+import time
 from uuid import uuid4
 
 from artifact_transport import manifest, transfer as transport_transfer
@@ -58,9 +59,13 @@ def prepare_inputs(config, output, *, read_snapshot, read_owner=None, transfer=t
     if environment=='fake':
         binding['clock']=clock_spec('fake',clock_domain=before[1]['clock_domain'],source_clock_id=before[1]['source_clock_id'])
         binding['capture_owner']=owner_identity(before[1],pid_key='pid')
+        from playground_pipeline import resident_wait_budget
+        budget=resident_wait_budget(pipeline,contract)  # Same frozen budget and cleanup reserve as execution.
+        capture_deadline=min(pipeline['resident_deadline_wall_ns']-45_000_000_000,time.time_ns()+int(budget*1e9))
     sealed = capture(read_snapshot, profile, binding, capture_dir,
                      **({'cancel':cancel} if cancel is not None else {}),
-                     **({'environment':environment} if environment != 'physical' else {}))
+                     **({'environment':environment,'wall_deadline_ns':capture_deadline}
+                        if environment != 'physical' else {}))
     if measured_start:
         sealed['initial_state'] = seal_initial_state(before, read_initial_sample(read_owner,environment=environment,
             **({'clock':binding['clock']} if environment=='fake' else {})), profile)

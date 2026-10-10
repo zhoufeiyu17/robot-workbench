@@ -10,6 +10,7 @@ import io
 import json
 import math
 from pathlib import Path
+import sys
 import time
 import zipfile
 
@@ -252,47 +253,107 @@ def decode_snapshot(body, serial, profile, *, environment='physical', clock=None
 
 
 def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
-            timeout_s=30.0, monotonic=time.monotonic, sleep=time.sleep, cancel=None, environment='physical'):
+            timeout_s=30.0, monotonic=time.monotonic, sleep=time.sleep, cancel=None, environment='physical',
+            wall_deadline_ns=None, wall_ns=time.time_ns):
     """Read at least nine unique atomic pairs covering >=8s (tracking warmup included); seal only on success.
 
-    Failed captures retain partial NPZ evidence, but never a manifest/receipt.
+    Physical timeout/cadence remain wall-clock based. Fake cadence uses the
+    sealed source clock; timeout_s bounds source stalls, and an explicit absolute
+    wall deadline (already excluding cleanup reserve) bounds the whole capture.
+    Failed captures retain timestamped NPZ diagnostics, never a manifest/receipt.
     The callback is task-owned, hardware-gated at its call site, and returns bytes.
     """
     import numpy as np
     spec = namespace(environment)
     validate_binding(profile,accepted_binding,environment=environment)
     clock=clock_for_source(accepted_binding,environment)
-    if not 0 < interval_s <= 1 or not 8 < timeout_s <= 120:
+    if (type(interval_s) not in (int,float) or type(timeout_s) not in (int,float)
+            or not 0 < interval_s <= 1 or not 8 < timeout_s <= 120):
         raise ValueError('capture cadence must be <=1s with bounded timeout >8s')
+    if environment=='fake' and (type(wall_deadline_ns) is not int or wall_deadline_ns<=0):
+        raise ValueError('fake observation requires an explicit bounded wall deadline')
     output=Path(output);output.mkdir(parents=True,exist_ok=False)
-    start=monotonic();rows=[];previous=None;previous_clock=None;seen=set();intrinsics=None;domain=None;original_intrinsics=None
-    while True:
+    start=monotonic();started_wall_ns=wall_ns();last_progress=start
+    deadline=start+max(0.,(wall_deadline_ns-started_wall_ns)/1e9) if environment=='fake' else start+timeout_s
+    rows=[];previous=None;previous_clock=None;previous_meta=None;previous_arrays=None;seen=set();intrinsics=None;domain=None;original_intrinsics=None
+    polls=0;last_observed=None;first_observed=None
+    interval_ns=round(interval_s*1e9)
+    poll_wall_s=min(interval_s,.25) if environment=='fake' else interval_s
+
+    def check_budget():
         if cancel is not None and cancel():
             raise InterruptedError('观测阶段已中断')
-        if monotonic()-start >= timeout_s:
-            raise TimeoutError('physical observation did not produce nine pairs spanning eight seconds')
-        meta,stamp,frame,depth_frame,arrays=decode_snapshot(read_snapshot(),accepted_binding['camera_serials']['head'],profile,
-            environment=environment,clock=clock,expected_owner=accepted_binding.get('capture_owner'))
-        current_clock=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},clock)
-        assert_progress(previous_clock,current_clock);previous_clock=current_clock
-        current=(stamp,frame,depth_frame,meta['device_timestamp_ms'],meta['depth_device_timestamp_ms'])
-        if meta['pair_id'] in seen or previous and any(a<=b for a,b in zip(current,previous)):
-            raise ValueError('camera pair/timestamps repeated or regressed')
-        if rows and (meta['intrinsics'] != intrinsics or meta['original_intrinsics'] != original_intrinsics or meta['timestamp_domain'] != domain):
-            raise ValueError('camera intrinsics or clock domain changed within observation')
-        intrinsics,domain=meta['intrinsics'],meta['timestamp_domain'];original_intrinsics=meta['original_intrinsics'];previous=current;seen.add(meta['pair_id'])
-        name=f'rgbd-{len(rows):04d}.npz';np.savez_compressed(output/name,**arrays)
-        rows.append(dict(path=name,sha256=sha(output/name),source_stamp_ns=stamp,capture_sequence_id=len(rows),
-                         pair_id=meta['pair_id'],frame_number=frame,depth_frame_number=depth_frame,
-                         device_timestamp_ms=meta['device_timestamp_ms'],depth_device_timestamp_ms=meta['depth_device_timestamp_ms']))
+        now=monotonic()
         if environment=='fake':
-            rows[-1].update(host_receive_ns=meta['host_receive_ns'],clock_domain=clock['clock_domain'],
-                source_clock_id=clock['source_clock_id'],source_time_ns=stamp,physics_step=meta['physics_step'],
-                timestamp_domain=meta['timestamp_domain'],
-                **owner_identity(meta,require_available=True))
-        if len(rows)>=9 and stamp-rows[0]['source_stamp_ns']>=8_000_000_000:
-            break
-        sleep(interval_s)
+            if now>=deadline or wall_ns()>=wall_deadline_ns:
+                raise TimeoutError('fake observation reached its fixed resident wall budget before nine pairs spanning eight source seconds')
+            if now-last_progress>=timeout_s:
+                raise TimeoutError(f'fake observation source did not advance for {timeout_s:g} wall seconds')
+        elif now>=deadline:
+            raise TimeoutError('physical observation did not produce nine pairs spanning eight seconds')
+
+    try:
+        while True:
+            check_budget()
+            body=read_snapshot();polls+=1
+            if environment=='fake':check_budget()  # A late callback cannot exceed the resident budget.
+            meta,stamp,frame,depth_frame,arrays=decode_snapshot(body,accepted_binding['camera_serials']['head'],profile,
+                environment=environment,clock=clock,expected_owner=accepted_binding.get('capture_owner'))
+            current_clock=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},clock)
+            last_observed=dict(source_stamp_ns=stamp,host_receive_ns=int(meta['host_receive_ns']),
+                physics_step=meta.get('physics_step'),frame_number=frame,depth_frame_number=depth_frame,
+                pair_id=meta['pair_id'])
+            if first_observed is None:first_observed=deepcopy(last_observed)
+            same=environment=='fake' and previous_clock==current_clock
+            assert_progress(previous_clock,current_clock,allow_same=environment=='fake')
+            current=(stamp,frame,depth_frame,meta['device_timestamp_ms'],meta['depth_device_timestamp_ms'])
+            if same:
+                # Frames.snapshot derives age at each HTTP read; source metadata
+                # and pixels still identify the exact same sampled frame.
+                if (current!=previous
+                        or {key:value for key,value in meta.items() if key!='source_age_s'} !=
+                           {key:value for key,value in previous_meta.items() if key!='source_age_s'}
+                        or any(not np.array_equal(arrays[key],previous_arrays[key]) for key in arrays)):
+                    raise ValueError('same source step changed camera pair/timestamps/payload')
+            elif meta['pair_id'] in seen or previous and any(a<=b for a,b in zip(current,previous)):
+                raise ValueError('camera pair/timestamps repeated or regressed')
+            if rows and (meta['intrinsics'] != intrinsics or meta['original_intrinsics'] != original_intrinsics or meta['timestamp_domain'] != domain):
+                raise ValueError('camera intrinsics or clock domain changed within observation')
+            if not same:last_progress=monotonic()
+            intrinsics,domain=meta['intrinsics'],meta['timestamp_domain'];original_intrinsics=meta['original_intrinsics']
+            previous=current;previous_clock=current_clock;seen.add(meta['pair_id'])
+            if environment=='fake':previous_arrays=arrays;previous_meta=meta
+            if not same and (environment!='fake' or not rows or stamp-rows[-1]['source_stamp_ns']>=interval_ns):
+                name=f'rgbd-{len(rows):04d}.npz';np.savez_compressed(output/name,**arrays)
+                rows.append(dict(path=name,sha256=sha(output/name),source_stamp_ns=stamp,capture_sequence_id=len(rows),
+                    host_receive_ns=int(meta['host_receive_ns']),pair_id=meta['pair_id'],frame_number=frame,depth_frame_number=depth_frame,
+                    device_timestamp_ms=meta['device_timestamp_ms'],depth_device_timestamp_ms=meta['depth_device_timestamp_ms']))
+                if environment=='fake':
+                    rows[-1].update(clock_domain=clock['clock_domain'],source_clock_id=clock['source_clock_id'],
+                        source_time_ns=stamp,physics_step=meta['physics_step'],timestamp_domain=meta['timestamp_domain'],
+                        **owner_identity(meta,require_available=True))
+            if environment=='fake':check_budget()
+            if len(rows)>=9 and rows[-1]['source_stamp_ns']-rows[0]['source_stamp_ns']>=8_000_000_000:
+                break
+            sleep(min(poll_wall_s,max(0.,deadline-monotonic())) if environment=='fake' else interval_s)
+    except BaseException as error:
+        diagnostic=dict(schema='rgbd_capture_failure.v1',status='failed',environment=environment,clock=clock,
+            error_type=type(error).__name__,error=str(error),started_wall_ns=started_wall_ns,finished_wall_ns=wall_ns(),
+            elapsed_wall_s=max(0.,monotonic()-start),timeout_s=timeout_s,
+            timeout_meaning='source_no_progress_wall_watchdog' if environment=='fake' else 'total_wall_watchdog',
+            wall_deadline_ns=wall_deadline_ns,minimum_pairs=9,minimum_source_span_ns=8_000_000_000,
+            sampling_interval_s=interval_s,sampling_clock=clock['clock_domain'],poll_wall_s=poll_wall_s,
+            poll_count=polls,retained_frame_count=len(rows),first_observed=first_observed,last_observed=last_observed,
+            source_stamp_range_ns=[rows[0]['source_stamp_ns'],rows[-1]['source_stamp_ns']] if rows else None,
+            host_receive_range_ns=[rows[0]['host_receive_ns'],rows[-1]['host_receive_ns']] if rows else None,
+            retained_source_span_ns=rows[-1]['source_stamp_ns']-rows[0]['source_stamp_ns'] if rows else 0,
+            frames=rows,manifest_sealed=False)
+        try:(output/'capture-diagnostic.json').write_text(json.dumps(diagnostic,indent=2,allow_nan=False)+'\n')
+        except OSError as diagnostic_error:
+            note='Could not save capture diagnostics: '+str(diagnostic_error)
+            if hasattr(error,'add_note'):error.add_note(note)
+            else:print(note,file=sys.stderr)
+        raise
     manifest=dict(frame_id='d405_base_0_color_optical_frame',evidence_source=spec['evidence'],
                   robot_id=accepted_binding['robot_id'],camera_serials=deepcopy(accepted_binding['camera_serials']),
                   source_clock='host_receive_wall_ns',capture_hz=1/interval_s,

@@ -80,7 +80,9 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
         self.cfg.update(contract_path=str(self.root/'contract.json'), remote_run_root=run,
             assets=str(assets), opening_mm=83., finger_envelope_sha256='a'*64,
             planning_backend='motiongen', curobo_root=str(self.root/'curobo'))
-        if self.environment=='fake':self.cfg['environment']='fake'
+        if self.environment=='fake':
+            self.cfg.update(environment='fake',resident_deadline_wall_ns=time.time_ns()+1_200_000_000_000)
+            self.contract['resources']['resident_deadline_wall_ns']=self.cfg['resident_deadline_wall_ns']
         self.write(self.root/'contract.json', self.contract)
         self.write(self.root/'config.json', self.cfg)
         self.bridge = SimpleNamespace(config=dict(preparation=dict(pipeline_config=str(self.root/'config.json'),
@@ -208,6 +210,7 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
     def plan(self):
         def fast_capture(*args, **kwargs):
             clock = [0.]
+            self.capture_options=deepcopy(kwargs)
             return capture(*args, **kwargs, monotonic=lambda:clock[0], sleep=lambda s:clock.__setitem__(0, clock[0]+s))
         with ExitStack() as stack:
             stack.enter_context(patch('real_observation.capture', fast_capture))
@@ -219,6 +222,9 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
     def test_actual_caller_prepares_bound_motiongen_scene(self):
         result = self.plan()
         self.assertTrue(result['validated'])
+        if self.environment=='fake':
+            self.assertEqual(self.capture_options['wall_deadline_ns'],self.cfg['resident_deadline_wall_ns']-45_000_000_000)
+            self.assertNotIn('timeout_s',self.capture_options)  # Retain independent 30 s source-stall watchdog.
         self.assertEqual(self.stages, ['preflight-simulated-real', 'preflight-dsw-scene', 'initialize', 'shared-storage',
             'physical-capture-import', 'detect', 'physical-detection-bind', 'bridge', 'physical-model-bind',
             'playground-geometry-inputs', 'playground-plan'])
