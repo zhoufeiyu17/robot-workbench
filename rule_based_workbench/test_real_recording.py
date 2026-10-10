@@ -5,11 +5,12 @@ from pathlib import Path
 import struct
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 import zlib
 
 from integration import _digest
 from playback import sha256
-from real_recording import RealRecorder, export_playback, verify_raw, png_shape, RecordingSession, CAMERAS
+from real_recording import RealRecorder, export_playback, verify_raw, png_shape, RecordingSession, CAMERAS, _raw_file_index
 from real_rgbd import pair_metadata,snapshot_bundle,RawSpool
 from test_frozen_executor import fixture
 
@@ -22,6 +23,38 @@ def png(depth=False):
 
 
 def main():
+    # Two reads may overlap, but completed image payloads cannot queue beyond
+    # the current pair; callbacks stay ordered on the calling thread.
+    import os,threading,time
+    from contextlib import contextmanager
+    with TemporaryDirectory() as folder:
+        root=Path(folder);camera=root/'camera/base_0';camera.mkdir(parents=True)
+        pins={}
+        for index in range(8):
+            path=camera/f'{index:08d}.zip';path.write_bytes(bytes([index])*32)
+            pins[str(path.relative_to(root))]=dict(size_bytes=32,sha256=sha256(path))
+        counts=dict(active=0,peak_active=0,queued=0,peak_queued=0);lock=threading.Lock();consumed=[]
+        caller=threading.get_ident();fdopen=os.fdopen
+        @contextmanager
+        def observed(fd,*args,**kwargs):
+            with fdopen(fd,*args,**kwargs) as stream:
+                class Reader:
+                    def read(self,*args):
+                        with lock:
+                            counts['active']+=1;counts['peak_active']=max(counts['peak_active'],counts['active'])
+                        time.sleep(.005);value=stream.read(*args)
+                        with lock:
+                            counts['active']-=1;counts['queued']+=1;counts['peak_queued']=max(counts['peak_queued'],counts['queued'])
+                        return value
+                yield Reader()
+        def consume(name,blob):
+            assert threading.get_ident()==caller and blob==bytes([len(consumed)])*32
+            time.sleep(.01)
+            with lock:counts['queued']-=1
+            consumed.append(name)
+        with patch('real_recording.os.fdopen',side_effect=observed):
+            assert _raw_file_index(root,pins,expected=pins,consume_rgbd=consume)==pins
+        assert consumed==list(pins) and counts['peak_active']==2 and counts['peak_queued']<=2 and counts['queued']==0,counts
     corrupt = bytearray(png(True)); corrupt[-1] ^= 1
     try: png_shape(bytes(corrupt),depth=True)
     except ValueError: pass
@@ -188,6 +221,17 @@ def main():
             return SimpleNamespace(stdout=json.dumps({'streams':[{'codec_name':'h264','pix_fmt':'yuv420p',
                 'nb_read_frames':'4' if path.name.startswith('source-') else '7','duration':'0.133'}]}))
         replay=export_playback(root/'raw',target_path,root/'playback',runner=runner)
+        import os
+        opens=[];original_open=os.open
+        def opened(path,*args,**kwargs):
+            if str(path).endswith('.zip'):opens.append(str(path))
+            return original_open(path,*args,**kwargs)
+        with patch('real_recording.os.open',side_effect=opened):
+            same=export_playback(root/'raw',target_path,root/'single-pass',runner=runner)
+        assert same==replay and len(opens)==12, 'export must hash and unpack each sealed frame in one read'
+        diagnostics=json.loads((root/'single-pass/export-timings.json').read_text())
+        assert diagnostics['verify_and_extract_wall_s']>0 and set(diagnostics['cameras'])==set(CAMERAS)
+        assert recorder.seal_timings['files']==len(manifest['files'])
         assert len(replay['files'])==6 and replay['task_outcome']=='unverified'
         assert replay['source_timing']['base_0']['frame_offsets_s']==[-.01,.023,.056,.09]
         assert all('-fps_mode' in cmd for cmd in calls if cmd[0]=='ffmpeg')
@@ -272,6 +316,42 @@ def main():
         assert mismatch['status']=='failed' and '终态回执' in mismatch['error']
         incomplete=RealRecorder(root/'incomplete',source,plan,binding).seal('completed')
         assert incomplete['capture_status']=='incomplete' and incomplete['validation']['problems']
+        # The directory-FD fast path rejects leaf/parent links and traversal,
+        # even if the redirected file would have exactly the expected bytes.
+        frame=root/'raw'/recorder.frames[CAMERAS[0]][0]['path'];original=frame.read_bytes()
+        outside=root/'outside.zip';outside.write_bytes(original)
+        frame.unlink();frame.symlink_to(outside)
+        try:
+            try:verify_raw(root/'raw')
+            except (ValueError,OSError):pass
+            else:raise AssertionError('symlink frame accepted')
+        finally:frame.unlink();frame.write_bytes(original)
+        (root/'raw/camera').rename(root/'moved-camera');(root/'raw/camera').symlink_to(root/'moved-camera',target_is_directory=True)
+        try:
+            try:verify_raw(root/'raw')
+            except (ValueError,OSError):pass
+            else:raise AssertionError('symlink frame parent accepted')
+        finally:(root/'raw/camera').unlink();(root/'moved-camera').rename(root/'raw/camera')
+        saved_manifest=(root/'raw/manifest.json').read_bytes()
+        modified=deepcopy(manifest);modified['files']['../outside.zip']=dict(size_bytes=len(original),sha256=sha256(outside))
+        (root/'raw/manifest.json').write_text(json.dumps(modified))
+        try:
+            try:verify_raw(root/'raw')
+            except ValueError:pass
+            else:raise AssertionError('traversal frame accepted')
+        finally:(root/'raw/manifest.json').write_bytes(saved_manifest)
+        # A matching file hash is insufficient when its depth PNG is corrupt.
+        with zipfile.ZipFile(io.BytesIO(original)) as archive:meta=json.loads(archive.read('metadata.json'))
+        broken=bytearray(png(True));broken[-1]^=1
+        frame.write_bytes(snapshot_bundle(meta,png(),bytes(broken)))
+        modified=deepcopy(manifest);modified['files'][str(frame.relative_to(root/'raw'))]=dict(size_bytes=frame.stat().st_size,sha256=sha256(frame))
+        (root/'raw/manifest.json').write_text(json.dumps(modified))
+        try:
+            try:export_playback(root/'raw',None,root/'bad-depth-export',runner=runner)
+            except ValueError as error:assert 'PNG checksum' in str(error)
+            else:raise AssertionError('hash-valid corrupt depth accepted by export')
+            assert not (root/'bad-depth-export/manifest.json').exists()
+        finally:frame.write_bytes(original);(root/'raw/manifest.json').write_bytes(saved_manifest)
         (root/'raw/commands.jsonl').write_text('{}\n')
         try: verify_raw(root/'raw')
         except ValueError: pass

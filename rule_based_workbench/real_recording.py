@@ -5,13 +5,18 @@ cannot establish complete raw capture). Commands and measured feedback remain
 separate. Sealing a command timeline never declares task or grasp success.
 """
 from copy import deepcopy
+from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import io
+from itertools import islice
 import json
 import math
 import os
 import uuid
 from pathlib import Path
 import statistics
+import stat
 import struct
 import subprocess
 import tempfile
@@ -29,6 +34,54 @@ from robot_workbench.sample_clock import clock_spec, clock_for_source, sample_st
 
 CAMERAS = ('base_0','left_wrist_0','right_wrist_0')
 SIDES = dict(zip(CAMERAS,('head','left','right')))
+
+
+def _raw_file_index(root,names,*,expected=None,consume_rgbd=None):
+    """Two bounded reads; consume verified bytes in order on the caller thread."""
+    result={};directories={}
+    def read_file(item):
+        name,path,parent=item;blob=None
+        fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+        try:
+            info=os.fstat(fd)
+            if expected is None and stat.S_ISDIR(info.st_mode):return name,None,None
+            if not stat.S_ISREG(info.st_mode):raise ValueError('regular raw file required: '+name)
+            if expected is not None and info.st_size!=expected[name]['size_bytes']:
+                raise ValueError('sealed raw file changed: '+name)
+            with os.fdopen(fd,'rb',closefd=False) as stream:
+                rgbd=consume_rgbd is not None and path.parts[0]=='camera' and path.suffix=='.zip'
+                digest=hashlib.sha256()
+                if rgbd:
+                    if info.st_size>16*1024*1024:raise ValueError('bounded snapshot ZIP bytes required')
+                    blob=stream.read();digest.update(blob)
+                else:
+                    for block in iter(lambda:stream.read(1024*1024),b''):digest.update(block)
+            pin=dict(size_bytes=info.st_size,sha256=digest.hexdigest())
+            if expected is not None and pin['sha256']!=expected[name]['sha256']:raise ValueError('sealed raw file changed: '+name)
+            return name,pin,blob
+        finally:os.close(fd)
+    with ExitStack() as stack:
+        # Join readers before closing shared directory FDs, including failures.
+        with ThreadPoolExecutor(max_workers=2) as readers:
+            names=iter(names)
+            while batch:=list(islice(names,2)):
+                jobs=[]
+                for name in batch:
+                    path=Path(name)
+                    if path.is_absolute() or '..' in path.parts or str(path)!=name or not path.parts:
+                        raise ValueError('invalid sealed raw path: '+str(name))
+                    for count in range(len(path.parts)):
+                        parts=path.parts[:count]
+                        if parts not in directories:
+                            fd=os.open(root if not parts else parts[-1],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,
+                                **({'dir_fd':directories[parts[:-1]]} if parts else {}))
+                            directories[parts]=fd;stack.callback(os.close,fd)
+                    jobs.append((name,path,directories[path.parts[:-1]]))
+                for name,pin,blob in readers.map(read_file,jobs):
+                    if pin is not None:result[name]=pin
+                    if blob is not None:consume_rgbd(name,blob)
+                    blob=None  # Do not retain the last image into the next batch.
+    return result
 
 
 def finite(value):
@@ -250,6 +303,7 @@ class RealRecorder:
         return True
 
     def seal(self,status,reason=None):
+        started=time.monotonic()
         if self.closed or status not in ('completed','failed','stopped','recording_failed'):
             raise ValueError('one explicit terminal outcome required')
         problems = []
@@ -292,8 +346,10 @@ class RealRecorder:
                             association='exact_feedback_sample' if left==right else 'feedback_bracket',interpolated=left!=right))
         if status != 'completed': problems.append('controller outcome: '+status)
         if self.environment=='fake':self.write_json('frame-feedback-pairs.json',dict(clock=self.clock,pairs=pairings))
-        files = {str(path.relative_to(self.root)):dict(size_bytes=path.stat().st_size,sha256=sha256(path))
-                 for path in self.root.rglob('*') if path.is_file()}
+        semantics_finished=time.monotonic()
+        files = _raw_file_index(self.root,(str(path.relative_to(self.root)) for path in self.root.rglob('*')))
+        self.seal_timings=dict(semantic_wall_s=semantics_finished-started,
+            file_integrity_wall_s=time.monotonic()-semantics_finished,files=len(files),bytes=sum(v['size_bytes'] for v in files.values()))
         manifest = dict(schema_version=self.namespace['raw_schema'],evidence_source=self.namespace['evidence'],
                         source_run_id=self.source['run_id'],plan_run_id=self.plan['run_id'],timeline_digest=self.plan['timeline_digest'],
                         robot_id=self.source['robot_id'],camera_serials=self.source['camera_serials'],
@@ -315,10 +371,11 @@ class RealRecorder:
                 execution_duration_s=self.frozen.duration_s)
         self.write_json('manifest.json',manifest)
         self.closed = True
+        self.seal_timings['total_wall_s']=time.monotonic()-started
         return manifest
 
 
-def verify_raw(root, *, environment='physical'):
+def verify_raw(root, *, environment='physical', _consume_rgbd=None):
     root = Path(root).resolve()
     if (root/'manifest.json').is_symlink(): raise ValueError('raw manifest symlink forbidden')
     manifest = json.loads((root/'manifest.json').read_text())
@@ -327,10 +384,7 @@ def verify_raw(root, *, environment='physical'):
     validate_namespace(manifest, environment)
     if not {'source.json','plan.json','binding.json'} <= set(manifest.get('files',{})):
         raise ValueError('raw identity files must be sealed')
-    for name,pin in manifest['files'].items():
-        path = root/name
-        if path.is_symlink() or not path.resolve().is_relative_to(root) or path.stat().st_size != pin['size_bytes'] or sha256(path) != pin['sha256']:
-            raise ValueError('sealed raw file changed: '+name)
+    _raw_file_index(root,manifest['files'],expected=manifest['files'],consume_rgbd=_consume_rgbd)
     source,plan,binding = [json.loads((root/name).read_text()) for name in ('source.json','plan.json','binding.json')]
     validate_real_plan(plan,source,binding,environment=environment)
     if environment=='fake' and (manifest.get('clock')!=clock_for_source(source,environment)
@@ -350,6 +404,7 @@ def verify_raw(root, *, environment='physical'):
 
 def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run,environment='physical',scratch_root=None):
     """Derived videos may exist for a failed run; raw/task outcome stays explicit."""
+    started=time.monotonic();diagnostics=dict(schema='source_playback_timings.v1',cameras={})
     raw_root = Path(raw_root).resolve()
     if scratch_root is not None:
         scratch_root=Path(scratch_root)
@@ -359,7 +414,9 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
         scratch_root=scratch_root.resolve()
     target_manifest_path = Path(target_manifest_path).resolve() if target_manifest_path is not None else None
     spec=namespace(environment)
-    raw,source,plan = verify_raw(raw_root,environment=environment)
+    # These provisional identities only prepare the export. The complete frozen
+    # verifier below checks every input while extracting the same verified bytes.
+    raw,source,plan = [json.loads((raw_root/name).read_text()) for name in ('manifest.json','source.json','plan.json')]
     target = json.loads(target_manifest_path.read_text()) if target_manifest_path is not None else None
     if target is not None and target.get('execution_timeline_digest') != raw.get('execution_timeline_digest'):
         raise ValueError('physical and simulation execution commands differ')
@@ -386,6 +443,21 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     command_start = sample_stamp(first_command,clock,wall_key='send_wall_ns',source_key='send_source_time_ns',require_step=False)[0]
     with tempfile.TemporaryDirectory(dir=scratch_root if scratch_root is not None else output) as temporary:
         temporary = Path(temporary)
+        indexed={row['path']:(camera,index,row) for camera,rows in frames.items() for index,row in enumerate(rows)}
+        if len(indexed)!=sum(map(len,frames.values())):raise ValueError('duplicate RGB-D index path')
+        consumed=set()
+        def consume(name,blob):
+            camera,index,row=indexed[name];before=time.monotonic()
+            meta,color,_=bundle(blob,source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
+            if meta!={k:v for k,v in row.items() if k!='path'}:raise ValueError('RGB-D index metadata differs from bundle')
+            (temporary/f'{camera}-{index:08d}.png').write_bytes(color)
+            consumed.add(name)
+            detail=diagnostics['cameras'].setdefault(camera,dict(frames=0,decode_and_stage_wall_s=0.))
+            detail['frames']+=1;detail['decode_and_stage_wall_s']+=time.monotonic()-before
+        before=time.monotonic()
+        verified=verify_raw(raw_root,environment=environment,_consume_rgbd=consume)
+        if verified!=(raw,source,plan) or consumed!=set(indexed):raise ValueError('raw identities or indexed RGB-D files changed during export')
+        diagnostics['verify_and_extract_wall_s']=time.monotonic()-before
         for camera,rows in frames.items():
             stamps = [sample_stamp({**row,'host_receive_ns':int(row['host_receive_ns'])},clock)[0] for row in rows]
             periods = [(b-a)/1e9 for a,b in zip(stamps,stamps[1:])]
@@ -397,8 +469,6 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
             entries = []
             for index,(row,duration) in enumerate(zip(rows,concat_periods+[last])):
                 path = temporary/f'{camera}-{index:08d}.png'
-                _,color,_ = bundle((raw_root/row['path']).read_bytes(),source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
-                path.write_bytes(color)
                 escaped = str(path).replace("'", "'\\''")
                 entries.extend([f"file '{escaped}'",'option framerate 1000',f'duration {duration:.9f}'])
             concat = temporary/f'{camera}.txt'; concat.write_text('\n'.join(entries)+'\n')
@@ -407,16 +477,19 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
             # frame reordering so the final packet is the final displayed frame,
             # then set its duration without adding a frame or changing captured PTS.
             tail_ns = max(1, round(last * 1e9))
+            before=time.monotonic()
             runner(['ffmpeg','-nostdin','-v','error','-n','-threads','2','-f','concat','-safe','0','-i',str(concat),
                     '-an','-c:v','libx264','-threads','2','-preset','fast','-crf','24','-pix_fmt','yuv420p',
                     '-bf','0','-bsf:v',f'setts=duration=if(eq(N\\,{len(rows)-1})\\,{tail_ns}/1000000000/TB\\,DURATION)',
                     '-fps_mode','vfr','-enc_time_base','1:1000','-video_track_timescale','1000000','-movflags','+faststart',str(destination)],check=True,timeout=300)
+            diagnostics['cameras'][camera]['encode_wall_s']=time.monotonic()-before
             timing[camera] = dict(clock='simulation' if environment=='fake' else 'host_receive',frame_offsets_s=[(stamp-command_start)/1e9 for stamp in stamps],
                                  frame_count=len(rows),depth_in_raw=True,last_frame_duration_s=last,
                                  duration_s=(stamps[-1]-stamps[0])/1e9+last)
             if environment=='fake':timing[camera].update(source_clock_id=clock['source_clock_id'],host_receive_ns=[int(row['host_receive_ns']) for row in rows])
         import shutil
         for name,path in target_paths.items(): shutil.copyfile(path,output/name)
+    before=time.monotonic()
     for path in sorted(output.glob('*.mp4')):
         probe = json.loads(runner(['ffprobe','-v','error','-count_frames','-select_streams','v:0','-show_streams','-of','json',str(path)],
                                  check=True,timeout=120,capture_output=True,text=True).stdout)['streams']
@@ -438,6 +511,8 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
                     controller_outcome=raw['controller_outcome'],task_outcome='unverified')
     if environment=='fake':manifest.update(environment='fake',simulation_only=True,source_clock=clock)
     (output/'manifest.json').write_text(json.dumps(manifest,allow_nan=False,indent=2)+'\n')
+    diagnostics.update(video_verify_wall_s=time.monotonic()-before,total_wall_s=time.monotonic()-started)
+    (output/'export-timings.json').write_text(json.dumps(diagnostics,allow_nan=False,indent=2)+'\n')
     return manifest
 
 

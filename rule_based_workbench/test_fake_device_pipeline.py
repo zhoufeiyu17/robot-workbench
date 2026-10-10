@@ -73,12 +73,18 @@ class FakeDeviceContractTest(unittest.TestCase):
                 clock=clock_spec('fake',source_clock_id=FAKE_CLOCK_ID)
                 source=dict(run_id='source',clock=clock,camera_serials=dict(head='h',left='l',right='r'))
                 plan=dict(run_id='plan',timeline_digest='fixture')
-                (raw/'manifest.json').write_text('{}');(raw/'frame.zip').write_bytes(b'upstream bundle fixture')
+                manifest=dict(capture_status='complete',controller_outcome='completed')
+                for name,value in [('manifest.json',manifest),('source.json',source),('plan.json',plan)]:
+                    (raw/name).write_text(json.dumps(value))
                 (raw/'commands.jsonl').write_text(json.dumps(dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
                     send_wall_ns=1,send_source_time_ns=stamps[0]))+'\n')
                 rows=[dict(path='frame.zip',host_receive_ns=1,source_time_ns=stamp,physics_step=step,
                     clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,capture_fps=30) for stamp,step in zip(stamps,steps)]
-                for camera in CAMERAS:(raw/(camera+'-pairs.jsonl')).write_text(''.join(json.dumps(row)+'\n' for row in rows))
+                indexed={}
+                for camera in CAMERAS:
+                    camera_rows=[dict(row,path=f'camera/{camera}/{index:08d}.zip') for index,row in enumerate(rows)]
+                    (raw/(camera+'-pairs.jsonl')).write_text(''.join(json.dumps(row)+'\n' for row in camera_rows))
+                    indexed.update({row['path']:{k:v for k,v in row.items() if k!='path'} for row in camera_rows})
                 probes={}
                 def encoder(argv,**kwargs):
                     destination=Path(argv[-1])
@@ -96,8 +102,11 @@ class FakeDeviceContractTest(unittest.TestCase):
                     duration=(pts_ns[-1]+int(durations[-1]*1000)*1_000_000)/1e9
                     probes[str(destination)]=dict(codec_name='h264',pix_fmt='yuv420p',nb_read_frames=str(count),duration=str(duration))
                     return SimpleNamespace(stdout='')
-                with patch('real_recording.verify_raw',return_value=(dict(capture_status='complete',controller_outcome='completed'),source,plan)), \
-                     patch('real_recording.bundle',return_value=({},png(),png(True))):
+                def verified(root,*,environment,_consume_rgbd):
+                    for name,meta in indexed.items():_consume_rgbd(name,json.dumps(meta).encode())
+                    return manifest,source,plan
+                with patch('real_recording.verify_raw',side_effect=verified), \
+                     patch('real_recording.bundle',side_effect=lambda blob,*a,**kw:(json.loads(blob),png(),png(True))):
                     replay=export_playback(raw,None,root/'playback',environment='fake',runner=encoder)
                 self.assertEqual(replay['source_timing']['base_0']['frame_offsets_s'],[(stamp-stamps[0])/1e9 for stamp in stamps])
 

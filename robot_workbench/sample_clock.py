@@ -81,7 +81,7 @@ def assert_progress(previous, current, *, allow_same=False):
 
 def bracket_samples(stamps, target):
     """Return exact/bracketing indices; a bracket is not an exact-step measurement."""
-    index = bisect_left([row[0] for row in stamps], target[0])
+    index = bisect_left(stamps, target[0], key=lambda row: row[0])
     if index < len(stamps) and stamps[index][0] == target[0]:
         if stamps[index][1] != target[1]:
             raise ValueError('equal source time is bound to a different physics step')
