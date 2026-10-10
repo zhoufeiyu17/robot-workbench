@@ -495,6 +495,19 @@ class WorkflowAdapterTest(unittest.TestCase):
             state['progress']=progress;workflow.refresh()
             self.assertIsNone(workflow.snapshot()['execution_binding'],'old native status cannot bind another job, even for the same plan')
 
+    def test_collection_terminal_data_uses_sealed_manifest_not_missing_status_field(self):
+        workflow,state=self.collection()
+        state.update(status='failed',busy=False,action='execute')
+        for recording,expected in (({},'未录制'),({'ready':True},'recording'),({'done':True},'pending'),
+                ({'done':True,'manifest':{'validation':{'status':'passed'}}},'valid'),
+                ({'done':True,'manifest':{'validation':{'status':'failed'}}},'invalid')):
+            state['recording']=recording;workflow.refresh()
+            self.assertEqual(workflow.snapshot()['outcomes']['data'],expected)
+        state['recording'].update(error='camera source queue overflow')
+        workflow.refresh()
+        self.assertEqual(workflow.snapshot()['outcomes']['data'],
+            {'status':'invalid','message':'camera source queue overflow'})
+
     def test_collection_media_is_current_and_cancel_uses_real_interrupt(self):
         workflow,state=self.collection();path=self.root/'recording.mp4';path.write_bytes(b'CPU video route fixture')
         state['videos']=[dict(label='头部回放',url='/api/playground/media/video-0?v=job-1')]

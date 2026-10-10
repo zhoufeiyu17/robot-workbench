@@ -517,6 +517,12 @@ class CollectionWorkflow:
             if instance and native.get('execution_instance_id')==instance else None)
         ready=state.get('environment',{}).get('ready')
         busy=state.get('busy',False)
+        recording=state.get('recording') or {}
+        validation=(recording.get('manifest') or {}).get('validation') or {}
+        data_error=recording.get('error') or recording.get('seal_error') or recording.get('diagnostics_error')
+        data_outcome=(dict(status='invalid',message=data_error) if data_error else
+            {'passed':'valid','failed':'invalid'}.get(validation.get('status')) or recording.get('status') or
+            ('pending' if recording.get('done') else 'recording' if recording.get('ready') else '未录制'))
         primary=dict(id='generate_plan',label='采集新观测并生成计划' if ready else '准备数采环境',
                      allowed=not busy,reason='数采任务正在进行' if busy else None)
         review_request=None
@@ -533,7 +539,7 @@ class CollectionWorkflow:
             stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=progress.get('label') or '数采任务',
             message=state.get('error') or state.get('capture_warning') or state.get('message',''),
             primary_action=primary,progress=None,execution_binding=execution_binding,outcomes=dict(motion=state.get('physical_outcome','未执行'),
-                data=(state.get('recording') or {}).get('status','未录制'),
+                data=data_outcome,
                 simulation=state.get('simulation','未验证'),task=state.get('task_outcome','未验证')),
             replan_action=dict(id='generate_plan',label='重新观测并规划',allowed=not busy,reason='数采任务正在进行' if busy else None) if plan.get('validated') else None,
             details=[{'label':'已耗时','value':f"{progress.get('elapsed_s',0):.1f} 秒"},
