@@ -6,6 +6,7 @@ host metadata and all normal-returning SDK stop samples. No GPU or hardware.
 import argparse
 from copy import deepcopy
 import hashlib
+import io
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import time
+import zipfile
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request,build_opener,ProxyHandler
@@ -27,7 +29,8 @@ from test_owner_clock import ClockBackend,Safety,calibration,jaw
 from test_collection_physx_protocol import protocol_fixture
 from robot_workbench.runtime import Runtime
 from robot_workbench.service import Application,Device,serve
-from real_recording import RecordingSession,RealRecorder,CAMERAS
+from real_recording import RecordingSession,RealRecorder,CAMERAS,SIDES
+from real_rgbd import RawSpool
 
 
 MATRIX={
@@ -83,6 +86,8 @@ class Harness:
         self.q=[*target['left_arm_joints'],jaw.feedback_sdk('left',target['left_gripper']),
                 *target['right_arm_joints'],jaw.feedback_sdk('right',target['right_gripper'])]
         self.recording_factory=None;self.sessions=[];self.release_gates=[];self.owner_events=[]
+        self.camera_feeders=[];self.camera_feed_errors=[]
+        self.recording_entered=threading.Event()
         self.runtime=None;self.sdk=None;self.counter=0
         self.allow_tick=threading.Event();self.allow_tick.set();self.tick_paused=threading.Event()
         def factory():
@@ -160,6 +165,7 @@ class Harness:
         require([row['tick'] for row in commands]==list(range(len(runner.runtime['commands']))),
                 'D commands skipped or burst reconstruction changed order')
         require(not self.runtime.owner.stop_requested,'data failure requested motion stop')
+        require(not self.camera_feed_errors,str(self.camera_feed_errors))
         return dict(motion_status=runner.status,command_count=len(commands),recording_error=self.runtime.owner.recording_error)
     def stop(self):return self.action('stop',business=self.runtime.holder)
     def recording(self,kind):
@@ -167,38 +173,68 @@ class Harness:
             path=self.root/'recording'
             kwargs={}
             if kind=='destination_unwritable':path.write_text('occupied by a file')
+            spools={};reference=[]
+            for camera in CAMERAS:
+                directory=self.root/'camera-spool'/camera;directory.mkdir(parents=True)
+                spools[camera]=RawSpool(directory,min_free_bytes=0,lease_guard=lambda lease:bool(reference)
+                    and self.runtime.owner.recording is reference[0] and reference[0].lease_active(lease))
+            kwargs['camera_directories']={camera:str(spool.root) for camera,spool in spools.items()}
             if kind=='directory_absent':kwargs['camera_directories']=dict.fromkeys(CAMERAS,str(self.root/'absent'))
             def recorder(*args,**options):
-                if kind=='queue_overflow':
+                if kind in ('queue_overflow','writer_not_exited'):
                     entered.set();require(release.wait(3),'bounded disk injection expired')
                 result=RealRecorder(*args,**options)
                 if kind=='command_log_unwritable':(result.root/'commands.jsonl').mkdir()
                 return result
             entered,release=threading.Event(),threading.Event();self.release_gates.append(release)
+            self.recording_entered=entered
             session=RecordingSession(path,payload['source'],payload['plan'],self.binding,
-                execution_timeline=payload['execution_timeline'],environment='fake',execution_owner=payload['execution_owner'],
+                execution_timeline=payload.get('execution_timeline'),environment='fake',execution_owner=payload['execution_owner'],
                 resident_deadline_wall_ns=time.time_ns()+60_000_000_000,
-                on_fault=on_fault,capacity=1 if kind=='queue_overflow' else 512,recorder_factory=recorder,**kwargs)
-            self.sessions.append(session)
-            if kind in ('wrong_serial','pair_mismatch'):
-                from test_real_observation import fixture
-                def metadata(meta):
-                    raw=self.runtime.owner.current_feedback
-                    ns=raw['source_time_ns']
-                    meta.update(environment='fake',simulation_only=True,evidence_source='fake_device_rgbd',
-                        clock_domain='simulation',source_clock_id=self.source['clock']['source_clock_id'],
-                        source_time_ns=ns,physics_step=raw['physics_step'],timestamp_kind='simulation_step',
-                        timestamp_domain='simulation',device_timestamp_ms=ns/1e6,depth_device_timestamp_ms=ns/1e6,
-                        host_receive_ns=time.time_ns(),owner_available=True,owner_pid=os.getpid(),
-                        command_epoch=self.runtime.owner.epoch,runtime_nonce=self.runtime.nonce)
-                    if kind=='wrong_serial':meta['serial']='unexpected-camera'
-                    else:meta['depth_device_timestamp_ms']+=100.
-                session.submit('rgbd',camera=CAMERAS[0],blob=fixture(1,metadata))
+                on_fault=on_fault,capacity=1 if kind=='queue_overflow' else 512,recorder_factory=recorder,
+                **kwargs,**payload['recording_preparation'])
+            self.sessions.append(session);reference.append(session)
+            def feed_startup_frames():
+                # Real bounded leases and writer paths; one synthetic startup
+                # pair per camera does not qualify complete/native RGB-D capture.
+                try:
+                    deadline=time.monotonic()+2
+                    while not (session.prepared.is_set() and self.runtime.owner.recording is session):
+                        if session.error or session.done.is_set():return
+                        require(time.monotonic()<deadline,'L1 deferred camera preparation did not finish')
+                        time.sleep(.002)
+                    start=max(json.loads((spool.root/'recording-request.json').read_text())['admission_start_wall_ns']
+                        for spool in spools.values())
+                    while True:
+                        with self.runtime.owner.lock:raw=deepcopy(self.runtime.owner.cache['calibration_feedback'])
+                        if raw['sample_wall_ns']>=start:break
+                        require(time.monotonic()<deadline,'L1 Owner did not sample after lease admission')
+                        time.sleep(.002)
+                    from test_real_observation import fixture
+                    for camera,spool in spools.items():
+                        def metadata(meta):
+                            ns=raw['source_time_ns'];side=SIDES[camera]
+                            meta.update(serial=self.source['camera_serials'][side],camera_name=side,
+                                environment='fake',simulation_only=True,evidence_source='fake_device_rgbd',
+                                clock_domain='simulation',source_clock_id=self.source['clock']['source_clock_id'],
+                                source_time_ns=ns,physics_step=raw['physics_step'],timestamp_kind='simulation_step',
+                                timestamp_domain='simulation',device_timestamp_ms=ns/1e6,depth_device_timestamp_ms=ns/1e6,
+                                host_receive_ns=raw['sample_wall_ns'],owner_available=True,
+                                **{key:raw[key] for key in ('owner_pid','command_epoch','runtime_nonce')})
+                            if camera==CAMERAS[0] and kind=='wrong_serial':meta['serial']='unexpected-camera'
+                            if camera==CAMERAS[0] and kind=='pair_mismatch':meta['depth_device_timestamp_ms']+=100.
+                        with zipfile.ZipFile(io.BytesIO(fixture(1,metadata))) as archive:
+                            spool.write(json.loads(archive.read('metadata.json')),archive.read('color.png'),archive.read('depth.png'))
+                except Exception as error:self.camera_feed_errors.append(str(error))
+            if kind!='directory_absent':
+                feeder=threading.Thread(target=feed_startup_frames,daemon=True)
+                self.camera_feeders.append(feeder);feeder.start()
             return session
         self.runtime.owner.recording_factory=factory
     def close(self):
         self.allow_tick.set()
         for gate in self.release_gates:gate.set()
+        for feeder in self.camera_feeders:feeder.join(2)
         if self.sdk:
             self.sdk.read_failure=False;self.sdk.frozen_sample=None
             if self.sdk.send_release:self.sdk.send_release.set()
@@ -303,7 +339,9 @@ def execute(category,variant):
             return dict(state=state['state'],reason=state.get('reason'),targets_after_failure=0)
         if category=='handoff_race':
             if variant=='writer_not_exited':
-                h.recording('queue_overflow');h.collect();h.assert_collection_complete()
+                h.recording('writer_not_exited');h.collect()
+                h.wait(lambda:h.recording_entered.is_set())
+                h.assert_collection_complete()
                 h.wait(lambda:r.owner.stationary)
                 require(h.sessions and h.sessions[0].thread.is_alive(),'writer injection already ended')
                 reason=rejected(lambda:r.handoff(c['collection'],'calibration'),'writer')
@@ -406,7 +444,7 @@ def command_clock_regression():
             require(abs(round(row['send_monotonic_s']*1e9)-row['send_source_time_ns'])<=1,'command clock changed')
             require(row['physics_step'] is None,'submission masquerades as a completed physics step')
             require(row['feedback_at_send']['source_time_ns']<=row['send_source_time_ns'],'future feedback at submission')
-        require(session.manifest['capture_status']=='incomplete','no-camera fixture claimed complete raw')
+        require(session.manifest['capture_status']=='incomplete','startup-only camera fixture claimed complete raw')
         return dict(result,passed=True,recorded_commands=len(commands),
             send_minus_feedback_ns=[row['send_source_time_ns']-row['feedback_at_send']['source_time_ns'] for row in commands],
             command_physics_steps=[row['physics_step'] for row in commands],

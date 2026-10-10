@@ -8,6 +8,7 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 sh calibration/scripts/check.sh
 python tests/test_owner_clock.py
 python tests/test_joint_bounds.py
+python tests/test_recording_preparation.py
 python tests/test_physx_boundary.py
 python tests/test_unified_runtime.py
 python tests/test_http_service.py
@@ -44,6 +45,9 @@ python rule_based_workbench/test_owned_process.py
 python rule_based_workbench/test_native_failure.py
 python rule_based_workbench/test_playground_interrupt.py
 python rule_based_workbench/test_resident_task_receipt.py
+python rule_based_workbench/test_joint_space.py
+python rule_based_workbench/test_playground_plan.py
+python rule_based_workbench/test_playground_sim.py
 for name in test_playground_motiongen_entry test_real_pipeline test_playground_pipeline test_real_acquisition test_physical_motiongen test_initial_state test_real_preparation_app test_frozen_executor; do
     python "rule_based_workbench/$name.py"
 done

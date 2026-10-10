@@ -34,7 +34,7 @@ def camera_intrinsics(rig):
 
 
 class CameraProducer:
-    def __init__(self, intrinsics, root, *, queue_capacity=8, min_free_bytes=2*1024**3):
+    def __init__(self, intrinsics, root, *, queue_capacity=8, min_free_bytes=2*1024**3,recording_guard=None):
         from real_rgbd import Frames, RawSpool
         if set(intrinsics) != set(CAMERAS.values()) or type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError('three cameras and a positive bounded queue required')
@@ -45,7 +45,7 @@ class CameraProducer:
             path = self.root/name
             path.mkdir(parents=True, exist_ok=False)
             self.frames[name] = Frames()
-            self.spools[name] = RawSpool(path, min_free_bytes=min_free_bytes)
+            self.spools[name] = RawSpool(path, min_free_bytes=min_free_bytes,lease_guard=recording_guard)
             self.directories[name] = str(path)
         self.queue = queue.Queue(maxsize=queue_capacity)
         self.closed = threading.Event()
@@ -116,9 +116,10 @@ class CameraProducer:
 
     def _lease_drop_error(self, spool):
         request = spool.root/'recording-request.json'
-        if not request.exists():return None
-        lease = json.loads(request.read_text())
-        start, end = lease.get('start_wall_ns'), lease.get('deadline_wall_ns')
+        try:lease=json.loads(request.read_text())
+        except FileNotFoundError:return None
+        if spool.lease_guard is not None and not spool.lease_guard(lease):return None
+        start, end = lease.get('admission_start_wall_ns',lease.get('start_wall_ns')), lease.get('deadline_wall_ns')
         if type(start) is not int or type(end) is not int:return 'invalid recording lease'
         with self.lock:
             # ponytail: bounded drop history; older leases are unverifiable rather than silently complete.

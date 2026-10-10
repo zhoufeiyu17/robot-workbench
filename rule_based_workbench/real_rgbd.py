@@ -55,9 +55,10 @@ def snapshot_bundle(metadata, color_png, depth_png):
 
 class RawSpool:
     """Local exclusive recording lease; idle preview never saves frame files."""
-    def __init__(self, root, *, clock_ns=time.time_ns, min_free_bytes=2*1024**3):
+    def __init__(self, root, *, clock_ns=time.time_ns, min_free_bytes=2*1024**3,lease_guard=None):
         self.root = Path(root)
         self.clock_ns, self.min_free_bytes = clock_ns, min_free_bytes
+        self.lease_guard=lease_guard
         self.active = None
         self.count = self.size = 0
         self.error = None
@@ -65,16 +66,25 @@ class RawSpool:
 
     def write(self, status, color, depth):
         request = self.root/'recording-request.json'
-        lease = json.loads(request.read_text()) if request.exists() else None
+        try:lease=json.loads(request.read_text())
+        except FileNotFoundError:lease=None
         now = self.clock_ns()
         if lease:
             token = lease.get('run_id')
             start, end = lease.get('start_wall_ns'), lease.get('deadline_wall_ns')
+            admission=lease.get('admission_start_wall_ns',start)
             if (not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token)
-                    or type(start) is not int or type(end) is not int or not 0 < end-start <= 600_000_000_000):
+                    or type(start) is not int or type(end) is not int or not 0 < end-start <= 600_000_000_000
+                    or type(admission) is not int or not 0<admission<=start):
                 raise ValueError('invalid bounded recording lease')
             if not start <= now < end:
                 lease = None
+            elif self.lease_guard is not None and (not self.lease_guard(lease)
+                    or int(status['host_receive_ns'])<admission
+                    or any(status.get(key)!=value for key,value in lease.get('execution_owner',{}).items())):
+                # Fake-only permission at consumption, including delayed encodes
+                # and an os.link which completed after its execution was revoked.
+                lease=None
         if lease and self.active != lease['run_id']:
             self.active = lease['run_id']
             self.count = self.size = 0

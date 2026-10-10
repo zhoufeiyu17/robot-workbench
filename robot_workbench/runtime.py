@@ -383,6 +383,7 @@ class Runtime:
                 root=getattr(recording,'root',None)
                 state['recording']=dict(ready=recording.ready.is_set(),done=recording.done.is_set(),
                     error=recording.error,controller_result=deepcopy(getattr(recording,'controller_result',None)),
+                    diagnostics_error=getattr(recording,'diagnostics_error',None),seal_error=getattr(recording,'seal_error',None),
                     directory=str(root) if root else None,
                     manifest_path=str(root/'manifest.json') if root and manifest else None,
                     manifest={k:deepcopy(v) for k,v in manifest.items() if k!='files'} if manifest else None)

@@ -368,5 +368,71 @@ class RecordingWallClockTest(unittest.TestCase):
                 else:self.assertEqual(path.read_bytes(),before)
                 self.assertEqual(list(Path(temp).iterdir()),[path])
 
+    def test_deferred_renewal_keeps_identity_and_original_frame_admission(self):
+        with TemporaryDirectory() as temp:
+            root=Path(temp);source,plan,binding,_=plan_fixture(300,'fake')
+            now=[1_000_000_000_000];origin=now[0];current=[];active=[True]
+            owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
+            spools={}
+            for camera in CAMERAS:
+                directory=root/camera;directory.mkdir()
+                spools[camera]=RawSpool(directory,clock_ns=lambda:now[0],min_free_bytes=0,
+                    lease_guard=lambda lease:bool(current) and current[0].lease_active(lease))
+            session=RecordingSession(root/'capture/raw',source,plan,binding,environment='fake',execution_owner=owner,
+                camera_directories={camera:str(spool.root) for camera,spool in spools.items()},clock_ns=lambda:now[0],
+                resident_deadline_wall_ns=origin+1245_000_000_000,defer_execution=True,execution_instance_id='renewal-instance',
+                preparation_active=lambda:active[0],preparation_deadline_monotonic=time.monotonic()+1)
+            current.append(session)
+            def publish(index,wall_stamp):
+                stamp=100_000_000_000+index*1_000_000_000//30
+                meta=pair_metadata(serial=source['camera_serials']['head'],camera_name='head',
+                    color_number=index,depth_number=index,color_ms=stamp/1e6,depth_ms=stamp/1e6,
+                    color_domain='simulation',depth_domain='simulation',host_receive_ns=wall_stamp,
+                    depth_scale_m=.001,intrinsics={'fx':600})
+                fake_metadata(meta,stamp,step=24000+index*8)
+                meta['host_receive_ns']=wall_stamp
+                spools[CAMERAS[0]].write(meta,png(),png(True))
+                return meta
+            try:
+                self.assertTrue(session.prepared.wait(2),session.error)
+                requests=[spool.root/'recording-request.json' for spool in spools.values()]
+                initial=[json.loads(path.read_text()) for path in requests]
+                self.assertTrue(all(row['admission_start_wall_ns']==origin for row in initial))
+                now[0]+=2_000_000
+                self.assertFalse(publish(0,origin-1)['recording_enabled'])
+                self.assertTrue(publish(1,origin+1_000_000)['recording_enabled'])
+                for index,elapsed in enumerate((300,400),2):
+                    now[0]=origin+elapsed*1_000_000_000
+                    for path,original in zip(requests,initial):
+                        old=json.loads(path.read_text())
+                        self.assertTrue(_renew_recording_lease(path,old['run_id'],old['deadline_wall_ns'],now[0]+600_000_000_000,
+                            clock_ns=lambda:now[0],active=lambda:session.preparation_current()))
+                        lease=json.loads(path.read_text())
+                        self.assertEqual(lease['execution_instance_id'],original['execution_instance_id'])
+                        self.assertEqual(lease['execution_owner'],original['execution_owner'])
+                        self.assertEqual(lease['admission_start_wall_ns'],origin)
+                        self.assertEqual(lease['start_wall_ns'],now[0])
+                        self.assertEqual(lease['deadline_wall_ns']-lease['start_wall_ns'],600_000_000_000)
+                        self.assertTrue(session.lease_active(lease))
+                    # Encoded after renewal but sampled during the same original
+                    # admission: preserve the old actual stamp and accept it.
+                    queued_at=origin+(elapsed-100)*1_000_000_000
+                    meta=publish(index,queued_at)
+                    self.assertTrue(meta['recording_enabled'])
+                    self.assertEqual(int(meta['host_receive_ns']),queued_at)
+                self.assertEqual(spools[CAMERAS[0]].count,3)
+                self.assertFalse(publish(4,origin-1)['recording_enabled'])
+                lease=json.loads(requests[0].read_text())
+                self.assertFalse(session.lease_active(dict(lease,execution_instance_id='different-instance')))
+                session.finish('stopped','cancel after renewal');self.assertFalse(session.lease_active(lease))
+                self.assertTrue(session.done.wait(2),session.error)
+                # Even a late renewal file cannot reactivate the cancelled guard.
+                requests[0].write_text(json.dumps(lease))
+                self.assertFalse(publish(5,now[0])['recording_enabled'])
+                self.assertEqual(spools[CAMERAS[0]].count,3)
+                requests[0].unlink()
+            finally:
+                active[0]=False;session.finish('stopped','renewal fixture cleanup');session.done.wait(2)
+
 
 if __name__=='__main__':unittest.main()

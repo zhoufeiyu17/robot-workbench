@@ -156,6 +156,15 @@ def classes(ref, *, jaw_mapping_file=None):
             self.owner = owner
             self.payload, self.base = payload, base
             self.recording = None
+            self.preparation_complete=owner.environment!='fake' or owner.recording_factory is None
+            self.preparation_closed=False
+            self.preparation_thread=None
+            self.preparation_error=None
+            self.preparation_deadline=None
+            self.managed_execution_instance=getattr(owner,'execution_instance_id',None)
+            self.execution_instance_id=self.managed_execution_instance or secrets.token_hex(16)
+            self.recording_owner=(owner_identity(dict(owner_pid=os.getpid(),command_epoch=owner.epoch,
+                runtime_nonce=owner.runtime_nonce)) if not self.preparation_complete else None)
             self.runtime_ready = threading.Event()
             self.recording_waits_for_endpoint=False
             self.runtime_started = False
@@ -169,6 +178,66 @@ def classes(ref, *, jaw_mapping_file=None):
             self.frozen.sink = self.submit_target
             self.frozen.gate = self.gate
             self.frozen.stop = lambda reason: self._fault(MotionTrackingError(reason))
+
+        def preparation_current(self):
+            owner=self.owner
+            return (not self.preparation_closed and owner.runner is self and self.status not in ('STOPPED','FAULT')
+                and not owner.stop_requested and not owner.release_requested
+                and owner.epoch==self.recording_owner['command_epoch']
+                and owner.runtime_nonce==self.recording_owner['runtime_nonce']
+                and getattr(owner,'execution_instance_id',None)==self.managed_execution_instance)
+
+        def preparation_fault(self,reason):
+            self.preparation_error=self.preparation_error or str(reason)
+            with self.owner.lock:
+                if (self.owner.runner is self and self.owner.epoch==self.recording_owner['command_epoch']
+                        and getattr(self.owner,'execution_instance_id',None)==self.managed_execution_instance):
+                    self.owner.recording_failed(reason)
+
+        def prepare_recording(self,now):
+            if self.preparation_complete:return True
+            if self.preparation_thread is None:
+                self.preparation_deadline=time.monotonic()+1.
+                self.owner.event('recording_preparation_started',execution_instance_id=self.execution_instance_id,
+                    deadline_monotonic_s=self.preparation_deadline,maximum_wall_s=1.,image_readiness_gate=False)
+                def prepare():
+                    candidate=None
+                    try:
+                        candidate=self.owner.recording_factory(dict(self.payload,execution_owner=self.recording_owner,
+                            recording_preparation=dict(defer_execution=True,execution_instance_id=self.execution_instance_id,
+                                preparation_active=self.preparation_current,preparation_deadline_monotonic=self.preparation_deadline)),
+                            self.preparation_fault)
+                        if not hasattr(candidate,'bind_execution') or not hasattr(candidate,'prepared'):
+                            raise ValueError('fake recording factory must support deferred execution binding')
+                        with self.owner.lock:
+                            current=self.preparation_current()
+                            if current:self.recording=self.owner.recording=candidate
+                        if not current:candidate.finish('stopped','recording preparation revoked before attachment')
+                    except Exception as error:
+                        self.preparation_fault(error)
+                        if candidate is not None:
+                            try:candidate.finish('failed',str(error))
+                            except Exception:pass
+                self.preparation_thread=threading.Thread(target=prepare,daemon=True,name='collection-recording-prepare')
+                self.preparation_thread.start()
+                return False
+            recording=self.recording
+            prepared=recording is not None and recording.prepared.is_set() and not recording.error
+            failed=self.preparation_error is not None or (recording is not None and (recording.error or recording.done.is_set()))
+            if not prepared and not failed and time.monotonic()<self.preparation_deadline:return False
+            if not prepared:
+                self.preparation_closed=True
+                reason=self.preparation_error or (recording.error if recording is not None else None) or 'fake recording preparation exceeded 1 wall second'
+                self.preparation_fault(reason)
+                if recording is not None:recording.fail(reason)
+            self.preparation_complete=True
+            # Resource setup precedes the existing 0.3 source-second window.
+            # Neither this point nor motion waits for image/encoder/writer ready.
+            self.stationary.reset()
+            self.verify_started=self.previous=now
+            self.owner.event('recording_preparation_finished',execution_instance_id=self.execution_instance_id,
+                prepared=prepared,error=self.preparation_error,source_time_s=now,image_readiness_gate=False)
+            return False
 
         def compile_runtime(self, q):
             from execution_timeline import initialize
@@ -219,12 +288,13 @@ def classes(ref, *, jaw_mapping_file=None):
             self.owner.event('execution_initialized', initialization=timeline['initialization'],
                              execution_timeline_digest=timeline['timeline_digest'])
             try:
-                if self.owner.recording_factory:
-                    identity={}
-                    if self.owner.environment=='fake':
-                        identity['execution_owner']=owner_identity(dict(owner_pid=os.getpid(),command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce))
+                if self.owner.environment=='fake':
+                    if self.recording is not None and not self.recording.error and not self.preparation_closed:
+                        self.recording.bind_execution(timeline,execution_instance_id=self.execution_instance_id,
+                            execution_owner=self.recording_owner)
+                elif self.owner.recording_factory:
                     self.recording = self.owner.recording_factory(
-                        dict(self.payload, execution_timeline=timeline,**identity), self.owner.recording_failed)
+                        dict(self.payload, execution_timeline=timeline), self.owner.recording_failed)
             except Exception as error:
                 self.owner.recording_failed(error)
             self.owner.recording = self.recording
@@ -286,6 +356,7 @@ def classes(ref, *, jaw_mapping_file=None):
             return self.last_submission_s
 
         def _fault(self, reason, *, cancelled=False):
+            self.preparation_closed=True
             if self.recording:
                 self.owner.recording_call('finish', 'stopped' if cancelled else 'failed',str(reason))
             return super()._fault(reason,cancelled=cancelled)
@@ -314,6 +385,9 @@ def classes(ref, *, jaw_mapping_file=None):
                     self.previous = now
                     return self.status
                 if self.status == 'VERIFYING':
+                    if not self.prepare_recording(now):
+                        self.previous=now
+                        return self.status
                     if not self.runtime_started and now-self.verify_started > 3:
                         raise ValueError('stationary verification deadline exceeded')
                     if not self.runtime_started and (not self.stationary.update(self.last_sample, q, v) or not all(self.sdk_advanced)):
@@ -611,7 +685,10 @@ def classes(ref, *, jaw_mapping_file=None):
                 return super().start_motion(plan, feedback, reviewed_deadline=reviewed_deadline)
             payload, frozen, base = self.frozen_payloads.pop(plan.sha256)
             self.recording_error = None
-            self.runner = self.timing_probe.call('runner_init', Runner, self, plan, payload, frozen, base)
+            runner = self.timing_probe.call('runner_init', Runner, self, plan, payload, frozen, base)
+            with self.lock:
+                self.runner=runner
+                if self.environment=='fake':self.recording=None
             self.runner.start(self.control_time(), feedback, review_age_s=self.review_age())
 
         def cache_state(self, feedback, limits):

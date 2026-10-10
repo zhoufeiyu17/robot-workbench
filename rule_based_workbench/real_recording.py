@@ -441,7 +441,8 @@ def _renew_recording_lease(request,token,previous_deadline,new_deadline,*,clock_
     temporary=request.with_name(token+'.renew.tmp')
     try:
         with temporary.open('x') as stream:
-            json.dump(dict(run_id=token,start_wall_ns=now,deadline_wall_ns=new_deadline),stream)
+            json.dump(dict(lease,start_wall_ns=now,deadline_wall_ns=new_deadline,
+                admission_start_wall_ns=lease.get('admission_start_wall_ns',lease['start_wall_ns'])),stream)
         if not active():return False
         if request.read_bytes()!=before or clock_ns()>=previous_deadline:
             raise ValueError('recording lease changed or expired before renewal')
@@ -460,7 +461,8 @@ class RecordingSession:
     """
     def __init__(self,root,source,plan,binding,*,camera_directories=None,clock_ns=time.time_ns,
                  capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None,
-                 resident_deadline_wall_ns=None):
+                 resident_deadline_wall_ns=None,defer_execution=False,execution_instance_id=None,
+                 preparation_active=None,preparation_deadline_monotonic=None):
         import queue
         import threading
         self.root=Path(root)
@@ -469,6 +471,21 @@ class RecordingSession:
         if (clock_domain is not None or source_clock_id is not None) and clock_spec(environment,clock_domain=clock_domain,source_clock_id=source_clock_id)!=self.clock:
             raise ValueError('recording session clock differs from source')
         self.execution_owner=execution_owner
+        if type(defer_execution) is not bool:raise ValueError('deferred execution must be explicit boolean')
+        if defer_execution and (environment!='fake' or execution_timeline is not None
+                or not isinstance(execution_instance_id,str) or not execution_instance_id
+                or not callable(preparation_active) or not finite(preparation_deadline_monotonic)
+                or camera_directories is None):
+            raise ValueError('deferred recording requires a fake execution instance and bounded active preparation')
+        if defer_execution:owner_identity(execution_owner)
+        self.defer_execution=defer_execution
+        self.execution_instance_id=execution_instance_id
+        self.preparation_active=preparation_active
+        self.preparation_deadline_monotonic=preparation_deadline_monotonic
+        self.prepared,self.execution_bound,self.cancelled=threading.Event(),threading.Event(),threading.Event()
+        self.preparation_started_wall_ns=clock_ns()
+        self.prepared_wall_ns=self.bound_wall_ns=None
+        self.lease_tokens=set()
         self.events=queue.Queue(maxsize=capacity)
         self.ready,self.done=threading.Event(),threading.Event()
         self.lock=threading.Lock()
@@ -492,11 +509,45 @@ class RecordingSession:
         self.thread.start()
 
     def fail(self,reason):
+        self.cancelled.set()
         with self.lock:
             first=self.error is None
             self.error=self.error or str(reason)
             self.terminal=('failed',self.error,time.monotonic())
         if first:self.on_fault(self.error)
+
+    def preparation_current(self):
+        return (self.defer_execution and not self.done.is_set() and not self.cancelled.is_set() and self.preparation_active()
+            and (self.prepared.is_set() or time.monotonic()<self.preparation_deadline_monotonic))
+
+    def check_preparation(self):
+        if not self.preparation_current():raise ValueError('fake recording preparation expired or execution was revoked')
+
+    def lease_active(self,lease):
+        """Fake producer admission also fences a cancelled in-flight os.link."""
+        return (self.preparation_current() and lease.get('run_id') in self.lease_tokens
+            and lease.get('execution_instance_id')==self.execution_instance_id
+            and lease.get('execution_owner')==self.execution_owner)
+
+    def bind_execution(self,timeline,*,execution_instance_id,execution_owner):
+        # The compiled timeline is private and immutable; validation/file writes
+        # remain on the recorder thread, never on the Owner tick.
+        with self.lock:
+            self.check_preparation()
+            if (not self.prepared.is_set() or self.execution_bound.is_set() or self.execution_timeline is not None
+                    or execution_instance_id!=self.execution_instance_id or execution_owner!=self.execution_owner):
+                raise ValueError('one final timeline for the prepared execution instance required')
+            self.execution_timeline=timeline
+            self.bound_wall_ns=self.clock_ns()
+            self.execution_bound.set()
+
+    def preparation_receipt(self):
+        return dict(schema='fake_recording_preparation.v1',execution_instance_id=self.execution_instance_id,
+            execution_owner=self.execution_owner,clock=self.clock,started_wall_ns=self.preparation_started_wall_ns,
+            prepared_wall_ns=self.prepared_wall_ns,bound_wall_ns=self.bound_wall_ns,
+            preparation_deadline_monotonic_s=self.preparation_deadline_monotonic,
+            prepared=self.prepared.is_set(),execution_bound=self.execution_bound.is_set(),cancelled=self.cancelled.is_set(),
+            error=self.error,lease_tokens=sorted(self.lease_tokens),image_readiness_gate=False)
 
     def submit(self,kind,**fields):
         import queue
@@ -621,6 +672,7 @@ class RecordingSession:
 
     def finish(self,status,reason=None):
         if status not in ('completed','failed','stopped'):raise ValueError('terminal status required')
+        if status!='completed':self.cancelled.set()
         with self.lock:
             self.controller_result=dict(status=status,reason=reason)
             if self.terminal is None:self.terminal=(status,reason,time.monotonic())
@@ -631,6 +683,7 @@ class RecordingSession:
                     directory=str(self.root),manifest_path=str(self.root/'manifest.json') if self.manifest else None,
                     diagnostics=deepcopy(self.diagnostics),
                     diagnostics_error=self.diagnostics_error,seal_error=self.seal_error,
+                    preparation=self.preparation_receipt() if self.defer_execution else None,
                     manifest={k:v for k,v in self.manifest.items() if k!='files'} if self.manifest else None)
 
     def _run(self,source,plan,binding,factory):
@@ -640,11 +693,13 @@ class RecordingSession:
         leases=[]
         lease_deadline_wall_ns=None
         recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
-        try:
-            self.recorder=factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
+        def create_recorder():
+            return factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
                 **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
                 **({'environment':self.environment,'clock_domain':self.clock['clock_domain'],'source_clock_id':self.clock['source_clock_id'],
                     'execution_owner':self.execution_owner} if self.environment=='fake' else {}))
+        try:
+            if not self.defer_execution:self.recorder=create_recorder()
             if self.camera_directories is not None:
                 if set(self.camera_directories)!=set(CAMERAS):raise ValueError('three native RGB-D spool directories required')
                 if self.environment=='fake':
@@ -659,6 +714,7 @@ class RecordingSession:
                     duration=self.recorder.frozen.duration_s+15
                     if not 0 < duration <= 600:raise ValueError('raw recording supports at most 585 seconds of execution')
                 for camera,value in self.camera_directories.items():
+                    if self.defer_execution:self.check_preparation()
                     directory=Path(value).resolve(strict=True)
                     if json.loads((directory/'recording-service.json').read_text()).get('schema') != 'rgbd_lease.v1':
                         raise ValueError(camera+': on-demand recording service required')
@@ -668,12 +724,32 @@ class RecordingSession:
                     token=uuid.uuid4().hex
                     request=directory/'recording-request.json'
                     temporary=directory/(token+'.request.tmp')
-                    temporary.write_text(json.dumps(dict(run_id=token,start_wall_ns=start,
-                                                        deadline_wall_ns=deadline_wall_ns)))
-                    try:os.link(temporary,request)  # Atomic exclusive publish; never replace another run.
-                    finally:temporary.unlink()
+                    lease=dict(run_id=token,start_wall_ns=start,deadline_wall_ns=deadline_wall_ns,
+                        admission_start_wall_ns=start)
+                    if self.defer_execution:
+                        lease.update(execution_instance_id=self.execution_instance_id,execution_owner=self.execution_owner)
+                        self.lease_tokens.add(token)
+                    temporary.write_text(json.dumps(lease))
                     leases.append((request,token))
+                    try:
+                        if self.defer_execution:self.check_preparation()
+                        os.link(temporary,request)  # Atomic exclusive publish; never replace another run.
+                        if self.defer_execution:self.check_preparation()
+                    finally:temporary.unlink()
                     cursors[camera]=(directory/token,1)
+                if self.defer_execution:
+                    self.check_preparation()
+                    self.prepared_wall_ns=self.clock_ns()
+                    self.prepared.set()
+                    while not self.execution_bound.wait(.01):
+                        self.check_preparation()
+                        if self.clock_ns()>=recording_deadline_wall_ns or time.monotonic()>=recording_deadline_monotonic:
+                            raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                        if self.clock_ns()>=lease_deadline_wall_ns:
+                            raise ValueError('recording lease actual wall deadline exceeded')
+                    self.check_preparation()
+                    self.recorder=create_recorder()
+                    self.recorder.write_json('recording-preparation.json',self.preparation_receipt())
                 ready_deadline=time.monotonic()+5
                 while True:
                     self.writer_stage='awaiting_first_frames'
@@ -725,7 +801,8 @@ class RecordingSession:
                     renewed=min(recording_deadline_wall_ns,now+600_000_000_000)
                     for request,token in leases:
                         if not _renew_recording_lease(request,token,lease_deadline_wall_ns,renewed,
-                                clock_ns=self.clock_ns,active=lambda:self.terminal is None):break
+                                clock_ns=self.clock_ns,active=lambda:self.terminal is None
+                                    and (not self.defer_execution or self.preparation_current())):break
                     else:
                         lease_deadline_wall_ns=renewed
                         renew_at_wall_ns=now+(renewed-now)//2
@@ -797,6 +874,11 @@ class RecordingSession:
                     except (FileNotFoundError,OSError):pass
                 except FileNotFoundError:pass
                 except Exception as error:self.fail('recording lease cleanup failed: '+str(error))
+            if self.defer_execution and self.recorder is None:
+                try:
+                    self.root.parent.mkdir(parents=True,exist_ok=True)
+                    (self.root.parent/'recording-preparation.json').write_text(json.dumps(self.preparation_receipt(),allow_nan=False))
+                except Exception as error:self.diagnostics_error=f'preparation receipt: {type(error).__name__}: {error}'
             self.done.set()
 
 

@@ -209,7 +209,11 @@ def run(args, base, nominal):
             events.put_nowait(dict(kind='_native_task_receipt',owner=owner,receipt=receipt))
         task_observer=NativeTaskObserver(env._m2_runtime,backend,plant_fixture,task_receipt)
         intrinsics=camera_intrinsics(env.cfg.d405_rig)
-        producer=CameraProducer(intrinsics,args.output/'camera-spool')
+        def recording_guard(lease):
+            owner=backend.owner
+            recording=getattr(owner,'recording',None) if owner else None
+            return recording is not None and recording.lease_active(lease)
+        producer=CameraProducer(intrinsics,args.output/'camera-spool',recording_guard=recording_guard)
         ports=producer.start_servers(dict(zip(CAMERAS,args.camera_ports)))
         from real_recording import RecordingSession
         recording_root=args.output/'collection-raw'
@@ -218,9 +222,9 @@ def run(args, base, nominal):
             binding=json.loads((args.output/'collection-binding.json').read_text())
             return RecordingSession(recording_root/secrets.token_hex(16)/'raw',
                 payload['source'],payload['plan'],binding,camera_directories=producer.directories,
-                execution_timeline=payload['execution_timeline'],environment='fake',
+                execution_timeline=payload.get('execution_timeline'),environment='fake',
                 execution_owner=payload.get('execution_owner'),on_fault=on_fault,
-                resident_deadline_wall_ns=resident_deadline_wall_ns)
+                resident_deadline_wall_ns=resident_deadline_wall_ns,**payload.get('recording_preparation',{}))
         token_files={};tokens={}
         for business in ('calibration','collection'):
             path=args.output/(business+'-gateway-token')
