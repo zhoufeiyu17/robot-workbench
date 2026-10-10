@@ -640,18 +640,20 @@ def classes(ref, *, jaw_mapping_file=None):
                     raise ValueError('frozen target exceeds SDK joint limits')
             from execution_timeline import prepare
             base = prepare(payload['plan'])
-            with self.lock:
-                current = self.cache
-                if self.epoch != preview_epoch or current.get('joint_limits') != limits:
+            # A shared-runtime compiler owns frozen inputs, not a ticking feedback cache.
+            guard = getattr(self, '_preview_live_owner', self)
+            with guard.lock:
+                current = guard.cache
+                if guard.epoch != preview_epoch or current.get('joint_limits') != limits:
                     raise ValueError('owner epoch or joint limits changed during preview')
                 if (not current.get('feedback_healthy') or not current.get('stationary') or current.get('automatic_enabled')
-                        or self.stop_requested or self.release_requested or current.get('command_epoch') != self.epoch
+                        or guard.stop_requested or guard.release_requested or current.get('command_epoch') != guard.epoch
                         or current.get('state') not in ('READY','STOPPED_DAMPING_HOLD','MANUAL_TAKEOVER')):
                     raise ValueError('fresh stationary healthy owner required')
                 raw = current['calibration_feedback']
-                if not 0 <= self.control_time()-raw['sample_time_s'] <= .1:
+                if not 0 <= guard.control_time()-raw['sample_time_s'] <= .1:
                     raise ValueError('feedback cache expired')
-                press = self.pedal_snapshot()
+                press = guard.pedal_snapshot()
                 if press[1:] != (False, True):
                     raise ValueError('pedal must be released and healthy')
                 first = frozen.ticks[0]['target']

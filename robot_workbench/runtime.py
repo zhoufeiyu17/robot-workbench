@@ -4,6 +4,7 @@ The embedding service supplies the reviewed backend factory/initialization and
 runs tick() on its sole control thread. A local lock excludes cooperating owners,
 not arbitrary external CAN programs. SDK return evidence is not firmware ACK.
 """
+from contextlib import contextmanager
 from copy import copy, deepcopy
 import fcntl
 import hashlib
@@ -56,6 +57,7 @@ class Runtime:
         self.device_id, self.environment = device_id, environment
         self.nonce, self.holder = secrets.token_hex(24), initial_holder
         self.lock, self.tick_lock = threading.RLock(), threading.Lock()
+        self.tick_idle = threading.Condition(self.lock)
         self.clients, self.calls, self.hold = {}, {}, {'left': None, 'right': None}
         self.hold_returns = {'left': None, 'right': None}
         self.call_sequence, self.preview_revision = 0, 0
@@ -202,6 +204,15 @@ class Runtime:
                 call['returned_monotonic_s'] = time.monotonic()
                 self.last_return = call
                 self.calls.pop(call['id'])
+                self.tick_idle.notify_all()
+
+    @contextmanager
+    def _preview_boundary(self):
+        with self.lock:
+            # Waiting releases the runtime lock: stop and the current SDK return stay independent.
+            if not self.tick_idle.wait_for(lambda:not self.tick_lock.locked() and not self.calls, timeout=.1):
+                raise ValueError('control tick or SDK call is still in flight after 0.1s preview boundary wait')
+            yield
 
     def _release_reason(self):
         owner = self.owner
@@ -272,7 +283,7 @@ class Runtime:
         action = command.get('action')
         if action == 'release':
             return self.request_release(credential, command)
-        with self.lock:
+        with self._preview_boundary() if action in CALIBRATION_PREVIEWS | COLLECTION_PREVIEWS else self.lock:
             business = self._authenticate(credential)
             if action == 'stop':
                 result = self.ref.Owner.submit(self.owner, command)
@@ -307,6 +318,7 @@ class Runtime:
                     compiler = copy(self.owner)
                     compiler.lock = threading.RLock()
                     compiler.cache = deepcopy(self.owner.cache)
+                    compiler._preview_live_owner = self.owner
                     compiler.pending, compiler.frozen_payloads, compiler.alignment_plans = {}, {}, {}
                     compiler.commands = queue.Queue(maxsize=16)
                 method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
@@ -321,7 +333,7 @@ class Runtime:
                 return method(self.owner, command)
         # No runtime/owner lock around full plan validation and hashing.
         result = method(compiler, command)
-        with self.lock, self.owner.lock:
+        with self._preview_boundary(), self.owner.lock:
             if (self.holder != business or self.owner.epoch != epoch or self.preview_revision != revision
                     or self._idle_reason() or self.owner.cache.get('joint_limits') != compiler.cache.get('joint_limits')
                     or self.owner.pedal_snapshot() != pedal):
@@ -388,8 +400,9 @@ class Runtime:
                 self.tick_lock.release()
 
     def tick(self):
-        if not self.tick_lock.acquire(blocking=False):
-            raise RuntimeError('only one control tick may run at a time')
+        with self.lock:
+            if not self.tick_lock.acquire(blocking=False):
+                raise RuntimeError('only one control tick may run at a time')
         try:
             if self.fd is None:
                 raise RuntimeError('runtime closed')
@@ -405,7 +418,9 @@ class Runtime:
                         receipt.update(stop_hold_return_confirmed=True, sdk_hold_returns=deepcopy(self.hold_returns))
             return result
         finally:
-            self.tick_lock.release()
+            with self.lock:
+                self.tick_lock.release()
+                self.tick_idle.notify_all()
 
     def snapshot(self, credential):
         with self.lock:

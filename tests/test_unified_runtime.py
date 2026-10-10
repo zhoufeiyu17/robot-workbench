@@ -264,7 +264,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
             resume.set(); worker.join(2.)
         self.assertFalse(worker.is_alive())
         self.assertIsInstance(result[0], ValueError)
-        self.assertIn('revoked',str(result[0]))
+        self.assertIn('changed during preview',str(result[0]))
         self.assertFalse(runtime.owner.pending)
         self.assertFalse(runtime.owner.frozen_payloads)
 
@@ -280,6 +280,128 @@ class UnifiedRuntimeTest(unittest.TestCase):
         runtime, creds = self.create(device=name, q=q, mapping=mapping, binding=directory/'binding.json')
         runtime.handoff(creds['calibration'], 'collection')
         return runtime, creds, dict(action='preview_frozen', source=source, plan=plan)
+
+    def test_collection_compilation_uses_live_guard_and_publishes_only_after_final_recheck(self):
+        for case in ('source','wall','stale','stop','release','epoch','limits','pedal','revision'):
+            with self.subTest(case=case):
+                runtime, creds, command = self.collection_case('live-guard-'+case)
+                if case == 'wall':
+                    runtime.owner.control_clock = None
+                    runtime.owner.backend.clock = time.monotonic
+                    for _ in range(42):
+                        runtime.tick(); time.sleep(.01)
+                entered, resume, compiled, publish = (threading.Event() for _ in range(4))
+                original, submit, result = runtime.owner.source_validator, runtime.collection.submit, []
+                events = list(runtime.owner.backend.events)
+                stamp = runtime.owner.cache['calibration_feedback']['sample_time_s']
+                def slow(*args):
+                    entered.set(); self.assertTrue(resume.wait(3.)); return original(*args)
+                def hold_compiled(compiler, payload):
+                    review = submit(compiler, payload)
+                    if payload['action'] != 'preview_frozen':return review
+                    self.assertTrue(compiler.pending)
+                    compiled.set(); self.assertTrue(publish.wait(3.))
+                    return review
+                def preview():
+                    try:result.append(runtime.submit(creds['collection'], command))
+                    except Exception as error:result.append(error)
+                with patch.object(runtime.owner, 'source_validator', slow), \
+                     patch.object(runtime.collection, 'submit', hold_compiled):
+                    worker = threading.Thread(target=preview); worker.start()
+                    try:
+                        self.assertTrue(entered.wait(1.))
+                        for _ in range(20):
+                            if case != 'wall':self.sim += .01
+                            runtime.tick(); time.sleep(.01)
+                        if case == 'wall':runtime.tick()
+                        live = runtime.owner.cache['calibration_feedback']['sample_time_s']
+                        self.assertGreater(runtime.owner.control_time()-stamp, .1)
+                        self.assertLess(runtime.owner.control_time()-live, .1)
+                        self.assertIsNone(runtime._idle_reason())
+                        self.assertFalse(runtime.owner.pending)
+                        self.assertFalse(runtime.owner.frozen_payloads)
+                        if case == 'stale':self.sim += .101
+                        elif case in ('stop','release'):
+                            runtime.submit(creds['collection'], dict(action=case, **(
+                                {'confirmation':'ARMS_SUPPORTED_RELEASE'} if case=='release' else {})))
+                        elif case == 'epoch':runtime.owner.epoch += 1
+                        elif case == 'limits':runtime.owner.cache['joint_limits'][0][0] += .01
+                        elif case == 'pedal':runtime.owner.pedal_snapshot = lambda:(1, False, True)
+                        elif case == 'revision':runtime.preview_revision += 1
+                        resume.set()
+                        if case in ('source','wall','pedal','revision'):
+                            self.assertTrue(compiled.wait(1.))
+                            self.assertFalse(runtime.owner.pending, 'compiler published before the final runtime gate')
+                            self.assertFalse(runtime.owner.frozen_payloads)
+                    finally:
+                        resume.set(); publish.set(); worker.join(3.)
+                self.assertFalse(worker.is_alive())
+                if case in ('source','wall'):
+                    self.assertIn(result[0]['token'], runtime.owner.pending)
+                    self.assertEqual(runtime.owner.cache['calibration_feedback']['sample_time_s'], live)
+                else:
+                    self.assertIsInstance(result[0], ValueError)
+                    self.assertFalse(runtime.owner.pending)
+                    self.assertFalse(runtime.owner.frozen_payloads)
+                    if case == 'stale':self.assertIn('feedback cache expired', str(result[0]))
+                    if case in ('pedal','revision'):self.assertIn('revoked', str(result[0]))
+                self.assertEqual(runtime.owner.backend.events, events, 'preview compilation touched the backend')
+
+    def test_preview_tick_boundary_keeps_normal_feedback_and_stop_independent(self):
+        from test_l1_fault_matrix import Harness
+        for phase, blocked in (('final',False),('initial',True),('final',True)):
+            with self.subTest(phase=phase, blocked=blocked):
+                h = Harness()
+                armed, entered, release = (threading.Event() for _ in range(3))
+                try:
+                    runtime = h.runtime
+                    runtime.handoff(h.credentials['calibration'], 'collection')
+                    original, result, waits = runtime.collection.submit, [], []
+                    wait_for = runtime.tick_idle.wait_for
+                    def read_delay():
+                        if armed.is_set():
+                            armed.clear(); entered.set()
+                            if blocked:self.assertTrue(release.wait(2.))
+                            else:time.sleep(.008)
+                    def compiled(compiler, command):
+                        review = original(compiler, command)
+                        if phase == 'final' and command['action'] == 'preview_frozen':
+                            armed.set(); self.assertTrue(entered.wait(1.))
+                        return review
+                    def wait(predicate, timeout):
+                        waits.append(not predicate())
+                        return wait_for(predicate, timeout)
+                    def preview():
+                        try:result.append(h.preview('collection'))
+                        except Exception as error:result.append(error)
+                    h.sdk.read_delay = read_delay
+                    with patch.object(runtime.collection, 'submit', compiled), \
+                         patch.object(runtime.tick_idle, 'wait_for', wait):
+                        if phase == 'initial':
+                            armed.set(); self.assertTrue(entered.wait(1.))
+                        worker = threading.Thread(target=preview); worker.start()
+                        try:
+                            self.assertTrue(entered.wait(1.))
+                            if blocked:
+                                started = time.monotonic()
+                                receipt = runtime.submit(h.credentials['collection'], dict(action='stop'))
+                                self.assertLess(time.monotonic()-started, .1)
+                                self.assertFalse(receipt['stop']['prior_calls_complete'])
+                                with self.assertRaisesRegex(ValueError, 'in flight'):
+                                    runtime.handoff(h.credentials['collection'], 'calibration')
+                            worker.join(.5)
+                            self.assertFalse(worker.is_alive(), 'preview boundary wait is unbounded')
+                            self.assertIn(True, waits, 'normal running feedback was not overlapped')
+                            if blocked:
+                                self.assertIsInstance(result[0], ValueError)
+                                self.assertIn('preview boundary wait', str(result[0]))
+                                self.assertFalse(runtime.owner.pending)
+                                self.assertFalse(runtime.owner.frozen_payloads)
+                            else:self.assertIn(result[0]['token'], runtime.owner.pending)
+                            self.assertTrue(h.allow_tick.is_set(), 'normal feedback clock was paused')
+                            self.assertFalse(h.sdk.trace, 'preview submitted motion')
+                        finally:release.set(); worker.join(2.)
+                finally:release.set(); h.close()
 
     def test_install_revokes_unconfirmed_preview_without_changing_epoch_or_hold(self):
         runtime, creds = self.create()
