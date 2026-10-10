@@ -170,6 +170,12 @@ def load_collection_contract(path,output,gpu,duration):
     elif value.get('preview_setup') is not None:raise ValueError('preview cannot enter the four-role contract')
     if not any(Path(output).resolve().is_relative_to(Path(root).resolve()) for root in value['filesystem']['writable_roots']):
         raise ValueError('resident output is outside the collection contract')
+    if 'camera_spool_root' in value:
+        spool=Path(value['camera_spool_root'])
+        if (not spool.is_absolute() or spool.exists() or spool.is_symlink() or not spool.parent.is_dir()
+                or Path(output).resolve().is_relative_to(spool.resolve())
+                or spool.resolve() not in {Path(root).resolve() for root in value['filesystem']['writable_roots']}):
+            raise ValueError('camera spool requires a new exclusive directory explicitly declared writable')
     if set(details)!={'profile_template','detection_runtime_root','plant_max_memory_mib','min_free_memory_mib'}:
         raise ValueError('explicit collection template/runtime and bounded memory fields required')
     for key in ('profile_template','detection_runtime_root'):

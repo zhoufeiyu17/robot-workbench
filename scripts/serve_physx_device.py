@@ -213,7 +213,7 @@ def run(args, base, nominal):
             owner=backend.owner
             recording=getattr(owner,'recording',None) if owner else None
             return recording is not None and recording.lease_active(lease)
-        producer=CameraProducer(intrinsics,args.output/'camera-spool',recording_guard=recording_guard)
+        producer=CameraProducer(intrinsics,args.camera_spool_root,recording_guard=recording_guard)
         ports=producer.start_servers(dict(zip(CAMERAS,args.camera_ports)))
         from real_recording import RecordingSession
         recording_root=args.output/'collection-raw'
@@ -458,6 +458,7 @@ def main():
         args.collection_spec=load_collection_contract(args.collection_contract,args.output,args.gpu,args.duration_wall_s)
     from robot_workbench.service import loopback_browser_hosts
     args.browser_ports=list((args.collection_spec or {}).get('browser_ports',[]))
+    args.camera_spool_root=Path((args.collection_spec or {}).get('camera_spool_root',args.output/'camera-spool')).resolve()
     browser_hosts=loopback_browser_hosts(args.browser_ports)
     base=json.loads(args.base.read_text())
     args.plant_joint_offsets_rad=plant_joint_offsets(base)
@@ -468,7 +469,9 @@ def main():
         raise ValueError('nominal estimator assets differ from this frozen plant A1 identity')
     checked=preflight(base)
     checked['plant_joint_offsets_rad']=list(args.plant_joint_offsets_rad)
-    checked.update(browser_ports=args.browser_ports,browser_hosts=sorted(browser_hosts))
+    checked.update(browser_ports=args.browser_ports,browser_hosts=sorted(browser_hosts),
+        camera_spool_root=str(args.camera_spool_root),
+        camera_spool_retention='consume only after durable raw archive; preserve remaining files for tracked cleanup')
     if args.collection_spec:
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
@@ -482,6 +485,7 @@ def main():
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)
+    args.camera_spool_root.mkdir(exist_ok=False)
     started_wall_ns=time.time_ns();args.resident_deadline_wall_ns=started_wall_ns+round(args.duration_wall_s*1e9)
     save(args.output/'run.json',dict(pid=os.getpid(),started_wall_ns=started_wall_ns,duration_wall_s=args.duration_wall_s,
         resident_deadline_wall_ns=args.resident_deadline_wall_ns,

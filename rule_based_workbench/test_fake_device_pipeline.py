@@ -233,11 +233,38 @@ class FakeDeviceContractTest(unittest.TestCase):
                     recorder.record_rgbd(camera,snapshot_bundle(meta,png(),png(True)))
             manifest=recorder.seal('completed')
             self.assertEqual(manifest['capture_status'],'complete',manifest['validation'])
+            scratch_inputs=[];expected_scratch=None
             def encoder(argv,**kwargs):
-                if argv[0]=='ffmpeg':Path(argv[-1]).write_bytes(b'0000ftyp-fake');return SimpleNamespace(stdout='')
+                if argv[0]=='ffmpeg':
+                    concat=Path(argv[argv.index('-i')+1]);scratch_inputs.append(concat)
+                    self.assertEqual(concat.parent.parent,expected_scratch)
+                    self.assertEqual(len(list(concat.parent.glob(concat.stem+'-*.png'))),5)
+                    self.assertTrue(all(path.read_bytes()==png() for path in concat.parent.glob('*.png')))
+                    Path(argv[-1]).write_bytes(b'0000ftyp-fake');return SimpleNamespace(stdout='')
                 return SimpleNamespace(stdout=json.dumps({'streams':[dict(codec_name='h264',pix_fmt='yuv420p',nb_read_frames='5',duration='.167')]}))
             artifact=root/'artifact'
+            expected_scratch=(artifact/'playback').resolve()
             replay=export_playback(raw,None,artifact/'playback',environment='fake',runner=encoder)
+            self.assertTrue(all(not path.exists() for path in scratch_inputs))
+            scratch=root/'declared-camera-spool';scratch.mkdir();expected_scratch=scratch.resolve()
+            retained=scratch/'base_0'/'unconsumed.zip';retained.parent.mkdir();retained.write_bytes(b'retain original spool evidence')
+            fast=export_playback(raw,None,artifact/'fast-playback',environment='fake',runner=encoder,scratch_root=scratch)
+            self.assertEqual(fast,replay,'temporary location must not change PTS, codec, pixels or manifest')
+            self.assertTrue(all(not path.exists() for path in scratch_inputs))
+            for error_type in (OSError,InterruptedError):
+                def failed_encoder(argv,**kwargs):
+                    scratch_inputs.append(Path(argv[argv.index('-i')+1]))
+                    raise error_type('export fixture failure')
+                with self.assertRaises(error_type):
+                    export_playback(raw,None,artifact/error_type.__name__,environment='fake',runner=failed_encoder,scratch_root=scratch)
+                self.assertTrue(all(not path.exists() for path in scratch_inputs))
+                self.assertEqual(retained.read_bytes(),b'retain original spool evidence')
+                self.assertEqual(list(scratch.iterdir()),[retained.parent])
+            for invalid in (Path('relative-scratch'),root/'missing-scratch',raw):
+                with self.assertRaisesRegex(ValueError,'fake playback scratch'):
+                    export_playback(raw,None,artifact/'invalid-scratch',environment='fake',runner=encoder,scratch_root=invalid)
+            with self.assertRaisesRegex(ValueError,'fake playback scratch'):
+                export_playback(raw,None,artifact/'physical-scratch',runner=encoder,scratch_root=scratch)
             self.assertEqual(replay['schema_version'],'fake_device_workbench_playback.v1')
             self.assertEqual(replay['provenance'],{'source':'fake_device_rgbd'})
             self.assertEqual(replay['source_timing']['base_0']['clock'],'simulation')

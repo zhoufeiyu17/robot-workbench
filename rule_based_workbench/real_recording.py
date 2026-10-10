@@ -348,9 +348,15 @@ def verify_raw(root, *, environment='physical'):
     return manifest,source,plan
 
 
-def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run,environment='physical'):
+def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run,environment='physical',scratch_root=None):
     """Derived videos may exist for a failed run; raw/task outcome stays explicit."""
     raw_root = Path(raw_root).resolve()
+    if scratch_root is not None:
+        scratch_root=Path(scratch_root)
+        if (environment!='fake' or not scratch_root.is_absolute() or '..' in scratch_root.parts
+                or scratch_root.is_symlink() or not scratch_root.is_dir() or scratch_root.resolve().is_relative_to(raw_root)):
+            raise ValueError('fake playback scratch must be an existing explicit directory outside sealed raw')
+        scratch_root=scratch_root.resolve()
     target_manifest_path = Path(target_manifest_path).resolve() if target_manifest_path is not None else None
     spec=namespace(environment)
     raw,source,plan = verify_raw(raw_root,environment=environment)
@@ -378,7 +384,7 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     clock=clock_for_source(source,environment)
     first_command=json.loads((raw_root/'commands.jsonl').read_text().splitlines()[0])
     command_start = sample_stamp(first_command,clock,wall_key='send_wall_ns',source_key='send_source_time_ns',require_step=False)[0]
-    with tempfile.TemporaryDirectory(dir=output) as temporary:
+    with tempfile.TemporaryDirectory(dir=scratch_root if scratch_root is not None else output) as temporary:
         temporary = Path(temporary)
         for camera,rows in frames.items():
             stamps = [sample_stamp({**row,'host_receive_ns':int(row['host_receive_ns'])},clock)[0] for row in rows]

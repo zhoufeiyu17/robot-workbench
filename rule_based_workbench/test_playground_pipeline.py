@@ -256,6 +256,7 @@ def main():
         assert 'raw_source_dir' not in raw_resolver.call_args.args[0], 'do not export stale raw'
         assert raw_resolver.call_args.args[1]['directory'] == str(raw)
         assert exporter.call_args.args[0] == raw
+        assert 'scratch_root' not in exporter.call_args.kwargs,'physical export must keep its existing temporary location'
         physical_contract=Path(json.loads(Path(prepared['config_path']).read_text())['contract_path'])
         physical_limits=json.loads(physical_contract.read_text())
         physical_limits['resources']['max_replay_time_seconds']=180
@@ -408,10 +409,25 @@ def main():
         fake_contract=json.loads(Path(fake_cfg['contract_path']).read_text())
         fake_cfg.update(environment='fake',execution={'transport':'local'},resident_deadline_wall_ns=900_000_000_000,
                         contract_path=str(root/'fake-contract.json'))
+        scratch=root/'explicit-camera-spool';scratch.mkdir()
+        for name in ('base_0','left_wrist_0','right_wrist_0'):(scratch/name).mkdir()
+        bridge.config['cameras']={name:{'recording_directory':str(scratch/name)} for name in ('base_0','left_wrist_0','right_wrist_0')}
+        fake_cfg['execution']['plant']={'scope':str(root/'resident')}
+        fake_contract['camera_spool_root']=str(scratch)
+        fake_contract['filesystem']['writable_roots'].append(str(scratch))
         fake_contract['resources']['resident_deadline_wall_ns']=fake_cfg['resident_deadline_wall_ns']
         (root/'fake-config.json').write_text(json.dumps(fake_cfg));(root/'fake-contract.json').write_text(json.dumps(fake_contract))
         fake_prepared=dict(prepared,environment='fake',config_path=str(root/'fake-config.json'))
         bridge.config['environment']='fake'
+        saved_roots=list(fake_contract['filesystem']['writable_roots'])
+        fake_contract['filesystem']['writable_roots'].remove(str(scratch));actions.clear()
+        (root/'fake-contract.json').write_text(json.dumps(fake_contract))
+        try:pipeline.execute(configured,root/'untrusted-playback-scratch',bridge,fake_prepared)
+        except ValueError as error:assert 'declared writable root' in str(error)
+        else:raise AssertionError('undeclared playback scratch accepted')
+        assert not actions,'scratch admission must fail before any control request'
+        fake_contract['filesystem']['writable_roots']=saved_roots
+        (root/'fake-contract.json').write_text(json.dumps(fake_contract))
         owner_fields.clear();recording_fields.clear();actions.clear()
         owner_fields.update(feedback_healthy=True,execution_timeline={'command_count':20},
                             native_task={'task_outcome':'success','task_qualified':True,'receipt_path':'unverified-owner-pointer'})
@@ -428,6 +444,7 @@ def main():
             result=pipeline.execute(configured,root/'resident-slow',bridge,fake_prepared,
                                     progress=lambda label,**kw:events.append(dict(label=label,**kw)))
         assert clock[0]==160 and not owner_sequence and result['status']=='completed'
+        assert exporter.call_args.kwargs['scratch_root']==str(scratch)
         assert result['task_outcome']=='unverified', 'unvalidated Owner pointer or independent L3 receipt qualified L2 task'
         assert result['simulation']['scope']=='L3_auxiliary_independent_target' and result['simulation']['task_success_evidence'] is False
         assert result['native_task']['receipt_verified'] is False

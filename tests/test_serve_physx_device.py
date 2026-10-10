@@ -31,8 +31,16 @@ class ResidentConfigurationTest(unittest.TestCase):
                 filesystem={'writable_roots':[str(root)]},resources=dict(gpu_uuid=TARGET['gpu_uuid'],cuda_visible_devices=[1],
                     max_workers=4,max_cpu_threads=4,service_lifetime_seconds=600,max_wall_time_minutes=11),
                 collection_setup=dict(profile_template=str(template),detection_runtime_root=str(runtime),plant_max_memory_mib=12288,min_free_memory_mib=16384),
-                browser_ports=[18867])
+                browser_ports=[18867],camera_spool_root=str(root/'private-spool'))
+            contract['filesystem']['writable_roots'].append(contract['camera_spool_root'])
             contract_path=root/'contract.json';contract_path.write_text(json.dumps(contract))
+            from robot_workbench.resident_collection import load_collection_contract
+            for spool in ('relative-spool',str(root/'undeclared'),str(runtime),str(root)):
+                invalid=deepcopy(contract);invalid['camera_spool_root']=spool
+                contract_path.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError,'camera spool'):
+                    load_collection_contract(contract_path,root/'output',1,300)
+            contract_path.write_text(json.dumps(contract))
             for configured in (False,True):
                 output=root/('forwarded' if configured else 'default')
                 argv=['serve','--base',str(base),'--nominal-config',str(nominal_path),'--output',str(output),'--gpu','1','--duration-wall-s','300']
@@ -47,8 +55,12 @@ class ResidentConfigurationTest(unittest.TestCase):
                     self.assertEqual(report['browser_ports'],[18867] if configured else [])
                     self.assertEqual(report['browser_hosts'],['127.0.0.1:18867','localhost:18867'] if configured else [])
                     run.assert_not_called();self.assertFalse(output.exists())
+                    self.assertFalse(Path(report['camera_spool_root']).exists())
                     with patch.object(sys,'argv',argv):serve_physx_device.main()
                     self.assertEqual(run.call_args.args[0].browser_ports,report['browser_ports'])
+                    spool=Path(report['camera_spool_root'])
+                    self.assertTrue(spool.is_dir())
+                    self.assertEqual(spool,(root/'private-spool' if configured else output/'camera-spool').resolve())
                     self.assertEqual(json.loads((output/'run.json').read_text())['browser_ports'],report['browser_ports'])
             self.assertNotIn('isaaclab.app',sys.modules)
 

@@ -32,6 +32,23 @@ def inside(path,root,*,exists=True):
     return path.resolve()
 
 
+def validated_spool_directories(values,contract,run_root):
+    """An external spool is only the exact camera tree admitted by this contract."""
+    root=Path(run_root).resolve()
+    declared=contract.get('camera_spool_root')
+    if declared is not None:
+        spool=Path(declared)
+        if (not spool.is_absolute() or '..' in spool.parts or spool.is_symlink() or not spool.is_dir()
+                or root.is_relative_to(spool.resolve())
+                or spool.resolve() not in {Path(p).resolve() for p in contract.get('filesystem',{}).get('writable_roots',[]) if Path(p).is_absolute()}):
+            raise ValueError('camera spool requires its exact declared writable root')
+        root=spool.resolve()
+    directories={key:str(inside(value,root)) for key,value in values.items()}
+    if declared is not None and directories!={name:str(root/name) for name in ('base_0','left_wrist_0','right_wrist_0')}:
+        raise ValueError('camera directories must be the three declared spool children')
+    return directories
+
+
 def loopback(url):
     parsed=urlsplit(url)
     if (parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port
@@ -103,7 +120,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         raise ValueError('D must use the same three C resident camera producers')
     for value in producer_ports.values():
         if type(value) is not int or not 0<value<65536:raise ValueError('valid loopback producer ports required')
-    directories={key:str(inside(value,root)) for key,value in producer_directories.items()}
+    directories=validated_spool_directories(producer_directories,contract_template,root)
     if any(read(Path(value)/'recording-service.json').get('schema')!='rgbd_lease.v1' for value in directories.values()):
         raise ValueError('resident producer raw lease protocol missing')
     if len(token.read_text().strip())<32:raise ValueError('current collection gateway token missing')
@@ -126,6 +143,8 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         # Startup fixture equality is already admitted. D receives only the
         # builder's calibration/model inputs, never its truth/base admission pins.
         contract_template.pop('filesystem',None)  # finalize rebuilds D roots from its actual inputs.
+        if contract_template.get('camera_spool_root') is not None:
+            contract_template['filesystem']=dict(writable_roots=[str(Path(contract_template['camera_spool_root']).resolve())])
         admission={Path(path).resolve() for path in admission_source['input_sha256']}
         for group in contract_template.get('provenance',{}).values():
             if not isinstance(group,dict):continue
@@ -184,6 +203,7 @@ def finalize_collection_setup(setup_path):
     output=Path(setup['root']);pipeline=deepcopy(setup['pipeline'])
     if not output.resolve().is_relative_to(Path(setup['resident_root']).resolve()):
         raise ValueError('setup output escaped the current resident scope')
+    validated_spool_directories(setup['producer_directories'],setup['contract_template'],setup['resident_root'])
     target=output/'native-assets';binding=read(target/'a1-binding.json')
     profile=read(output/'calibration'/'profile.json')
     if (binding.get('schema')!='a1_isaac_assets.v1' or binding.get('conversion_complete') is not True
@@ -274,6 +294,8 @@ def finalize_collection_setup(setup_path):
     pipeline['detector_service']=service;contract['detector_service']=deepcopy(service)
     contract['filesystem']=dict(readonly_roots=read_roots,writable_roots=[str(jobs/'template'),str(jobs),
         str(capture),str(parent),str(detector_root),execution['plant']['scope']],allow_overwrite=False,allow_delete=False)
+    if contract.get('camera_spool_root') is not None:
+        contract['filesystem']['writable_roots'].append(str(Path(contract['camera_spool_root']).resolve()))
     contract['provenance']=dict(input_sha256=pins,code_sha256=code,prompt_sha256=inherited['prompt_sha256'],config_sha256={})
     pipeline['contract_path']=str(output/'pipeline-contract.json')
     path=write(output/'pipeline-template.json',pipeline)

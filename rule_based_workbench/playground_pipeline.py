@@ -579,6 +579,11 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
     if cfg.get('environment','physical')!=environment or prepared.get('environment',environment)!=environment:
         raise ValueError('prepared plan environment differs from this workbench')
     resident=environment=='fake' and (cfg.get('execution') or {}).get('transport')=='local'
+    scratch_root=contract.get('camera_spool_root') if resident else None
+    if scratch_root is not None:
+        from robot_workbench.collection_setup import validated_spool_directories
+        validated_spool_directories({name:row.get('recording_directory','') for name,row in bridge.config.get('cameras',{}).items()},
+                                   contract,cfg['execution']['plant']['scope'])
     original=json.loads(Path(prepared['plan_path']).read_text())
     source=json.loads(Path(prepared['source_path']).read_text()); binding=json.loads(Path(prepared['hardware_binding']).read_text())
     remote_plan=cfg['remote_run_root']+'/playground-plan/plan.json'
@@ -726,7 +731,8 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
             try:
                 from cancellable_process import run
                 export_playback(raw,None,output/'physical-video',runner=lambda argv,**kw:run(argv,cancel=cancel,**kw),
-                                **({'environment':environment} if environment=='fake' else {}))
+                                **({'environment':environment} if environment=='fake' else {}),
+                                **({'scratch_root':scratch_root} if scratch_root is not None else {}))
             except InterruptedError:
                 raise
             except Exception as error:

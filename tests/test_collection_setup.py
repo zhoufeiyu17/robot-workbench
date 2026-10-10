@@ -83,7 +83,7 @@ def inputs(root):
 
 
 def main(a1,roles=4):
-    with tempfile.TemporaryDirectory() as temp:
+    with tempfile.TemporaryDirectory() as temp,tempfile.TemporaryDirectory() as spool_temp:
         root=Path(temp).resolve();capture,active,cconfig,installed,registration=fixture(root,Path(a1).resolve())
         base,contract,runtime_root,external=inputs(root)
         # These startup-only pins deliberately sit inside an otherwise accepted
@@ -142,11 +142,23 @@ def main(a1,roles=4):
             rejects(lambda:prepare_collection_setup(**options,output=root/'old-clock'));batch.write_bytes(saved_batch)
             changed_contract=deepcopy(contract);changed_contract['provenance']['code_sha256'][external['native']]='0'*64
             rejects(lambda:prepare_collection_setup(**{**options,'contract_template':changed_contract},output=root/'bad-dependency'))
+            fast=Path(spool_temp).resolve();fast_dirs={}
+            for name in dirs:
+                path=fast/name;path.mkdir();write(path/'recording-service.json',{'schema':'rgbd_lease.v1'});fast_dirs[name]=str(path)
+            fast_contract=deepcopy(contract);fast_contract['camera_spool_root']=str(fast)
+            rejects(lambda:prepare_collection_setup(**{**options,'producer_directories':fast_dirs},output=root/'undeclared-spool'))
+            rejects(lambda:prepare_collection_setup(**{**options,'producer_directories':fast_dirs,'contract_template':fast_contract},output=root/'unwritable-spool'))
+            fast_contract['filesystem']['writable_roots'].append(str(fast))
+            rejects(lambda:prepare_collection_setup(**{**options,'producer_directories':{**fast_dirs,'base_0':dirs['base_0']},'contract_template':fast_contract},output=root/'mixed-spool'))
+            if roles==5:options.update(producer_directories=fast_dirs,contract_template=fast_contract)
             result=prepare_collection_setup(**options,output=root/'collection-new')
             setup=read(result['setup_path']);verify_inputs(setup)
             assert contract==original_contract,'D preparation must not mutate the startup contract'
             assert 'diagnostic_calibration_source' not in setup['contract_template']
-            assert 'filesystem' not in setup['contract_template']
+            if roles==5:
+                assert setup['contract_template']['filesystem']=={'writable_roots':[str(fast)]}
+                assert setup['producer_directories']==fast_dirs
+            else:assert 'filesystem' not in setup['contract_template']
             assert 'admission-relative.json' not in setup['contract_template']['provenance']['input_sha256']
             assert all(str(path) not in json.dumps(setup['contract_template']) for path in admission)
             assert all(str(path) not in group for group in setup['dependency_provenance'].values() for path in admission)
@@ -185,6 +197,14 @@ def main(a1,roles=4):
             assert all(str(path) not in pins for path in admission),'truth/base admission cannot enter D input pins'
             assert all(str(path) not in frozen['filesystem']['readonly_roots'] for path in admission)
             assert '/startup-only-root' not in frozen['filesystem']['writable_roots']
+            if roles==5:
+                assert frozen['camera_spool_root']==str(fast)
+                assert str(fast) in frozen['filesystem']['writable_roots']
+                saved=Path(result['setup_path']).read_bytes()
+                tampered=read(result['setup_path']);tampered['contract_template']['filesystem']['writable_roots']=[]
+                write(Path(result['setup_path']),tampered)
+                rejects(lambda:finalize_collection_setup(result['setup_path']))
+                Path(result['setup_path']).write_bytes(saved)
             for key in ('native','entry','node','params','dep','curobo','prompt'):
                 assert pins[external[key]]==sha(external[key]),key
             assert external['old'] not in pins and external['old_plan'] not in pins
@@ -216,6 +236,7 @@ def main(a1,roles=4):
             assert len(spec['socket'].encode())<104 and len(cfg['detector_service']['socket'].encode())<104
             assert transport(cfg,'dsw-scene','true')==clean_command(['bash','-c','true'])
             bridge=read(configured['collection_config']);validate_acquisition(bridge['preparation'])
+            if roles==5:assert {name:row['recording_directory'] for name,row in bridge['cameras'].items()}==fast_dirs
             assert bridge['preparation']['acquisition']['transport']['endpoint'] is None
             write(root/'collection-binding.json',read(configured['initial_trusted_binding_source']))
             parts=construct_collection(output/'configured.json',device,application)
