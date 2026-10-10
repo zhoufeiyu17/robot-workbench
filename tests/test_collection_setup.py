@@ -86,6 +86,22 @@ def main(a1,roles=4):
     with tempfile.TemporaryDirectory() as temp:
         root=Path(temp).resolve();capture,active,cconfig,installed,registration=fixture(root,Path(a1).resolve())
         base,contract,runtime_root,external=inputs(root)
+        # These startup-only pins deliberately sit inside an otherwise accepted
+        # dependency root, so the generic path allowlist alone cannot exclude them.
+        admission_root=Path(base['deps'])/'diagnostic-origin';admission_root.mkdir()
+        admission=[admission_root/name for name in ('truth-fixture.json','plant-fixture.json','run.json','base.json',
+            'nominal-config.json','registration.json','opaque-admission.json')]
+        for path in admission:write(path,{'fixture_admission_only':True})
+        relative_admission=Path(contract['code']['root'])/'admission-relative.json'
+        write(relative_admission,{'fixture_admission_only':True});admission.append(relative_admission)
+        actual_calibration=active/'head.json'
+        contract['diagnostic_calibration_source']=dict(mode='warm_diagnostic',source_run=str(admission_root),
+            source_base_manifest=str(admission_root/'base.json'),expected_install=installed,
+            input_sha256={str(path):sha(path) for path in (*admission,actual_calibration)})
+        contract['provenance']['input_sha256'].update(contract['diagnostic_calibration_source']['input_sha256'])
+        contract['provenance']['input_sha256']['admission-relative.json']=contract['provenance']['input_sha256'].pop(str(relative_admission))
+        contract['filesystem']=dict(readonly_roots=[str(path) for path in admission],writable_roots=['/startup-only-root'])
+        original_contract=deepcopy(contract)
         token=root/'collection-token';token.write_text('x'*48);token.chmod(0o600)
         device=Device('cpu-fake-device','fake',None);application=Application({'fake':device})
         gateway,gateway_thread=start_control_gateway(device,{'calibration':'y'*48,'collection':'x'*48},port=0)
@@ -128,6 +144,13 @@ def main(a1,roles=4):
             rejects(lambda:prepare_collection_setup(**{**options,'contract_template':changed_contract},output=root/'bad-dependency'))
             result=prepare_collection_setup(**options,output=root/'collection-new')
             setup=read(result['setup_path']);verify_inputs(setup)
+            assert contract==original_contract,'D preparation must not mutate the startup contract'
+            assert 'diagnostic_calibration_source' not in setup['contract_template']
+            assert 'filesystem' not in setup['contract_template']
+            assert 'admission-relative.json' not in setup['contract_template']['provenance']['input_sha256']
+            assert all(str(path) not in json.dumps(setup['contract_template']) for path in admission)
+            assert all(str(path) not in group for group in setup['dependency_provenance'].values() for path in admission)
+            assert setup['input_sha256'][str(actual_calibration)]==sha(actual_calibration),'actual builder inputs must be restored'
             assert result['status']=='awaiting_native_asset_conversion' and not result['runtime_allowed']
             assert not setup['conversion']['executed'] and setup['actual_plant_unchanged']
             assert all(key not in setup['pipeline'] for key in ('observation_input_root','detection_input_root','planned_input_root',
@@ -158,6 +181,10 @@ def main(a1,roles=4):
             configured=finalize_collection_setup(result['setup_path']);detector_parent=Path(configured['detector_parent'])
             cfg,frozen,_=load_config(Path(configured['pipeline_config']))
             pins={key:value for group in pinned_files(frozen) for key,value in group.items()}
+            assert 'diagnostic_calibration_source' not in frozen
+            assert all(str(path) not in pins for path in admission),'truth/base admission cannot enter D input pins'
+            assert all(str(path) not in frozen['filesystem']['readonly_roots'] for path in admission)
+            assert '/startup-only-root' not in frozen['filesystem']['writable_roots']
             for key in ('native','entry','node','params','dep','curobo','prompt'):
                 assert pins[external[key]]==sha(external[key]),key
             assert external['old'] not in pins and external['old_plan'] not in pins

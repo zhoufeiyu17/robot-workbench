@@ -77,7 +77,7 @@ def selected_dependency_pins(contract,pipeline):
 def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected_install,
         registration,profile_template,base_pipeline_config,execution,contract_template,
         detection_runtime_root,control_url,token_file,producer_ports,producer_directories,
-        trusted_binding_path,local_recording_root,resident_deadline_wall_ns,output):
+        trusted_binding_path,local_recording_root,resident_deadline_wall_ns,output,diagnostic_source=None):
     """CPU-only. The template supplies interface fields, never installed calibration."""
     from robot_workbench.calibration_profile import build_fake_profile
     from local_execution import validate as validate_local
@@ -119,6 +119,22 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
     base.update(workbench_code=str(wb),detection_runtime_root=str(Path(detection_runtime_root).resolve()),
                 environment='fake',execution=deepcopy(execution),render_replay=False,record_raw=False,
                 resident_deadline_wall_ns=resident_deadline_wall_ns)
+    contract_template=deepcopy(contract_template)
+    diagnostic=contract_template.pop('diagnostic_calibration_source',None)
+    admission_source=diagnostic_source if diagnostic_source is not None else diagnostic
+    if isinstance(admission_source,dict):
+        # Startup fixture equality is already admitted. D receives only the
+        # builder's calibration/model inputs, never its truth/base admission pins.
+        contract_template.pop('filesystem',None)  # finalize rebuilds D roots from its actual inputs.
+        admission={Path(path).resolve() for path in admission_source['input_sha256']}
+        for group in contract_template.get('provenance',{}).values():
+            if not isinstance(group,dict):continue
+            for raw in list(group):
+                path=Path(raw)
+                if not path.is_absolute():
+                    if not contract_template.get('code',{}).get('root'):continue
+                    path=Path(contract_template['code']['root'])/path
+                if path.resolve() in admission:group.pop(raw)
     dependency_provenance,excluded_pins=selected_dependency_pins(contract_template,base)
     template=Path(profile_template).resolve()
     if not template.is_file():raise FileNotFoundError(template)
@@ -129,7 +145,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
     pins={str(path):sha(path) for path in (config_path,registration_path,template,Path(execution['plant']['script']))}
     output.mkdir(mode=0o700)
     bridge=build_fake_profile(config_path,capture,template_value,read(registration_path),output/'calibration',
-                              expected_install=expected_install)
+                              expected_install=expected_install,diagnostic_source=diagnostic_source)
     bridge_receipt=read(output/'calibration'/'bridge.json')
     pins.update(bridge_receipt['input_sha256'])
     conversion=dict(argv=['/isaac-sim/python.sh','-u','-B',str(wb/'a1_isaac_assets.py'),

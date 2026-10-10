@@ -239,6 +239,10 @@ def run(args, base, nominal):
             return request['runtime']
         device=Device('fake-physx-'+args.output.name,'fake',factory,label='A1 PhysX · 同源三相机',
                       drive=lambda runtime,closed:closed.wait())
+        if args.diagnostic_source:
+            from robot_workbench.calibration_profile import diagnostic_metadata
+            device.label='A1 PhysX · 复用标定诊断（非空库验收）'
+            device.diagnostic_calibration=diagnostic_metadata(args.diagnostic_source)
         application=Application({'fake':device,
             'physical':Device('physical-unconfigured','physical',None,label='真机 · 未配置')})
         gateway,_=start_control_gateway(device,tokens,port=args.gateway_port)
@@ -249,6 +253,10 @@ def run(args, base, nominal):
         from robot_workbench.workflows import CalibrationWorkflow
         calibration=Workbench(calibration_config,args.output/'calibration-workbench')
         device.workflows['calibration']=CalibrationWorkflow(calibration,device,application)
+        mesh_workbench=calibration
+        if args.diagnostic_source:
+            from robot_workbench.calibration_profile import diagnostic_mesh_view
+            mesh_workbench,device.diagnostic_mesh_candidates=diagnostic_mesh_view(calibration,args.diagnostic_source)
         if args.collection_spec is not None and args.collection_spec['resources']['max_workers']==5:
             from robot_workbench.preview_service import prepare_preview_roles,resident_execution,PreviewService,calibration_mesh_inputs
             from arx_env.joint_head_workbench_geometry import jaw_gaps
@@ -258,20 +266,28 @@ def run(args, base, nominal):
                     from run_pipeline import load_config
                     return load_config(Path(collection_preparation.parts.pipeline_config))[0]
                 return {'execution':resident_execution(args.collection_spec,args.output)}
+            def mesh_inputs(camera,candidate):
+                if getattr(device,'diagnostic_calibration',{}).get('invalidated'):
+                    raise ValueError('复用标定诊断已失效，请启动新运行')
+                return calibration_mesh_inputs(mesh_workbench,producer,camera,candidate)
             preview_service=PreviewService(execution=resident_execution(args.collection_spec,args.output),
                 deadline_wall_ns=resident_deadline_wall_ns,deps=base['pipeline_config']['deps'],
                 admission_config=preview_admission,
                 validate_pose=lambda q,gaps:(calibration.geometry._q(q),jaw_gaps(gaps)),
-                mesh_inputs=lambda camera,candidate:calibration_mesh_inputs(calibration,producer,camera,candidate))
+                mesh_inputs=mesh_inputs)
             device.preview=preview_service
             preview_service.start()
         if args.collection_spec is not None:
+            from robot_workbench.calibration_profile import diagnostic_snapshot
             collection_preparation=CollectionPreparation(contract=args.collection_spec,output=args.output,base=base,
                 device=device,application=application,ports=ports,directories=producer.directories,
                 control_url='http://127.0.0.1:'+str(gateway.server_port),token_file=token_files['collection'],
-                deadline_wall_ns=resident_deadline_wall_ns,installed_snapshot=calibration.installed_pair)
+                deadline_wall_ns=resident_deadline_wall_ns,
+                installed_snapshot=(lambda:diagnostic_snapshot(args.diagnostic_source)) if args.diagnostic_source else calibration.installed_pair,
+                diagnostic_source=args.diagnostic_source)
             device.collection_preparation=collection_preparation
             install_notification(device.workflows['calibration'],calibration,collection_preparation.notify)
+            if args.diagnostic_source:collection_preparation.notify(diagnostic_snapshot(args.diagnostic_source))
         for role,name in CAMERAS.items():
             def frame(name=name):
                 value=producer.frames[name].snapshot()
@@ -291,7 +307,8 @@ def run(args, base, nominal):
             collection_contract=str(args.collection_contract) if args.collection_contract else None,
             collection_enabled=args.collection_spec is not None,
             preview_enabled=preview_service is not None,
-            full_pipeline_qualified=False,physical_hardware_connected=False))
+            full_pipeline_qualified=False,physical_hardware_connected=False,
+            **({'diagnostic_calibration':device.diagnostic_calibration,'fresh_C_completed':False} if args.diagnostic_source else {})))
         save(args.output/'collection-runtime.json',dict(environment='fake',clock=source_clock,
             robot_id=device.id,camera_serials=calibration_config['hardware_camera_serials'],
             owner_port=gateway.server_port,owner_token_file=token_files['collection'],
@@ -336,6 +353,9 @@ def run(args, base, nominal):
                         recording_factory=recording_factory,
                         initialize_backend=lambda value:value.set_damping_hold(manual=True))
                     backend.owner=runtime.owner
+                    if args.diagnostic_source:
+                        identity=hashlib.sha256(json.dumps(device.diagnostic_calibration,sort_keys=True).encode()).hexdigest()
+                        runtime.notify_calibration_installed('diagnostic-calibration-'+identity)
                     task_observer.attach(runtime.owner)
                     with request['lock']:
                         cancelled=request['cancelled']
@@ -427,6 +447,7 @@ def main():
         raise ValueError('bounded duration and valid loopback ports required')
     if args.output.exists():raise FileExistsError(args.output)
     args.collection_spec=None
+    args.diagnostic_source=None
     if args.collection_contract:
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
@@ -448,6 +469,12 @@ def main():
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
             args.collection_spec['collection_setup']['detection_runtime_root'])
+        diagnostic=args.collection_spec.get('diagnostic_calibration_source')
+        if diagnostic is not None:
+            from robot_workbench.calibration_profile import validate_diagnostic_source,diagnostic_metadata
+            args.diagnostic_source=validate_diagnostic_source(diagnostic,base,nominal,
+                printed_marker_fixture(json.loads(Path(nominal['candidate']).read_bytes())),args.output)
+            checked.update(diagnostic_calibration=diagnostic_metadata(args.diagnostic_source),fresh_C_completed=False)
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)

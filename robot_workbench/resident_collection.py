@@ -180,21 +180,37 @@ def load_collection_contract(path,output,gpu,duration):
 
 class CollectionPreparation:
     """One installation's owned conversion/services; notification never blocks C."""
-    def __init__(self,*,contract,output,base,device,application,ports,directories,control_url,token_file,deadline_wall_ns,installed_snapshot=None):
+    def __init__(self,*,contract,output,base,device,application,ports,directories,control_url,token_file,deadline_wall_ns,installed_snapshot=None,diagnostic_source=None):
         self.contract,self.output,self.base=deepcopy(contract),Path(output),base
         self.device,self.application=device,application
         self.ports,self.directories,self.control_url,self.token_file=ports,directories,control_url,token_file
         self.deadline_wall_ns=deadline_wall_ns
         self.installed_snapshot=installed_snapshot
+        self.diagnostic_source=deepcopy(diagnostic_source);self.diagnostic_invalidated=False
         self.lock=threading.Lock();self.busy=False;self.running=False;self.last_install=None
         self.value=dict(status='awaiting_calibration',error=None,attempt=0,installed=None,
             message='等待有效标定安装；安装后自动准备数采环境。')
+        if self.diagnostic_source:
+            from robot_workbench.calibration_profile import diagnostic_metadata
+            self.value.update(diagnostic_origin=diagnostic_metadata(self.diagnostic_source),fresh_C_completed=False)
         self.closed=threading.Event();self.notifications=queue.Queue(maxsize=1)
         self.identity=None;self.parts=None;self.process=None;self.error=None
         self.thread=threading.Thread(target=self._run,daemon=True,name='resident-collection-setup');self.thread.start()
 
     def notify(self,snapshot):
         if self.closed.is_set() or not snapshot or snapshot.get('verified') is not True:return
+        if self.diagnostic_source:
+            from robot_workbench.calibration_profile import diagnostic_snapshot
+            try:matches=snapshot==diagnostic_snapshot(self.diagnostic_source)
+            except (ValueError,OSError):matches=False
+            if not matches:
+                self.diagnostic_invalidated=True;self.closed.set()
+                with self.lock:self.busy=self.running
+                self.application.invalidate_collection_preparation(self.device)
+                self.device.diagnostic_mesh_candidates=[]
+                self.device.diagnostic_calibration.update(invalidated=True)
+                self._status('failed',error='复用标定诊断已因新 C 安装失效；请启动独立新运行',movement_started=False)
+                return
         value=deepcopy(snapshot)
         with self.lock:
             self.last_install=value
@@ -210,6 +226,7 @@ class CollectionPreparation:
 
     def snapshot(self):
         with self.lock:value=deepcopy(self.value);value['busy']=self.busy
+        if self.diagnostic_invalidated:value.update(status='failed',diagnostic_invalidated=True)
         remaining=max(0.,(self.deadline_wall_ns-time.time_ns())/1e9)
         reason=('驻留服务已结束' if self.closed.is_set() else '驻留服务剩余时间不足，不能延长期限' if remaining<=60
                 else '数采环境正在准备，请等待当前请求结束' if value['busy'] else
@@ -253,6 +270,8 @@ class CollectionPreparation:
     def _status(self,status,**fields):
         from probe_owner_physx import save
         with self.lock:
+            if self.diagnostic_invalidated:
+                status='failed';fields.update(error='复用标定诊断已失效；不能切换来源或自动转为冷启动',diagnostic_invalidated=True)
             if status=='failed':fields.setdefault('failed_stage',self.value['status'])
             self.value.update(status=status,wall_ns=time.time_ns(),**fields)
             value=deepcopy(self.value)
@@ -281,8 +300,14 @@ class CollectionPreparation:
         from robot_workbench.collection_setup import prepare_collection_setup,finalize_collection_setup,construct_collection
         from probe_owner_physx import save
         root=self.output;active=root/'calibrations/hardware/active'
-        expected=dict(head_id=snapshot['head_id'],wrist_id=snapshot['wrist_id'],
-            manifest_sha256=hashlib.sha256((active/'manifest.json').read_bytes()).hexdigest())
+        if self.diagnostic_source:
+            from robot_workbench.calibration_profile import diagnostic_snapshot
+            if self.diagnostic_invalidated or snapshot!=diagnostic_snapshot(self.diagnostic_source):
+                raise ValueError('warm diagnostic source invalidated')
+            expected=deepcopy(self.diagnostic_source['expected_install'])
+        else:
+            expected=dict(head_id=snapshot['head_id'],wrist_id=snapshot['wrist_id'],
+                manifest_sha256=hashlib.sha256((active/'manifest.json').read_bytes()).hexdigest())
         if (expected==self.identity and self.parts and self.parts.detector.status().get('status')=='ready'
                 and self.parts.planner.status().get('status')=='ready'):
             self._status('ready',error=None);return
@@ -305,7 +330,8 @@ class CollectionPreparation:
             contract_template=self.contract,detection_runtime_root=details['detection_runtime_root'],
             control_url=self.control_url,token_file=self.token_file,producer_ports=self.ports,producer_directories=self.directories,
             trusted_binding_path=root/'collection-binding.json',local_recording_root=root/'collection-raw',
-            resident_deadline_wall_ns=self.deadline_wall_ns,output=output)
+            resident_deadline_wall_ns=self.deadline_wall_ns,output=output,
+            **({'diagnostic_source':self.diagnostic_source} if self.diagnostic_source else {}))
         budget=min(600.,(self.deadline_wall_ns-time.time_ns())/1e9-60)
         if budget<=0:raise TimeoutError('resident deadline leaves no conversion/cleanup budget')
         if self.closed.is_set():raise InterruptedError('resident preparation cancelled before conversion')

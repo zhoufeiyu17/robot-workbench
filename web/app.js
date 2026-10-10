@@ -5,7 +5,7 @@ const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','previ
 const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
 const reasonText=value=>value==='motion or capture is still active'?'当前动作或采集尚未结束':value;
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
-const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
+const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',diagnostic_readonly:'只读诊断',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
 const outcomeStatus = value => typeof value === 'object' && value ? value.status : value;
 const executing = value => ['running','executing','settling','verifying','awaiting_capture'].includes(String(value).toLowerCase());
 
@@ -382,7 +382,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('media-preview').classList.toggle('overview',previewView==='overview');
     el('mesh-controls').hidden=!preview;el('media-mesh').hidden=!preview;
     el('mesh-camera').value=meshCamera;
-    const choices=(state?.results||[]).filter(row=>row.kind===(meshCamera==='head'?'head':'wrist'));
+    const choices=[...(state?.results||[]),...(preview?.diagnostic_candidates||[])].filter(row=>row.kind===(meshCamera==='head'?'head':'wrist'));
     const optionsKey=JSON.stringify([key(),meshCamera,meshCandidate,choices.map(row=>[row.id,row.label,row.status])]);
     if(optionsKey!==meshOptionsKey){meshOptionsKey=optionsKey;const box=el('mesh-candidate');box.replaceChildren();for(const row of [{id:'',label:'选择标定候选'},...choices]){const option=make('option',row.label+(row.status?' · '+statusText(row.status):''));option.value=row.id;box.append(option);}box.value=choices.some(row=>row.id===meshCandidate)?meshCandidate:'';}
     setText('mesh-state','请求：'+(mesh.requested===true?'开启':mesh.requested===false?'关闭':'未知')+' · 后端：'+(mesh.applied===true?'已开启':mesh.applied===false?'已关闭':'未知'));
@@ -391,6 +391,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('preview-status',(protocol?'当前为协议 Fake（L1）：只验证控制协议与页面，不提供 PhysX 相机图像。完整 Fake 需要物理仿真、相机与渲染服务。 ':'')+(!preview||preview.status==='unconfigured'?'目标预览渲染服务尚未配置。':(preview.connected===true?'渲染服务已连接':preview.connected===false?'渲染服务未连接':'渲染连接尚未核验')+(preview.error?' · '+preview.error:'')));
     const rows=[{label:'渲染连接',value:!preview||preview.status==='unconfigured'?'尚未配置':preview.connected===true?'已连接':preview.connected===false?'未连接':'未知'},
       {label:'当前渲染原因',value:preview?.error||preview?.status||'尚无渲染状态回执'}];
+    if(preview?.diagnostic_calibration)rows.unshift({label:'复用标定诊断（不是本轮新安装）',value:preview.diagnostic_calibration});
     if(protocol)rows.unshift({label:'设备资格',value:'协议 Fake（L1）不提供 PhysX 相机图像；缺少这类图像属于未配置完整仿真，不能通过重连浏览器补齐。'});
     for(const media of state?.media||[])if(media.error||media.ready===false)rows.push({label:media.label||media.id||'图像通道',value:media.error||'当前画面尚未就绪'});
     for(const [view,frame]of Object.entries(preview?.frames||{}))if(frame?.error)rows.push({label:{target:'目标姿态',overview:'整机视角',mesh:'Mesh 叠加'}[view]||view,value:frame.error});

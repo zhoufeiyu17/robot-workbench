@@ -68,6 +68,21 @@ class PreviewHTTPTests(unittest.TestCase):
         self.post('stop')
         self.assertTrue(self.device.stop_latched)
 
+    def test_diagnostic_candidates_are_read_only_preview_inputs_not_current_results(self):
+        self.device.diagnostic_calibration=dict(mode='warm_diagnostic',fresh_C_completed=False,source_run='origin')
+        self.device.diagnostic_mesh_candidates=[dict(id='origin-head',kind='head',label='复用标定诊断',status='diagnostic_readonly')]
+        state=json.loads(self.http.open(self.url+'/api/state?environment=fake&business=calibration').read())
+        self.assertEqual(state['results'],[])
+        self.assertEqual(state['preview']['diagnostic_candidates'],self.device.diagnostic_mesh_candidates)
+        for action in ('generate_plan','execute','install','fit_batch'):
+            self.assertFalse(state['runtime']['allowed_operations'][action]['allowed'])
+            with self.assertRaisesRegex(ValueError,'复用标定'):
+                self.app.action(action,dict(environment='fake',business='calibration',request_id='warm-'+action))
+        self.assertFalse(self.app.jobs)
+        self.post('preview_target',q12=[0.]*12,jaw_gap_mm=[80.,80.])
+        self.post('stop')
+        self.assertTrue(self.device.stop_latched)
+
     def test_mesh_metadata_keeps_actual_wall_time_and_candidate_identity(self):
         self.post('preview_mesh',enabled=True,camera='left',candidate_id='wrist-candidate')
         self.frame('mesh',dict(revision=1,camera='left',candidate_id='wrist-candidate',source_wall_ns=456,

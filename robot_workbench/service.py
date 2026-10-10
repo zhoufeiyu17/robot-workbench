@@ -15,6 +15,8 @@ from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection')
+WARM_C_ACTIONS = ('generate_plan','execute','install',*CALIBRATION_TOOLS)
+WARM_C_REASON = '当前为复用标定的数采诊断；完整标定请使用空库验收入口'
 
 
 class Device:
@@ -147,6 +149,8 @@ class Application:
                 source_wall_ns=meta.get('source_wall_ns',meta.get('source_timestamp_ns')),error=value.get('mesh_error') if view=='mesh' else value.get('error'))
         selection=value.get('mesh') or {}
         return dict(value,renderer_id=value.get('renderer_instance_id'),display_context=display_context,target_floor=floors['target'],revision_floors=dict(floors),revisions=revisions,frames=frames,
+            diagnostic_calibration=deepcopy(getattr(device,'diagnostic_calibration',None)) if device.environment=='fake' else None,
+            diagnostic_candidates=deepcopy(getattr(device,'diagnostic_mesh_candidates',[])) if device.environment=='fake' else [],
             mesh=dict(requested=selection.get('enabled',False),applied=bool(selection.get('enabled') and frames['mesh']['ready']),
                       camera=selection.get('camera','head'),candidate_id=selection.get('candidate_id')))
 
@@ -291,6 +295,8 @@ class Application:
             if preparing:
                 for action in ('generate_plan','execute'):
                     allowed[action]=dict(allowed=False,reason='先完成数采环境准备；已安装标定仍保留')
+        if business=='calibration' and (preview.get('diagnostic_calibration') or {}).get('mode')=='warm_diagnostic':
+            for action in WARM_C_ACTIONS:allowed[action]=dict(allowed=False,reason=WARM_C_REASON)
         primary = value.get('primary_action')
         if primary and primary['id'] in (*CALIBRATION_TOOLS,'generate_plan') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
@@ -338,6 +344,9 @@ class Application:
             for workflow in device.workflows.values():
                 threading.Thread(target=workflow.cancel,daemon=True).start()
             return {**result,'message':'停止已受理；请查看控制器确认状态'}
+        if (environment=='fake' and business=='calibration' and action in WARM_C_ACTIONS
+                and (getattr(device,'diagnostic_calibration',None) or {}).get('mode')=='warm_diagnostic'):
+            raise ValueError(WARM_C_REASON)
         if action in ('preview_target','preview_overview','preview_mesh','preview_recover'):
             provider=device.preview
             if provider is None:raise ValueError('目标图像服务未配置')
