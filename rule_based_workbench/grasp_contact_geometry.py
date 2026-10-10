@@ -136,17 +136,23 @@ def analyze_contact_pose(planner, data, cup_from_tool, *, closed_jaw_m,
                 raise ValueError('pad geometry differs from the frozen source parts')
             frame = relative[part.link]
             vertices = (np.asarray(part.vertices) @ frame[:3, :3].T+frame[:3, 3]) @ rotation.T+position
-            pad_shapes[part.link] = _hull(vertices, part.faces)
+            # Convexity is a source-mesh property. Recomputing almost collinear
+            # face normals after FK/pose transforms makes it depend on arm pose.
+            a, b = _hull(part.vertices, part.faces)
+            a = a @ (rotation @ frame[:3, :3]).T
+            pad_shapes[part.link] = a, b+a @ (rotation @ frame[:3, 3]+position)
             pad_inputs.append(dict(link=part.link, name=part.name, vertices=vertices.tolist(), faces=part.faces))
         cup_shapes, cup_inputs = {}, []
         for band in planner.cup.bands:
             if not callable(getattr(band, 'mesh', None)):
                 raise ValueError('explicit native cup-band mesh required; analytic cylinder approximation is unqualified')
             vertices, faces = band.mesh()
-            vertices = np.asarray(vertices, dtype=float)+[0., 0., (band.z_min_m+band.z_max_m)/2]
+            a, b = _hull(vertices, faces)
+            center = np.array([0., 0., (band.z_min_m+band.z_max_m)/2])
+            vertices = np.asarray(vertices, dtype=float)+center
             if band.shape_path in cup_shapes:
                 raise ValueError('unique cup-band geometry required')
-            cup_shapes[band.shape_path] = _hull(vertices, faces)
+            cup_shapes[band.shape_path] = a, b+a @ center
             cup_inputs.append(dict(name=band.shape_path, vertices=vertices.tolist(), faces=faces))
         if not cup_shapes:
             raise ValueError('complete original cup-band geometry required')

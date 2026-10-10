@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from scipy.spatial import ConvexHull
+from scipy.spatial.transform import Rotation
 
 from grasp_contact_geometry import analyze_contact_pose
 
@@ -126,6 +127,63 @@ def main():
     planner.fk = FK()
     planner.parts[0].faces = planner.parts[0].faces[:-1]
     assert not analyze_contact_pose(planner, data, pose, closed_jaw_m=.015)['passed']
+
+    # Seven source-pad vertices minimized from the 040630 failure. The old
+    # transformed-face check misclassifies a ~1.6e-12 m² triangle as nonconvex.
+    planner, data, pose = fixture()
+    vertices = np.array([
+        [.07100038230746372, .02692000587099421, .011270925531377788],
+        [.07100100232458115, .026920087644716536, .011270699667960477],
+        [.0009990001197512088, .017689823021660372, .03677142959892582],
+        [.0009990001197416054, .017690025111115962, .0367714292569962],
+        [.05599990940599344, .026140995972027004, .016733355094208535],
+        [.07100100232458115, .025419767515893484, .011270700541896862],
+        [.0009990214687390017, .016189082369588926, .036771097908232825]])
+    faces = [[4,6,3], [5,4,1], [5,4,6], [0,5,1], [2,6,3],
+             [2,5,6], [2,0,5], [2,4,1], [2,4,3], [2,0,1]]
+    for part in planner.parts:
+        points = vertices.copy()
+        if part.link == 'left_link7':
+            points[:, 1] *= -1
+        part.vertices, part.faces = points.tolist(), faces
+    data['parts'] = [vars(p) for p in planner.parts]
+    pose = dict(position=[-.121462024215198, 0., .14], orientation_wxyz=[
+        .9497051983623903, .00029650889100494085, .3131452358370428, -9.77675459307028e-5])
+    class WorldFK:
+        world = np.eye(4)
+        def forward(self, state):
+            result = {'left_link6': self.world}
+            for number, sign in ((7, 1), (8, -1)):
+                frame = np.array([
+                    [.9999999999999999, -1.4482008771693869e-16, 1.786519601833262e-17, .08397000000000002],
+                    [-8.928561046024588e-17, .9999999999999998, 2.7216121192794418e-17, 0.],
+                    [1.9737889168124518e-17, 2.727832392728769e-17, 1., -.006270300000000034],
+                    [0., 0., 0., 1.]])
+                frame[1, 3] = sign*(.023637999999999965+state[f'left_joint{number}'])
+                result[f'left_link{number}'] = self.world @ frame
+            return result
+    planner.fk = WorldFK()
+    planner.open_position_m = .041496
+    baseline = analyze_contact_pose(planner, data, pose, closed_jaw_m=.015)
+    assert baseline['passed'], baseline
+    # A global arm rigid transform must preserve the contact bounds.
+    for angles in ((.3, -.5, .8), (-1.3, .8, 2.1)):
+        planner.fk.world = np.eye(4)
+        planner.fk.world[:3, :3] = Rotation.from_euler('xyz', angles).as_matrix()
+        planner.fk.world[:3, 3] = [.255113, .234719, .882812]
+        transformed = analyze_contact_pose(planner, data, pose, closed_jaw_m=.015)
+        assert transformed['passed'], transformed
+        assert np.allclose(transformed['contact_height_interval_m'],
+                           baseline['contact_height_interval_m'], atol=1e-9, rtol=0)
+
+    # A closed mesh with a dent remains invalid in the source frame: the
+    # transform fix must not replace its geometry with its convex hull.
+    planner, data, pose = fixture()
+    planner.parts[0].vertices = deepcopy(planner.parts[0].vertices)
+    planner.parts[0].vertices[-1] = [0., 0., .0625]
+    data['parts'] = [vars(p) for p in planner.parts]
+    dented = analyze_contact_pose(planner, data, pose, closed_jaw_m=.015)
+    assert not dented['passed'] and dented['error'] == 'source mesh is not convex', dented
     print('continuous pad/cup LP: stops, interior extrema, 37–98 mm bounds, noncontact pad vertices and stale evidence PASS')
 
 
