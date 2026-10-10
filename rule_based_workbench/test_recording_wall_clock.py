@@ -39,7 +39,8 @@ class RecordingWallClockTest(unittest.TestCase):
             if time.monotonic()>=deadline:self.fail('CPU recorder fixture did not progress')
             time.sleep(.001)
 
-    def setup_session(self,root,count=300,environment='fake',budget=900,recorder_factory=RealRecorder):
+    def setup_session(self,root,count=300,environment='fake',budget=900,recorder_factory=RealRecorder,
+                      session_factory=RecordingSession,capacity=512):
         self.wall=[1_000_000_000_000];self.start=self.wall[0]
         self.source,self.plan,self.binding,self.timeline=plan_fixture(count,environment)
         for camera in CAMERAS:(root/camera).mkdir()
@@ -47,7 +48,7 @@ class RecordingWallClockTest(unittest.TestCase):
         self.directories={camera:str(root/camera) for camera in CAMERAS}
         self.faults=[]
         owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
-        self.session=RecordingSession(root/'raw',self.source,self.plan,self.binding,
+        self.session=session_factory(root/'raw',self.source,self.plan,self.binding,capacity=capacity,
             environment=environment,execution_timeline=self.timeline,execution_owner=owner if environment=='fake' else None,
             recorder_factory=recorder_factory,
             camera_directories=self.directories,clock_ns=lambda:self.wall[0],on_fault=self.faults.append,

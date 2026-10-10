@@ -503,6 +503,8 @@ class RecordingSession:
         self.checked_reference=None
         self.writer_stage='starting'
         self.last_event_write=None
+        self.last_event_batch=None
+        self.last_nonempty_event_batch=None
         self.diagnostics=None
         self.diagnostics_error=self.seal_error=None
         self.thread=threading.Thread(target=self._run,args=(source,plan,binding,recorder_factory),daemon=True)
@@ -659,7 +661,9 @@ class RecordingSession:
         return dict(schema='recording_failure_diagnostics.v1',error=self.error,writer_stage=self.writer_stage,
             captured_wall_ns=now,captured_monotonic_s=mono,checked_reference=reference(self.checked_reference),
             latest_submitted_reference=reference(latest_reference),queue=dict(depth=len(pending),capacity=self.events.maxsize,oldest=oldest),
-            last_event_write=self.last_event_write,command_count=len(self.recorder.commands) if self.recorder else 0,
+            last_event_write=self.last_event_write,last_event_batch=self.last_event_batch,
+            last_nonempty_event_batch=self.last_nonempty_event_batch,
+            command_count=len(self.recorder.commands) if self.recorder else 0,
             feedback_count=len(self.recorder.feedback) if self.recorder else 0,cameras=cameras)
 
     def save_failure_diagnostics(self,cursors):
@@ -669,6 +673,38 @@ class RecordingSession:
                 self.recorder.write_json('recording-diagnostics.json',self.diagnostics)
             except Exception as error:
                 self.diagnostics_error=f'{type(error).__name__}: {error}'
+
+    def _write_event(self,event):
+        kind,fields,queued_wall,queued_mono=event
+        started=time.monotonic();self.writer_stage='event:'+kind
+        self.last_event_write=dict(kind=kind,tick=fields.get('tick'),queued_wall_ns=queued_wall,
+            write_started_wall_ns=self.clock_ns(),queue_wait_monotonic_s=started-queued_mono,status='failed')
+        try:
+            getattr(self.recorder,'record_'+kind)(**fields)
+            self.events.task_done()
+            self.last_event_write['status']='written'
+        finally:
+            finished=time.monotonic()
+            wall=self.clock_ns()
+            self.last_event_write.update(finished_wall_ns=wall,
+                written_wall_ns=wall if self.last_event_write['status']=='written' else None,processing_wall_s=finished-started,
+                enqueue_to_write_monotonic_s=finished-queued_mono)
+
+    def _drain_events(self):
+        import queue
+        started=time.monotonic();self.writer_stage='event_batch'
+        self.last_event_batch=dict(started_wall_ns=self.clock_ns(),count=0)
+        try:
+            # A count bound gives cameras a turn without turning slow metadata
+            # IO into a one-event quota. Every event is still validated/written.
+            for index in range(64):
+                try:event=self.events.get(timeout=.01 if index==0 else 0)
+                except queue.Empty:break
+                self._write_event(event)
+                self.last_event_batch['count']+=1
+        finally:
+            self.last_event_batch.update(finished_wall_ns=self.clock_ns(),duration_wall_s=time.monotonic()-started)
+            if self.last_event_batch['count']:self.last_nonempty_event_batch=dict(self.last_event_batch)
 
     def finish(self,status,reason=None):
         if status not in ('completed','failed','stopped'):raise ValueError('terminal status required')
@@ -687,12 +723,12 @@ class RecordingSession:
                     manifest={k:v for k,v in self.manifest.items() if k!='files'} if self.manifest else None)
 
     def _run(self,source,plan,binding,factory):
-        import queue
         cursors={}
         camera_progress={}
         leases=[]
         lease_deadline_wall_ns=None
         recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
+        tail_wait_started=None;tail_wait_elapsed=0.
         def create_recorder():
             return factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
                 **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
@@ -792,7 +828,7 @@ class RecordingSession:
                     raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
                 if lease_deadline_wall_ns is not None and now>=lease_deadline_wall_ns:
                     raise ValueError('recording lease actual wall deadline exceeded')
-                if self.environment=='fake' and cursors:
+                if self.environment=='fake' and cursors and self.terminal is None:
                     with self.lock:feedback_progress=self.feedback_progress
                     if feedback_progress and (now-feedback_progress[1]>=30_000_000_000 or time.monotonic()-feedback_progress[2]>=30):
                         raise ValueError('Owner source feedback stalled for 30 wall seconds')
@@ -806,28 +842,25 @@ class RecordingSession:
                     else:
                         lease_deadline_wall_ns=renewed
                         renew_at_wall_ns=now+(renewed-now)//2
-                self.writer_stage='event_batch'
-                batch_started=time.monotonic()
-                # Bound both count and wall time so camera IO gets a turn,
-                # without making 100 Hz feedback wait behind every PNG batch.
-                for event_index in range(64):
-                    try:kind,fields,queued_wall,queued_mono=self.events.get(timeout=.01 if event_index==0 else 0)
-                    except queue.Empty:break
-                    getattr(self.recorder,'record_'+kind)(**fields)
-                    self.last_event_write=dict(kind=kind,tick=fields.get('tick'),queued_wall_ns=queued_wall,
-                        written_wall_ns=self.clock_ns(),enqueue_to_write_monotonic_s=time.monotonic()-queued_mono)
-                    self.events.task_done()
-                    if time.monotonic()-batch_started>=.02:break
+                self._drain_events()
                 # Snapshot Owner first: a later publication may be ahead of it,
                 # but a writer delay must not make this reference race forward.
-                with self.lock:self.checked_reference=self.feedback_progress
+                with self.lock:
+                    self.checked_reference=self.feedback_progress
+                    terminal_round=self.terminal
+                endpoint=(self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0)
+                tail_endpoint=endpoint if self.environment=='fake' and terminal_round and self.events.empty() else None
                 for camera,(directory,index) in list(cursors.items()):
                     self.writer_stage='camera:'+camera
-                    head=self.spool_head(camera,directory) if self.environment=='fake' else None
+                    rows=self.recorder.frames[camera]
+                    head=self.spool_head(camera,directory) if self.environment=='fake' and terminal_round is None else None
                     # Bounded batch prevents a fast camera from starving command evidence.
                     for _ in range(4):
+                        if tail_endpoint is not None and rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=tail_endpoint:break
                         path=directory/f'{index:09d}.zip'
                         if not path.is_file():break
+                        if tail_wait_started is not None:
+                            tail_wait_elapsed+=time.monotonic()-tail_wait_started;tail_wait_started=None
                         self.recorder.record_rgbd(camera,path.read_bytes())
                         # The recorder has persisted both frame and index before reclaiming our spool copy.
                         path.unlink()
@@ -835,7 +868,7 @@ class RecordingSession:
                         cursors[camera]=(directory,index)
                     cursors[camera]=(directory,index)
                     rows=self.recorder.frames[camera]
-                    if rows:
+                    if rows and (self.environment!='fake' or terminal_round is None):
                         if self.environment=='fake':
                             # A frame ahead of the last Owner tick remains pending
                             # that feedback; its actual source advance is still
@@ -855,7 +888,20 @@ class RecordingSession:
                     status,reason,requested=terminal
                     endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
                     covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
-                    if not cursors or covered or time.monotonic()-requested>=1:
+                    expired=time.monotonic()-requested>=1
+                    if self.environment=='fake':
+                        if recording_deadline_wall_ns is not None and (self.clock_ns()>=recording_deadline_wall_ns
+                                or time.monotonic()>=recording_deadline_monotonic):
+                            raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                        available=any((not self.recorder.frames[camera] or self.recorder._stamp(self.recorder.frames[camera][-1],'rgbd')[0]<endpoint)
+                            and (directory/f'{index:09d}.zip').is_file() for camera,(directory,index) in cursors.items())
+                        if available:
+                            if tail_wait_started is not None:tail_wait_elapsed+=time.monotonic()-tail_wait_started
+                            tail_wait_started=None
+                        elif tail_wait_started is None:tail_wait_started=time.monotonic()
+                        waited=tail_wait_elapsed+(time.monotonic()-tail_wait_started if tail_wait_started is not None else 0.)
+                        expired=not available and waited>=1
+                    if not cursors or covered or expired:
                         self.save_failure_diagnostics(cursors)
                         self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         break

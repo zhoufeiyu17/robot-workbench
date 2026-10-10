@@ -9,6 +9,7 @@ sh calibration/scripts/check.sh
 python tests/test_owner_clock.py
 python tests/test_joint_bounds.py
 python tests/test_recording_preparation.py
+python tests/test_recording_io.py
 python tests/test_physx_boundary.py
 python tests/test_unified_runtime.py
 python tests/test_http_service.py
