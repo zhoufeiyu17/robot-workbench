@@ -24,11 +24,16 @@ def main():
     try:transformed_spheres(proof,identity,Transform(),263)
     except ValueError:pass
     else:raise AssertionError('capacity silently truncated')
-    from cup_envelope import verify_offline
+    from cup_envelope import nominal_clearance,verify_offline
+    import numpy as np
     from curobo_robot_model import digest
     assert verify_offline(proof)['passed']
     bad=deepcopy(proof)
-    bad['first_band_spheres'][0][3]+=.0002
+    center=np.asarray([bad['first_band_spheres'][0][:3]],dtype=float)
+    first=bad['source_bands'][0];center[0,2]+=(first['z_min_m']+first['z_max_m'])/2
+    # Leave only 2.999 mm inside the actual source surface. A fixed 0.2 mm
+    # increase previously left 3.017 mm and was therefore still legal.
+    bad['first_band_spheres'][0][3]=float(nominal_clearance(center,bad['source_bands'])[0])-.003+1e-6
     bad['proof']['spheres_sha256']=digest(bad['first_band_spheres'])
     try:verify_offline(bad)
     except ValueError:pass
