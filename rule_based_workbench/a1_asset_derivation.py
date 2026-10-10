@@ -98,7 +98,7 @@ def derive(source_urdf,bundle_urdf,target_urdf,native_code,certificate_root=None
     sidecar_bytes=encoded(sidecar)
     derived_identity=dict(identity,sidecar_path=str(target_urdf.with_name('a1_support_contact.json')),
         sidecar_sha256=hashlib.sha256(sidecar_bytes).hexdigest(),urdf_sha256=target_sha)
-    provenance=dict(source_urdf_sha256=identity['urdf_sha256'],derived_urdf_sha256=target_sha,
+    provenance=dict(source_urdf_path=str(source_urdf.resolve()),source_urdf_sha256=identity['urdf_sha256'],derived_urdf_sha256=target_sha,
         source_sidecar_sha256=identity['sidecar_sha256'],derived_sidecar_sha256=derived_identity['sidecar_sha256'],
         mechanical_identity_sha256=original,allowed_origin_joints=list(OPTICAL))
     root=Path(certificate_root or Path(__file__).parent);files={};pins={};parts=set()
@@ -137,3 +137,34 @@ def certificate_path(name,urdf):
         raise ValueError('derived certificate escapes its asset directory')
     if sha(result)!=proof['certificates'][name]['derived_sha256']:raise ValueError('derived certificate SHA differs: '+name)
     return result
+
+
+def derive_cup_reference(reference,urdf,*,certificate_root=None):
+    """Keep the accepted task pose; rebind only a proven optical-only URDF edit."""
+    urdf=Path(urdf).resolve();path=urdf.with_name(PROOF)
+    if path.is_symlink() or not path.is_file():raise ValueError('regular asset-local cup-reference derivation proof required')
+    proof=json.loads(path.read_bytes())
+    sidecar=Path(proof['source_support_identity']['sidecar_path'])
+    # Older optical proofs name the reviewed native asset's sidecar rather than
+    # its URDF. That asset has this fixed, already-reviewed entry point.
+    source=Path(proof.get('source_urdf_path') or sidecar.with_name('acone_no_handle_d405.urdf'))
+    if (source.resolve().parent!=sidecar.resolve().parent or sha(source)!=reference.get('urdf_sha256')
+            or proof.get('source_urdf_sha256')!=sha(source) or proof.get('source_sidecar_sha256')!=sha(sidecar)):
+        raise ValueError('cup-reference source differs from the accepted A1 baseline')
+    expected_sidecar=dict(json.loads(sidecar.read_bytes()),urdf_sha256=sha(urdf))
+    if json.loads(urdf.with_name('a1_support_contact.json').read_bytes())!=expected_sidecar:
+        raise ValueError('cup-reference derived support policy/mesh differs from baseline')
+    mechanical=mechanical_identity(source)
+    if proof.get('mechanical_identity_sha256')!=mechanical or mechanical_identity(urdf)!=mechanical:
+        raise ValueError('cup-reference mechanical geometry/joint chain changed')
+    root=Path(certificate_root or Path(__file__).parent)
+    for name in CERTIFICATES:
+        original=root/name
+        if (proof['certificates'][name]['source_sha256']!=sha(original)
+                or json.loads(original.read_bytes()).get('urdf_sha256')!=reference['urdf_sha256']):
+            raise ValueError('cup-reference baseline certificate differs: '+name)
+        certificate_path(name,urdf)
+    return dict(deepcopy(reference),urdf_sha256=sha(urdf),calibration_derivation=dict(
+        proof_sha256=sha(path),source_reference_sha256=value_sha(reference),
+        source_urdf_sha256=reference['urdf_sha256'],derived_urdf_sha256=sha(urdf),
+        mechanical_identity_sha256=mechanical,allowed_origin_joints=list(OPTICAL)))

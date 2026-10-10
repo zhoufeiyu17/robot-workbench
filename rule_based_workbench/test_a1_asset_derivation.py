@@ -89,6 +89,77 @@ def publish(source,target,native,certs):
 
 
 class AssetDerivationTest(unittest.TestCase):
+    def test_cup_reference_rebinds_only_urdf_and_preserves_accepted_pose(self):
+        import motiongen_targets as targets
+        with TemporaryDirectory() as temp:
+            source,target,native,certs,_=fixture(Path(temp));proof=publish(source,target,native,certs)
+            accepted={**deepcopy(targets.REFERENCE),'urdf_sha256':derivation.sha(source)}
+            before=deepcopy(accepted)
+            ref=derivation.derive_cup_reference(accepted,target,certificate_root=certs)
+            self.assertEqual(accepted,before)
+            self.assertEqual(ref['urdf_sha256'],derivation.sha(target))
+            evidence=ref.pop('calibration_derivation')
+            self.assertEqual(evidence['proof_sha256'],derivation.sha(target.with_name(derivation.PROOF)))
+            self.assertEqual(evidence['source_reference_sha256'],derivation.value_sha(accepted))
+            self.assertEqual(evidence['mechanical_identity_sha256'],proof['mechanical_identity_sha256'])
+            ref['urdf_sha256']=accepted['urdf_sha256'];self.assertEqual(ref,accepted)
+            # The archived optical proof format remains verifiable from its
+            # original native source entry point; no historical artifact rewrite.
+            source.with_name('acone_no_handle_d405.urdf').write_bytes(source.read_bytes())
+            proof.pop('source_urdf_path');target.with_name(derivation.PROOF).write_bytes(derivation.encoded(proof))
+            self.assertEqual(derivation.derive_cup_reference(accepted,target,certificate_root=certs)['urdf_sha256'],derivation.sha(target))
+
+    def test_actual_task_reference_guard_still_rejects_cup_native_and_envelope_changes(self):
+        import motiongen_targets as targets
+        with TemporaryDirectory() as temp:
+            source,target,native,certs,_=fixture(Path(temp));publish(source,target,native,certs)
+            accepted={**deepcopy(targets.REFERENCE),'urdf_sha256':derivation.sha(source)}
+            planner=NS(cup=NS(profile_sha256=accepted['cup_profile_sha256']),
+                identity={key:accepted[key] for key in ('native_geometry_sha256','envelope_sha256')})
+            data=dict(urdf_sha256=derivation.sha(target));original=derivation.derive_cup_reference
+            def checked(reference,urdf):return original(reference,urdf,certificate_root=certs)
+            with patch.object(targets,'REFERENCE',accepted),patch.object(derivation,'derive_cup_reference',side_effect=checked):
+                ref,identity=targets.checked_reference(planner,data,urdf_path=target)
+                self.assertEqual(identity['urdf_sha256'],derivation.sha(target));self.assertEqual(ref['source'],accepted['source'])
+                self.assertIn('calibration_derivation',ref)
+                with self.assertRaisesRegex(ValueError,'does not match'):targets.checked_reference(planner,data)
+                for field in ('cup_profile_sha256','native_geometry_sha256','envelope_sha256'):
+                    changed=deepcopy(planner)
+                    if field=='cup_profile_sha256':changed.cup.profile_sha256='f'*64
+                    else:changed.identity[field]='f'*64
+                    with self.subTest(field=field),self.assertRaisesRegex(ValueError,'does not match'):
+                        targets.checked_reference(changed,data,urdf_path=target)
+                # A caller cannot ask the unchanged strict guard to accept the
+                # old reference simply because an optical proof exists nearby.
+                with self.assertRaisesRegex(ValueError,'does not match'):
+                    targets.checked_reference(planner,data,reference=accepted,urdf_path=target)
+
+    def test_cup_reference_rejects_changed_mechanics_or_damaged_proof(self):
+        from motiongen_targets import REFERENCE
+        for change in ('joint','mesh','finger','missing_proof','proof','certificate','sidecar','source'):
+            with self.subTest(change=change),TemporaryDirectory() as temp:
+                source,target,native,certs,_=fixture(Path(temp));publish(source,target,native,certs)
+                accepted={**deepcopy(REFERENCE),'urdf_sha256':derivation.sha(source)}
+                if change in ('joint','finger'):
+                    tree=ET.parse(target)
+                    if change=='joint':tree.find("joint[@name='left_joint2']/origin").set('xyz','.001 0 0')
+                    else:
+                        visual=ET.SubElement(tree.find("link[@name='left_link7']"),'visual')
+                        ET.SubElement(ET.SubElement(visual,'geometry'),'box',size='.1 .1 .1')
+                    tree.write(target)
+                elif change=='mesh':(target.parent/'meshes/left_link2.stl').write_bytes(b'changed support')
+                elif change=='missing_proof':target.with_name(derivation.PROOF).unlink()
+                elif change=='proof':
+                    path=target.with_name(derivation.PROOF);value=json.loads(path.read_text());value['mechanical_identity_sha256']='f'*64
+                    path.write_bytes(derivation.encoded(value))
+                elif change=='certificate':
+                    path=target.parent/'derived-certificates'/derivation.CERTIFICATES[0];path.write_bytes(path.read_bytes()+b'\n')
+                elif change=='sidecar':
+                    path=target.with_name('a1_support_contact.json');value=json.loads(path.read_text());value['policy']['max_interference_m']=.002
+                    path.write_bytes(derivation.encoded(value))
+                else:source.write_bytes(source.read_bytes()+b'\n')
+                with self.assertRaises(ValueError):derivation.derive_cup_reference(accepted,target,certificate_root=certs)
+
     def test_real_asset_prepare_derives_proofs_and_rejects_mechanical_change_before_output(self):
         from a1_isaac_assets import prepare
         from model_adapt import seal

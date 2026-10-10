@@ -434,7 +434,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     right, home_q = [start[name] for name in RIGHT], [start[name] for name in LEFT]
     initial_gap, right_gap = (start['left_joint7']+start['left_joint8'])*1000, (start['right_joint17']+start['right_joint18'])*1000
     action_cache = {}
-    targets = generate_targets(planner, observation, data)
+    targets = generate_targets(planner, observation, data,urdf_path=urdf_path)
     diagnostic('targets.json', targets)
     if not targets['grasp_candidates'] or not targets['placement_candidates']:
         raise ValueError('no supported task-space targets')

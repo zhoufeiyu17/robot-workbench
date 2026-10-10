@@ -19,7 +19,7 @@ try:
  source=json.loads(a.source.read_text());parent=a.seed_plan
  seed=json.loads(parent.read_text())['path'][-1]
  initial=dict(planner.home_state,left_joint7=planner.open_position_m,left_joint8=planner.open_position_m)
- raw=RigidTransform(**generate_targets(planner,obs,data)['grasp_candidates'][0]['world_from_tool'])
+ raw=RigidTransform(**generate_targets(planner,obs,data,urdf_path=ac_one_asset_spec(a.assets).urdf_path)['grasp_candidates'][0]['world_from_tool'])
  raised=RigidTransform(tuple(v+(a.grasp_height_offset_mm/1000 if i==2 else 0.) for i,v in enumerate(raw.position)),raw.orientation_wxyz)
  goal=planner.geo.mount.inverse().compose(raised)
  solver=A1Kinematics(ac_one_asset_spec(a.assets).urdf_path,planner.fk.movable,initial)

@@ -35,19 +35,27 @@ def _hand_points_tool(planner, jaw_position):
             for part in planner.parts if part.link in ('left_link6', 'left_link7', 'left_link8')]
 
 
-def generate_targets(planner, observation, data, *, reference=None):
-    """Bind accepted cup-relative grasp and support-local placement to this scene."""
-    from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
-    from robot_sim.tasks.manager_based.coffee_make.relative_targets import (
-        placement_candidates, eroded_support_polygon, _nearest_polygon_point)
-    from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import OUTLET_TOLERANCE_M, outlet_distance
+def checked_reference(planner,data,*,reference=None,urdf_path=None):
     ref = REFERENCE if reference is None else reference
     expected = dict(cup_profile_sha256=planner.cup.profile_sha256,
                     urdf_sha256=data['urdf_sha256'],
                     native_geometry_sha256=planner.identity['native_geometry_sha256'],
                     envelope_sha256=planner.identity['envelope_sha256'])
+    if reference is None and urdf_path is not None and ref['urdf_sha256']!=expected['urdf_sha256']:
+        from a1_asset_derivation import derive_cup_reference
+        ref=derive_cup_reference(ref,urdf_path)
     if not ref.get('source') or any(ref.get(key) != value for key, value in expected.items()):
         raise ValueError('cup-relative reference does not match current cup/A1-cal geometry')
+    return ref,expected
+
+
+def generate_targets(planner, observation, data, *, reference=None,urdf_path=None):
+    """Bind accepted cup-relative grasp and support-local placement to this scene."""
+    ref,expected=checked_reference(planner,data,reference=reference,urdf_path=urdf_path)
+    from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
+    from robot_sim.tasks.manager_based.coffee_make.relative_targets import (
+        placement_candidates, eroded_support_polygon, _nearest_polygon_point)
+    from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import OUTLET_TOLERANCE_M, outlet_distance
     numbers = [ref['grasp_offset_m'], ref['pitch_rad'], ref['roll_rad'],
                *ref['cup_from_tool_position_m'], planner.GRASP_CENTER_OFFSET_M]
     if not all(math.isfinite(v) for v in numbers):
@@ -115,6 +123,7 @@ def generate_targets(planner, observation, data, *, reference=None):
     if placements:placements[0]['preferred']=True
     return dict(schema_version='motiongen_rule_targets.v1', task_space_only=True,
                 reference_identity=expected, grasp_candidates=[grasp], placement_candidates=placements,
+                **({'reference_derivation':ref['calibration_derivation']} if 'calibration_derivation' in ref else {}),
                 placement_goal=dict(schema_version='cup_outlet_goal.v1',metric='cup_mouth_world_xy_to_liquid_outlet',
                     tolerance_m=OUTLET_TOLERANCE_M,target_tolerance_m=target_tolerance,
                     tracking_reserve_m=tracking_reserve,
