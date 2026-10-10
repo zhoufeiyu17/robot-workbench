@@ -1,35 +1,36 @@
 {
-  "status": "grasp-native-and-raw-qualified-source-replay-recovered-cold-suite-pending",
-  "updated_at": "2026-10-11T00:08:30.522492+08:00",
+  "status": "v31_contact_preview_fixes_CPU_passed_warm_D_starting",
+  "updated_at": "2026-10-11T05:11:18.740570+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "e67cf7e",
-  "qualification_scope": "e67cf7e CPU/L1 passed. Frozen bda3c8c warm223638 native task, raw and L3 independently passed; original export failed and teardown persisted stopped. Fixed source replay independently recovered using unchanged raw in CPU replay000106. Original workflow not reclassified. Cold suite0/3; hardware unqualified.",
+  "candidate_commit_before_summary": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+  "qualification_scope": "c06ae64 dynamic normal-v31 with source-frame convex geometry and live/idle preview guards: full CPU and L1 27/27 passed, fixed040630 input GPU plan independently verified. warm-20261011-050624 reuses read-only040630 calibration and is currently preparing new D; it never counts as a cold pass. Complete empty-store suite remains0/3. Historical failures and snapshot-specific image/warm/raw/replay qualifications are retained. No real hardware qualification.",
   "cpu": {
-    "source_equivalent_commit": "e67cf7e",
-    "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/receipt.json",
+    "source_equivalent_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+    "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/receipt.json",
     "full_check_exit_code": 0,
-    "unittest_executions_in_full_log": 760,
-    "unittest_passed_in_full_log": 759,
+    "unittest_executions_in_full_log": 780,
+    "unittest_passed_in_full_log": 779,
     "unittest_skipped_in_full_log": 1,
-    "skip_detail": "old-model mesh fixture; actual pinned A1/native checks enabled",
-    "source_files": 371,
+    "source_files": 374,
     "source_unchanged": true,
     "native_unchanged": true,
-    "detector_unchanged": true,
-    "count_note": "execution counts, not unique tests; L1 and supplemental counts are not added"
+    "detector_unchanged": true
   },
   "l1": {
-    "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/l1/l1-fault-matrix.json",
+    "evidence": ".evidence/s2/tick-contact-full-cpu-20261011-v2/l1/l1-fault-matrix.json",
     "cases_passed": 27,
     "cases_total": 27,
     "exit_code": 0,
     "source_unchanged": true,
-    "python_source_files": 324,
+    "python_source_files": 327,
     "stop_barrier_samples": 30,
-    "stop_barrier_p95_ms": 2.2483328357338905,
-    "stop_barrier_max_ms": 3.5922499373555183,
-    "scope": "Mac L1 protocol fake only; not physical stopping or GPU task qualification"
+    "stop_barrier_p95_ms": 4.900124855339527,
+    "stop_barrier_max_ms": 5.38845919072628,
+    "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
+    "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
+    "physical_stop": "unverified",
+    "firmware_ack": "unsupported"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -48,9 +49,10 @@
     "status": "full_pipeline_not_qualified",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "latest_cold_attempt": "full-20261010-123915",
-    "latest_diagnostic": "warm-20261010-223638",
-    "meaning": "0/3 counts complete empty-store calibration-to-successful-collection/raw/playback cases; calibration subpipeline has passed"
+    "latest_cold_attempt": "full-20261011-040630",
+    "latest_diagnostic": "warm-20261011-050624",
+    "meaning": "0/3 counts complete empty-store calibration-to-successful-collection/raw/playback cases; calibration subpipeline has passed",
+    "latest_cold_attempt_status": "D_planning_failed_IK_4_candidates"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
@@ -63,8 +65,8 @@
     "renderer_gpu_lifecycle": "pending",
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
-    "latest_scope_screenshot": ".evidence/s2/warm-223638-ui-export-failure.jpg",
-    "temporary_loopback_forward": "18867 closed; no listener after run teardown",
+    "latest_scope_screenshot": ".evidence/s2/parity-ui-20261010T174002Z-verified/trajectory-verified.jpg",
+    "temporary_loopback_forward": "authorized18867→734:43759 active for current warm run; close after acceptance work;18866 L1 unchanged",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
     "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
@@ -76,19 +78,55 @@
       "off": ".evidence/s2/warm-145124-browser-mesh-off.json",
       "on": ".evidence/s2/warm-145124-browser-mesh-on.json"
     },
-    "current_UI_scope": "18866 L1 retained; actual223638 browser progress and separate motion/data/native outcomes verified; original overall export failure preserved",
+    "current_UI_scope": "26-row existing UI parity visually verified with task-owned CPU fixtures; screenshots remain scoped to that UI source. Browser automation later failed twice; no new warm/cold browser qualification. Actual same-plant camera API content captured in full040630.",
     "performance_windows_ref": "event_driven_preview.off.windows and event_driven_preview.on.windows",
     "live_collection_progress_fix": {
       "commit": "30fc9f3",
       "evidence": ".evidence/s2/collection-ui-progress-20261010/receipt.json",
       "actual_gpu_revalidated": true,
       "actual_gpu_evidence": ".evidence/s2/warm-223638-ui-running.jpg"
-    }
+    },
+    "parity_controls": {
+      "commit": "b5ab340",
+      "receipt": ".evidence/s2/parity-ui-20261010T174002Z-verified/receipt.json",
+      "matrix": ".evidence/s2/parity-ui-20261010T170940Z/parity-matrix.json",
+      "final_observations": ".evidence/s2/parity-ui-20261010T174002Z-verified/browser-observations.json",
+      "intermediate_observations": ".evidence/s2/parity-ui-20261010T170940Z-final/browser-observations.json",
+      "verified_actions": [
+        "add calibration queue waypoint",
+        "set fit-source",
+        "wrist-result head replay and frozen-head overlay routing",
+        "50 percent server-bound collection review",
+        "load current-plan JSON and inspect close stage/tick30",
+        "paired 2x playback, pause, end/home seek and resume",
+        "failed terminal title with independent outcomes",
+        "latched fault state/reason and readonly diagnostics navigation",
+        "explicit release clears connection and review; explicit reconnect returns control to calibration",
+        "controller state/reason separated from service thread exception"
+      ],
+      "physical_support_confirmation_scope": "Node/HTTP only; actual browser release used protocol Fake",
+      "final_screenshots": [
+        ".evidence/s2/parity-ui-20261010T174002Z-verified/trajectory-verified.jpg",
+        ".evidence/s2/parity-ui-20261010T174002Z-verified/release-verified.jpg",
+        ".evidence/s2/parity-ui-20261010T174002Z-verified/diagnostics-reconnected.jpg"
+      ],
+      "source_files_pinned": 14,
+      "source_hashes_unchanged_after_verification": true,
+      "all_browser_branches_qualified": false,
+      "fixture_ports_closed": [
+        58403,
+        55373,
+        51135
+      ],
+      "user_18866_untouched": true
+    },
+    "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json"
   },
   "remaining": [
-    "完成最终版本三个预声明空库全链案例；warm复用旧标定，不能计入0/3。",
-    "补完新入口的旧功能对照及导出/封存性能整理。",
-    "单独完成真机SDK、现场止动、时延、载荷与单writer正式切换。"
+    "完成当前warm D执行、native任务、raw、源录像和L3辅助回放独立审计；复用C不计冷全链。",
+    "在冻结suite-v4完成nominal、scene-xy、device-j1三个新空库全链；当前0/3，失败不恢复冒充通过。",
+    "补充实际轨迹/回放视觉证据，更新最终文档并清退自有资源；浏览器自动化不可用时明确证据范围。",
+    "实体SDK、现场止动、时延、载荷与单writer切换属于独立L4验收。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -419,8 +457,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": null,
-  "last_gpu_run": "warm-20261010-223638",
+  "current_gpu_run": "warm-20261011-050624",
+  "last_gpu_run": "full-20261011-040630",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -438,79 +476,15 @@
     "qualification_evidence": ".evidence/s2/warm-223638-offline-archive-audit-20261011-001.json"
   },
   "latest_warm_diagnostic": {
-    "run": "warm-20261010-223638",
-    "source_commit": "bda3c8c",
+    "run": "warm-20261011-050624",
+    "source_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+    "status": "D_setup_initializing_detector",
     "fresh_C_completed": false,
     "diagnostic_only": true,
-    "motion_outcome": "completed",
-    "execution_tick_count": 3669,
-    "native_task_outcome": "success",
-    "native_task_qualified": true,
-    "observed_physics_samples": 29355,
-    "outlet_alignment_error_mm": 1.7905,
-    "raw_complete": true,
-    "command_count": 3669,
-    "feedback_count": 12232,
-    "camera_frames": {
-      "base_0": 3681,
-      "left_wrist_0": 3681,
-      "right_wrist_0": 3681
-    },
-    "camera_source_drops": 0,
-    "auxiliary_replay": "completed and independently verified",
-    "original_workflow": "export_failed_then_stopped_at_teardown",
-    "original_failure": "source video duration122.698s vs122.700s; accumulated per-frame microsecond truncation",
-    "original_workflow_reclassified": false,
-    "source_replay_recovery": {
-      "schema": "source_replay_recovery.v1",
-      "status": "passed",
-      "gpu_used": false,
-      "started_wall_ns": 1791648072888683688,
-      "finished_wall_ns": 1791648395558796210,
-      "origin_run": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638",
-      "origin_job": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638/collection-2c7420bda31c720d-1791643105028188257/playground/jobs/f9ead4dbad3849208864c1a64710a945",
-      "original_workflow_reclassified": false,
-      "raw_manifest_sha256": "3987743ed0c14a2f7d8023e5684913b4c67e9bb965a5d294d7fa3ec6043982f4",
-      "native_receipt_sha256": "2d29c832f4ba7859b368f42eee680ab5120027e9eadbec7ff565d0b99d30bf13",
-      "module_sha256": "f54ac8d2454d274c4a390c2a5f097ab0e0c376ec3360b3f62f86e159590eef12",
-      "execution_timeline_digest": "72ff09bdcf0aa327a37246d9640d18409fae60c330648936617b202d67320be5",
-      "source_clock_id": "physx-78e33d1df45b36aa5f25ca82de558331",
-      "source_replay_manifest": "/mnt/data/feiyu.zhou/runs/robot-workbench/replay-20261011-000106/playback/manifest.json",
-      "source_replay_manifest_sha256": "74aa4740fe98d31d2e549ea546bae3f8c9cd161d93ec1a52cb099660ef882ea8",
-      "camera_checks": {
-        "base_0": {
-          "frames": 3681,
-          "duration_s": 122.7,
-          "expected_duration_s": 122.7,
-          "maximum_frame_pts_error_s": 0.0003333330000003798,
-          "sha256": "eabaeb8b65600c4b42c58042c115bd7281c47029880b4742d8616240b6c7b4b4",
-          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
-        },
-        "left_wrist_0": {
-          "frames": 3681,
-          "duration_s": 122.7,
-          "expected_duration_s": 122.7,
-          "maximum_frame_pts_error_s": 0.0003333330000003798,
-          "sha256": "aa44863bd33a234e334417a393232679fbe2ac8a84f0ac95329247763df219eb",
-          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
-        },
-        "right_wrist_0": {
-          "frames": 3681,
-          "duration_s": 122.7,
-          "expected_duration_s": 122.7,
-          "maximum_frame_pts_error_s": 0.0003333330000003798,
-          "sha256": "51b4db55bc47baeda48d014d9984f06d6d7967a3b3efea42e9a9722d1e3bd655",
-          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
-        }
-      },
-      "qualification_scope": "new CPU-derived source replay of the completed frozen raw; original workflow failure retained, no cold-case qualification"
-    },
-    "artifact_audit": ".evidence/s2/warm-223638-offline-archive-audit-20261011-001.json",
-    "native_evidence": ".evidence/s2/warm-223638-native-task-receipt.json",
-    "teardown": ".evidence/s2/warm-20261010-223638-teardown.json",
-    "released": true,
-    "temporary_spool_cleanup": ".evidence/s2/warm-223638-spool-cleanup.json",
-    "qualifies_cold_case": false
+    "source_spec": ".evidence/s2/warm-source-040630.json",
+    "full_pipeline_qualified": false,
+    "qualifies_cold_case": false,
+    "released": false
   },
   "preview_three_slot_measurement": {
     "off": {
@@ -896,6 +870,40 @@
       "failure": "C capture total wall deadline used source motion duration; unchanged original thresholds",
       "failure_evidence": ".evidence/s2/full-115724-head-timeout-evidence.json",
       "teardown_evidence": ".evidence/s2/full-20261010-115724-teardown.json"
+    },
+    "full-20261011-015820": {
+      "run": "full-20261011-015820",
+      "product_commit": "b5ab340",
+      "head_frames": 34,
+      "wrist_frames": 29,
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": false,
+      "full_pipeline_qualified": false,
+      "head_image_passed": false,
+      "head_dependency_eligible": true,
+      "head_false_image_checks": [
+        "independent_poses"
+      ],
+      "left_wrist_holdout_rms_px": 1.5102434931617184,
+      "right_wrist_holdout_rms_px": 1.1757162235175258,
+      "failure": "native optimizer output violated original 2mm straight segment acceptance; reverse front_height and world-axis insert mismatch",
+      "diagnosis": ".evidence/s2/full-015820-planner-diagnosis.json",
+      "audit": ".evidence/s2/full-20261011-015820-failed-audit-v2.json",
+      "released": true,
+      "teardown": ".evidence/s2/full-20261011-015820-teardown.json"
+    },
+    "full-20261011-015444": {
+      "status": "harness_preflight_failed_before_connect_or_motion",
+      "product_commit": "b5ab340",
+      "failure": "zero-sample arrival diagnostic summary mistaken for old calibration",
+      "fresh_C_completed": false,
+      "full_pipeline_qualified": false,
+      "owned_processes_exited": true,
+      "gpu_released": true,
+      "launch_evidence": ".evidence/s2/full-20261011-015444-launch-receipt.json",
+      "driver_log": ".evidence/s2/full-20261011-015444-driver.log",
+      "teardown_evidence": ".evidence/s2/full-20261011-015444-teardown.json"
     }
   },
   "historical_installed_attempts": {
@@ -1049,6 +1057,81 @@
       "plan_evidence": ".evidence/s2/warm-212644-plan-qualification.json",
       "teardown": ".evidence/s2/warm-20261010-212644-teardown.json",
       "released": true
+    },
+    "warm-20261010-223638": {
+      "run": "warm-20261010-223638",
+      "source_commit": "bda3c8c",
+      "fresh_C_completed": false,
+      "diagnostic_only": true,
+      "motion_outcome": "completed",
+      "execution_tick_count": 3669,
+      "native_task_outcome": "success",
+      "native_task_qualified": true,
+      "observed_physics_samples": 29355,
+      "outlet_alignment_error_mm": 1.7905,
+      "raw_complete": true,
+      "command_count": 3669,
+      "feedback_count": 12232,
+      "camera_frames": {
+        "base_0": 3681,
+        "left_wrist_0": 3681,
+        "right_wrist_0": 3681
+      },
+      "camera_source_drops": 0,
+      "auxiliary_replay": "completed and independently verified",
+      "original_workflow": "export_failed_then_stopped_at_teardown",
+      "original_failure": "source video duration122.698s vs122.700s; accumulated per-frame microsecond truncation",
+      "original_workflow_reclassified": false,
+      "source_replay_recovery": {
+        "schema": "source_replay_recovery.v1",
+        "status": "passed",
+        "gpu_used": false,
+        "started_wall_ns": 1791648072888683688,
+        "finished_wall_ns": 1791648395558796210,
+        "origin_run": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638",
+        "origin_job": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638/collection-2c7420bda31c720d-1791643105028188257/playground/jobs/f9ead4dbad3849208864c1a64710a945",
+        "original_workflow_reclassified": false,
+        "raw_manifest_sha256": "3987743ed0c14a2f7d8023e5684913b4c67e9bb965a5d294d7fa3ec6043982f4",
+        "native_receipt_sha256": "2d29c832f4ba7859b368f42eee680ab5120027e9eadbec7ff565d0b99d30bf13",
+        "module_sha256": "f54ac8d2454d274c4a390c2a5f097ab0e0c376ec3360b3f62f86e159590eef12",
+        "execution_timeline_digest": "72ff09bdcf0aa327a37246d9640d18409fae60c330648936617b202d67320be5",
+        "source_clock_id": "physx-78e33d1df45b36aa5f25ca82de558331",
+        "source_replay_manifest": "/mnt/data/feiyu.zhou/runs/robot-workbench/replay-20261011-000106/playback/manifest.json",
+        "source_replay_manifest_sha256": "74aa4740fe98d31d2e549ea546bae3f8c9cd161d93ec1a52cb099660ef882ea8",
+        "camera_checks": {
+          "base_0": {
+            "frames": 3681,
+            "duration_s": 122.7,
+            "expected_duration_s": 122.7,
+            "maximum_frame_pts_error_s": 0.0003333330000003798,
+            "sha256": "eabaeb8b65600c4b42c58042c115bd7281c47029880b4742d8616240b6c7b4b4",
+            "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+          },
+          "left_wrist_0": {
+            "frames": 3681,
+            "duration_s": 122.7,
+            "expected_duration_s": 122.7,
+            "maximum_frame_pts_error_s": 0.0003333330000003798,
+            "sha256": "aa44863bd33a234e334417a393232679fbe2ac8a84f0ac95329247763df219eb",
+            "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+          },
+          "right_wrist_0": {
+            "frames": 3681,
+            "duration_s": 122.7,
+            "expected_duration_s": 122.7,
+            "maximum_frame_pts_error_s": 0.0003333330000003798,
+            "sha256": "51b4db55bc47baeda48d014d9984f06d6d7967a3b3efea42e9a9722d1e3bd655",
+            "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+          }
+        },
+        "qualification_scope": "new CPU-derived source replay of the completed frozen raw; original workflow failure retained, no cold-case qualification"
+      },
+      "artifact_audit": ".evidence/s2/warm-223638-offline-archive-audit-20261011-001.json",
+      "native_evidence": ".evidence/s2/warm-223638-native-task-receipt.json",
+      "teardown": ".evidence/s2/warm-20261010-223638-teardown.json",
+      "released": true,
+      "temporary_spool_cleanup": ".evidence/s2/warm-223638-spool-cleanup.json",
+      "qualifies_cold_case": false
     }
   },
   "historical_browser_measurements": {
@@ -1207,6 +1290,99 @@
       "source_files": 371,
       "source_unchanged": true,
       "count_note": "Execution counts, not unique tests; script and L1 counts are not added"
+    },
+    {
+      "source_equivalent_commit": "e67cf7e",
+      "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/receipt.json",
+      "full_check_exit_code": 0,
+      "unittest_executions_in_full_log": 760,
+      "unittest_passed_in_full_log": 759,
+      "unittest_skipped_in_full_log": 1,
+      "skip_detail": "old-model mesh fixture; actual pinned A1/native checks enabled",
+      "source_files": 371,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true,
+      "count_note": "execution counts, not unique tests; L1 and supplemental counts are not added",
+      "l1": {
+        "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/l1/l1-fault-matrix.json",
+        "cases_passed": 27,
+        "cases_total": 27,
+        "exit_code": 0,
+        "source_unchanged": true,
+        "python_source_files": 324,
+        "stop_barrier_samples": 30,
+        "stop_barrier_p95_ms": 2.2483328357338905,
+        "stop_barrier_max_ms": 3.5922499373555183,
+        "scope": "Mac L1 protocol fake only; not physical stopping or GPU task qualification"
+      },
+      "superseded_at": "2026-10-11T02:01:35.607154+08:00"
+    },
+    {
+      "source_equivalent_commit": "b5ab340",
+      "git_head_at_test_start": "bc73a291e222d3cc09db2dd8f1cd92eea204c3cc",
+      "tested_working_tree_changes": true,
+      "current_source_matches_tested_hashes": true,
+      "evidence": ".evidence/s2/cold-suite-final-cpu-20261011-v1/receipt.json",
+      "full_check_exit_code": 0,
+      "supplemental_entries_passed": 14,
+      "unittest_executions_in_full_log": 778,
+      "unittest_passed_in_full_log": 777,
+      "unittest_skipped_in_full_log": 1,
+      "skip_detail": "test_real_mesh_plan: explicit local mesh fixture only; actual pinned A1/native checks enabled",
+      "source_files": 373,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true,
+      "finished_at": "2026-10-11T01:53:33.638841+08:00",
+      "count_note": "execution counts, not unique tests; L1 and supplemental counts are not added",
+      "l1": {
+        "evidence": ".evidence/s2/cold-suite-final-cpu-20261011-v1/l1/l1-fault-matrix.json",
+        "cases_passed": 27,
+        "cases_total": 27,
+        "exit_code": 0,
+        "source_unchanged": true,
+        "python_source_files": 326,
+        "stop_barrier_samples": 30,
+        "stop_barrier_p95_ms": 1.2061670422554016,
+        "stop_barrier_max_ms": 1.4414172619581223,
+        "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
+        "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
+        "physical_stop": "unverified",
+        "firmware_ack": "unsupported"
+      },
+      "superseded_at": "2026-10-11T03:23:44.166123+08:00"
+    },
+    {
+      "source_equivalent_commit": "5bac1aba57371001e1b26de7ff4d87c12496c714",
+      "git_head_at_test_start": "b5ab340e9837f73e93239eff563556c9b2cdba6a",
+      "tested_working_tree_changes": true,
+      "current_source_matches_tested_hashes": true,
+      "evidence": ".evidence/s2/normal-v31-full-cpu-20261011-v1/receipt.json",
+      "full_check_exit_code": 0,
+      "supplemental_entries_passed": 14,
+      "unittest_executions_in_full_log": 778,
+      "unittest_passed_in_full_log": 777,
+      "unittest_skipped_in_full_log": 1,
+      "skip_detail": "test_real_mesh_plan: explicit local mesh fixture only; actual pinned A1/native checks enabled",
+      "source_files": 374,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true,
+      "finished_at": "2026-10-11T03:14:32.224414+08:00",
+      "count_note": "execution counts, not unique tests; L1 and supplemental counts are not added"
+    },
+    {
+      "source_equivalent_commit": "44f68beb545e6fa8d52b6d6cdf0d072afee3a32a",
+      "evidence": ".evidence/s2/preview-budget-full-cpu-20261011-v1/receipt.json",
+      "full_check_exit_code": 0,
+      "unittest_executions_in_full_log": 778,
+      "unittest_passed_in_full_log": 777,
+      "unittest_skipped_in_full_log": 1,
+      "source_files": 374,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true
     }
   ],
   "grasp_contact_reserve": {
@@ -1267,5 +1443,344 @@
       "UNRECONCILED_STATUS_DELTA"
     ],
     "scope": "governance accounting diagnostics; not a product test or runtime blocker"
+  },
+  "parity": {
+    "status": "approved_implementation_gaps_addressed_scoped_evidence_complete",
+    "commit": "b5ab340",
+    "matrix": ".evidence/s2/parity-ui-20261010T170940Z/parity-matrix.json",
+    "rows": 26,
+    "known_approved_implementation_gaps": 0,
+    "receipt": ".evidence/s2/parity-ui-20261010T174002Z-verified/receipt.json",
+    "historical_and_current_qualification_separate": true,
+    "all_browser_branches_qualified": false,
+    "physical_hardware_qualified": false,
+    "intentionally_not_retained": [
+      "standalone dual_dsw control mode",
+      "withdrawn multi-round auto-iteration",
+      "old marker-prior experiments and old-format batch compatibility"
+    ],
+    "remaining_qualification": "See each row remaining_gap for exact CPU-only, partial-browser, historical-run and L4 boundaries; no three-cold-case qualification from fixtures."
+  },
+  "performance": {
+    "status": "passed_for_full_archived_raw_CPU_comparison",
+    "commit": "af6cfa9",
+    "comparison": ".evidence/s2/cpu-export-perf2-20261011-0115/comparison.json",
+    "baseline_receipt": ".evidence/s2/cpu-export-perf-20261011-0050/baseline-receipt.json",
+    "candidate_receipt": ".evidence/s2/cpu-export-perf2-20261011-0115/candidate-receipt.json",
+    "phase_wall_s": {
+      "seal_readonly": {
+        "baseline": 125.52118566102581,
+        "candidate": 69.0957773370319
+      },
+      "verify_raw": {
+        "baseline": 119.90234715299448,
+        "candidate": 66.39815199095756
+      },
+      "export": {
+        "baseline": 321.2845607409836,
+        "candidate": 163.75674545299262
+      },
+      "decode_verify_base_0": {
+        "baseline": 2.3930578849976882,
+        "candidate": 2.374837398005184
+      },
+      "decode_verify_left_wrist_0": {
+        "baseline": 2.5279907750082202,
+        "candidate": 2.5088599659502506
+      },
+      "decode_verify_right_wrist_0": {
+        "baseline": 2.337020623963326,
+        "candidate": 2.312749932985753
+      }
+    },
+    "baseline_total_s": 576.2221695539774,
+    "candidate_total_s": 309.244813094032,
+    "wall_time_reduction_percent": 46.332364592392935,
+    "original_raw_unchanged": true,
+    "original_workflow_reclassified": false,
+    "baseline_candidate_video_and_decoded_pixel_hashes_identical": true,
+    "raw_file_index_sha256": "cecd511105186acd4656ae37daa994dcf412054fcf6d47d6b714df825ef01542",
+    "videos": {
+      "base_0": {
+        "frames": 3681,
+        "max_pts_error_s": 0.0003333330000003798,
+        "decoded_pixel_sequence_sha256": "23cf1a8d598049c294683579a10cef5b21d1821df008f124b65788a8beffa755",
+        "video_sha256": "eabaeb8b65600c4b42c58042c115bd7281c47029880b4742d8616240b6c7b4b4",
+        "duration_s": 122.7
+      },
+      "left_wrist_0": {
+        "frames": 3681,
+        "max_pts_error_s": 0.0003333330000003798,
+        "decoded_pixel_sequence_sha256": "de1a71d789cef5477f1ef64e046098a1da7e59706c8679d2668f254b9e005a52",
+        "video_sha256": "aa44863bd33a234e334417a393232679fbe2ac8a84f0ac95329247763df219eb",
+        "duration_s": 122.7
+      },
+      "right_wrist_0": {
+        "frames": 3681,
+        "max_pts_error_s": 0.0003333330000003798,
+        "decoded_pixel_sequence_sha256": "3418ec2deb43ee959ac8cbc936996a96309f39e62655a4d9031b461bceb27030",
+        "video_sha256": "51b4db55bc47baeda48d014d9984f06d6d7967a3b3efea42e9a9722d1e3bd655",
+        "duration_s": 122.7
+      }
+    },
+    "scope": "CPU-only postprocessing of one complete archived three-camera raw input on the measured host/load/storage; not GPU/live collection throughput, new cold-case success or universal storage performance."
+  },
+  "latest_cold_attempt": {
+    "run": "full-20261011-040630",
+    "status": "D_planning_failed_IK_4_candidates",
+    "product_commit": "44f68beb545e6fa8d52b6d6cdf0d072afee3a32a",
+    "fresh_C_completed": true,
+    "group_installed": true,
+    "D_motion_started": false,
+    "full_pipeline_qualified": false,
+    "released": true,
+    "launch_evidence": ".evidence/s2/full-20261011-040630-launch-receipt.json",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-040630-contract.json",
+    "C_results": ".evidence/s2/full-20261011-040630-C-results.json",
+    "artifact_audit": ".evidence/s2/full-20261011-040630-failed-audit.json",
+    "accepted_D_executions": 0,
+    "teardown": ".evidence/s2/full-20261011-040630-teardown.json"
+  },
+  "base_alignment": {
+    "status": "owner_reply_read_back_dynamic_recipe_implemented",
+    "owner_session": "01a11f11-57eb-78a2-bfd8-28de72ac0c43",
+    "latest_qualified_reference": "normal-v31 single S0 human accepted; not arbitrary calibration/layout qualification",
+    "authority": "/Users/wujie/Developer/work/anyverse/_context/notes/sim-recovery-data-production-handoff-20261009.md#24-25",
+    "base_freeze": "/Users/wujie/Developer/worktrees/robot_sim-recovery-data-20261009/outputs/checkpoint-branch-review-20261011/base-reuse-freeze.json",
+    "base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
+    "normal_raw_sha256": "2af3e069b8f127008f40f74c04c76b71e7120d8ea8dcf237671586d2406862a4",
+    "normal_timeline_digest": "2acab464a2284b4c7a130e2a6133c2fc80d057b22d197dc2092022b1a99b7dc1",
+    "nominal_machine_cup_layout_matches_deployment_base": true,
+    "independent_upstream_production_layers": [
+      "checkpoint",
+      "hot4"
+    ],
+    "implemented_commit": "5bac1aba57371001e1b26de7ff4d87c12496c714",
+    "pushed_commit": "5bac1aba57371001e1b26de7ff4d87c12496c714",
+    "recipe": "normal-v31-dynamic-targets",
+    "fixed_source_q_or_ticks_imported": false,
+    "old_C_installation_imported": false,
+    "endpoint_source": "current calibrated model, fresh scene and current grasp relation",
+    "cartesian_nominal_commands": {
+      "lift_withdraw": 129,
+      "cross": 170,
+      "insert": 90,
+      "lower": 29
+    },
+    "cartesian_receipt_method": "A1Kinematics.batch_ik",
+    "command_rate_hz": 30,
+    "budget_overrun_policy": "reject; no automatic extension",
+    "gripper_release": {
+      "schema_version": "commanded_gap_release.v3",
+      "command_count": 45,
+      "duration_s": 1.5,
+      "curve": "cosine",
+      "maximum_command_gap_speed_mm_s": 20.0,
+      "fixed_under_UI_speed_scaling": true,
+      "release_hold_commands": 6,
+      "release_hold_duration_s": 0.2
+    },
+    "original_physical_and_control_gates_unchanged": true,
+    "new_GPU_runs_started": true,
+    "full_pipeline_qualified": false
+  },
+  "latest_planning_probe": {
+    "run": "contact-plan-20261011-044857",
+    "status": "passed",
+    "evidence": ".evidence/s2/contact-plan-20261011-044857-audit.json",
+    "scope": "fixed040630 failed input; plan only; no device/cold qualification",
+    "source_equivalent_planning_commit": "c06ae64",
+    "input_pins_verified": 930,
+    "ticks": 3209,
+    "duration_s": 106.96666666666667,
+    "released": true
+  },
+  "current_cold_suite": {
+    "id": "cold-suite-normal-v31-20261011-v4",
+    "evidence": ".evidence/s2/cold-suite-freeze-20261011-v4.json",
+    "sha256": "1a55e6d2db3f198db04f87e1143c04bb9eee22e104cf5cd83a19f7a464d7b618",
+    "product_commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142",
+    "source_files": 375,
+    "motion_recipe": "normal-v31-dynamic-targets",
+    "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
+    "normal_cases_passed": 0,
+    "required_normal_cases": 3,
+    "current_run": null,
+    "status": "awaiting_warm_D_smoke_before_new_cold_runs"
+  },
+  "historical_cold_attempts": {
+    "full-20261011-031842": {
+      "run": "full-20261011-031842",
+      "product_commit": "5bac1aba57371001e1b26de7ff4d87c12496c714",
+      "status": "failed_pre_action_preview_timeout",
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": false,
+      "full_pipeline_qualified": false,
+      "launch_evidence": ".evidence/s2/full-20261011-031842-launch-receipt.json",
+      "contract": ".evidence/s2/full-20261011-031842-contract.json",
+      "source_files": 375,
+      "gpu_record": "unified-full-20261011-031842",
+      "supervisor": {
+        "pid": 3588631,
+        "start_ticks": "30759854"
+      },
+      "resource_window": {
+        "expected_start": "2026-10-11T03:19:29.722354+08:00",
+        "expected_end": "2026-10-11T05:14:29.722354+08:00",
+        "resident_minutes": 110,
+        "cleanup_minutes": 5,
+        "renewal_policy": "lead session checks within 50 minutes; fixed service deadline not extended"
+      },
+      "released": true,
+      "artifact_audit": ".evidence/s2/full-20261011-031842-failed-audit.json",
+      "teardown": ".evidence/s2/full-20261011-031842-teardown.json",
+      "preview_timeout_probe": ".evidence/s2/full-20261011-031842-preview-budget-probe.log",
+      "preview_http_wall_s": 2.1453925010282546,
+      "original_timeout_s": 2,
+      "accepted_D_executions": 0,
+      "C_acceptance": {
+        "reporting_only": true,
+        "acceptance": {
+          "image_checks": {
+            "all_captured_valid": true,
+            "capture_counts_match": true,
+            "full_rank": true,
+            "holdout_marker_px": true,
+            "holdout_mesh_coverage": true,
+            "holdout_mesh_px": true,
+            "independent_poses": true,
+            "no_missing_planned_frames": true,
+            "not_at_bound": true,
+            "optimizer_converged": true,
+            "positive_depth": true
+          },
+          "image_passed": true,
+          "physical_passed": false,
+          "physical_status": "independent_truth_or_metrology_required",
+          "thresholds": {
+            "camera_position_mm": 2.0,
+            "camera_rotation_deg": 0.3,
+            "holdout_mesh_max_px": 7.0,
+            "holdout_mesh_min_coverage": 0.7,
+            "max_joint_offset_deg": 0.5
+          }
+        },
+        "image_passed": true,
+        "image_checks": {
+          "all_captured_valid": true,
+          "capture_counts_match": true,
+          "full_rank": true,
+          "holdout_marker_px": true,
+          "holdout_mesh_coverage": true,
+          "holdout_mesh_px": true,
+          "independent_poses": true,
+          "no_missing_planned_frames": true,
+          "not_at_bound": true,
+          "optimizer_converged": true,
+          "positive_depth": true
+        },
+        "false_image_checks": [],
+        "dependency_policy": {
+          "name": "Workbench.head_dependency_eligible",
+          "eligible": true,
+          "scope": "original head-to-wrist dependency gate; not overall head image acceptance",
+          "required": [
+            "optimizer success",
+            "sticker_corners_plus_mesh objective",
+            "complete snapshot",
+            "positive depth",
+            "finite holdout marker RMS within0..2px",
+            "finite mesh coverage/error within source-dependent thresholds"
+          ],
+          "not_required": [
+            "acceptance.image_passed",
+            "image_checks.independent_poses"
+          ],
+          "effective_thresholds": {
+            "holdout_mesh_max_px": 7.0,
+            "holdout_mesh_min_coverage": 0.7
+          },
+          "source_sha256": {
+            "/mnt/data/feiyu.zhou/code/robot-workbench-full-20261011-031842/calibration/examples/scripts/debug/joint_head_workbench.py": "7afc0690d875edf8ac06f0865262c210f0a5d6a36ea2e3fa06a87bd2b9498f5a",
+            "/mnt/data/feiyu.zhou/code/robot-workbench-full-20261011-031842/calibration/infra/arx_env/joint_head_x5_hybrid.py": "48ac0aeb95d5ad68248b80f3aede4957b8c796cc372ee16ef4cd6c1009159ebb"
+          }
+        },
+        "actual_values": {
+          "row_optimizer": {
+            "at_bound": false,
+            "positive_depth": true,
+            "success": true
+          },
+          "parameter_optimizer": {
+            "at_bound": false,
+            "positive_depth": true,
+            "success": true
+          },
+          "objective": "sticker_corners_plus_mesh",
+          "snapshot_complete": true,
+          "positive_depth": true,
+          "holdout_marker": {
+            "corners": 16,
+            "mean_px": 0.9026970227059029,
+            "p95_px": 1.638096357186016,
+            "rms_px": 1.0090869768149209
+          },
+          "holdout_mesh": {
+            "frames": 4,
+            "frames_without_matches": [],
+            "macro_coverage": 0.94875,
+            "macro_mean_penalized_px": 2.829391132827002
+          }
+        }
+      }
+    }
+  },
+  "preview_compilation_budget_fix": {
+    "commit": "44f68beb545e6fa8d52b6d6cdf0d072afee3a32a",
+    "preview_socket_timeout_s": 15,
+    "other_request_socket_timeout_s": 2,
+    "automatic_retry": false,
+    "observed_failure_preview_http_s": 2.1453925010282546,
+    "evidence": ".evidence/s2/full-20261011-031842-preview-budget-probe.log"
+  },
+  "preview_live_feedback_bug": {
+    "status": "fixed_CPU_L1_passed",
+    "introduced_by": "c0142a50 composition with original CollectionOwner",
+    "scope": "wall-clock or advancing source-clock preview compilation",
+    "real_feedback_age_s": 0.0074,
+    "compiler_snapshot_age_s": 0.339,
+    "evidence": ".evidence/s2/live-guard-unified-runtime.log",
+    "threshold_unchanged_s": 0.1,
+    "live_feedback_threshold_s": 0.1,
+    "commit": "612408a"
+  },
+  "contact_geometry_fix": {
+    "status": "fixed_input_GPU_plan_passed",
+    "reason": "near-collinear transformed face caused false non-convexity at1.2065nm; source geometry itself convex",
+    "thresholds_changed": false,
+    "source_frame_halfspaces": true,
+    "evidence": ".evidence/s2/ik-040630-diagnosis.json",
+    "cpu_regression": ".evidence/s2/ik-040630-fix-validation.json",
+    "gpu_probe": ".evidence/s2/contact-plan-20261011-044857-audit.json",
+    "input_pins_verified": 930,
+    "plan_ticks": 3209,
+    "plan_duration_s": 106.96666666666667,
+    "gpu_released": true,
+    "counts_as_cold": false,
+    "commit": "c06ae643f9f4c4fa37d0aa1ca5bcd55d5c31a142"
+  },
+  "preview_tick_boundary_fix": {
+    "status": "fixed_CPU_L1_27_of_27_passed",
+    "original_full_l1_failure": ".evidence/s2/live-guard-contact-full-cpu-20261011-v1/l1/l1-fault-matrix.json",
+    "cause": "normal8ms feedback tick overlapped token publication, live age11.1ms; epochs unchanged",
+    "before": ".evidence/s2/preview-tick-fence-before.json",
+    "after": ".evidence/s2/preview-tick-fence-after.json",
+    "wait_wall_limit_s": 0.1,
+    "stop_waits": false,
+    "clock_paused": false,
+    "original_failure_preserved": true,
+    "commit": "612408a",
+    "full_receipt": ".evidence/s2/tick-contact-full-cpu-20261011-v2/receipt.json"
   }
 }
