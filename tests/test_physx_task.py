@@ -90,7 +90,7 @@ class Native:
         return Sample(step,arm_positions=tuple(self.backend.actual['left'][:6]+self.backend.actual['right'][:6])),NS()
 
 
-def fixture(*,prefix=False,preset=None):
+def fixture(*,prefix=False,preset=None,corrupt_preset=False):
     backend=PhysxBackend(LaggingPlant(),joint_offsets=[.04]*12,metal_gap_offset_mm=.008)
     source,model,binding=fake_inputs(source_clock_id=backend.source_clock_id,runtime_nonce='fixture-owner')
     start=model['ticks'][0]['target']
@@ -120,6 +120,7 @@ def fixture(*,prefix=False,preset=None):
         runner=NS(runtime=timeline,frozen=NS(command_index=0,ticks=timeline['commands'])))
     native=Native(backend)
     if preset is not None:native.physical_identity['cup_contact_preset']=deepcopy(preset)
+    if corrupt_preset:native.physical_identity['cup_contact_preset']['stiffness_n_m']+=1.
     backend.plant.contact_status=dict(complete=True,absolute_physics_step=60)
     monitor=CoffeeTaskMonitor(native,backend,prepared,timeline,command_epoch=3,runtime_nonce='fixture-owner')
     return monitor
@@ -140,6 +141,11 @@ def apply(monitor,index,steps=1):
 
 class TaskTest(unittest.TestCase):
     def setUp(self):Evaluator.events={};Evaluator.calls=[]
+
+    def test_actual_plant_preset_must_still_equal_frozen_plan(self):
+        preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,diagnostic_claw_compression=True)
+        with self.assertRaisesRegex(ValueError,'native cup contact preset differs'):
+            fixture(preset=preset,corrupt_preset=True)
 
     def test_native_acceptance_and_diagnostic_cup_policy_are_preserved(self):
         preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,

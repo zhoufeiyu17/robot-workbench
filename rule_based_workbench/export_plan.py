@@ -108,11 +108,8 @@ def publish_motiongen(source_path, planned_directory, output, cup_contact_preset
     bridge.ingest_source(source)
     bridge.accept_plan(plan)
     if cup_contact_preset is not None:
-        from cup_presets import bind_preset_identity
-        plan['cup_contact_preset']=cup_contact_preset
-        identity=plan['native_identity']
-        identity['physical_configuration_sha256']=bind_preset_identity(identity['physical_configuration'],cup_contact_preset)
-        plan['preset_qualification']='simulation diagnostic candidate; default not selected'
+        from cup_presets import bind_plan_preset
+        bind_plan_preset(plan,cup_contact_preset)
         bridge.accept_plan(plan)
     write(output, plan)
     return dict(status='motiongen-plan-published', timeline_digest=plan['timeline_digest'],

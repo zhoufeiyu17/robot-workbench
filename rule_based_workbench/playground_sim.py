@@ -176,7 +176,24 @@ def runtime_initial_model(source,timeline):
     return convert_state(timeline['commands'][0]['target'],source['calibration_profile'],to_reported=False)
 
 
+def requested_cup_preset(args,plan):
+    preset=getattr(args,'cup_contact_preset',None)
+    if preset is not None:
+        if getattr(args,'environment','physical')!='fake':raise ValueError('Playground cup preset is fake-only')
+        from cup_presets import bind_preset_identity
+        bind_preset_identity({},preset)
+    if plan is not None and (plan.get('cup_contact_preset')!=preset
+            or plan.get('native_identity',{}).get('physical_configuration',{}).get('cup_contact_preset')!=preset):
+        raise ValueError('replay cup preset differs from the frozen plan/physical configuration')
+    if plan is not None and preset is not None:
+        identity=plan['native_identity']
+        if identity.get('physical_configuration_sha256')!=bind_preset_identity(dict(identity['physical_configuration']),preset):
+            raise ValueError('replay physical configuration digest differs')
+    return deepcopy(preset)
+
+
 def setup(args,source,suite,plan,execution_timeline=None):
+    preset=requested_cup_preset(args,plan)
     os.environ['ROBOT_SIM_ASSET_ROOT']=str(args.assets)
     from isaaclab.app import AppLauncher
     app=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',active_gpu=args.gpu,multi_gpu=False,
@@ -222,6 +239,12 @@ def setup(args,source,suite,plan,execution_timeline=None):
         env=CoffeeMakeEnv(cfg)
         materials=apply_whitebox_materials()
         runtime=env._m2_runtime
+        if preset is not None:
+            import isaaclab.sim as sim_utils
+            from cup_presets import configure_preset
+            material=configure_preset(runtime,sim_utils.get_current_stage(),preset)
+            write(args.output/'cup-contact-preset.json',dict(preset=preset,material=material,
+                default_selected=False,scope='frozen fake configuration; actual material applied before reset'))
         bind_effective_gripper_identity(runtime,acceptance.open_position_m,env.action_manager.get_term('guarded').gripper_limits())
         _,info=env.reset(options={'episode':episode})
         observed,_=runtime.read(runtime.loop.physics_steps)
@@ -450,6 +473,7 @@ if __name__=='__main__':
     parser.add_argument('--finger-envelope-sha256')
     parser.add_argument('--speed-scale',type=float,default=.3)
     parser.add_argument('--environment',choices=('physical','fake'),default='physical')
+    parser.add_argument('--cup-contact-preset',type=json.loads,help='explicit frozen fake material preset; never a physical setting')
     parser.add_argument('--execution-json',help='trusted local deployment, supplied by the frozen pipeline')
     parser.add_argument('--gpu',type=int,required=True)
     parser.add_argument('--instance',required=True)

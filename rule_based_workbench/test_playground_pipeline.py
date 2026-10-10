@@ -21,6 +21,12 @@ def main():
     assert environment['PYTHONPATH'].startswith('/curobo/python:/curobo/deps:')
     with patch.object(pipeline,'gpu_check_command',return_value='gpu-check'):
         command=pipeline.native_stage(gpu_cfg,'replay','/output',plan_path='/plan')['argv'][-1]
+        preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,diagnostic_claw_compression=True)
+        for mode in ('geometry-inputs','replay'):
+            fake=pipeline.native_stage(dict(gpu_cfg,environment='fake',cup_contact_preset=preset),mode,'/output')['argv'][-1]
+            assert '--cup-contact-preset' in fake and str(preset['stiffness_n_m']) in fake
+        physical=pipeline.native_stage(dict(gpu_cfg,environment='physical',cup_contact_preset=preset),'replay','/output')['argv'][-1]
+        assert '--cup-contact-preset' not in physical
     assert all(key+'='+value in command for key,value in environment.items())
     assert pipeline.controller_failure({'reason':'host stale','motion':{'reason':'operator stop'}},{'controller_outcome':'failed'})=='host stale'
     assert pipeline.controller_failure({'frozen':{'status':'failed','reason':'tracking failure'}},{})=='tracking failure'

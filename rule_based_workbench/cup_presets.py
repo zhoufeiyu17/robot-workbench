@@ -15,6 +15,22 @@ def bind_preset_identity(identity,preset):
     return hashlib.sha256(json.dumps(identity,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
 
+def bind_plan_preset(plan,preset):
+    """Existing publish binding, shared by native scene-derived base/retimed plans."""
+    identity=plan['native_identity']
+    identity['physical_configuration_sha256']=bind_preset_identity(identity['physical_configuration'],preset)
+    plan['cup_contact_preset']=dict(preset)
+    plan['preset_qualification']='simulation diagnostic candidate; default not selected'
+
+
+def configure_preset(runtime,stage,preset):
+    """Publish the declared identity only after applying its actual material."""
+    identity=dict(runtime.physical_identity);digest=bind_preset_identity(identity,preset)
+    material=configure(stage,runtime.root,preset['stiffness_n_m'],preset['damping_n_s_m'])
+    runtime.physical_identity.update(identity);runtime.physical_sha256=digest
+    return material
+
+
 def stiffness_seeds(reference_force_n):
     if not math.isfinite(reference_force_n) or not .5 <= reference_force_n <= 100.:
         raise ValueError('valid bilateral hard-reference force required')

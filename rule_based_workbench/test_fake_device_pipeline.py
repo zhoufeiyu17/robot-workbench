@@ -72,6 +72,10 @@ class FakeDeviceContractTest(unittest.TestCase):
                 [('initial_hold',0),('approach_pre',1),('close_and_hold',4),('home_hold',5)]])
         model['gripper_distance_control']['geometry_derivation']=dict(open_travel_mm=82.992,
             closed_travel_mm=64.992,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
+        from cup_presets import bind_plan_preset
+        model['native_identity']['physical_configuration']={'fixture_physics':'unchanged'}
+        preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,diagnostic_claw_compression=True)
+        bind_plan_preset(model,preset)
         model['timeline_digest']=_digest(model['ticks'])
         model['planning_validation']['timeline_digest']=model['timeline_digest']
         model['control_validation']=validate_control(model)
@@ -84,6 +88,8 @@ class FakeDeviceContractTest(unittest.TestCase):
             first=retime(base,source,.3,environment='fake')
             second=retime(base,source,.3,environment='fake')
             self.assertEqual(first,second);self.assertGreater(first['duration_s'],base['duration_s'])
+            self.assertEqual(first['cup_contact_preset'],preset)
+            self.assertEqual(first['native_identity'],base['native_identity'])
             self.assertEqual((base,source),before)
             validate_real_plan(first,source,binding,environment='fake')
             self.assertEqual(first['physical_gpu_conversion']['model_validation']['derivation']['speed_scale'],.3)

@@ -342,6 +342,13 @@ def freeze(stages, source, data, grip, spec, *, run_id):
                              initial_model_gap_mm=grip['closed_travel_mm'], arm_motion=False))
     from control_motion import validate_control
     plan['control_validation']=validate_control(plan)
+    preset=plan['native_identity'].get('physical_configuration',{}).get('cup_contact_preset')
+    if preset is not None:
+        from cup_presets import bind_plan_preset
+        physical_sha=plan['native_identity'].get('physical_configuration_sha256')
+        bind_plan_preset(plan,preset)
+        if plan['native_identity']['physical_configuration_sha256']!=physical_sha:
+            raise ValueError('exported cup physical configuration digest differs')
     return plan
 
 

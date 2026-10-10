@@ -76,7 +76,9 @@ def native_stage(cfg, mode, output, *, speed=.3, plan_path=None, execution_timel
           '--speed-scale',str(speed)]
     if plan_path: args+=['--plan',plan_path]
     if execution_timeline_path:args+=['--execution-timeline',execution_timeline_path]
-    if cfg.get('environment')=='fake':args+=['--environment','fake']
+    if cfg.get('environment')=='fake':
+        args+=['--environment','fake']
+        if cfg.get('cup_contact_preset') is not None:args+=['--cup-contact-preset',json.dumps(cfg['cup_contact_preset'])]
     if cfg.get('execution'):args+=['--execution-json',json.dumps(cfg['execution'])]
     environment=isaac_environment(cfg,'dsw-scene')
     seconds=timeout_s
