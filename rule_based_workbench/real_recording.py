@@ -390,8 +390,12 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
             stamps = [sample_stamp({**row,'host_receive_ns':int(row['host_receive_ns'])},clock)[0] for row in rows]
             periods = [(b-a)/1e9 for a,b in zip(stamps,stamps[1:])]
             last = statistics.median(periods) if periods else 1/rows[0]['capture_fps']
+            # Concat parses each duration in microseconds. Quantize absolute
+            # offsets first so sub-microsecond rounding cannot accumulate.
+            offsets_us = [(stamp-stamps[0]+500)//1000 for stamp in stamps]
+            concat_periods = [(b-a)/1e6 for a,b in zip(offsets_us,offsets_us[1:])]
             entries = []
-            for index,(row,duration) in enumerate(zip(rows,periods+[last])):
+            for index,(row,duration) in enumerate(zip(rows,concat_periods+[last])):
                 path = temporary/f'{camera}-{index:08d}.png'
                 _,color,_ = bundle((raw_root/row['path']).read_bytes(),source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
                 path.write_bytes(color)
