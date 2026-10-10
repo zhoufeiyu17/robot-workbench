@@ -35,6 +35,17 @@ def finite(value):
     return type(value) in (int,float) and math.isfinite(value)
 
 
+def feedback_clock_fields(raw, supplied):
+    result={}
+    for key in ('clock_domain','source_clock_id','source_time_ns','physics_step','owner_pid','command_epoch','runtime_nonce'):
+        value=supplied.get(key)
+        if value is None:value=(raw or {}).get(key)
+        elif raw is not None and key in raw and raw[key]!=value:
+            raise ValueError('feedback source clock differs from raw sample')
+        result[key]=value
+    return result
+
+
 def png_shape(image, *, depth=False):
     if len(image)<33 or image[:8] != b'\x89PNG\r\n\x1a\n' or image[12:16] != b'IHDR':
         raise ValueError('PNG payload required')
@@ -204,11 +215,7 @@ class RealRecorder:
         if self.environment=='fake':
             supplied=dict(clock_domain=clock_domain,source_clock_id=source_clock_id,source_time_ns=source_time_ns,physics_step=physics_step,
                 owner_pid=owner_pid,command_epoch=command_epoch,runtime_nonce=runtime_nonce)
-            for key,value in supplied.items():
-                if value is None:value=(raw or {}).get(key)
-                elif raw is not None and key in raw and raw[key]!=value:
-                    raise ValueError('feedback source clock differs from raw sample')
-                row[key]=value
+            row.update(feedback_clock_fields(raw,supplied))
             self._check_owner(row)
             stamp=self._stamp(row,'feedback')
             if abs(round(sample_monotonic_s*1e9)-stamp[0])>1:
@@ -468,6 +475,7 @@ class RecordingSession:
         self.resident_deadline_wall_ns=resident_deadline_wall_ns
         self.recorder=None
         self.execution_timeline=execution_timeline
+        self.feedback_progress=None
         self.thread=threading.Thread(target=self._run,args=(source,plan,binding,recorder_factory),daemon=True)
         self.thread.start()
 
@@ -480,16 +488,43 @@ class RecordingSession:
 
     def submit(self,kind,**fields):
         import queue
+        error=None
         with self.lock:
             if self.terminal or self.error or self.done.is_set():raise ValueError('recording is closing or failed')
             if kind not in ('command','feedback','rgbd'):raise ValueError('unknown recording input')
-            try:self.events.put_nowait((kind,fields))
-            except queue.Full:
-                overflow=True
-            else:overflow=False
-        if overflow:
-            self.fail('bounded recording queue overflow')
+            try:
+                if self.environment=='fake' and kind=='feedback':
+                    # Latest actual Owner submission, not writer progress or an
+                    # extrapolated simulation clock. This never waits for IO.
+                    meta=dict(sample_wall_ns=fields.get('sample_wall_ns'),
+                        **feedback_clock_fields(fields.get('raw'),fields))
+                    identity=owner_identity(meta)
+                    if self.execution_owner is not None and identity!=self.execution_owner:
+                        raise ValueError('feedback Owner differs from this execution')
+                    stamp=sample_stamp(meta,self.clock,wall_key='sample_wall_ns')
+                    if not finite(fields.get('sample_monotonic_s')) or abs(round(fields['sample_monotonic_s']*1e9)-stamp[0])>1:
+                        raise ValueError('feedback control time differs from source time')
+                    assert_progress(self.feedback_progress[0] if self.feedback_progress else None,stamp)
+                    self.feedback_progress=(stamp,self.clock_ns(),time.monotonic())
+                self.events.put_nowait((kind,fields))
+            except queue.Full:error='bounded recording queue overflow'
+            except ValueError as exc:error=str(exc)
+        if error:
+            self.fail(error)
             raise ValueError(self.error)
+
+    def fake_frame_stamp(self,meta):
+        with self.lock:reference=self.feedback_progress
+        if reference is None:return None
+        stamp=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},self.clock)
+        # A camera may sample between Owner ticks; compare actual steps without
+        # pretending a command timestamp or wall elapsed time is new feedback.
+        first,last=sorted((stamp,reference[0]))
+        assert_progress(first,last,allow_same=True)
+        if stamp[0]>reference[0][0]:return None
+        if reference[0][0]-stamp[0]>500_000_000:
+            raise ValueError('native RGB-D source lag exceeds 0.5 seconds')
+        return stamp
 
     def finish(self,status,reason=None):
         if status not in ('completed','failed','stopped'):raise ValueError('terminal status required')
@@ -506,6 +541,8 @@ class RecordingSession:
     def _run(self,source,plan,binding,factory):
         import queue
         cursors={}
+        camera_progress={}
+        pending_reference={}
         leases=[]
         lease_deadline_wall_ns=None
         recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
@@ -556,16 +593,17 @@ class RecordingSession:
                             if meta.get('recording_run_id') != directory.name or not meta.get('recording_enabled'):
                                 raise ValueError(camera+': raw recording lease differs')
                             first.append(meta)
-                    if len(first)==3:break
+                    if len(first)==3 and (self.environment!='fake' or all(self.fake_frame_stamp(meta) is not None for meta in first)):break
                     with self.lock:terminal=self.terminal
                     if terminal:
                         status,reason,_=terminal
-                        self.manifest=self.recorder.seal(status,reason)
+                        self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         return
                     if time.monotonic()>=ready_deadline:
-                        raise ValueError('three native raw streams did not start within 5 seconds')
+                        raise ValueError('three native raw streams did not start within 5 seconds'
+                            + (' with actual Owner source feedback' if self.environment=='fake' else ''))
                     time.sleep(.01)
-                if any(not 0 <= self.clock_ns()-int(meta['host_receive_ns']) <= 500_000_000 for meta in first):
+                if self.environment!='fake' and any(not 0 <= self.clock_ns()-int(meta['host_receive_ns']) <= 500_000_000 for meta in first):
                     raise ValueError('native raw stream absent or stale')
             self.ready.set()
             while True:
@@ -575,6 +613,10 @@ class RecordingSession:
                     raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
                 if lease_deadline_wall_ns is not None and now>=lease_deadline_wall_ns:
                     raise ValueError('recording lease actual wall deadline exceeded')
+                if self.environment=='fake' and cursors:
+                    with self.lock:feedback_progress=self.feedback_progress
+                    if feedback_progress and (now-feedback_progress[1]>=30_000_000_000 or time.monotonic()-feedback_progress[2]>=30):
+                        raise ValueError('Owner source feedback stalled for 30 wall seconds')
                 if (recording_deadline_wall_ns is not None and lease_deadline_wall_ns<recording_deadline_wall_ns
                         and now>=renew_at_wall_ns and self.terminal is None):
                     renewed=min(recording_deadline_wall_ns,now+600_000_000_000)
@@ -601,15 +643,32 @@ class RecordingSession:
                         index+=1
                     cursors[camera]=(directory,index)
                     rows=self.recorder.frames[camera]
-                    if rows and self.clock_ns()-int(rows[-1]['host_receive_ns'])>500_000_000:
-                        raise ValueError(camera+': native RGB-D recording stalled')
+                    if rows:
+                        if self.environment=='fake':
+                            # A frame ahead of the last Owner tick remains pending
+                            # that feedback; its actual source advance is still
+                            # liveness evidence, never a fabricated fresh reference.
+                            if self.fake_frame_stamp(rows[-1]) is None:
+                                pending=pending_reference.setdefault(camera,(self.clock_ns(),time.monotonic()))
+                                if self.clock_ns()-pending[0]>=30_000_000_000 or time.monotonic()-pending[1]>=30:
+                                    raise ValueError(camera+': actual Owner reference did not reach frame within 30 wall seconds')
+                            else:pending_reference.pop(camera,None)
+                            stamp=self.recorder._stamp(rows[-1],'rgbd');previous=camera_progress.get(camera)
+                            if previous is None or stamp!=previous[0]:
+                                assert_progress(previous[0] if previous else None,stamp)
+                                camera_progress[camera]=(stamp,self.clock_ns(),time.monotonic())
+                            progress=camera_progress[camera]
+                            if self.clock_ns()-progress[1]>=30_000_000_000 or time.monotonic()-progress[2]>=30:
+                                raise ValueError(camera+': native RGB-D source stalled for 30 wall seconds')
+                        elif self.clock_ns()-int(rows[-1]['host_receive_ns'])>500_000_000:
+                            raise ValueError(camera+': native RGB-D recording stalled')
                 with self.lock:terminal=self.terminal
                 if terminal and self.events.empty():
                     status,reason,requested=terminal
                     endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
                     covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
                     if not cursors or covered or time.monotonic()-requested>=1:
-                        self.manifest=self.recorder.seal(status,reason)
+                        self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         break
         except Exception as error:
             self.fail(error)

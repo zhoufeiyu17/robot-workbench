@@ -59,7 +59,7 @@ class RecordingWallClockTest(unittest.TestCase):
         if hasattr(self,'session') and not self.session.done.is_set():
             self.session.finish('stopped');self.session.done.wait(5)
 
-    def publish(self,index):
+    def publish(self,index,*,sample_wall_ns=None,changes=None):
         source_ns=100_000_000_000+index*1_000_000_000//30
         for camera,spool in self.spools.items():
             side=SIDES[camera]
@@ -67,18 +67,34 @@ class RecordingWallClockTest(unittest.TestCase):
                 color_number=index,depth_number=index,color_ms=source_ns/1e6,depth_ms=source_ns/1e6,
                 color_domain='simulation',depth_domain='simulation',host_receive_ns=self.wall[0],
                 depth_scale_m=.001,intrinsics={'fx':600})
-            fake_metadata(meta,source_ns,step=24_000+index*8);meta['host_receive_ns']=self.wall[0]
+            if self.session.environment=='fake':fake_metadata(meta,source_ns,step=24_000+index*8)
+            meta['host_receive_ns']=self.wall[0] if sample_wall_ns is None else sample_wall_ns
+            meta.update(changes or {})
             spool.write(meta,png(),png(True))
         return source_ns
 
+    def submit_feedback(self,index,**changes):
+        source_ns=100_000_000_000+index*1_000_000_000//30
+        raw=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
+            source_time_ns=source_ns,physics_step=24_000+index*8,sample_wall_ns=self.wall[0],
+            owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
+        raw.update(changes)
+        self.session.submit('feedback',tick=min(index,len(self.plan['ticks'])-1),
+            state=self.plan['ticks'][min(index,len(self.plan['ticks'])-1)]['target'],
+            sample_monotonic_s=raw['source_time_ns']/1e9,sample_wall_ns=self.wall[0],raw=raw)
+
     def test_slow_source_and_cross_six_hundred_wall_seconds_keep_complete_raw_and_one_spool(self):
-        for count in (300,4530):  # 10/151 source seconds, 40/604 injected wall seconds.
-            with self.subTest(source_seconds=count/30),TemporaryDirectory() as temp:
+        for count,slowdown in ((300,4),(300,24),(4530,4)):
+            with self.subTest(source_seconds=count/30,slowdown=slowdown),TemporaryDirectory() as temp:
                 root=Path(temp);self.setup_session(root,count)
-                self.publish(0);self.assertTrue(self.session.ready.wait(5),self.session.error)
+                self.publish(0);self.submit_feedback(0)
+                self.assertTrue(self.session.ready.wait(5),self.session.error)
                 for index in range(count+1):
                     if index:
-                        self.wall[0]=self.start+round(index*4/30*1e9)
+                        self.wall[0]=self.start+round(index*slowdown/30*1e9)
+                        if index==1 and slowdown==24:
+                            time.sleep(.05)  # No new sample yet; old wall-only freshness must fail here.
+                            self.assertFalse(self.session.done.is_set(),self.session.error)
                         source_ns=self.publish(index)
                     else:source_ns=100_000_000_000
                     identity=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
@@ -90,8 +106,7 @@ class RecordingWallClockTest(unittest.TestCase):
                         self.session.submit('command',tick=index,target=target,send_monotonic_s=source_ns/1e9,
                             send_wall_ns=self.wall[0],send_source_time_ns=source_ns,physics_step=None,
                             feedback_at_send=sample,**identity)
-                    self.session.submit('feedback',tick=min(index,count-1),state=target,sample_monotonic_s=source_ns/1e9,
-                        sample_wall_ns=self.wall[0],source_time_ns=source_ns,physics_step=sample['physics_step'],**identity)
+                    if index:self.submit_feedback(index)
                     self.wait_for(lambda:len(self.session.recorder.feedback)==index+1
                         and len(self.session.recorder.commands)==min(index+1,count)
                         and all(len(rows)==index+1 for rows in self.session.recorder.frames.values()),self.session)
@@ -114,16 +129,86 @@ class RecordingWallClockTest(unittest.TestCase):
     def test_source_stall_and_fixed_parent_deadline_fail_data_and_remove_leases(self):
         for cause in ('source_stall','resident_deadline'):
             with self.subTest(cause=cause),TemporaryDirectory() as temp:
-                root=Path(temp);self.setup_session(root,budget=10)
+                root=Path(temp);self.setup_session(root,budget=60 if cause=='source_stall' else 10)
                 if cause=='source_stall':
-                    self.publish(0);self.assertTrue(self.session.ready.wait(5),self.session.error)
+                    self.publish(0);self.submit_feedback(0);self.assertTrue(self.session.ready.wait(5),self.session.error)
                     self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
-                self.wall[0]+=600_000_000 if cause=='source_stall' else 10_000_000_000
+                self.wall[0]+=30_001_000_000 if cause=='source_stall' else 10_000_000_000
                 self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
                 self.assertIn('stalled' if cause=='source_stall' else 'fixed resident wall deadline',self.session.error)
                 self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
                 self.assertEqual(self.session.manifest['capture_status'],'incomplete')
                 self.assertTrue(all(not (Path(path)/'recording-request.json').exists() for path in self.directories.values()))
+
+    def test_fake_first_frame_uses_actual_feedback_not_wall_age_or_future_reference(self):
+        with TemporaryDirectory() as temp:
+            self.setup_session(Path(temp))
+            # A genuine frame may spend >500ms awaiting encoding/IO. Keep its old
+            # actual wall stamp while supplying same-source Owner evidence later.
+            self.wall[0]+=800_000_000
+            self.publish(1,sample_wall_ns=self.start)
+            time.sleep(.05);self.assertFalse(self.session.ready.is_set())
+            self.submit_feedback(0)
+            time.sleep(.05);self.assertFalse(self.session.ready.is_set(),'frame ahead of Owner must wait for actual feedback')
+            self.wall[0]+=1_000_000
+            self.submit_feedback(1)
+            self.assertTrue(self.session.ready.wait(5),self.session.error)
+            self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
+            for rows in self.session.recorder.frames.values():
+                self.assertEqual(int(rows[0]['host_receive_ns']),self.start,'never relabel original sample time')
+                self.assertEqual(rows[0]['physics_step'],24008)
+            self.wall[0]+=800_000_000;self.publish(2)
+            self.wait_for(lambda:all(len(rows)==2 for rows in self.session.recorder.frames.values()),self.session)
+            time.sleep(.05);self.assertFalse(self.session.done.is_set(),self.session.error)
+            self.submit_feedback(2)
+            self.wait_for(lambda:len(self.session.recorder.feedback)==3,self.session)
+
+    def test_fake_rejects_source_lag_instance_change_and_feedback_regression(self):
+        for cause in ('source_lag','wrong_frame_clock','wrong_feedback_clock','feedback_regression'):
+            with self.subTest(cause=cause),TemporaryDirectory() as temp:
+                self.setup_session(Path(temp))
+                self.publish(0);self.submit_feedback(0)
+                self.assertTrue(self.session.ready.wait(5),self.session.error)
+                self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
+                self.wall[0]+=10_000_000
+                if cause=='source_lag':self.submit_feedback(18)
+                elif cause=='wrong_frame_clock':self.publish(1,changes={'source_clock_id':'other-plant'})
+                else:
+                    with self.assertRaises(ValueError):
+                        if cause=='wrong_feedback_clock':self.submit_feedback(1,source_clock_id='other-plant')
+                        else:self.submit_feedback(0,source_time_ns=99_995_833_333,physics_step=23999)
+                self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+                self.assertIn({'source_lag':'source lag exceeds 0.5','wrong_frame_clock':'source clock differs',
+                    'wrong_feedback_clock':'source clock differs','feedback_regression':'repeated or regressed'}[cause],self.session.error)
+                self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
+                self.assertEqual(self.session.manifest['capture_status'],'incomplete')
+
+    def test_fake_camera_source_stall_is_bounded_even_when_owner_keeps_advancing(self):
+        with TemporaryDirectory() as temp:
+            self.setup_session(Path(temp));self.publish(0);self.submit_feedback(0)
+            self.assertTrue(self.session.ready.wait(5),self.session.error)
+            self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
+            time.sleep(.02)
+            for index in range(1,31):
+                self.wall[0]+=1_000_000_000
+                self.submit_feedback(index,source_time_ns=100_000_000_000+index*1_000_000_000//240,
+                    physics_step=24000+index)
+                time.sleep(.02)
+            self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+            self.assertIn('native RGB-D source stalled for 30 wall seconds',self.session.error)
+
+    def test_physical_first_frame_and_running_freshness_remain_five_hundred_wall_ms(self):
+        for stale_at_start in (False,True):
+            with self.subTest(stale_at_start=stale_at_start),TemporaryDirectory() as temp:
+                self.setup_session(Path(temp),environment='physical')
+                if stale_at_start:self.wall[0]+=501_000_000
+                self.publish(0,sample_wall_ns=self.start)
+                if not stale_at_start:
+                    self.assertTrue(self.session.ready.wait(5),self.session.error)
+                    self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
+                    self.wall[0]+=501_000_000
+                self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+                self.assertIn('absent or stale' if stale_at_start else 'recording stalled',self.session.error)
 
     def test_physical_lease_retains_source_duration_plus_fifteen_and_completion_stops_renewal(self):
         with TemporaryDirectory() as temp:
