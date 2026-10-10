@@ -620,12 +620,19 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
     previous=(before.get('recording') or {}).get('directory')
     previous_runtime=(before.get('execution_timeline') or {}).get('path')
     runtime_enabled='compiled_tick_count_before_initialization' in preview
-    simulation=native_stage(cfg,'replay',cfg['remote_run_root']+'/playground-replay-'+output.name,plan_path=remote_plan,
-                            timeout_s=contract['resources'].get('max_replay_time_seconds',600))
     log=(output/'simulation.log').open('wb')
-    process=None; videos=[]; recording=None; manifest=None; errors={}; owner={};controller_outcome=None
+    process=None; simulation=None; videos=[]; recording=None; manifest=None; errors={}; owner={};controller_outcome=None
     execution_started=None;execution_budget=None;execution_deadline=None;simulation_started=None
     task_outcome='unverified';native_task_evidence=None;execution_identity=None;confirmation_requested=False
+    def start_simulation(execution_timeline_path=None):
+        # Each launch uses the original execution deadline, including preparation time.
+        remaining=execution_deadline-time.monotonic() if resident else 600
+        seconds=contract['resources'].get('max_replay_time_seconds',remaining)
+        if resident:seconds=min(seconds,remaining)
+        if seconds<=0:raise TimeoutError('resident wall budget exhausted before L3 replay start')
+        stage=native_stage(cfg,'replay',cfg['remote_run_root']+'/playground-replay-'+output.name,
+            plan_path=remote_plan,execution_timeline_path=execution_timeline_path,timeout_s=seconds)
+        return subprocess.Popen(stage['argv'],stdout=log,stderr=subprocess.STDOUT),stage,time.monotonic()
     def resident_evidence():
         if not resident:return {}
         return dict(execution_scope='resident_same_plant',native_task=deepcopy(native_task_evidence or owner.get('native_task')),
@@ -647,7 +654,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
             execution_started=time.monotonic();execution_deadline=execution_started+execution_budget
         # Both lanes start from one click; there is deliberately no per-tick barrier.
         if not runtime_enabled:
-            process=subprocess.Popen(simulation['argv'],stdout=log,stderr=subprocess.STDOUT);simulation_started=time.monotonic()
+            process,simulation,simulation_started=start_simulation()
         save(output/'execution-phase.json',dict(phase='confirm_requested',timeline_digest=prepared['timeline_digest']))
         confirmation_requested=True
         confirmation=lane.control(dict(action='confirm',token=preview['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
@@ -659,11 +666,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
             try:
                 runtime=execution_runtime(lane,plan_value,output,previous_runtime,cancel=cancel)
                 remote_runtime=prepare_remote_runtime(cfg,remote_plan,runtime,cancel=cancel)
-                simulation=native_stage(cfg,'replay',cfg['remote_run_root']+'/playground-replay-'+output.name,
-                    plan_path=remote_plan,execution_timeline_path=remote_runtime,
-                    timeout_s=contract['resources'].get('max_replay_time_seconds',600))
-                process=subprocess.Popen(simulation['argv'],stdout=log,stderr=subprocess.STDOUT)
-                simulation_started=time.monotonic()
+                process,simulation,simulation_started=start_simulation(remote_runtime)
             except InterruptedError:raise
             except Exception as error:errors['simulation_runtime']=str(error)
         if progress:
@@ -750,24 +753,30 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         if progress: progress('同 plant 视频已核验，等待 L3 辅助回放封存' if resident else '核验真机视频后等待独立仿真视频封存',next_label='独立回放本轮可用视频',
                               errors=errors,recording=recording,physical_outcome=controller_outcome,task_outcome=task_outcome,
                               **resident_evidence())
-        deadline=(min((simulation_started or execution_started)+simulation['timeout_s'],execution_deadline)+40
-                  if resident else time.monotonic()+simulation['timeout_s']+40)
         if process is None:
             return dict(status='failed',physical_outcome=controller_outcome,task_outcome=task_outcome,
                 capture_outcome=manifest.get('validation',{}).get('status'),videos=videos,errors=errors,
                 error='; '.join(f'{k}: {v}' for k,v in errors.items()),recording=recording,**resident_evidence())
+        deadline=(min(simulation_started+simulation['timeout_s'],execution_deadline)+40
+                  if resident else time.monotonic()+simulation['timeout_s']+40)
         while process.poll() is None:
             if cancel is not None and cancel():raise InterruptedError('仿真回放已中断')
             if time.monotonic()>deadline:raise TimeoutError('仿真回放超时')
             time.sleep(.1)
         returncode=process.wait(timeout=0)
         remote=cfg['remote_run_root']+'/playground-replay-'+output.name
+        save(output/'simulation-exit.json',dict(exit_code=returncode,timeout_s=simulation['timeout_s'],
+            result_path=remote+'/result.json',**simulation_scope))
+        if returncode:
+            errors['simulation']=(f'simulation replay timed out (exit=124, wall limit={simulation["timeout_s"]:g} s)'
+                                  if returncode==124 else f'simulation replay exited with code {returncode}')
         fetch(remote+'/result.json',output/'simulation-result.json',cancel=cancel,execution_config=cfg)
         sim=json.loads((output/'simulation-result.json').read_text())
         if resident:
             sim.update(simulation_scope);save(output/'simulation-result.json',sim)
-        if returncode!=0 or sim.get('status')!='completed':
-            errors['simulation']=sim.get('error') or f'simulation status={sim.get("status")}, exit={returncode}'
+        if sim.get('status')!='completed':
+            detail=sim.get('error') or f'simulation status={sim.get("status")}'
+            errors['simulation']='; '.join(filter(None,(errors.get('simulation'),detail)))
         if sim.get('status')=='completed' and (sim.get('source_run_id')!=source['run_id']
                 or sim.get('plan_run_id')!=plan_value['run_id'] or sim.get('timeline_digest')!=plan_value['timeline_digest']):
             raise ValueError('simulation replay belongs to another source or timeline')

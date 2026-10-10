@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from copy import deepcopy
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +28,10 @@ def main():
             assert '--cup-contact-preset' in fake and str(preset['stiffness_n_m']) in fake
         physical=pipeline.native_stage(dict(gpu_cfg,environment='physical',cup_contact_preset=preset),'replay','/output')['argv'][-1]
         assert '--cup-contact-preset' not in physical
+        with patch.object(pipeline,'transport',side_effect=lambda cfg,side,command,**kwargs:[command]) as route:
+            replay=pipeline.native_stage(gpu_cfg,'replay','/output',timeout_s=2020)
+        assert replay['timeout_s']==route.call_args.kwargs['timeout']==2020
+        assert shlex.split(replay['argv'][-1])[:4]==['timeout','-k','30','2020']
     assert all(key+'='+value in command for key,value in environment.items())
     assert pipeline.controller_failure({'reason':'host stale','motion':{'reason':'operator stop'}},{'controller_outcome':'failed'})=='host stale'
     assert pipeline.controller_failure({'frozen':{'status':'failed','reason':'tracking failure'}},{})=='tracking failure'
@@ -106,7 +111,7 @@ def main():
         bridge.owner = Mock(return_value={})
         preparation = stack.enter_context(patch('real_pipeline.preparation_stages', return_value=[dict(name=n) for n in stage_names[:8]]))
         native = stack.enter_context(patch.object(pipeline, 'native_stage', side_effect=lambda c,m,o,**kw:
-                                                 dict(name='playground-'+m, argv=['fake-'+m], timeout_s=1)))
+                                                 dict(name='playground-'+m, argv=['fake-'+m], timeout_s=kw.get('timeout_s',1))))
         geometry = stack.enter_context(patch.object(pipeline, 'geometry_stage', side_effect=lambda c,o,**kw:
                                                    dict(name='playground-plan', argv=['fake-cpu-plan'], timeout_s=1)))
         run = stack.enter_context(patch.object(pipeline, 'run_stages'))
@@ -246,10 +251,19 @@ def main():
         assert popen.call_count == 1 and publication.call_count == 1
         assert upload.call_count==0, 'unchanged DSW parent must not be uploaded again'
         assert native.call_args.kwargs['plan_path'].endswith('/playground-plan/plan.json')
+        assert native.call_args.kwargs['timeout_s']==600, 'physical default wall limit changed'
         assert result['status'] == 'completed' and len(result['videos']) == 6
         assert 'raw_source_dir' not in raw_resolver.call_args.args[0], 'do not export stale raw'
         assert raw_resolver.call_args.args[1]['directory'] == str(raw)
         assert exporter.call_args.args[0] == raw
+        physical_contract=Path(json.loads(Path(prepared['config_path']).read_text())['contract_path'])
+        physical_limits=json.loads(physical_contract.read_text())
+        physical_limits['resources']['max_replay_time_seconds']=180
+        physical_contract.write_text(json.dumps(physical_limits))
+        pipeline.execute(configured,root/'physical-explicit-replay-budget',bridge,prepared)
+        assert native.call_args.kwargs['timeout_s']==180, 'physical explicit wall limit changed'
+        physical_limits['resources'].pop('max_replay_time_seconds')
+        physical_contract.write_text(json.dumps(physical_limits))
 
         # Successful speed changes rebuild/audit the cached route with CPU geometry only;
         # the only Kit invocation is the separately requested action replay.
@@ -291,6 +305,17 @@ def main():
         assert result['status'] == 'failed' and len(result['videos']) == 3
         assert all(Path(v['path']).is_file() for v in result['videos'])
         assert actions == ['preview_frozen', 'confirm'], 'failure never retries motion'
+        for code in (124,7):
+            process.wait.return_value=code;actions.clear()
+            destination=root/f'simulation-exit-{code}'
+            result=pipeline.execute(configured,destination,bridge,prepared)
+            assert result['status']=='failed' and len(result['videos'])==3
+            assert str(code) in result['errors']['simulation']
+            assert ('timed out' in result['errors']['simulation'])==(code==124)
+            assert 'simulation result missing' in result['errors']['postprocessing']
+            assert json.loads((destination/'simulation-exit.json').read_text())['exit_code']==code
+            assert actions==['preview_frozen','confirm'], 'failed L3 replay retried motion'
+        process.wait.return_value=0
 
         # Startup failed before any frames: preserve the original control/recording
         # errors, skip raw export, and never replace them with missing-video errors.
@@ -415,6 +440,44 @@ def main():
             assert pipeline.resident_wait_progress({'frozen':frozen,'execution_timeline':{'command_count':20}},0,600)['percent'] is None
         assert all(row.get('estimate_s') is None for row in events if 'estimate_s' in row)
         assert all(video['label'].startswith('L3 辅助') for video in result['videos'][3:])
+        # A short source timeline can need >600 wall seconds. Both launch paths
+        # inherit one absolute deadline; runtime preparation cannot restart it.
+        fake_contract['resources']['max_wall_time_minutes']=45
+        fake_cfg['resident_deadline_wall_ns']=2_145_000_000_000
+        fake_contract['resources']['resident_deadline_wall_ns']=fake_cfg['resident_deadline_wall_ns']
+        for compiled,cap,preparation_s,expected in ((False,None,0,2100),(True,None,80,2020),(True,900,80,900)):
+            if cap is None:fake_contract['resources'].pop('max_replay_time_seconds',None)
+            else:fake_contract['resources']['max_replay_time_seconds']=cap
+            (root/'fake-config.json').write_text(json.dumps(fake_cfg));(root/'fake-contract.json').write_text(json.dumps(fake_contract))
+            if compiled:preview_fields['compiled_tick_count_before_initialization']=1
+            else:preview_fields.pop('compiled_tick_count_before_initialization',None)
+            owner_fields.update(automatic_enabled=False,frozen={'status':'completed'})
+            clock[0]=0.;actions.clear()
+            def delayed_runtime(*args,**kwargs):
+                clock[0]+=preparation_s
+                return '/remote/shared-runtime.json'
+            with patch.object(pipeline,'execution_runtime',return_value=runtime), \
+                 patch.object(pipeline,'prepare_remote_runtime',side_effect=delayed_runtime), \
+                 patch.object(pipeline.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(pipeline.time,'time_ns',side_effect=lambda:round(clock[0]*1e9)):
+                result=pipeline.execute(configured,root/f'resident-replay-budget-{compiled}-{cap}',bridge,fake_prepared)
+            assert result['status']=='completed' and native.call_args.kwargs['timeout_s']==expected
+            assert json.loads((root/f'resident-replay-budget-{compiled}-{cap}'/'simulation-exit.json').read_text())['timeout_s']==expected
+            assert actions==['preview_frozen','confirm']
+        fake_contract['resources'].pop('max_replay_time_seconds',None)
+        (root/'fake-contract.json').write_text(json.dumps(fake_contract))
+        clock[0]=0.;preparation_s=2101;popen_before=popen.call_count
+        with patch.object(pipeline,'execution_runtime',return_value=runtime), \
+             patch.object(pipeline,'prepare_remote_runtime',side_effect=delayed_runtime), \
+             patch.object(pipeline.time,'monotonic',side_effect=lambda:clock[0]), \
+             patch.object(pipeline.time,'time_ns',side_effect=lambda:round(clock[0]*1e9)):
+            result=pipeline.execute(configured,root/'resident-replay-exhausted-before-start',bridge,fake_prepared)
+        assert result['status']=='failed' and 'before L3 replay start' in result['errors']['simulation_runtime']
+        assert popen.call_count==popen_before, 'expired resident launched L3 replay'
+        fake_cfg['resident_deadline_wall_ns']=900_000_000_000
+        fake_contract['resources'].update(max_wall_time_minutes=10,resident_deadline_wall_ns=fake_cfg['resident_deadline_wall_ns'])
+        fake_contract['resources'].pop('max_replay_time_seconds',None)
+        (root/'fake-config.json').write_text(json.dumps(fake_cfg));(root/'fake-contract.json').write_text(json.dumps(fake_contract))
         # Expiring resident wins over the job budget; absent lifetime is never an infinite wait.
         with patch.object(pipeline.time,'time_ns',return_value=800_000_000_000):
             assert pipeline.resident_wait_budget(fake_cfg,fake_contract)==55
