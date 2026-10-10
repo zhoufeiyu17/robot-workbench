@@ -1,10 +1,10 @@
 {
   "status": "l1-qualified-full-l2-incomplete",
-  "updated_at": "2026-10-09T23:15:34.116161+00:00",
+  "updated_at": "2026-10-10T00:48:28.064633+00:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "c3782da",
-  "qualification_scope": "Original C core reused; full-045936 and full-061606 both completed same-plant fake calibration/install. D integration remains unqualified. c3782da CPU checks passed including real closed-release preflight, then new full-071034 started with exactly matching persistent detector release.",
+  "candidate_commit_before_summary": "7e7b74a",
+  "qualification_scope": "C core reused: four complete same-plant fake calibration/install runs retained, and the newest D profile/model binding independently passed. Full-080258 remains unqualified: D observation failed before planning or execution. Local clock repair is separately tested; no D/raw/replay or hardware qualification is claimed.",
   "cpu": {
     "calibration_tests": 469,
     "calibration_skipped": 4,
@@ -14,7 +14,7 @@
     "workflow_adapter_tests": 14,
     "target_preview_tests": 4,
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "6a00a535d4b2808c7dd0930dbab59131c81dc0df4508f036932006410a310f95",
+    "full_check_log_sha256": "dea34f4f9c05c8729e998a6c18e00c8aac972e40932ffb5a06e428bc60e452f7",
     "preview_http_tests": 3,
     "preview_lifecycle_tests": 3,
     "collection_setup_role_variants": [
@@ -22,11 +22,15 @@
       5
     ],
     "collection_preparation_http_tests": 4,
-    "full_check_log": ".evidence/s2/release-preflight-cpu-check.log",
-    "full_check_commit": "c3782da",
+    "full_check_log": ".evidence/s2/observation-clock-final-cpu-check.log",
+    "full_check_commit": "7e7b74a",
     "detector_release_preflight_tests": 4,
     "real_release_fixture_explicitly_enabled": true,
-    "local_execution_tests": 12
+    "local_execution_tests": 12,
+    "shared_gateway_tests": 4,
+    "atomic_evidence_save_tests": 2,
+    "plant_bias_serve_tests": 5,
+    "sample_clock_tests": 17
   },
   "l1": {
     "status": "passed",
@@ -34,12 +38,13 @@
     "matrix_passed": 27,
     "matrix_total": 27,
     "source_unchanged": true,
-    "receipt_sha256": "08c0ffd527f688695ce4ae14befd165b77614ed343353b33bd3703cac1ac5277",
+    "receipt_sha256": "a5d64bab32472660cd881191dc72f050b4d7048267eb06670bad3ba48f4bdfb5",
     "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 1.5871659852564335,
-    "stop_request_to_software_barrier_max_ms": 2.6256670244038105,
+    "stop_request_to_software_barrier_p95_ms": 1.0187500156462193,
+    "stop_request_to_software_barrier_max_ms": 1.1895839124917984,
     "physical_stop_qualified": false,
-    "tested_functional_commit": "77f31cb"
+    "tested_functional_commit": "399d007",
+    "receipt": ".evidence/s2/l1-cached-feedback-399d007/l1-fault-matrix.json"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -55,15 +60,24 @@
     "gpu_released": true
   },
   "l2_complete": {
-    "status": "running_not_qualified",
+    "status": "observation_failed_not_qualified",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "latest_run": "full-20261010-071034",
-    "frozen_implementation": "c3782da",
-    "installation_completed": false,
+    "latest_run": "full-20261010-080258",
+    "frozen_implementation": "399d007",
+    "installation_completed": true,
     "collection_started": false,
-    "gpu_released": false,
-    "source": "frozen full-071034 contract + remote full-driver.jsonl and final artifacts"
+    "gpu_released": true,
+    "source": "frozen full-080258 contract + remote full-driver.jsonl and final artifacts",
+    "resident_deadline": "2026-10-10T08:58:49+08:00",
+    "resource_deadline": "2026-10-10T09:03:42+08:00",
+    "active_manifest_sha256": "c84317945926a5f0897150c81fd5357fdb047e441151f1337f9570edd6fbf488",
+    "accepted_execution_count": 0,
+    "collection_failure": "Initial RGB-D capture mixed a 30 wall-second timeout with an eight simulation-source-second observation requirement",
+    "artifact_audit": ".evidence/s2/full-080258-artifact-verification.json",
+    "observation_failure_evidence": ".evidence/s2/full-080258-observation-failure-evidence.json",
+    "owned_gpu_processes_exited": true,
+    "teardown_evidence": ".evidence/s2/full-20261010-080258-teardown.json"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
@@ -131,45 +145,47 @@
     "source": "remote full-045936/runtime-boundary-20261010-054145/conversion/result.json"
   },
   "last_installed_attempt": {
-    "status": "calibration_installed_collection_setup_failed",
-    "latest_run": "full-20261010-061606",
-    "frozen_implementation": "77f31cb",
+    "status": "calibration_installed_collection_observation_failed",
+    "latest_run": "full-20261010-080258",
+    "frozen_implementation": "399d007",
     "installation_completed": true,
     "collection_started": false,
     "gpu_released": true,
     "head_capture_count": 34,
     "wrist_capture_count": 29,
-    "left_wrist_holdout_rms_px": 1.2909729194936819,
-    "right_wrist_holdout_rms_px": 1.0413834854913937,
+    "left_wrist_holdout_rms_px": 1.360906723989425,
+    "right_wrist_holdout_rms_px": 1.0296950171533665,
     "installed_evidence": {
-      "head_id": "88adaa8405df9282367dbe7a23b1d9f05805e0961a21483d2bad8809468d3569",
-      "wrist_id": "d905514afda6a0c9ee1d0481aaf4662c2c61d58af3931c17227e026e092e377f",
-      "wrist_dependency": "88adaa8405df9282367dbe7a23b1d9f05805e0961a21483d2bad8809468d3569",
+      "head_id": "6b457679e096555ea006d372c75fe66ec307c20a1bbdfc5d4817da11ea7fd3d2",
+      "wrist_id": "b4a01bc3041af9df14ec9c8996077c26811756e5f3af5664a2bafc0c41291915",
+      "wrist_dependency": "6b457679e096555ea006d372c75fe66ec307c20a1bbdfc5d4817da11ea7fd3d2",
       "clock": {
         "environment": "fake",
         "clock_domain": "simulation",
-        "source_clock_id": "physx-dd06af7ad6385ea4257d5876defce02b"
+        "source_clock_id": "physx-0236519ba4268c06de64f8a95515b64d"
       },
       "batches": {
         "head": {
-          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-061606/calibration-workbench/batch-hardware-2a29641a6a/capture",
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-080258/calibration-workbench/batch-hardware-a8093783fc/capture",
           "frames": 34,
-          "dataset_sha256": "2ccd82649ead40bebec7e000ec254911e8b96b17bdfa5410ebeeac4139822a90"
+          "dataset_sha256": "f7fa482acb17ee10dbd0944aeb4a7c0016f7eaf1d72855fa1579280782cef860"
         },
         "wrist": {
-          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-061606/calibration-workbench/batch-hardware-c1337b95a9/capture",
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-080258/calibration-workbench/batch-hardware-ce2637ddd3/capture",
           "frames": 29,
-          "dataset_sha256": "a60e7bb68f89fa1b65d903f28632a9b40405cd7f78c87a77ac0216ebb0d603dc"
+          "dataset_sha256": "75948665ad6bbf08d2bb9941499969b617335706a456bbbb32dfac493c32205b"
         }
       },
       "active_sha256": {
-        "head.json": "6f8eb76108c5eba5a57cdef909c8d008bee89c23a8d7383a16133e3707bd63f4",
-        "wrist.json": "20d84c7a8d8491182d8446ff370625916bb925a587b2ff178a7a2819a0b29974",
-        "manifest.json": "76fb4af1ae9d3d42833a44eda579deb20d2d8adcd95740ff3d1a15ee4472798a"
+        "head.json": "f7452caa80311ab4228882d556f2cea7f676bd4a9705a33a6a1906fe8699cda8",
+        "wrist.json": "0778029c9a5d86e74b7294bfbc72332b4260c6ae264240d480ef8dccd0343783",
+        "manifest.json": "c84317945926a5f0897150c81fd5357fdb047e441151f1337f9570edd6fbf488"
       }
     },
-    "collection_failure": "worker IPC directory roots included exact pinned files",
-    "teardown_evidence": ".evidence/s2/full-20261010-061606-teardown.json"
+    "new_D_profile_model_passed": true,
+    "collection_failure": "30 wall-second capture deadline mixed with eight simulation-source-second coverage",
+    "artifact_audit": ".evidence/s2/full-080258-artifact-verification.json",
+    "teardown_evidence": ".evidence/s2/full-20261010-080258-teardown.json"
   },
   "historical_installed_attempt": {
     "status": "calibration_installed_collection_setup_failed",
@@ -234,5 +250,96 @@
     "model_inference": false,
     "node_config_sha256": "75bc53d0adddfee06e766078ac05e08b4d79c563c726db879c5c1095193ba8fa",
     "source_confirmation": "original D owner read-only alignment: 01a0e689-3c0f-7c03-9f0c-051943193ee2; old 739 /tmp bundle matches same digest"
+  },
+  "previous_installed_attempt_061606": {
+    "status": "calibration_installed_collection_setup_failed",
+    "latest_run": "full-20261010-061606",
+    "frozen_implementation": "77f31cb",
+    "installation_completed": true,
+    "collection_started": false,
+    "gpu_released": true,
+    "head_capture_count": 34,
+    "wrist_capture_count": 29,
+    "left_wrist_holdout_rms_px": 1.2909729194936819,
+    "right_wrist_holdout_rms_px": 1.0413834854913937,
+    "installed_evidence": {
+      "head_id": "88adaa8405df9282367dbe7a23b1d9f05805e0961a21483d2bad8809468d3569",
+      "wrist_id": "d905514afda6a0c9ee1d0481aaf4662c2c61d58af3931c17227e026e092e377f",
+      "wrist_dependency": "88adaa8405df9282367dbe7a23b1d9f05805e0961a21483d2bad8809468d3569",
+      "clock": {
+        "environment": "fake",
+        "clock_domain": "simulation",
+        "source_clock_id": "physx-dd06af7ad6385ea4257d5876defce02b"
+      },
+      "batches": {
+        "head": {
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-061606/calibration-workbench/batch-hardware-2a29641a6a/capture",
+          "frames": 34,
+          "dataset_sha256": "2ccd82649ead40bebec7e000ec254911e8b96b17bdfa5410ebeeac4139822a90"
+        },
+        "wrist": {
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-061606/calibration-workbench/batch-hardware-c1337b95a9/capture",
+          "frames": 29,
+          "dataset_sha256": "a60e7bb68f89fa1b65d903f28632a9b40405cd7f78c87a77ac0216ebb0d603dc"
+        }
+      },
+      "active_sha256": {
+        "head.json": "6f8eb76108c5eba5a57cdef909c8d008bee89c23a8d7383a16133e3707bd63f4",
+        "wrist.json": "20d84c7a8d8491182d8446ff370625916bb925a587b2ff178a7a2819a0b29974",
+        "manifest.json": "76fb4af1ae9d3d42833a44eda579deb20d2d8adcd95740ff3d1a15ee4472798a"
+      }
+    },
+    "collection_failure": "worker IPC directory roots included exact pinned files",
+    "teardown_evidence": ".evidence/s2/full-20261010-061606-teardown.json"
+  },
+  "previous_installed_attempt_071034": {
+    "status": "calibration_installed_collection_observation_failed",
+    "latest_run": "full-20261010-071034",
+    "frozen_implementation": "c3782da",
+    "installation_completed": true,
+    "collection_started": false,
+    "gpu_released": true,
+    "head_capture_count": 34,
+    "wrist_capture_count": 29,
+    "left_wrist_holdout_rms_px": 1.322485,
+    "right_wrist_holdout_rms_px": 1.040878,
+    "active_manifest_sha256": "bcd3b6b8062af7b7deb795fbc298f6e4305f54bdd4f738cbb1e09c79efb64786",
+    "collection_failure": "Runtime cache facade omitted original CollectionOwner physical_feedback; read_initial_sample rejected before D plan/motion/raw",
+    "worker_services_ready": true,
+    "planner_model_initialized": false,
+    "harness_failure": "direct read of concurrently written setup JSON; harness switched to public API, continuation retained separately",
+    "teardown_verified_at": "2026-10-10T07:49:00+08:00",
+    "gpu_released_at": "2026-10-10T07:55:11+08:00",
+    "teardown_evidence": ".evidence/s2/full-20261010-071034-teardown.json"
+  },
+  "observation_clock_diagnostic": {
+    "candidate_sha256": "946921402f2eca0635e827827e237c9321db55c8279e845fe451eccd4ca06d90",
+    "parent_run": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-080258",
+    "gpu_started": false,
+    "controller_actions": false,
+    "full_l2_qualified": false,
+    "status": "passed",
+    "wall_elapsed_s": 33.303860297,
+    "frames": 9,
+    "source_span_s": 8.133333333,
+    "source_clock": {
+      "environment": "fake",
+      "clock_domain": "simulation",
+      "source_clock_id": "physx-0236519ba4268c06de64f8a95515b64d"
+    },
+    "source_intervals_s": [
+      1.033333333,
+      1.0,
+      1.033333333,
+      1.0,
+      1.033333334,
+      1.0,
+      1.033333333,
+      1.0
+    ],
+    "manifest_sha256": "95f25650fc787e732257fe60ffe34d9caa5357dd60f33ba65d8d4888df9bdf11",
+    "source": ".evidence/s2/observation-clock-084437-result.json",
+    "run": "observation-clock-20261010-084437",
+    "qualification_scope": "separate CPU candidate reading existing same plant; not a full D or cold-start campaign pass"
   }
 }

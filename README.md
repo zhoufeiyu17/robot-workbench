@@ -42,11 +42,13 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 `scripts/serve_physx_device.py` 只用于有界、任务独占的GPU环境。运行前必须冻结本次代码/输入/资源/输出合同，通过preflight和dry-run，并登记实际GPU占用。服务只绑定loopback；不通过页面输入任意远端地址或fallback到其他实例。
 
 - S0已验证同Owner→PhysX实测响应、同场景RGB-D、停止/失联保护及连续物理步反馈更新，历史摘要见 [validation-summary.json](migration/validation-summary.json)。
-- 已封存源码的L1故障矩阵27/27通过，覆盖权限、迟到回调、重启、录制/相机、SDK、交接、安装及UI断线；30样本的HTTP起点→软件停止屏障P95为1.587ms、最大2.626ms。墙钟测量仅资格执行测试的Mac，不外推ARX或实体止动，后续改动需重新验证相应路径。
+- 最新完整L1故障矩阵绑定399d007，27/27通过；30个正常SDK样本的HTTP请求起点→软件停止屏障P95为1.019ms、最大1.190ms。仅资格本Mac墙钟控制流，不外推实体止动或后续产品增量。后续HTTP限额与观测时钟修复分别有回归和实际图像证据。
 - L2历史失败原样保留：短测在双腕22/29时达到1100s自设期限；`full-20261010-033728`头解失败。后者经独立冷启动A/B定位为新scene贴纸共面，0.1mm打印面分离修复不改变求解器或验收阈值。
 - `full-20261010-045936`已完成34张头部、29张双腕的空库标定并安装：头部留出贴纸RMS1.086px、mesh3.255px/92.625%，左/右腕RMS1.352/1.108px；仅安装于该fake run。D自动准备因跨Python运行时环境串扰失败，后续隔离环境的实际GPU转换及URDF/USD/rig/binding核验通过；尚无完整D执行/raw/回放资格。该run进程已实际清退、GPU1已释放。
 - `77f31cb`已修复数采准备阶段/失败重试、旧审批撤销及服务重启页面恢复；同源码L1矩阵27/27通过。`full-20261010-061606`也完整标定并安装（腕部1.291/1.041px），转换通过后D初始化发现IPC目录清单混入file pins；8ac2b48已修复。该run/诊断已清退释放，尚无D运动/raw资格。
-- 进一步发现既有detector配置引用原实例/tmp release；已与原D任务核对组件并在新隔离CPFS目录形成完全相同digest的持久包。c3782da复用真实startup/catalog做CPU闭包检查，缺包/错digest/损坏在GPU/C前拒绝；全CPU检查已通过（C469项/4skip，显式A1及真实release fixture另验）。2026-10-10 07:11启动新冻结`full-20261010-071034`，45分钟resident、08:01前清退，当前完整C→D复验中，未标通过。动态状态与最终产物见validation-summary及原始run。
+- 既有detector配置曾引用原实例/tmp release；已与原D任务核对，在隔离CPFS形成完全相同digest的持久包，并将真实CPU闭包校验前置到GPU/C之前。full-071034完成C安装、workers ready后，首次观测因新Runtime漏派生physical_feedback失败；399d007现复用原CollectionOwner缓存字段，不进SDK/recorder锁。原run与失败均保留、已清退。
+- full-080258冻结399d007：34头+29腕再次通过并安装，新D profile/URDF/USD/rig与安装绑定独立核验通过。但首观测混用30墙钟秒超时和8仿真源秒覆盖要求，未到D规划/执行/raw/replay；该run完整L2失败，08:46核验全部自有进程和GPU1清空、08:47释放。
+- 7e7b74a按源时间完成fake观测，保留9组/8秒要求、30墙钟秒无进展保护及固定resident清退余量；physical原30秒语义不变。独立候选读取同一plant实际RGB-D，在33.304墙钟秒取得9组/8.133源秒并通过原validator，无控制或新GPU进程，不能追溯资格完整D。049ce80另恢复原D接口16MiB计划请求范围。最终全CPU检查exit0（C469执行/4skip，显式A1/release fixture另验），最新详情见validation-summary。
 - 用户已人工确认四栏目布局；随后浏览器验证了协议fake单姿态审批/执行，以及切栏不交接、显式交接保留保持。完整业务界面与目标预览性能仍待验收。
 
 真机仍须单独核验SDK、增益/踏板、实际止动和设备侧时延，并遵守现场支撑/运动审阅门。正式安装对外路径保持 `/var/lib/anyverse/calibration/hardware/active/{head.json,wrist.json,manifest.json}`；fake使用隔离的身份与安装根。
