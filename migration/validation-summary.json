@@ -1,12 +1,12 @@
 {
-  "status": "l1-qualified-full-l2-incomplete",
-  "updated_at": "2026-10-10T16:28:27.815418+08:00",
+  "status": "current-cpu-l1-passed-full-l2-incomplete",
+  "updated_at": "2026-10-10T17:35:04.342327+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "75539d4",
-  "qualification_scope": "Original C/D cores reused. full-123915 completed C capture/solve/install and fresh D model/observation/detection/scene; planning failed at cup-reference URDF identity. No complete D/native/raw/replay or physical qualification. Cold suite remains 0/3.",
+  "candidate_commit_before_summary": "7d1a5dd",
+  "qualification_scope": "Latest warm-153813 completed Owner motion but raw/native task/L3 failed. Approved position-boundary, L3 and fake lease fixes pass CPU/L1; new DSW run still required. Cold suite 0/3; no hardware qualification.",
   "cpu": {
-    "calibration_tests": 476,
+    "calibration_tests": 479,
     "calibration_skipped": 4,
     "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
     "runtime_tests": 16,
@@ -14,15 +14,15 @@
     "workflow_adapter_tests": 14,
     "target_preview_tests": 11,
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "3af051db9199ac2dbc01302c33a2c8444e2173232dcab03a7aecbfe418371663",
-    "preview_http_tests": 9,
+    "full_check_log_sha256": "c0da41a2dbb7685e862f91a463c1bbf415d0ae87d1e4726065e0cd669e009aa7",
+    "preview_http_tests": 10,
     "preview_lifecycle_tests": 3,
     "collection_setup_role_variants": [
       4,
       5
     ],
     "collection_preparation_http_tests": 4,
-    "full_check_log": ".evidence/s2/event-driven-preview-full-cpu.log",
+    "full_check_log": ".evidence/s2/position-and-recording-final-cpu.log",
     "full_check_commit": "99e99b8",
     "detector_release_preflight_tests": 4,
     "real_release_fixture_explicitly_enabled": true,
@@ -35,7 +35,11 @@
     "a1_supplement_log": ".evidence/s2/warm-cup-a1-cpu.log",
     "a1_supplement_tests": 4,
     "cup_reference_tests": 9,
-    "preview_subscription_tests": 4
+    "preview_subscription_tests": 4,
+    "position_boundaries_tests": 5,
+    "recording_preparation_tests": 9,
+    "recording_clock_tests": 14,
+    "final_renewal_scope": "targeted real-recorder/producer checks plus final unchanged-source L1; full check preceded renewal increment"
   },
   "l1": {
     "status": "passed",
@@ -43,13 +47,13 @@
     "matrix_passed": 27,
     "matrix_total": 27,
     "source_unchanged": true,
-    "receipt_sha256": "b28b51c360a8ba29d757f0288dd4524271e23afbd6ad150335ed9d6106c83112",
+    "receipt_sha256": "359729facc1ed532bc7bd3b0ad7d79fd5700627eb844995d3d5efc39fd2212ed",
     "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 20.995874889194965,
-    "stop_request_to_software_barrier_max_ms": 35.90870788320899,
+    "stop_request_to_software_barrier_p95_ms": 1.2332499027252197,
+    "stop_request_to_software_barrier_max_ms": 1.2515410780906677,
     "physical_stop_qualified": false,
-    "tested_functional_commit": "99e99b8",
-    "receipt": ".evidence/s2/l1-event-driven-preview/l1-fault-matrix.json"
+    "tested_functional_commit": "7d1a5dd",
+    "receipt": ".evidence/s2/l1-deferred-renewal-final/l1-fault-matrix.json"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -85,7 +89,7 @@
     "protocol_fake_manual_preview_execute": "passed",
     "explicit_handoff_keeps_connection_hold": "passed",
     "tab_switch_does_not_handoff": "passed",
-    "full_business_and_preview_performance": "pending",
+    "full_business_and_preview_performance": "preview qualified on stated warm145124 host/profile; full business pending",
     "initial_loading_clears": "passed after fix",
     "image_recovery_and_l1_scope": "passed on real browser; protocol-only service",
     "renderer_gpu_lifecycle": "pending",
@@ -160,12 +164,13 @@
       }
     ],
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
-    "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json"
+    "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
+    "position_boundary_review": "18866 actual UI accepted 3.144 rad request at upper3.14; preview only, cancelled without execution",
+    "position_boundary_screenshot": ".evidence/s2/ui-position-boundary-review.png"
   },
   "remaining": [
-    "complete prior-feature parity through actual new entry",
-    "complete same-plant calibration/install/collection/raw/replay and three normal cases",
-    "GPU-qualify already wired target preview/mesh with explicit private process registry",
+    "actual warm D/native task/complete RGB-D and both playback paths on current fixes",
+    "three predeclared empty-store cold cases and full new-entry feature parity",
     "physical SDK/stop/timing qualification and single-writer cutover"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
@@ -508,7 +513,13 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": null,
+  "current_gpu_run": {
+    "run": "warm-20261010-173414",
+    "source_commit": "7d1a5dd",
+    "phase": "preparing fresh D environment",
+    "qualified": false,
+    "hardware": false
+  },
   "last_gpu_run": {
     "run": "full-20261010-123915",
     "status": "terminated_and_released",
@@ -855,16 +866,20 @@
     },
     "preserved_receipt": ".evidence/s2/warm-20261010-145124-browser-evidence-qualified-preserved.json"
   },
-  "pending_behavior_decisions": {
-    "fake_lease_prepare_before_verify": {
-      "proposed_wall_budget_s": 1,
-      "approval": "not_yet_user_requested_explanation"
+  "pending_behavior_decisions": {},
+  "approved_behavior_contracts": {
+    "source": "user approvals in current session; _context design 06",
+    "fake_lease_preparation": "<=1 wall second after confirmation, then original .3 source-second stationary gate; never recording.ready",
+    "position_noise_rad": {
+      "fake": 0.005,
+      "physical": 0.01
     },
-    "explicit_L3_initialization_derivation": {
-      "existing_limit_rad": 0.005,
-      "actual_adjustment_rad": 0.000678260787791217,
-      "affected_ticks": 1,
-      "approval": "not_yet_user_requested_explanation"
-    }
+    "noise_scope": "position boundaries/conversion/action encoding only; source environment; raw retained, legal targets and explicit corrections; all other thresholds unchanged",
+    "L3": "explicit independently verified initialization prefix derivation; immutable Owner and suffix",
+    "implemented_commits": [
+      "4c8c740",
+      "7d1a5dd"
+    ],
+    "gpu_revalidated": false
   }
 }
