@@ -55,7 +55,7 @@ python rule_based_workbench/test_resident_task_receipt.py
 python rule_based_workbench/test_joint_space.py
 python rule_based_workbench/test_playground_plan.py
 python rule_based_workbench/test_playground_sim.py
-for name in test_playground_motiongen_entry test_real_pipeline test_playground_pipeline test_real_acquisition test_physical_motiongen test_initial_state test_real_preparation_app test_frozen_executor; do
+for name in test_playground_motiongen_entry test_real_pipeline test_playground_pipeline test_real_acquisition test_physical_motiongen test_initial_state test_real_preparation_app test_real_bridge test_frozen_executor; do
     python "rule_based_workbench/$name.py"
 done
 python rule_based_workbench/test_real_control.py "$ROOT/calibration"

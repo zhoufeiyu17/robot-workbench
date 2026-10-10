@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from real_contract import namespace, owner_matches_environment
@@ -45,14 +45,22 @@ class RealBridge:
         data = None if payload is None else json.dumps(payload, allow_nan=False).encode()
         if data is not None:
             headers['Content-Type'] = 'application/json'
+        action = payload.get('action') if control and payload is not None else None
+        timeout = 15 if action == 'preview_frozen' else 2
+        request = Request(url, data=data, headers=headers)
         try:
-            with self.opener.open(Request(url, data=data, headers=headers), timeout=2) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 body = response.read(16 * 1024 * 1024 + 1)
                 if len(body) > 16 * 1024 * 1024:
                     raise ValueError('robot service response too large')
                 return body, response.headers.get('Content-Type', 'application/octet-stream')
         except HTTPError as error:
             raise ValueError('robot service rejected request: ' + error.read(2048).decode(errors='replace')) from None
+        except (TimeoutError, URLError) as error:
+            if isinstance(error, URLError) and not isinstance(error.reason, TimeoutError):
+                raise
+            raise TimeoutError(f'robot service timed out: {request.get_method()} {urlsplit(url).path} '
+                               f'action={action or "none"} budget={timeout}s') from None
 
     def owner(self):
         if self.config.get('hardware_access_enabled', True) is False:
