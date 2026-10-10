@@ -76,7 +76,8 @@ def printed_marker_fixture(candidate):
     return markers
 
 
-def configure_calibration(nominal, output, intrinsics, ports, gateway_port, token_file, *, source_clock, auto_confirm=False):
+def configure_calibration(nominal, output, intrinsics, ports, gateway_port, token_file, *, source_clock, auto_confirm=False,
+                          resident_deadline_wall_ns=None):
     from robot_workbench.physx_camera import CAMERAS
     keys=('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','model_family',
           'asset_geometry_id','asset_seal_sha256','parking_support_contact','wrist_nominal_mounts',
@@ -100,6 +101,10 @@ def configure_calibration(nominal, output, intrinsics, ports, gateway_port, toke
         hardware_camera_serials={role:intrinsics[name]['serial'] for role,name in CAMERAS.items()},
         wrist_simulation_cameras={side:dict(intrinsics[CAMERAS[side]],rectified=True) for side in ('left','right')},
         pipeline_auto_confirm=auto_confirm,bind_host='127.0.0.1')
+    if resident_deadline_wall_ns is not None:
+        if type(resident_deadline_wall_ns) is not int or resident_deadline_wall_ns<=0:
+            raise ValueError('fixed positive resident calibration deadline required')
+        config['resident_deadline_wall_ns']=resident_deadline_wall_ns
     save(output/'calibration-config.json',config)
     return config
 
@@ -238,7 +243,8 @@ def run(args, base, nominal):
             'physical':Device('physical-unconfigured','physical',None,label='真机 · 未配置')})
         gateway,_=start_control_gateway(device,tokens,port=args.gateway_port)
         calibration_config=configure_calibration(nominal,args.output,intrinsics,ports,gateway.server_port,
-            token_files['calibration'],source_clock=source_clock,auto_confirm=args.calibration_auto_confirm)
+            token_files['calibration'],source_clock=source_clock,auto_confirm=args.calibration_auto_confirm,
+            resident_deadline_wall_ns=resident_deadline_wall_ns)
         from examples.scripts.debug.joint_head_workbench import Workbench
         from robot_workbench.workflows import CalibrationWorkflow
         calibration=Workbench(calibration_config,args.output/'calibration-workbench')

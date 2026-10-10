@@ -141,11 +141,13 @@ class ResidentConfigurationTest(unittest.TestCase):
                  intrinsics=dict(fx=100.,fy=100.,cx=2.,cy=1.),distortion=dict(coefficients=[0.]*5))
                  for i,name in enumerate(CAMERAS.values())}}
             clock=clock_spec('fake',source_clock_id='resident-fixture')
+            resident_deadline=1_900_000_000_000_000_000
             result=configure_calibration(nominal,output,camera_intrinsics(rig),dict(head=18001,left=18002,right=18003),
-                18004,root/'credential-path',source_clock=clock)
+                18004,root/'credential-path',source_clock=clock,resident_deadline_wall_ns=resident_deadline)
             self.assertEqual(result['environment'],'fake')
             self.assertEqual(result['robot_source'],'simulated')
             self.assertEqual(result['clock'],clock)
+            self.assertEqual(result['resident_deadline_wall_ns'],resident_deadline)
             self.assertEqual(list(Path(result['calibration_root']).iterdir()),[])
             self.assertNotIn('live_backend',result)
             self.assertNotIn('truth_fixture',result)

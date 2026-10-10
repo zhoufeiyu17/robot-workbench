@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import itertools
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -123,6 +124,122 @@ class CaptureFlowTests(unittest.TestCase):
         self.assertEqual(manifest['clock']['source_clock_id'],'fixture-plant')
         self.assertTrue(manifest['simulation_only'])
         self.assertEqual(manifest['frames'][0]['capture_ready_source_ns'],50_000_000)
+
+    def clocked_capture(self,*,environment='fake',resident_s=300.,ready_wall_s=160.,corruption=None,pipeline=False):
+        """The real C orchestration sees a healthy 0.25x source and virtual wall waits."""
+        a=self.app;clock=[0.];wall_origin=1_700_000_000_000_000_000
+        if environment=='fake':
+            a.config.update(environment='fake',simulation_only=True,robot_source='simulated')
+            a.hardware_feedback={'owner':dict(mode='simulation',environment='fake',simulation_only=True)}
+            if resident_s is not None:a.config['resident_deadline_wall_ns']=wall_origin+round(resident_s*1e9)
+        def wall_ns():
+            rollback=1000. if corruption=='wall_rollback' and clock[0]>=50. else 0.
+            return wall_origin+round((clock[0]-rollback)*1e9)
+        original=self.gateway
+        def gateway(action,body=None,**kwargs):
+            if action=='trajectory-preview':return {**original(action,body,**kwargs),'total_motion_duration_s':40.}
+            if action!='state':return original(action,body,**kwargs)
+            owner=self.owner_state()['owner']
+            if not self.acknowledged and clock[0]<ready_wall_s:owner['motion']['status']='RUNNING'
+            if environment=='fake':
+                source_ns=round(clock[0]*.25*1e9)
+                if corruption=='source_regression' and clock[0]>=40.:source_ns=0
+                if corruption=='epoch' and clock[0]>=40.:owner['command_epoch']+=1
+                owner.update(mode='simulation',environment='fake',simulation_only=True,
+                    calibration_feedback=dict(sample_wall_ns=wall_ns(),clock_domain='simulation',
+                        source_clock_id='other-source' if corruption=='source_instance' and clock[0]>=40. else 'slow-fixture',
+                        source_time_ns=source_ns,physics_step=source_ns*240//1_000_000_000))
+                owner['motion'].update(capture_ready_source_ns=round(ready_wall_s*.25*1e9),
+                    capture_ready_physics_step=round(ready_wall_s*.25*240),capture_clock_domain='simulation',capture_source_clock_id='slow-fixture')
+            return {'owner':owner}
+        def sample(*args,**kwargs):
+            if environment=='fake':
+                self.assertEqual(kwargs['not_before_source_ns'],round(ready_wall_s*.25*1e9))
+                kwargs={**kwargs,'not_before_ns':1050000000}
+            return self.sample(*args,**kwargs)
+        def wait(unused):clock[0]+=10.;return False
+        a.control_request=gateway
+        with patch('joint_head_workbench.time.monotonic',side_effect=lambda:clock[0]), \
+                patch('joint_head_workbench.time.time_ns',side_effect=wall_ns),patch.object(a.stop,'wait',side_effect=wait), \
+                patch('arx_env.joint_head_workbench_capture.capture_sample',side_effect=sample):
+            if pipeline:
+                a.config['pipeline_auto_confirm']=True
+                with self.assertRaises(ValueError):a.capture_batch({},'头部')
+            else:self.confirm()
+        dataset=next(a.output.glob('batch-hardware-*/capture'))
+        return json.loads((dataset/'completion.json').read_text()),json.loads((dataset/'dataset.json').read_text())
+
+    def test_resident_fake_capture_can_outlast_legacy_wall_formula_with_real_source_progress(self):
+        completion,manifest=self.clocked_capture()
+        self.assertEqual(self.app.status,'READY',self.app.reason)
+        self.assertTrue(completion['passed']);self.assertEqual(completion['captured'],1)
+        timing=completion['timing']
+        self.assertGreater(timing['elapsed_wall_s'],timing['legacy_wall_budget_s'])
+        self.assertEqual(timing['legacy_wall_budget_s'],110.)
+        self.assertGreaterEqual(timing['source_span_s'],40.)
+        self.assertEqual(timing['budget_origin'],'fixed_resident_wall')
+        self.assertEqual(completion['runtime_environment'],'fake');self.assertEqual(manifest['environment'],'hardware')
+
+    def test_physical_and_independent_fake_keep_finite_original_wall_timeout(self):
+        for environment in ('physical','fake'):
+            with self.subTest(environment=environment),tempfile.TemporaryDirectory() as root:
+                self.app.output=Path(root).resolve();self.app.config.pop('resident_deadline_wall_ns',None)
+                completion,manifest=self.clocked_capture(environment=environment,resident_s=None)
+                self.assertFalse(completion['passed']);self.assertEqual(completion['captured'],0)
+                self.assertIn(('Fake' if environment=='fake' else '真机')+'采集超时',completion['reason'])
+                self.assertEqual(completion['timing']['legacy_wall_budget_s'],110.)
+                self.assertEqual(completion['runtime_environment'],environment)
+                self.assertEqual(manifest['failure']['runtime_environment'],environment)
+                self.assertNotIn('capture-ack',[action for action,_ in self.calls])
+
+    def test_fixed_resident_deadline_cannot_extend_on_wall_rollback_or_automatic_retry(self):
+        completion,manifest=self.clocked_capture(resident_s=130.,ready_wall_s=160.,corruption='wall_rollback',pipeline=True)
+        self.assertFalse(completion['passed']);self.assertIn('固定驻留',completion['reason'])
+        self.assertEqual(completion['timing']['resident_budget']['deadline_monotonic_s'],85.)
+        self.assertEqual(completion['timing']['elapsed_wall_s'],90.)
+        self.assertEqual(completion['timing']['first_source_stamp'],[0,0])
+        self.assertGreater(completion['timing']['last_source_stamp'][0],0)
+        self.assertEqual([action for action,_ in self.calls].count('motion-confirm'),1)
+        self.assertNotIn('capture-ack',[action for action,_ in self.calls])
+        self.assertEqual(manifest['failure']['timing']['owner_pid'],123)
+
+    def test_slow_fake_still_rejects_source_regression_instance_and_epoch_changes(self):
+        for corruption in ('source_regression','source_instance','epoch'):
+            with self.subTest(corruption=corruption),tempfile.TemporaryDirectory() as root:
+                self.app.output=Path(root).resolve();self.app.__dict__.pop('_resident_capture_budget',None)
+                completion,_=self.clocked_capture(corruption=corruption)
+                self.assertFalse(completion['passed']);self.assertLess(completion['timing']['elapsed_wall_s'],110.)
+                self.assertIn('stop',[action for action,_ in self.calls])
+                self.assertNotIn('capture-ack',[action for action,_ in self.calls])
+
+    def test_outer_fake_wait_uses_original_resident_end_and_preserves_collector_reason(self):
+        a=self.app;clock=[0.];origin=time.time_ns()
+        a.config.update(environment='fake',simulation_only=True,resident_deadline_wall_ns=origin+4_000_000_000_000)
+        a.status='CAPTURING';a.reason=None
+        def advance(unused):
+            clock[0]+=1000.
+            if clock[0]>=3000.:a.status='REJECTED';a.reason='collector exact failure preserved'
+        with patch('joint_head_workbench.time.monotonic',side_effect=lambda:clock[0]), \
+                patch('joint_head_workbench.time.time_ns',side_effect=lambda:origin+round(clock[0]*1e9)), \
+                patch('joint_head_workbench.time.sleep',side_effect=advance):
+            with self.assertRaisesRegex(ValueError,'collector exact failure preserved'):a.wait_for_step(1800,'头部采集')
+        self.assertEqual(clock[0],3000.)
+
+    def test_exhausted_resident_rejects_confirmation_before_motion_or_batch_creation(self):
+        a=self.app;now=time.time_ns()
+        a.config.update(environment='fake',simulation_only=True,robot_source='simulated',resident_deadline_wall_ns=now+30_000_000_000)
+        a.hardware_feedback={'owner':dict(mode='simulation',environment='fake',simulation_only=True)}
+        with self.assertRaisesRegex(ValueError,'固定驻留'):self.confirm()
+        self.assertNotIn('motion-confirm',[action for action,_ in self.calls])
+        self.assertEqual(list(a.output.glob('batch-hardware-*')),[])
+
+    def test_resident_anchor_rejects_configuration_extension(self):
+        a=self.app;a.config.update(environment='fake',simulation_only=True,robot_source='simulated',
+            resident_deadline_wall_ns=time.time_ns()+300_000_000_000)
+        original=a.resident_capture_budget()
+        a.config['resident_deadline_wall_ns']+=100_000_000_000
+        with self.assertRaisesRegex(ValueError,'期限已变化'):a.resident_capture_budget()
+        self.assertEqual(a._resident_capture_budget,original)
 
     def test_head_and_wrist_share_hardware_capture_and_persist_before_ack(self):
         for kind in ('head','wrist'):

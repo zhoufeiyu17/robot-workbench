@@ -120,7 +120,10 @@ class Workbench:
         if config.get('hardware_status_owner_port') is not None:
             from arx_env.joint_head_workbench_hardware import HardwareReadAdapter
             self.hardware_reader=HardwareReadAdapter(config['hardware_status_owner_port'],environment=environment)
-        self.config=config; self.geometry=Geometry(config); self.output=Path(output).resolve()
+        self.config=config
+        if environment=='fake' and config.get('resident_deadline_wall_ns') is not None:
+            self.resident_capture_budget()
+        self.geometry=Geometry(config); self.output=Path(output).resolve()
         self.output.mkdir(parents=True,exist_ok=True)
         from arx_env.joint_head_calibration_store import CalibrationStore
         self.calibration_root=Path(config.get('calibration_root',self.output/'calibrations')).absolute()
@@ -866,7 +869,28 @@ class Workbench:
         with self.review_lock:
             self.require_review(review)
             self.calibration_previews={preview['token']:{'preview':preview,'queue':frozen,'contract':contract,'workflow':workflow,'intrinsics':intrinsics,'pipeline_run_id':review[4],'expires':time.monotonic()+preview.get('expires_in_s',30)}}
-        return {**preview,'environment':'hardware','samples':sample,'kind':workflow['kind']}
+        return {**preview,'environment':'hardware','runtime_environment':transport_environment(self.config),'samples':sample,'kind':workflow['kind']}
+
+    def resident_capture_budget(self,*,check=True):
+        """One immutable wall/monotonic anchor for this mounted fake resident.
+
+        Independent fake entries without a resident contract keep their existing
+        finite per-batch wall fallback. Physical behavior is unchanged.
+        """
+        if transport_environment(self.config)!='fake' or self.config.get('resident_deadline_wall_ns') is None:return None
+        resident=self.config['resident_deadline_wall_ns']
+        if type(resident) is not int or resident<=0:raise ValueError('Fake resident_deadline_wall_ns 必须是有效的固定墙钟期限')
+        budget=getattr(self,'_resident_capture_budget',None)
+        if budget is None:
+            now=time.monotonic();wall=time.time_ns();remaining=max(0.,(resident-wall)/1e9)
+            budget=dict(resident_deadline_wall_ns=resident,resident_deadline_monotonic_s=now+remaining,
+                wall_deadline_ns=resident-45_000_000_000,deadline_monotonic_s=now+remaining-45.,
+                anchored_wall_ns=wall,anchored_monotonic_s=now,cleanup_reserve_s=45.)
+            self._resident_capture_budget=budget
+        if resident!=budget['resident_deadline_wall_ns']:raise ValueError('Fake 驻留期限已变化，不能延长当前采集预算')
+        if check and (time.monotonic()>=budget['deadline_monotonic_s'] or time.time_ns()>=budget['wall_deadline_ns']):
+            raise ValueError('Fake 采集已达到固定驻留墙钟期限（保留45秒清退时间）')
+        return dict(budget)
 
     def confirm_calibration(self,body):
         self.idle()
@@ -874,6 +898,7 @@ class Workbench:
         if set(body)!={'token','confirmation','physical_clearance'} or body['confirmation']!='START_REVIEWED_SINGLE_ARM' or body['physical_clearance'] is not True:raise ValueError('请明确确认完整轨迹与现场净空')
         pending=self.calibration_previews.pop(body['token'],None)
         if not pending or pending['expires']<time.monotonic() or pending['workflow']!=self.workflow or pending.get('pipeline_run_id')!=getattr(self,'pipeline_run_id',None):raise ValueError('标定预览已过期或依赖变化')
+        self.resident_capture_budget()  # Reject an exhausted fake contract before confirming any motion.
         if self.control_mode!='hardware_sync' or not self.control_available():raise ValueError('真机控制或反馈不可用')
         root=self.output/('batch-hardware-'+secrets.token_hex(5));dataset=root/'capture';dataset.mkdir(parents=True)
         manifest={'environment':'hardware','runtime_environment':transport_environment(self.config),'robot_source':self.robot_source(),'simulation_only':self.robot_source()!='physical','robot_id':self.store.robot_id,'frames':[],'planned_frames':pending['queue'],'camera':pending['intrinsics']['head']}
@@ -900,28 +925,47 @@ class Workbench:
             try:
                 self.control_request('stop',{'owner_pid':pending['preview']['owner_pid'],'command_epoch':pending['preview']['command_epoch']})
             except Exception:pass
-            (dataset/'completion.json').write_text(json.dumps({'passed':False,'captured':0,'reason':str(exc)}));raise
-        return {'message':'已启动真机标定：每个采样点保存成功后才继续','environment':'hardware','batch_id':str(dataset.relative_to(self.output))}
+            (dataset/'completion.json').write_text(json.dumps({'passed':False,'captured':0,'reason':str(exc),
+                'environment':'hardware','runtime_environment':transport_environment(self.config)}));raise
+        label='Fake' if transport_environment(self.config)=='fake' else '真机'
+        return {'message':'已启动'+label+'标定：每个采样点保存成功后才继续','environment':'hardware',
+                'runtime_environment':transport_environment(self.config),'batch_id':str(dataset.relative_to(self.output))}
 
     def collect_hardware(self,pending,dataset,manifest):
         from arx_env.joint_head_workbench_capture import capture_sample
         from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp
         environment=transport_environment(self.config)
-        source_clock=None;last_source_stamp=None;ready_source=None;ready_step=None
+        label='Fake' if environment=='fake' else '真机'
+        source_clock=None;first_source_stamp=None;last_source_stamp=None;ready_source=None;ready_step=None
         preview=pending['preview'];pid=preview['owner_pid'];epoch=preview['command_epoch']
         window_v2=None
         tentative=None;created=[]
         seen=set();expected={w['sample_id']:w for w in pending['queue'] if w.get('capture') is not False}
-        deadline=time.monotonic()+float(preview['total_motion_duration_s'])+len(pending['queue'])*20+30
+        started=time.monotonic();started_wall_ns=time.time_ns()
+        legacy_budget=float(preview['total_motion_duration_s'])+len(pending['queue'])*20+30
+        budget=None;deadline=started+legacy_budget
+        last_motion={}
+        def check_budget():
+            if budget:self.resident_capture_budget()
+            elif time.monotonic()>deadline:raise ValueError(label+'采集超时')
+        def timing():
+            return dict(runtime_environment=environment,started_wall_ns=started_wall_ns,observed_wall_ns=time.time_ns(),
+                elapsed_wall_s=max(0.,time.monotonic()-started),deadline_monotonic_s=deadline,
+                budget_origin='fixed_resident_wall' if budget else 'independent_fake_finite_wall_fallback' if environment=='fake' else 'physical_legacy_wall',
+                resident_budget=budget,legacy_wall_budget_s=legacy_budget,
+                planned_motion_duration_s=float(preview['total_motion_duration_s']),clock=source_clock,
+                first_source_stamp=first_source_stamp,last_source_stamp=last_source_stamp,
+                source_span_s=(last_source_stamp[0]-first_source_stamp[0])/1e9 if first_source_stamp is not None else None,
+                last_motion=last_motion,planned_samples=len(expected),accepted_samples=len(seen),owner_pid=pid,command_epoch=epoch)
         def save():
             tmp=dataset/'dataset.json.tmp';tmp.write_text(json.dumps(manifest,allow_nan=False));tmp.replace(dataset/'dataset.json')
         def checked_owner(owner=None):
-            nonlocal window_v2,source_clock,last_source_stamp
+            nonlocal window_v2,source_clock,first_source_stamp,last_source_stamp,last_motion
             if owner is None:owner=self.control_request('state').get('owner') or {}
             if owner.get('pid')!=pid or owner.get('command_epoch')!=epoch:
                 raise ValueError('控制器身份或动作版本已变化，采集中止'+('：'+str(owner['reason']) if owner.get('reason') else ''))
             if not owner.get('feedback_healthy') or owner.get('state') in ('FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY','STOPPED','DISCONNECTED'):
-                raise ValueError(owner.get('reason') or '真机反馈失效或已停止')
+                raise ValueError(owner.get('reason') or label+'反馈失效或已停止')
             if environment=='fake':
                 if owner.get('environment')!='fake' or owner.get('mode')!='simulation' or owner.get('simulation_only') is not True:
                     raise ValueError('Fake 采集必须绑定明确的模拟 Owner，不能跨设备环境')
@@ -929,10 +973,12 @@ class Workbench:
                 source_clock=source_clock or clock_spec('fake',clock_domain=feedback.get('clock_domain'),source_clock_id=feedback.get('source_clock_id'))
                 point=sample_stamp(feedback,source_clock,wall_key='sample_wall_ns')
                 last_source_stamp=assert_progress(last_source_stamp,point,allow_same=True)
+                if first_source_stamp is None:first_source_stamp=point
                 manifest['clock']=source_clock
             elif owner.get('environment') not in (None,'physical') or owner.get('simulation_only') is True:
                 raise ValueError('物理采集拒绝 Fake Owner')
             if window_v2 is None:window_v2='calibration_capture_window_v2' in (owner.get('capabilities') or [])
+            last_motion={key:(owner.get('motion') or {}).get(key) for key in ('status','sample_id','waypoint_index','capture_ready_source_ns','capture_ready_physics_step')}
             return owner
         def same_window(owner,identity,ready_ns):
             motion=owner.get('motion') or {}
@@ -953,11 +999,14 @@ class Workbench:
             with path.open('xb') as stream:
                 created.append(path);stream.write(raw)
         try:
+            budget=self.resident_capture_budget(check=False)
+            if budget:deadline=budget['deadline_monotonic_s']
+            check_budget()
             cameras,intrinsics=self.hardware_calibration_cameras()
             if intrinsics!=pending['intrinsics']:raise ValueError('预览后实际相机内参已变化')
             while True:
-                if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('真机采集已停止')
-                if time.monotonic()>deadline:raise ValueError('真机采集超时')
+                if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError(label+'采集已停止')
+                check_budget()
                 owner=checked_owner();motion=owner.get('motion') or {}
                 self.record_arrivals(owner,pending,dataset,manifest['robot_source'])
                 if motion.get('status')=='AWAITING_CAPTURE':
@@ -977,10 +1026,11 @@ class Workbench:
                     required={w['observer']:[30 if w['observer']=='left' else 24]} if pending['workflow']['kind']=='wrist' else {'head':[w.get('expected_marker_id') or (24 if w.get('arm')=='left' else 30)]}
                     limit=time.monotonic()+2;sample=None
                     while True:
-                        if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('真机采样已停止')
+                        if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError(label+'采样已停止')
+                        if budget:check_budget()
                         try:sample=capture_sample(cameras,intrinsics,self.feedback_history_snapshot,feedback_diagnostics=self.feedback_diagnostics,owner_pid=pid,command_epoch=epoch,required_markers=required,**capture_time);break
                         except Exception as exc:
-                            if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('真机采样已停止') from exc
+                            if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError(label+'采样已停止') from exc
                             if window_v2 and not same_window(checked_owner(),identity,ready_ns):
                                 reject_window(identity,ready_ns,exc);break
                             if not isinstance(exc,ValueError) or time.monotonic()>limit:raise
@@ -1008,6 +1058,7 @@ class Workbench:
                     try:os.fsync(fd)
                     finally:os.close(fd)
                     if self.stop.is_set() or self.control_mode!='hardware_sync':raise ValueError('采样期间已停止，不确认继续动作')
+                    if budget:check_budget()
                     ack={'owner_pid':pid,'command_epoch':epoch,'sample_id':identity}
                     if window_v2:ack['capture_ready_wall_ns']=ready_ns
                     try:self.control_request('capture-ack',ack)
@@ -1024,7 +1075,8 @@ class Workbench:
                             checked_owner(owner)
                             if not same_window(owner,identity,ready_ns):
                                 reject_window(identity,ready_ns,'窗口撤销或旧窗口 ACK 未确认');break
-                            if time.monotonic()>deadline:raise ValueError('等待采样 ACK 确认超时')
+                            if budget:check_budget()
+                            elif time.monotonic()>deadline:raise ValueError('等待采样 ACK 确认超时')
                             self.stop.wait(.03)
                         if tentative is None:continue
                     seen.add(identity);tentative=None;created.clear()
@@ -1032,7 +1084,8 @@ class Workbench:
                 elif len(seen)==len(expected) and owner.get('state')=='READY' and not owner.get('automatic_enabled'):
                     break
                 self.stop.wait(.03)
-            (dataset/'completion.json').write_text(json.dumps({'passed':True,'captured':len(seen),'accepted':len(seen),'failed':0,'environment':'hardware'}))
+            (dataset/'completion.json').write_text(json.dumps({'passed':True,'captured':len(seen),'accepted':len(seen),'failed':0,
+                'environment':'hardware','runtime_environment':environment,'timing':timing()}))
         except Exception as exc:
             if tentative is not None or created:
                 try:reject_window(identity,ready_ns,exc)
@@ -1041,12 +1094,13 @@ class Workbench:
                 self.control_request('stop',{'owner_pid':pid,'command_epoch':epoch})
             except Exception:pass
             try:
-                manifest['failure']={'reason':str(exc),'at_s':time.time()}
+                manifest['failure']={'reason':str(exc),'at_s':time.time(),'runtime_environment':environment,'timing':timing()}
                 evidence=getattr(exc,'evidence',{})
                 for name,raw in evidence.get('raw_images',{}).items():(dataset/('failed-'+name+'-raw.jpg')).write_bytes(raw)
                 manifest['failure']['evidence']={k:v for k,v in evidence.items() if k not in ('images','raw_images')}
                 save()
-                (dataset/'completion.json').write_text(json.dumps({'passed':False,'captured':len(manifest['frames']),'reason':str(exc),'environment':'hardware'}))
+                (dataset/'completion.json').write_text(json.dumps({'passed':False,'captured':len(manifest['frames']),'reason':str(exc),
+                    'environment':'hardware','runtime_environment':environment,'timing':timing()}))
             except OSError:pass
             raise
         finally:
@@ -2628,6 +2682,7 @@ class Workbench:
     def wait_for_step(self, timeout, label, settle=('READY','STOPPED')):
         """Block until a sub-job the pipeline started has stopped running."""
         began=time.monotonic()
+        budget=None;budget_loaded=False
         while True:
             with self.lock: status=self.status; reason=self.reason
             if label.endswith('采集') and getattr(self,'pipeline_running',False):
@@ -2637,7 +2692,15 @@ class Workbench:
                      'completed':counts['captured'],'total':total})
             if status in settle:return
             if status=='REJECTED':raise ValueError('%s 失败：%s'%(label,reason or '未给出原因'))
-            if time.monotonic()-began>timeout:raise ValueError('%s 超时（%.0f s 未回到 READY）'%(label,timeout))
+            if not budget_loaded:
+                budget=self.resident_capture_budget(check=False) if label.endswith('采集') else None
+                budget_loaded=True
+            if budget:
+                # The collector owns the earlier cutoff and its detailed failure.
+                # Only the original resident end bounds a stuck cleanup/status path.
+                if time.monotonic()>=budget['resident_deadline_monotonic_s'] or time.time_ns()>=budget['resident_deadline_wall_ns']:
+                    raise ValueError('Fake 采集未能在原驻留期限内结束；检查批次 completion.json')
+            elif time.monotonic()-began>timeout:raise ValueError('%s 超时（%.0f s 未回到 READY）'%(label,timeout))
             time.sleep(2)
 
     def pipeline_stop(self):
@@ -2665,6 +2728,7 @@ class Workbench:
         if not automatic:attempts=1
         for attempt in range(attempts):
             self.pipeline_stop()
+            if transport_environment(self.config)=='fake':self.resident_capture_budget()
             try:
                 if automatic:
                     preview=self.preview_calibration()
@@ -2688,6 +2752,7 @@ class Workbench:
                     raise ValueError('本次采集未产生通过完整性检查的批次')
                 return batch
             except (ValueError,OSError) as exc:
+                if transport_environment(self.config)=='fake':self.resident_capture_budget()
                 # OSError too: the camera and renderer clients raise urllib's HTTPError, so a
                 # 503 from an unreachable service is not a ValueError and used to escape the
                 # retry entirely (seen live: 'HTTP Error 503: Service Unavailable').
