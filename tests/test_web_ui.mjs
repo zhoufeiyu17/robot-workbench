@@ -4,7 +4,7 @@ import {webcrypto} from 'node:crypto';
 
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
-const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -16,6 +16,7 @@ class Element {
   querySelectorAll(selector){const matches=node=>selector.startsWith('.')?node.classList.contains(selector.slice(1)):node.tagName===selector;return this.children.flatMap(child=>[...(matches(child)?[child]:[]),...child.querySelectorAll(selector)]);}
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
   async decode(){}
+  getBoundingClientRect(){return {top:0,left:0,bottom:100,right:100,width:100,height:100};}
 }
 function documentStub(){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Element()]));
@@ -33,10 +34,11 @@ function manualSnapshot(){
   value.manual={joint_names:Array.from({length:12},(_,i)=>'J'+i),positions:Array(12).fill(.1),limits:Array.from({length:12},()=>[-1,1]),jaw_gaps_mm:[80,80],default_joint_speed_rad_s:.2,default_jaw_speed_mm_s:10,queue:{available:true,revision:4,waypoints:[]}};
   return value;
 }
-function harness(){
-  const document=documentStub(),requests=[],intervals=[],revoked=[],timeouts=new Map();let now=0,timerId=0;
-  const app=createWorkbench({document,location:{href:'http://localhost:8110/'},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:()=>`blob:fixture-${requests.length}`,revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
-  return {app,document,requests,intervals,revoked,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},nextFrame(){const timer=[...timeouts.entries()].find(([,t])=>t.ms!==2500);assert(timer,'frame timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;}};
+function harness({audit=false}={}){
+  const document=documentStub(),requests=[],intervals=[],revoked=[],blobs=[],timeouts=new Map(),rafs=new Map();let now=0,timerId=0,rafId=0;
+  const app=createWorkbench({document,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
+  const fireTimer=predicate=>{const timer=[...timeouts.entries()].find(([,t])=>predicate(t.ms));assert(timer,'matching timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;};
+  return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
 
 assert.equal(countedProgress({current:4,total:null}),null);
@@ -385,4 +387,74 @@ function deletionSnapshot(){
   newFrame.resolve(response({},previewHeaders('target',1)));await settle();assert.equal(h.get('media-preview').querySelector('img').hidden,false,'old display response must not restore its revision floor');
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'server restart must not replay an old action');h.app.destroy();
 }
-console.log('PASS unified web: server-instance restart isolation, truthful media, review gates and legacy deletion confirmation.');
+{
+  const inputs=Array.from({length:30},(_,input_id)=>({input_id,input_ms:input_id*33,...(input_id<20?{submitted_ms:input_id*33+40,presented_ms:input_id*33+150}:{coalesced:true,cancelled:'coalesced'})}));
+  const window={status:'completed',duplicates:2,inputs,frames:[{input_id:0,presented_ms:150},{input_id:0,presented_ms:61000}]};
+  const summary=previewAuditSummary(window);
+  assert.equal(summary.raw_inputs,30);assert.equal(summary.dispatched_inputs,20);assert.equal(summary.coalesced_inputs,10);assert.equal(summary.other_undispatched_inputs,0);
+  assert.equal(summary.new_display_fps,1/60);assert.equal(summary.matched_inputs,20);assert.equal(summary.unmatched_inputs,0);
+  assert.equal(summary.latency_p95_ms,150,'latency starts at the selected original input, including its 40 ms queue delay');assert.equal(summary.latency_p95_unbounded,false,'never-dispatched coalesced samples are not timed-out requests');
+  for(const input of inputs.slice(18,20)){delete input.presented_ms;input.cancelled='after dispatch';}
+  const missing=previewAuditSummary(window);assert.equal(missing.matched_inputs,18);assert.equal(missing.unmatched_inputs,2);assert.equal(missing.cancelled_requests,2);
+  assert.equal(missing.latency_p95_ms,null);assert.equal(missing.latency_p95_unbounded,true);assert.equal(missing.latency_max_unbounded,true,'dispatched but unpresented requests must remain in the tail');
+  assert.equal(summary.passed,undefined,'the diagnostic must not silently declare qualification');
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;h.reply(0,value);await settle();h.reply(1,{},previewHeaders('target',7));await settle();
+  assert.equal(h.get('preview-audit').hidden,true,'normal UI does not show instrumentation');assert.equal(h.nextFrame(),40,'target fetch pacing must not impose a 10 Hz ceiling on the approved 20 FPS profile');h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  assert.equal(h.get('preview-audit').hidden,false);assert.equal(h.get('audit-start').disabled,false);h.get('audit-start').events.click();
+  assert.equal(h.requests[1].url,'/api/actions/preview_target');h.advance(5);h.reply(1,{client_revision:8});await settle();
+  value.revision=2;value.preview.revisions.target=8;value.preview.frames.target={...value.preview.frames.target,ready:true,revision:8};h.reply(2,value);await settle();
+  h.advance(10);h.reply(3,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
+  h.fireTimer(ms=>ms!==2500&&Math.abs(ms-1000/30)>.01);h.reply(4,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
+  h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text()),window=evidence.windows[0];
+  assert.match(evidence.presentation_endpoint,/two requestAnimationFrame/);assert.match(evidence.presentation_endpoint,/not display photons/);
+  assert.equal(evidence.measurement_population,'dispatched display targets');
+  assert.equal(window.summary.matched_inputs,1);assert.equal(window.summary.duplicate_frames,1);assert.equal(window.inputs[0].presented_ms,31);assert.equal(window.inputs[0].acknowledged_ms,5);
+  assert.equal(window.summary.latency_max_ms,31);assert.equal(window.summary.new_display_fps,null,'interrupted windows never count as a completed 60 s test');
+  assert.equal(window.frames[0].source_wall_ns,10e9);assert(!JSON.stringify(evidence).includes('fixture-only'),'evidence must not include CSRF');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1);assert.equal(h.get('audit-download').hidden,false);h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;h.reply(0,value);await settle();
+  h.reply(1,{},previewHeaders('target',7));await settle();h.get('audit-start').events.click();h.reply(2,{client_revision:8});await settle();
+  value.revision=2;value.preview.revisions.target=8;value.preview.frames.target.revision=8;h.reply(3,value);await settle();
+  h.reply(4,{},previewHeaders('target',8,{frame_id:'frame-7'}));await settle();h.paint();h.advance(16);h.paint();
+  h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(evidence.windows[0].summary.duplicate_frames,1,'a reused source frame cannot become new just because its revision metadata changed');
+  assert.equal(evidence.windows[0].summary.matched_inputs,0);assert.equal(evidence.windows[0].summary.latency_p95_unbounded,true);h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.manual.positions[0]=1;value.manual.positions[1]=.9999;h.reply(0,value);await settle();
+  h.get('audit-start').events.click();h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(evidence.profile.joint_index,1,'a joint exactly at its limit is not moved by recentering the scripted profile');
+  assert.equal(evidence.profile.center_rad,.9999);assert(evidence.profile.amplitude_rad<=.00005);h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();h.get('audit-start').events.click();
+  h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'input generation keeps one target request in flight');
+  h.app.poll();value.revision=2;value.runtime.calibration_revision=99;h.reply(h.requests.length-1,value);await settle();
+  assert.match(h.get('audit-status').textContent,/中止/);assert.equal(h.requests[1].options.signal.aborted,true);h.get('audit-export').events.click();
+  const evidence=JSON.parse(await h.blobs.at(-1).text()),summary=evidence.windows[0].summary;assert.equal(summary.raw_inputs,3);assert.equal(summary.dispatched_inputs,1);assert.equal(summary.coalesced_inputs,1);assert.equal(summary.other_undispatched_inputs,1);assert.equal(summary.cancelled_requests,1);assert.equal(summary.unmatched_inputs,1);assert.equal(summary.latency_p95_unbounded,true);h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();h.get('audit-start').events.click();
+  for(let i=0;i<3;i++){h.advance(62000);h.app.poll();value.revision++;h.reply(h.requests.length-1,value);await settle();h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);await settle();}
+  assert.match(h.get('audit-status').textContent,/采集结束/);h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(evidence.windows.length,3);assert.equal(evidence.profile.window_seconds,60);assert.equal(evidence.profile.tail_wait_seconds,2);assert.equal(evidence.status,'completed');
+  assert(evidence.windows.every(row=>row.summary.new_display_fps===0&&row.summary.latency_p95_unbounded));
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url==='/api/actions/preview_target'));h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.manual.positions[0]=1.000000001;h.reply(0,value);await settle();
+  assert.equal(h.get('audit-start').disabled,true,'raw feedback outside the command domain is not silently clamped');
+  h.get('zero-preview').events.click();assert.equal(h.get('audit-start').disabled,false);h.get('audit-start').events.click();
+  h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.deepEqual(evidence.profile.base.q12,Array(12).fill(0));assert.equal(evidence.profile.base_source,'explicit manual display inputs');
+  assert.equal(value.manual.positions[0],1.000000001,'display diagnostics do not rewrite measured feedback');h.app.destroy();
+}
+console.log('PASS unified web: instance/media guards, bounded display-only browser presentation audit and uncensored latency evidence.');
