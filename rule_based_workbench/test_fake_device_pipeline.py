@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import time
+import sys
 
 from integration import _digest
 from physical_motiongen import freeze_physical
@@ -56,6 +57,43 @@ class FakePlaygroundEntryTest(entry.PlaygroundMotionGenEntryTest):
 
 
 class FakeDeviceContractTest(unittest.TestCase):
+    def test_cached_retime_retains_source_clock_and_scales_only_the_checked_base(self):
+        from playground_plan import retime
+        from physical_motiongen import target_vector,vector_target
+        from control_motion import validate_control
+        source,model,binding=fake_inputs();start=model['ticks'][0]['target']
+        targets=[deepcopy(start) for _ in range(6)]
+        for index in range(1,5):targets[index]['left_arm_joints'][0]+=.001*min(index,3)
+        targets[4]['left_gripper']=64.992
+        model.update(ticks=[dict(tick=i,time_s=i/30,target=value) for i,value in enumerate(targets)],
+            native_actions=[target_vector(value) for value in targets],native_substeps=[8]*6,duration_s=.2,
+            native_identity={'control':deepcopy(model['control'])},gripper_opening_mm=82.992,
+            stages=[dict(name=name,start_tick=i,motiongen_receipt_index=0) for name,i in
+                [('initial_hold',0),('approach_pre',1),('close_and_hold',4),('home_hold',5)]])
+        model['gripper_distance_control']['geometry_derivation']=dict(open_travel_mm=82.992,
+            closed_travel_mm=64.992,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
+        model['timeline_digest']=_digest(model['ticks'])
+        model['planning_validation']['timeline_digest']=model['timeline_digest']
+        model['control_validation']=validate_control(model)
+        base=freeze_physical(model,source,binding,environment='fake');before=deepcopy((base,source))
+        # Real cached retiming and validators; only native action decoding is a
+        # CPU fixture, not a new GPU/geometry qualification.
+        action=SimpleNamespace(ac_one_dual_arm_zero_home_action_spec=lambda:None)
+        with patch.dict(sys.modules,{'robot_sim.specs.action':action}), \
+                patch('isaac_lane.native_target',side_effect=lambda values,*a,**kw:vector_target(values)):
+            first=retime(base,source,.3,environment='fake')
+            second=retime(base,source,.3,environment='fake')
+            self.assertEqual(first,second);self.assertGreater(first['duration_s'],base['duration_s'])
+            self.assertEqual((base,source),before)
+            validate_real_plan(first,source,binding,environment='fake')
+            self.assertEqual(first['physical_gpu_conversion']['model_validation']['derivation']['speed_scale'],.3)
+            with self.assertRaisesRegex(ValueError,'original checked base plan'):
+                retime(first,source,.3,environment='fake')
+            changed=deepcopy(source);changed['initial_state']['clock']=clock_spec('fake',source_clock_id='another-plant')
+            with self.assertRaisesRegex(ValueError,'clocks differ'):retime(base,changed,.3,environment='fake')
+            changed=deepcopy(source);changed.pop('clock')
+            with self.assertRaisesRegex(ValueError,'sealed source clock'):retime(base,changed,.3,environment='fake')
+
     def test_same_bridge_pipeline_and_capture_readiness_do_not_gate_motion(self):
         from real_bridge import RealBridge, CAMERAS
         from playground import Playground

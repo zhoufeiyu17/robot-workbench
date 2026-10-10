@@ -128,7 +128,9 @@ def retime(plan,source,speed_scale,*,environment='physical'):
     binding=dict(calibration_accepted=True,evidence_source=spec['evidence'],robot_id=source['robot_id'],
                  camera_serials=source['camera_serials'],source_digest=_digest(source),
                  calibration_profile_digest=_digest(source['calibration_profile']),initial_state=source['initial_state'])
-    if environment=='fake':binding.update(environment='fake',simulation_only=True)
+    if environment=='fake':
+        from robot_workbench.sample_clock import clock_for_source
+        binding.update(environment='fake',simulation_only=True,clock=clock_for_source(source,environment))
     if plan.get('physical_gpu_conversion'):
         from physical_motiongen import retime_physical
         return retime_physical(plan,source,binding,speed_scale,environment=environment)
