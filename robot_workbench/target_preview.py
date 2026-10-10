@@ -280,7 +280,9 @@ class TargetPreview:
                             target_revision=max(remote.get('preview_revision',-1)+1,target_revision+1)
                             slot['renderer_revision']=target_revision;slot['status']='rendering'
                     if not valid:continue
-                    try:self.client.request('/preview',dict(slot['target'],revision=target_revision))
+                    try:
+                        slot['submit_started_wall_ns']=time.time_ns()
+                        self.client.request('/preview',dict(slot['target'],revision=target_revision))
                     except Exception:
                         with self.lock:
                             if any(item is slot for item in self.slots):self._retire_locked(slot,'failed','renderer target submission failed')
@@ -295,7 +297,7 @@ class TargetPreview:
                 for name,renderer_view in (('overview','actual'),) if mode=='overview' else (('target','preview'),) if slot is not None else ():
                     query=dict(view=renderer_view,renderer_instance_id=self.instance,
                                overview_revision=view_revision if view_revision is not None else remote.get('overview_revision',0))
-                    if name=='target':query['target_revision']=slot['renderer_revision']
+                    if name=='target':query.update(target_revision=slot['renderer_revision'],wait_ms=100)
                     stamp=(remote.get('frame_timestamp_s') or {}).get(renderer_view)
                     with self.lock:cached=self.frames.get(name)
                     if (cached and type(stamp) in (int,float) and math.isfinite(stamp)
@@ -305,7 +307,9 @@ class TargetPreview:
                             and remote.get('overview_revision',0)==query['overview_revision']
                             and name=='overview'):
                         continue
-                    try:raw,metadata=self.client.request('/frame.jpg?'+urlencode(query),frame=True)
+                    try:
+                        raw,metadata=self.client.request('/frame.jpg?'+urlencode(query),frame=True)
+                        frame_received_wall_ns=time.time_ns()
                     except PendingFrame:continue
                     if (metadata.get('schema')!='target_preview_frame.v1' or not metadata.get('frame_id')
                             or metadata.get('renderer_instance_id')!=self.instance or metadata.get('view')!=renderer_view
@@ -322,6 +326,8 @@ class TargetPreview:
                                 raise ValueError('renderer display timestamp moved backwards')
                             stamp=max(slot['requested_wall_ns'],requested['view']) if name=='target' else requested['view']
                             timing=dict(client_requested_wall_ns=stamp,display_latency_ms=(metadata['source_timestamp_ns']-stamp)/1e6) if stamp else {}
+                            if name=='target':timing.update(adapter_submit_started_wall_ns=slot['submit_started_wall_ns'],
+                                adapter_frame_received_wall_ns=frame_received_wall_ns)
                             self.frames[name]=(raw,dict(metadata,client_revision=slot['revision'] if name=='target' else current['target'],
                                 client_view_revision=current['view'],display_context=self.display_context,**timing),time.monotonic())
                             if name=='target':

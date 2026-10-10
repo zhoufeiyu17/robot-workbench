@@ -58,6 +58,7 @@ class Session:
         self.overview_revision = 0
         self.overview_requested_revision = 0
         self.last_preview_received = float('-inf')
+        self.preview_received_wall_ns = 0
         self.last_overlay_started = float('-inf')
         self.last_wrist_overlay_started = float('-inf')
         self.overview_view = None
@@ -180,6 +181,7 @@ class Session:
             with self.lock:
                 self.active_display_view=body['view']
                 if body['view']!='target':self.preview=None
+                self.frame_ready.notify_all()
             return {'active_display_view':self.active_display_view}
         if endpoint == '/overlay-rendering':
             if set(body)!={'enabled'} or type(body['enabled']) is not bool:raise ValueError('enabled must be boolean')
@@ -198,6 +200,7 @@ class Session:
                 if revision>self.overview_requested_revision:
                     self.overview_requested_revision=revision
                     self.overview_view=(view,revision)
+                    self.frame_ready.notify_all()
             return {'queued':True,'overview_revision':revision}
         if endpoint == '/mirror':
             return self.mirror_feedback(body)
@@ -284,6 +287,8 @@ class Session:
                 if revision > newest:
                     self.preview = (q, revision, gaps)
                     self.last_preview_received = time.monotonic()
+                    self.preview_received_wall_ns = time.time_ns()
+                    self.frame_ready.notify_all()
             return self.state()
         if endpoint != '/execute':
             raise ValueError('unknown command')
@@ -413,6 +418,10 @@ class Session:
                 self.jpeg.pop(view,None)
                 self.frame_timestamp.pop(view,None)
 
+    def wait_display_work(self, timeout=.05):
+        with self.frame_ready:
+            return self.frame_ready.wait_for(lambda:self.preview is not None or self.overview_view is not None or self.active_display_view!='target',timeout)
+
     def tick(self, renderer, dt):
         """Advance virtual time by at most 100ms; slow RTX cannot jump over motion."""
         with self.lock:
@@ -477,6 +486,7 @@ class Session:
             render_actual = active is not None or self.actual_render_started is None or time.monotonic()-self.actual_render_started >= actual_interval
             if self.display_only and self.active_display_view!='overview':render_actual=False
             preview = self.preview
+            preview_received_wall_ns = self.preview_received_wall_ns
             self.preview = None
         with self.lock:
             view=self.overview_view;self.overview_view=None
@@ -554,6 +564,7 @@ class Session:
                         active['start_jaw']=gaps.copy()
         if preview:
             started = time.monotonic()
+            render_started_wall_ns = time.time_ns()
             if paired is not None:
                 started = pair_started
                 jpeg, _ = paired[1]
@@ -569,6 +580,10 @@ class Session:
                 self.render_times['preview'].append(time.monotonic())
                 self.render_ms['preview'] = (time.monotonic()-started)*1000
                 self.render_stages['preview'] = dict(getattr(renderer, 'last_timings', {}))
+                if self.display_only:
+                    self.frame_metadata['preview'].update(renderer_received_wall_ns=preview_received_wall_ns,
+                        renderer_render_started_wall_ns=render_started_wall_ns,renderer_render_ms=self.render_ms['preview'])
+                    if self.status=='STARTING':self.status='READY'
                 self.frame_ready.notify_all()
                 self.updated = time.time()
 
@@ -1185,19 +1200,34 @@ def serve(session, token, port):
             url = urlsplit(self.path)
             if url.path == '/stream.mjpg':
                 return self.stream(parse_qs(url.query).get('view', ['actual'])[0])
+            query=parse_qs(url.query);frame_wait_ms=0
+            requested={key:query.get(key,[None])[0] for key in ('renderer_instance_id','target_revision','overview_revision')}
+            if url.path=='/frame.jpg' and 'wait_ms' in query:
+                try:
+                    frame_wait_ms=int(query['wait_ms'][0])
+                    if (not session.display_only or query.get('view',['actual'])[0]!='preview' or not 0<=frame_wait_ms<=100
+                            or not requested['renderer_instance_id'] or int(requested['target_revision'])<0 or int(requested['overview_revision'])<0):
+                        raise ValueError('invalid exact display wait')
+                except (ValueError,TypeError):return self.send(400,{'error':'bounded exact wait requires a dedicated renderer and complete frame identity'})
             response = (404, {'error': 'not found'})
             with session.lock:
                 if url.path == '/state':
                     response = (200, session.state())
                 elif url.path == '/frame.jpg':
                     view = parse_qs(url.query).get('view', ['actual'])[0]
+                    def context_changed():
+                        return (session.renderer_instance_id!=requested['renderer_instance_id'] or session.active_display_view!='target'
+                                or session.overview_requested_revision>int(requested['overview_revision']))
+                    if frame_wait_ms:
+                        with session.frame_ready:
+                            session.frame_ready.wait_for(lambda:context_changed() or all(
+                                str((session.frame_metadata.get(view) or {}).get(key))==value for key,value in requested.items()),frame_wait_ms/1000)
                     image = session.jpeg.get(view)
                     frame_id = parse_qs(url.query).get('frame_id', [None])[0]
                     candidate_id = parse_qs(url.query).get('candidate_id', [None])[0]
                     wrist_side = view.split('-')[0] if view in ('left-calibration','left-calibration-original','right-calibration','right-calibration-original') else None
                     display_meta=session.frame_metadata.get(view) if view in ('actual','preview') else None
-                    requested={key:parse_qs(url.query).get(key,[None])[0] for key in ('renderer_instance_id','target_revision','overview_revision')}
-                    if view in ('actual','preview') and any(value is not None and (not display_meta or str(display_meta.get(key))!=value) for key,value in requested.items()):
+                    if (frame_wait_ms and context_changed()) or view in ('actual','preview') and any(value is not None and (not display_meta or str(display_meta.get(key))!=value) for key,value in requested.items()):
                         response=(409,{'error':'display frame revision differs; wait for current renderer frame'})
                     elif wrist_side and candidate_id is not None and candidate_id != session.wrist_overlay_state.get(wrist_side,{}).get('id'):
                         response = (409, {'error': 'wrist calibration changed; refresh state'})
@@ -1312,6 +1342,20 @@ def real_overlay_request(geometry, body):
     return encoded.tobytes()
 
 
+def run_render_loop(app, session, renderer, deadline):
+    previous=time.monotonic()
+    while time.monotonic()<deadline and app.is_running():
+        if session.display_only and session.active_display_view=='target' and not session.wait_display_work():
+            # Keep Kit responsive when idle without inserting an update between queued target frames.
+            renderer.actual_updates(False);renderer.preview_updates(False);app.update()
+            previous=time.monotonic()
+            continue
+        now=time.monotonic();rendered=session.tick(renderer,now-previous);previous=now
+        if not rendered:app.update()
+        if not session.display_only or session.active_display_view!='target':
+            time.sleep(max(0.,1/30-(time.monotonic()-now)))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -1361,14 +1405,7 @@ def main():
         server = serve(session, token, args.port)
         if registration:registration('ready')
         deadline = time.monotonic()+args.duration_s if args.duration_s else float('inf')
-        previous = time.monotonic()
-        while time.monotonic() < deadline and app.is_running():
-            now = time.monotonic()
-            rendered = session.tick(renderer, now-previous)
-            previous = now
-            if not rendered:
-                app.update()
-            time.sleep(max(0., 1/30-(time.monotonic()-now)))
+        run_render_loop(app,session,renderer,deadline)
         session.command('/stop', {})
         session.tick(renderer, 0)
     finally:

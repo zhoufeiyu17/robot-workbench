@@ -142,6 +142,7 @@ class TargetPreviewTests(unittest.TestCase):
             if path=='/overview-view':remote['overview_revision']=body['revision'];return {}
             if path=='/display-view':return {}
             query=parse_qs(urlsplit(path).query);view=query['view'][0];reads.append(view)
+            self.assertEqual(query.get('wait_ms'),['100'] if view=='preview' else None)
             return b'jpeg',dict(schema='target_preview_frame.v1',frame_id=view+str(remote['frame_timestamp_s'][view]),
                 renderer_instance_id='preview',view=view,source='kinematic_target' if view=='preview' else 'kinematic_overview',
                 overview_revision=remote['overview_revision'],target_revision=remote['preview_revision'] if view=='preview' else None,
@@ -177,6 +178,7 @@ class TargetPreviewTests(unittest.TestCase):
                 pending=dict(body,polls=0);sent.append((body['q'][0],len(waits)));return {}
             query=parse_qs(urlsplit(path).query)
             self.assertEqual(query['view'],['preview'])
+            self.assertEqual(query['wait_ms'],['100'])
             pending['polls']+=1
             if pending['polls']<2:raise PendingFrame('delayed renderer')
             published=pending;pending=None;remote['preview_revision']=published['revision']
@@ -201,6 +203,9 @@ class TargetPreviewTests(unittest.TestCase):
             self.assertEqual(json.loads(raw),[revision/100]*12)
             self.assertEqual(meta['client_revision'],revision)
             self.assertEqual(meta['client_requested_wall_ns'],requested[revision])
+            self.assertLessEqual(requested[revision],meta['adapter_submit_started_wall_ns'])
+            self.assertLessEqual(meta['adapter_submit_started_wall_ns'],meta['source_timestamp_ns'])
+            self.assertLessEqual(meta['source_timestamp_ns'],meta['adapter_frame_received_wall_ns'])
         self.assertEqual(adapter.state()['queue']['occupied'],3,'GET must not consume completed slots')
         for fields,watermark in (({},1),(dict(identity,display_context='old'),1),
                                  (dict(identity,renderer_instance_id='old'),1),(dict(identity,view_revision=1),1),(identity,4)):
@@ -327,6 +332,32 @@ class TargetPreviewTests(unittest.TestCase):
             self.assertEqual(result[0][1]['client_revision'],1)
             self.assertEqual(adapter.state()['queue']['occupied'],1)
         finally:adapter.close();reader.join(1)
+
+    def test_renderer_frame_wait_does_not_hold_state_or_presentation_ack_lock(self):
+        waiting,release=threading.Event(),threading.Event();pending=None;sent=[]
+        def request(path,body=None,**kwargs):
+            nonlocal pending
+            if path=='/state':return dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
+            if path=='/preview':pending=body;sent.append(body['revision']);return {}
+            query=parse_qs(urlsplit(path).query);self.assertEqual(query['wait_ms'],['100'])
+            if pending['revision']==2:
+                waiting.set()
+                if not release.wait(int(query['wait_ms'][0])/1000):raise PendingFrame('bounded renderer wait expired')
+            return b'frame',dict(schema='target_preview_frame.v1',frame_id='frame-'+str(pending['revision']),renderer_instance_id='preview',
+                view='preview',source='kinematic_target',overview_revision=0,target_revision=pending['revision'],source_timestamp_ns=time.time_ns())
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('context')
+        identity=dict(display_context='context',renderer_instance_id='preview',view_revision=0)
+        adapter.target_pose([.1]*12,[80.,80.],**identity);adapter.target_pose([.2]*12,[80.,80.],**identity);adapter.start()
+        try:
+            self.assertTrue(waiting.wait(1));started=time.monotonic()
+            self.assertEqual(adapter.state()['queue']['occupied'],2)
+            adapter.target_pose([.3]*12,[80.,80.],**identity,presented_through_revision=1)
+            self.assertEqual([slot['revision'] for slot in adapter.slots],[2,3])
+            self.assertEqual(adapter.media('target')[1]['client_revision'],1)
+            self.assertLess(time.monotonic()-started,.05,'renderer HTTP wait must never hold the adapter lock')
+            release.set();self.wait(lambda:adapter.state()['queue']['highest_completed_revision']==3)
+            self.assertEqual(sent,[1,2,3])
+        finally:release.set();adapter.close()
 
     def test_renderer_metadata_and_timestamp_regression_remain_rejected(self):
         rounds=0;pending=None;wrong='view'
