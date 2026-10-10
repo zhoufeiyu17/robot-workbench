@@ -83,7 +83,7 @@ class PreparationHTTPTest(unittest.TestCase):
         playground.cancel_event=threading.Event();playground.thread=None
         (playground.directory/'prepared-plan.json').write_text(json.dumps({'plan':playground.state['plan']}))
         workflow=CollectionWorkflow.__new__(CollectionWorkflow)
-        workflow.playground=playground;workflow.closed=threading.Event();workflow.lock=threading.Lock()
+        workflow.playground=playground;workflow.closed=threading.Event();workflow.lock=threading.Lock();workflow.generation=0
         workflow.value=dict(status='ready',busy=False,primary_action=None);workflow.catalog=[];workflow.review_key='old-review'
         self.device.workflows['collection']=workflow
         parts=NS(playground=playground,workflow=workflow,detector=Mock(),planner=Mock())

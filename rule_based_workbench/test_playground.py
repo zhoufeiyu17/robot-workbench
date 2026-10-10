@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -37,6 +38,35 @@ def rejected(fn):
 
 def main():
     executed = []
+
+    # Acceptance publishes the real task identity before its worker completes.
+    with TemporaryDirectory() as tmp:
+        bridge=Bridge();bridge.connected=True
+        service=Playground(tmp,bridge,lambda:{'status':'ready'})
+        identities=[]
+        for _ in range(2):
+            entered=Event();release=Event()
+            def blocked_run(*args):
+                entered.set()
+                assert release.wait(2), 'test worker not released'
+            with patch.object(service,'run',side_effect=blocked_run):
+                try:
+                    receipt=service.start({'action':'prepare'})
+                    assert entered.wait(1)
+                    state=service.snapshot();saved=json.loads((Path(tmp)/'state.json').read_text())
+                    assert receipt['action']==state['action']=='prepare'
+                    assert receipt['output']==state['output']==saved['output']
+                    assert state['busy'] and state['status']=='running'
+                    assert Path(receipt['output']).is_dir()
+                    identities.append(receipt['output'])
+                finally:release.set();service.thread.join(2)
+            with service.lock:service.state['busy']=False
+        assert identities[0]!=identities[1]
+        health=bridge.status();health['cameras']['base_0']['ready']=False
+        with patch.object(bridge,'status',return_value=health):
+            assert service.snapshot()['capture_warning']=='图像或录制状态待确认；动作独立运行，数据完整性以封存校验为准。'
+            service.state['error']='recording: actual recorder failure'
+            assert service.snapshot()['error']=='recording: actual recorder failure'
 
     def plan(config, output, bridge, speed, progress=None):
         progress('碰撞检查', estimate_s=2, stages=[dict(label='碰撞检查', status='completed', elapsed_s=.1, estimate_s=2)])

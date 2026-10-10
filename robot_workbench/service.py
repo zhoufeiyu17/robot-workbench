@@ -228,6 +228,8 @@ class Application:
                 review = None
             elif workflow and review.get('workflow_revision') is not None and review['workflow_revision']!=workflow.manual_revision():
                 review=None
+            elif workflow and review.get('workflow_generation') is not None and review['workflow_generation']!=workflow.generation:
+                review=None
             elif review['action']=='manual_execute' and workflow and (value.get('busy') or
                     review.get('manual_revision') is not None and review['manual_revision']!=workflow.manual_revision()):
                 review=None
@@ -247,9 +249,7 @@ class Application:
                 allowed=execution_gate['allowed'],reason=execution_gate['reason'])
         if job and job['status'] in ('running','failed'):
             value['request'] = job
-            if job['status'] == 'failed':
-                value.update(status='failed',message=job['error'])
-            else:
+            if job['status'] == 'running':
                 value['busy'] = True
                 if value.get('primary_action'):
                     value['primary_action'].update(allowed=False,reason='当前请求仍在处理')
@@ -418,6 +418,8 @@ class Application:
             workflow=device.workflows.get(business)
             if workflow and review.get('workflow_revision') is not None and review['workflow_revision']!=workflow.manual_revision():
                 raise ValueError('标定计划或求解来源已变化，请重新审阅')
+            if workflow and review.get('workflow_generation') is not None and review['workflow_generation']!=workflow.generation:
+                raise ValueError('数采任务已变化，请重新审阅')
             if action=='manual_execute' and workflow and (workflow.snapshot().get('busy') or
                     review.get('manual_revision') is not None and review['manual_revision']!=workflow.manual_revision()):
                 raise ValueError('人工队列或标定任务已变化，请重新预览')
@@ -569,6 +571,8 @@ class Application:
         manual_revision=(preview.get('review_generation',workflow.manual_revision())
                          if action=='manual_execute' and workflow and hasattr(workflow,'manual_revision') else None)
         with self.lock:
+            generation=preview.get('workflow_generation')
+            if generation is not None and (workflow is None or generation!=workflow.generation):return
             if business=='collection' and device.collection_preparation:
                 if device.collection_preparation.snapshot()['status']!='ready':return
             review=dict(id=secrets.token_hex(16),action=action,
@@ -576,6 +580,7 @@ class Application:
                 owner_preview=bool(preview.get('owner_pid')),
                 manual_revision=manual_revision,
                 workflow_revision=workflow.manual_revision() if business=='calibration' and workflow and hasattr(workflow,'manual_revision') else None,
+                workflow_generation=generation,
                 deadline=time.monotonic()+min(30.,preview.get('expires_in_s',30.)),
                 runtime_nonce=preview.get('runtime_nonce',state['runtime_nonce']),epoch=preview['command_epoch'],
                 calibration_revision=state.get('calibration_revision'))

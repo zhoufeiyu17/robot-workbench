@@ -101,7 +101,7 @@ class Playground:
                                     and value['plan'].get('validated') is True)
         value['capture_ready'] = bool(owner.get('recording_configured') and all(
             value['cameras'].get(key, {}).get('ready') is True for key in ('base_0','left_wrist_0','right_wrist_0')))
-        value['capture_warning'] = None if value['capture_ready'] else '录制或相机未就绪；动作可独立执行，数据将标为未完成'
+        value['capture_warning'] = None if value['capture_ready'] else '图像或录制状态待确认；动作独立运行，数据完整性以封存校验为准。'
         if value['plan'].get('validated') is True and not safe and not value['busy']:
             value['message'] = '计划已验证；控制器尚未允许执行（' + str(owner.get('state', '未知')) + '），请检查真机连接与踏板状态。'
         if self.started is not None and value['busy']:
@@ -215,7 +215,7 @@ class Playground:
             previous_time = self.state.get('timing_history', {}).get(action)
             estimate = previous_time if action != 'execute' and previous_time else {'prepare': 180, 'plan': 300,
                        'execute': plan.get('duration_s', 70) + 120}[action]
-            self.state.update(status='running', busy=True, can_execute=False, error=None, action=action,
+            self.state.update(status='running', busy=True, can_execute=False, error=None, action=action,output=str(output),
                               message={'prepare': '正在准备环境', 'plan': '正在重建场景与规划', 'execute': '正在执行与录制'}[action],
                               progress={'label': {'prepare': '准备环境', 'plan': '准备观测', 'execute': '校验执行输入'}[action],
                                         'elapsed_s': 0, 'stage_elapsed_s': 0, 'stage_status': 'running',
@@ -234,7 +234,7 @@ class Playground:
             self.thread = Thread(target=self.run, args=(action, config, output, plan, speed,
                                                         payload.get('arms_supported') is True), daemon=True)
             self.thread.start()
-            return dict(status='accepted', action=action)
+            return dict(status='accepted', action=action,output=str(output))
 
     def finish_interrupt(self):
         self.invalidate_checkpoint()

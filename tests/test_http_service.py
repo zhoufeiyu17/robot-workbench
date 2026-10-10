@@ -62,6 +62,45 @@ class HTTPTest(unittest.TestCase):
         code,_=self.action('connect');self.assertEqual(code,202)
         return self.wait(lambda s:s['runtime'].get('stationary'))
 
+    def test_request_failure_preserves_running_task_and_actual_task_failure(self):
+        self.connect();self.action('handoff',target_business='collection')
+        value=dict(id='current-D-run',status='running',busy=True,stage_id='collection.prepare',
+            message='当前环境准备仍在运行',primary_action=dict(id='generate_plan',allowed=False),outcomes={})
+        workflow=SimpleNamespace(snapshot=lambda:dict(value),results=lambda:[],
+            action=Mock(side_effect=ValueError('重复请求被拒绝')))
+        self.device.workflows['collection']=workflow
+        self.action('generate_plan',business='collection')
+        end=time.monotonic()+2
+        while time.monotonic()<end:
+            state=self.state('collection')['workflow']
+            if state.get('request',{}).get('status')=='failed':break
+            time.sleep(.01)
+        self.assertEqual(state['request']['error'],'重复请求被拒绝')
+        self.assertEqual(state['status'],'running');self.assertTrue(state['busy'])
+        self.assertEqual(state['id'],'current-D-run');self.assertEqual(state['message'],value['message'])
+        value.update(status='failed',busy=False,message='实际任务失败：场景检测错误')
+        state=self.state('collection')['workflow']
+        self.assertEqual(state['status'],'failed');self.assertEqual(state['message'],value['message'])
+        self.assertEqual(state['request']['error'],'重复请求被拒绝')
+
+    def test_collection_review_generation_blocks_late_publication_and_execution(self):
+        self.connect();self.action('handoff',target_business='collection')
+        workflow=SimpleNamespace(generation=2,snapshot=lambda:dict(status='ready',busy=False,primary_action=None),results=lambda:[],action=Mock())
+        self.device.workflows['collection']=workflow
+        owner=self.device.snapshot('collection')
+        preview=dict(token='frozen-plan',command_epoch=owner['command_epoch'],workflow_generation=1)
+        self.app.add_review(self.device,'collection',preview,'execute','old snapshot')
+        self.assertNotIn(('fake','collection'),self.app.reviews)
+        preview['workflow_generation']=2
+        self.app.add_review(self.device,'collection',preview,'execute','current snapshot')
+        review=self.state('collection')['workflow']['review']
+        workflow.generation=3
+        self.assertNotIn('review',self.state('collection')['workflow'])
+        with self.assertRaises(HTTPError) as rejected:
+            self.action('execute',business='collection',review_id=review['id'],physical_clearance=True)
+        self.assertIn('数采任务已变化',json.loads(rejected.exception.read())['error'])
+        workflow.action.assert_not_called()
+
     def test_declared_browser_port_preserves_Host_Origin_and_CSRF_checks(self):
         self.assertEqual(self.server.allowed_hosts,{f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'})
         self.server.shutdown();self.server.server_close();self.thread.join(1)

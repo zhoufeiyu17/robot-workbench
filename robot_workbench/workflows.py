@@ -493,30 +493,35 @@ class CollectionWorkflow:
         self.lock=threading.Lock();self.closed=threading.Event()
         self.value=dict(status='connecting',busy=False,stage_id='connecting',title='数采',primary_action=None,outcomes={})
         self.catalog=[];self.review_key=None
+        self.generation=0
         self.media_files={}
         self.thread=threading.Thread(target=self.monitor,daemon=True,name='collection-view');self.thread.start()
 
     def monitor(self):
         while not self.closed.is_set():
+            with self.lock:generation=self.generation
             try:self.refresh()
             except Exception as error:
-                with self.lock:self.value.update(view_error=str(error),message=str(error))
+                with self.lock:
+                    if generation==self.generation:self.value.update(view_error=str(error),message=str(error))
             self.closed.wait(.5)
 
     def refresh(self):
+        with self.lock:generation=self.generation
         state=self.playground.snapshot();plan=state.get('plan') or {};progress=state.get('progress') or {}
         ready=state.get('environment',{}).get('ready')
         busy=state.get('busy',False)
         primary=dict(id='generate_plan',label='采集新观测并生成计划' if ready else '准备数采环境',
                      allowed=not busy,reason='数采任务正在进行' if busy else None)
-        if plan.get('validated') and state.get('can_execute'):
+        review_request=None
+        if plan.get('validated') and state.get('can_execute') and not busy:
             key=(plan.get('timeline_digest'),plan.get('output'),plan.get('speed_scale'))
-            if key!=self.review_key:
+            with self.lock:needs_review=key!=self.review_key
+            if needs_review:
                 owner=self.device.snapshot('collection')
-                self.service.add_review(self.device,'collection',dict(token=plan['timeline_digest'],
-                    command_epoch=owner['command_epoch'],expires_in_s=30), 'execute',
+                review_request=(dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],
+                    expires_in_s=30,workflow_generation=generation),
                     plan.get('summary') or f"冻结轨迹 {plan.get('duration_s',0):.2f} 秒；当前起点变化时使用慢初始化段")
-                self.review_key=key
             primary.update(label='重新预览冻结计划',allowed=True)
         value=dict(id=state.get('output'),status=state.get('status','idle'),busy=busy,
             stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=progress.get('label') or '数采任务',
@@ -537,7 +542,30 @@ class CollectionWorkflow:
             catalog.append(dict(id=identity,label=row.get('label','录制视频'),kind='recording',status=state.get('status','unknown'),
                 media=dict(id=identity,label=row.get('label','录制视频'),kind='replay',ready=True,mime_type='video/mp4',
                     url=media_url(self.device.environment,'collection',identity))))
-        with self.lock:self.value=value;self.catalog=catalog;self.media_files=files
+        with self.lock:
+            if generation!=self.generation:return
+            self.value=value;self.catalog=catalog;self.media_files=files
+            if review_request:
+                if self.review_key==key:review_request=None
+                else:self.review_key=key
+        if review_request:
+            self.service.add_review(self.device,'collection',review_request[0],'execute',review_request[1])
+
+    def accepted(self,result,action):
+        """Publish the accepted task before its short HTTP request completes.
+
+        Snapshot stays cached; remote health reads never enter this lock. A
+        refresh already in flight belongs to the preceding generation.
+        """
+        with self.lock:
+            self.generation+=1;self.review_key=None
+            self.value.update(id=result['output'],status='running',busy=True,stage_id='collection.'+action,
+                title={'prepare':'准备数采环境','plan':'采集新观测并生成计划','execute':'执行与录制'}[action],
+                message='本轮任务已启动，正在更新阶段进度。',progress={'indeterminate':True},outcomes={},replan_action=None,
+                primary_action=dict(id='generate_plan',label='采集新观测并生成计划',allowed=False,reason='数采任务正在进行'))
+            self.value.pop('view_error',None)
+        with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
+        return result
 
     def snapshot(self):
         with self.lock:return deepcopy(self.value)
@@ -559,23 +587,31 @@ class CollectionWorkflow:
             if type(replan) is not bool:raise ValueError('replan 必须是布尔值')
             if not replan and plan.get('validated') and state.get('can_execute'):
                 owner=self.device.snapshot('collection')
-                return dict(preview=dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],expires_in_s=30),
+                with self.lock:
+                    self.generation+=1
+                    self.review_key=(plan.get('timeline_digest'),plan.get('output'),plan.get('speed_scale'))
+                    generation=self.generation
+                return dict(preview=dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],expires_in_s=30,
+                    workflow_generation=generation),
                     summary=plan.get('summary') or f"冻结轨迹 {plan.get('duration_s',0):.2f} 秒；重新审阅，不重新规划")
-            self.review_key=None
             with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
-            return self.playground.start(dict(action='plan' if state.get('environment',{}).get('ready') else 'prepare'))
+            stage='plan' if state.get('environment',{}).get('ready') else 'prepare'
+            return self.accepted(self.playground.start(dict(action=stage)),stage)
         if action=='execute':
             plan=self.playground.snapshot().get('plan') or {}
             if plan.get('timeline_digest')!=body['token']:raise ValueError('本轮计划身份已变化，请重新审阅')
-            return self.playground.start({'action':'execute'})
+            return self.accepted(self.playground.start({'action':'execute'}),'execute')
         if action=='cancel':return self.cancel()
         raise ValueError('未知数采操作')
     def invalidate(self):
-        self.review_key=None
-        self.playground.invalidate_checkpoint()
-        with self.playground.lock:self.playground.state['plan']={'validated':False}
+        try:
+            self.playground.invalidate_checkpoint()
+            with self.playground.lock:self.playground.state['plan']={'validated':False}
+        finally:
+            with self.lock:self.generation+=1;self.review_key=None
     def cancel(self):
-        result=self.playground.start({'action':'interrupt'})
-        self.review_key=None
-        with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
+        try:result=self.playground.start({'action':'interrupt'})
+        finally:
+            with self.lock:self.generation+=1;self.review_key=None
+            with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
         return dict(result,message='数采已请求中断；动作停止与数据收尾独立显示')

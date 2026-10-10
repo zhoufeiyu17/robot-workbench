@@ -421,7 +421,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('stop-state',r.stop_receipt?(r.stop_receipt.stop_hold_return_confirmed===true?'停止：保持调用已确认':'停止：已受理，尚未确认'):'');
     setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',statusText(w.status));
     setText('run-identity','Run：'+textValue(w.id));setText('stage-title',w.title||'等待任务状态');setText('stage-id',w.stage_id||'—');
-    setText('task-message',w.request?.status==='failed'?'请求失败：'+textValue(w.request.error):w.request?.status==='running'?'正在处理请求：'+textValue(w.request.action)+'。'+(w.message||''):w.message||'尚未取得当前任务回执。');
+    setText('task-message',w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理请求：'+textValue(w.request.action)+'。'+(w.message||''):w.message||'尚未取得当前任务回执。');
     const p=countedProgress(w.progress);el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
     if(p){el('task-progress').max=p.total;el('task-progress').value=p.current;}
     else el('task-progress').removeAttribute('value');

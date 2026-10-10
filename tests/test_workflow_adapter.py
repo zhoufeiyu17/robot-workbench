@@ -43,10 +43,15 @@ class WorkflowAdapterTest(unittest.TestCase):
 
     def collection(self):
         workflow=CollectionWorkflow.__new__(CollectionWorkflow);workflow.lock=threading.Lock()
-        workflow.value={'busy':False};workflow.catalog=[];workflow.review_key=None;workflow.media_files={}
-        state=dict(environment={'ready':True},busy=False,can_execute=True,status='ready',action='plan',progress={},
+        workflow.value={'busy':False};workflow.catalog=[];workflow.review_key=None;workflow.media_files={};workflow.generation=0
+        workflow.closed=threading.Event()
+        state=dict(output='job-1',environment={'ready':True},busy=False,can_execute=True,status='ready',action='plan',progress={},
             plan=dict(validated=True,timeline_digest='frozen',output='job-1',duration_s=20.,speed_scale=.3),videos=[])
-        workflow.playground=SimpleNamespace(snapshot=Mock(side_effect=lambda:state),start=Mock(return_value={'status':'accepted'}),
+        def start(payload):
+            if payload['action']=='interrupt':return {'status':'stopping'}
+            state.update(output='job-next',busy=True,can_execute=False,status='running',action=payload['action'])
+            return dict(status='accepted',action=payload['action'],output=state['output'])
+        workflow.playground=SimpleNamespace(snapshot=Mock(side_effect=lambda:deepcopy(state)),start=Mock(side_effect=start),
             directory=self.root,media=Mock(),invalidate_checkpoint=Mock(),lock=threading.Lock(),state=state)
         workflow.device=SimpleNamespace(environment='fake',snapshot=Mock(return_value={'command_epoch':5}))
         workflow.service=SimpleNamespace(add_review=Mock(),lock=threading.Lock(),reviews={('fake','collection'):{'id':'old'}})
@@ -486,6 +491,100 @@ class WorkflowAdapterTest(unittest.TestCase):
         state['videos']=[];workflow.refresh();self.assertIsNone(workflow.media(entry['id']))
         workflow.value['busy']=True;workflow.action('cancel',{})
         workflow.playground.start.assert_called_with({'action':'interrupt'})
+
+    def test_collection_acceptance_closes_cache_gap_and_rejects_old_refresh(self):
+        for action,stage in [('generate_plan','prepare'),('generate_plan','plan'),('execute','execute')]:
+            with self.subTest(stage=stage):
+                workflow,state=self.collection()
+                if stage=='prepare':state.update(environment={'ready':False},can_execute=False,plan={'validated':False})
+                entered=threading.Event();release=threading.Event();errors=[]
+                def snapshot():
+                    captured=deepcopy(state)
+                    if threading.current_thread() is worker:
+                        entered.set()
+                        if not release.wait(2):raise TimeoutError('test refresh not released')
+                    return captured
+                def refresh():
+                    try:workflow.refresh()
+                    except Exception as error:errors.append(error)
+                workflow.playground.snapshot.side_effect=snapshot
+                worker=threading.Thread(target=refresh);worker.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    result=workflow.action(action,{'replan':True,'token':'frozen'})
+                    value=workflow.snapshot()  # Must remain a cached, nonblocking read.
+                    self.assertEqual(value['id'],result['output']);self.assertEqual(value['id'],'job-next')
+                    self.assertEqual(value['stage_id'],'collection.'+stage)
+                    self.assertEqual(value['status'],'running');self.assertTrue(value['busy'])
+                    self.assertFalse(value['primary_action']['allowed'])
+                    with self.assertRaisesRegex(ValueError,'不允许'):workflow.action('generate_plan',{})
+                    self.assertNotIn(('fake','collection'),workflow.service.reviews)
+                finally:release.set();worker.join(2)
+                self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+                self.assertEqual(workflow.snapshot(),value,'old snapshot overwrote accepted task')
+                workflow.service.add_review.assert_not_called()
+                state.update(busy=False,status='ready',can_execute=False)
+                workflow.refresh()
+                self.assertEqual(workflow.snapshot()['id'],'job-next')
+                self.assertEqual(workflow.snapshot()['status'],'ready');self.assertFalse(workflow.snapshot()['busy'])
+
+    def test_old_monitor_failure_cannot_replace_new_task_message(self):
+        workflow,state=self.collection();entered=threading.Event();release=threading.Event()
+        def snapshot():
+            if threading.current_thread() is worker:
+                entered.set()
+                if not release.wait(2):raise TimeoutError('test failure not released')
+                workflow.closed.set()
+                raise RuntimeError('old camera read failed')
+            return deepcopy(state)
+        workflow.playground.snapshot.side_effect=snapshot
+        worker=threading.Thread(target=workflow.monitor);worker.start()
+        try:
+            self.assertTrue(entered.wait(1));workflow.action('generate_plan',{'replan':True})
+            accepted=workflow.snapshot()
+        finally:release.set();worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(workflow.snapshot(),accepted)
+        self.assertNotIn('view_error',workflow.snapshot())
+
+    def test_busy_collection_cannot_publish_review_for_retained_plan(self):
+        workflow,state=self.collection();state['busy']=True
+        workflow.refresh()
+        self.assertFalse(workflow.snapshot()['primary_action']['allowed'])
+        workflow.service.add_review.assert_not_called()
+
+    def test_refresh_started_during_revocation_cannot_restore_review(self):
+        for operation in ('invalidate','cancel'):
+            with self.subTest(operation=operation):
+                workflow,state=self.collection();errors=[]
+                entered=threading.Event();release=threading.Event()
+                sampled=threading.Event();publish=threading.Event()
+                def backend(*args):
+                    entered.set()
+                    if not release.wait(2):raise TimeoutError('test revocation not released')
+                    state.update(plan={'validated':False},can_execute=False)
+                    return {'status':'ready'}
+                def snapshot():
+                    captured=deepcopy(state);sampled.set()
+                    if not publish.wait(2):raise TimeoutError('test snapshot not released')
+                    return captured
+                def guarded(action):
+                    try:action()
+                    except Exception as error:errors.append(error)
+                workflow.playground.invalidate_checkpoint.side_effect=backend
+                workflow.playground.start.side_effect=backend
+                workflow.playground.snapshot.side_effect=snapshot
+                revoke=threading.Thread(target=guarded,args=(getattr(workflow,operation),))
+                refresh=threading.Thread(target=guarded,args=(workflow.refresh,))
+                revoke.start()
+                try:
+                    self.assertTrue(entered.wait(1));refresh.start();self.assertTrue(sampled.wait(1))
+                    release.set();revoke.join(2)
+                finally:
+                    release.set();publish.set();revoke.join(2)
+                    if refresh.ident is not None:refresh.join(2)
+                self.assertFalse(revoke.is_alive());self.assertFalse(refresh.is_alive());self.assertEqual(errors,[])
+                workflow.service.add_review.assert_not_called()
+                self.assertIsNone(workflow.review_key)
 
 
 if __name__=='__main__':unittest.main()

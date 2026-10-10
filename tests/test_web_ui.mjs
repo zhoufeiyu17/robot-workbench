@@ -55,6 +55,16 @@ assert.match(actionPermission(review,'execute').reason,/净空/);
 assert.equal(actionPermission(review,'execute',{clearance:true}).allowed,true);
 assert.equal(actionPermission(snapshot(),'stop',{pending:true,fresh:false}).allowed,true);
 
+for(const [status,message,label] of [['running','本轮准备仍在运行','进行中'],['failed','实际任务失败：场景检测错误','失败']]){
+  const h=harness();h.app.start();const value=snapshot();
+  value.workflow={...value.workflow,status,busy:status==='running',message,request:{status:'failed',error:'重复请求被拒绝'}};
+  h.reply(0,value);await settle();
+  assert.match(h.get('task-message').textContent,new RegExp(message));
+  assert.match(h.get('task-message').textContent,/本次请求失败：重复请求被拒绝/);
+  assert.equal(h.get('task-status').textContent,label,'a request error is not the business task outcome');
+  h.app.destroy();
+}
+
 {
   const h=harness();h.get('request-status').textContent='正在读取设备与任务状态…';h.app.start();
   h.reply(0,snapshot());await settle();assert.equal(h.get('request-status').textContent,'设备与任务状态已更新。');
