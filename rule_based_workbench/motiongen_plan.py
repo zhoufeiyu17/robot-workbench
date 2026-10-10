@@ -573,13 +573,9 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
         add('initial_open', jaw_rows(home_q, right, initial_gap, opening, right_gap))
     remaining=list(targets['grasp_candidates']);grasp_failures=[];prefix_count=len(stages)
     while remaining:
-        selected_index=None
+        grasp=remaining.pop(0)
         try:
-            path,receipt=move('plan_pose',home_q,[base_pose(row['world_from_pregrasp']) for row in remaining],'approach_pre')
-            returned_index=receipt.get('goalset_index',[0])[0]
-            if type(returned_index) is not int or not 0<=returned_index<len(remaining):raise ValueError('MotionGen goalset index is invalid')
-            selected_index=returned_index
-            grasp=remaining.pop(selected_index)
+            path,receipt=move('plan_pose',home_q,[base_pose(grasp['world_from_pregrasp'])],'approach_pre')
             add('approach_pre',[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)
             stages[-1]=continuous_stage(stages[-1:],'approach_pre','approach_pre',opening,duration_s=2.)
             path,_=move('plan_pose',stages[-1]['rows'][-1]['left_arm_joints'],[base_pose(grasp['world_from_tool'])],
@@ -594,8 +590,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             break
         except ValueError as error:
             stages=stages[:prefix_count];engine.grasp_contact_certificate=None
-            grasp_failures.append(dict(candidate_id=grasp['candidate_id'] if selected_index is not None else None,error=str(error)))
-            if selected_index is None:raise  # The remaining goalset itself could not be planned.
+            grasp_failures.append(dict(candidate_id=grasp['candidate_id'],error=str(error)))
     else:raise ValueError('bounded discrete grasp candidates exhausted; no global infeasibility claim: '+str(grasp_failures))
     diagnostic('closing.json',closing)
     certificate=closing['contact_certificate']

@@ -121,12 +121,13 @@ def main(native_code, urdf):
             steps=max(2,math.ceil(max(abs(b-a) for a,b in zip(start,end))/.0045))
             return [[a+(b-a)*i/steps for a,b in zip(start,end)] for i in range(steps+1)]
         def plan_pose(self, start, goals, *, name, hold_orientation=False, linear_approach=False, linear_axis=None,project_to_goal_frame=True):
+            if len(goals)!=1:raise ValueError('this rule chain uses one pose goal per stage')
             end = [*goals[0]['position'], *start[3:]]
             rows=self.path(start,end)
             if self.twist and name.endswith('/cross'):rows[len(rows)//2][3]=.01
             if self.projection_noise and name in ('approach_pre','retreat_insert'):
                 rows[len(rows)//2][3]=0.  # Owner lower bound is model +.002 in the projection fixture.
-            receipt = dict(stage=name, method='MotionGen.plan_single' if len(goals) == 1 else 'MotionGen.plan_goalset', success=True)
+            receipt = dict(stage=name, method='MotionGen.plan_goalset', success=True)
             self.receipts.append(receipt)
             return rows, receipt
         def plan_joint(self, start, goal, *, name):
@@ -242,7 +243,7 @@ def main(native_code, urdf):
         assert len(model_calls)==before+2, 'changed geometry reused a stale sphere model'
         bridge = DualGpuPipeline(); bridge.ingest_source(source); bridge.accept_plan(plan)
         assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_single_js'] == 1
-        assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_single'] == 10
+        assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_goalset'] == 10
         assert any(row.get('substage')=='retreat_insert' for row in plan['stages'])
         assert all(row['claw_cup_allowance_m']==0. for row in plan['motiongen_receipts'] if row['stage']=='home')
         assert not plan['planning_validation']['cpu_search_fallback']
@@ -273,17 +274,31 @@ def main(native_code, urdf):
         assert evidence['gpu_final_acceptance']['task_semantics']['checked_cross_samples'] > 0
         assert evidence['gpu_final_acceptance']['task_semantics']['max_ee_orientation_error_rad'] == 0.
         alternatives=deepcopy(targets)
-        alternatives['grasp_candidates']=[dict(grasp,candidate_id='rejected-contact'),
+        alternatives['grasp_candidates']=[dict(grasp,candidate_id='rejected-pregrasp',world_from_pregrasp=asdict(Pose((.151,.2,.3)))),
+            dict(grasp,candidate_id='rejected-contact'),
             dict(grasp,candidate_id='next-contact',world_from_tool=asdict(Pose((.2,.201,.3))))]
+        native_plan_pose=Engine.plan_pose;pregrasp_attempts=[]
+        def reject_pregrasp(engine,start,goals,**options):
+            if len(goals)!=1:raise ValueError('this rule chain uses one pose goal per stage')
+            if options['name']=='approach_pre':
+                pregrasp_attempts.append(deepcopy(goals[0]))
+                if len(pregrasp_attempts)==1:
+                    engine.receipts.append(dict(stage='approach_pre',method='MotionGen.plan_goalset',success=False))
+                    raise ValueError('fixture pregrasp unreachable')
+            return native_plan_pose(engine,start,goals,**options)
         def reject_first(engine,planner,state,cup,**options):
             if options['candidate_id']=='rejected-contact':raise ValueError('fixture native closing rejects first candidate')
             return closing_fixture(engine,planner,state,cup,**options)
         with patch('motiongen_targets.generate_targets',return_value=alternatives),\
+                patch.object(Engine,'plan_pose',reject_pregrasp),\
                 patch('gpu_acceptance.closing_geometry',side_effect=reject_first):
             _,next_plan,_=plan_loaded(planner,observation,data,source,urdf,speed_scale=.3)
         assert next_plan['task_targets']['grasp']['candidate_id']=='next-contact'
         assert next_plan['grasp_contact_certificate']['candidate_id']=='next-contact'
-        assert next_plan['task_targets']['failed_grasp_candidates'][0]['candidate_id']=='rejected-contact'
+        assert [row['candidate_id'] for row in next_plan['task_targets']['failed_grasp_candidates']]==['rejected-pregrasp','rejected-contact']
+        assert len(pregrasp_attempts)==3
+        assert all(next_plan['motiongen_receipts'][index]['success'] for index in
+                   next_plan['planning_validation']['selected_motiongen_receipt_indices'])
         relation=Pose(**next_plan['grasp_contact_certificate']['tool_from_held_cup'])
         expected_tool=Pose(**next_plan['task_targets']['placement']['world_from_cup']).compose(relation.inverse())
         assert next_plan['task_targets']['placement']['world_from_tool']==asdict(expected_tool)

@@ -135,7 +135,7 @@ class Worker:
         output=request['output'];output.mkdir(parents=True,exist_ok=False)
         began=time.perf_counter();updates=0
         report=dict(type='result',status='failed',passed=False,offline_candidate=not self.formal,output=str(output),backend='curobo_motiongen',
-            speed_scale=request['speed_scale'],gpu_ik=True,online_cpu_mesh_audit=False)
+            speed_scale=request['speed_scale'],gpu_ik=True,online_cpu_mesh_audit=None)
         try:
             parent=json.loads(request['source'].read_text())
             binding=json.loads(request['physical_binding'].read_text()) if request.get('physical_binding') else None
@@ -177,6 +177,8 @@ class Worker:
             write_new(output/'plan.json',plan if self.formal else seal_offline(plan,provenance))
             if not self.formal:write_new(output/'planning-evidence.json',evidence)
             report.update(passed=True,status='motiongen-plan-ready',input_ticks=len(base['ticks']),output_ticks=len(plan['ticks']),timeline_digest=plan['timeline_digest'],
+                online_cpu_mesh_audit=evidence['gpu_final_acceptance'].get('online_cpu_mesh_audit'),
+                online_cpu_mesh_scope=evidence['gpu_final_acceptance'].get('online_cpu_mesh_scope'),
                 geometry_inputs_reused=reused_geometry,
                 engine_reused=evidence['engine_reused'],full_hot_planning_wall_seconds=evidence['full_hot_planning_wall_seconds'],
                 input_sha256=provenance['input_sha256'],source_sha256=provenance['source_sha256'])
