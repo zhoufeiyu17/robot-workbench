@@ -73,7 +73,8 @@ def start_control_gateway(device, token, *, port=0):
             try:
                 business=self.business()
                 length=int(self.headers.get('Content-Length','0'))
-                if not 0<length<=4*1024*1024:raise ValueError('small JSON body required')
+                limit=16*1024*1024 if self.path=='/operator' and business=='collection' else 4*1024*1024
+                if not 0<length<=limit:raise ValueError('small JSON body required')
                 body=json.loads(self.rfile.read(length))
                 if self.path=='/operator' and business=='collection':
                     if body.get('action')=='acquire':

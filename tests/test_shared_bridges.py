@@ -1,6 +1,7 @@
 """Existing calibration HTTP protocol uses the shared Owner and fake reader."""
 from pathlib import Path
 from copy import deepcopy
+from http.client import HTTPConnection
 import json
 import sys
 import threading
@@ -20,6 +21,48 @@ from arx_env.joint_head_workbench_hardware import HardwareReadAdapter
 
 
 class SharedBridgeTest(unittest.TestCase):
+    def test_collection_operator_preserves_legacy_16MiB_request_limit(self):
+        with TemporaryDirectory() as folder:
+            device=protocol_fake(Path(folder))
+            from test_frozen_executor import fixture
+            from frozen_executor import FrozenExecutor
+            from integration import _digest
+            source,plan=fixture();count=17000
+            plan['ticks']=[dict(tick=i,time_s=i/30,target=deepcopy(plan['ticks'][0]['target'])) for i in range(count)]
+            plan.update(native_substeps=[8]*count,duration_s=count/30,timeline_digest=_digest(plan['ticks']))
+            payload=dict(action='preview_frozen',source=source,plan=plan)
+            body=json.dumps(payload,allow_nan=False).encode()
+            self.assertGreater(len(body),4*1024*1024);self.assertLessEqual(len(body),16*1024*1024)
+            calls=[]
+            def dispatch(business,command):
+                self.assertEqual(business,'collection');self.assertEqual(command['action'],'preview_frozen')
+                # Validate the actual legacy frozen plan without starting its follower or SDK.
+                frozen=FrozenExecutor(command['plan'],command['source'],sink=lambda _:self.fail('motion started'),gate=lambda:False,stop=lambda _:None)
+                self.assertEqual(len(frozen.ticks),count);calls.append(business)
+                return dict(token='cpu-preview-only',timeline_digest=frozen.plan['timeline_digest'])
+            tokens={'calibration':'c'*40,'collection':'d'*40}
+            server,thread=start_control_gateway(device,tokens)
+            try:
+                with patch.object(device,'submit',side_effect=dispatch):
+                    connection=HTTPConnection('127.0.0.1',server.server_port,timeout=5)
+                    try:
+                        connection.request('POST','/operator',body,{'Content-Type':'application/json','Authorization':'Bearer '+tokens['collection']})
+                        response=connection.getresponse();reply=json.loads(response.read())
+                        self.assertEqual(response.status,200,reply);self.assertEqual(reply['timeline_digest'],plan['timeline_digest'])
+                    finally:connection.close()
+                    # Headers alone prove an oversized body is rejected before it is read/dispatched.
+                    for path,business,size in [('/operator','collection',16*1024*1024+1),('/api/trajectory-preview','calibration',len(body))]:
+                        connection=HTTPConnection('127.0.0.1',server.server_port,timeout=2)
+                        try:
+                            connection.request('POST',path,headers={'Content-Type':'application/json',
+                                'Authorization':'Bearer '+tokens[business],'Content-Length':str(size)})
+                            response=connection.getresponse();self.assertEqual(response.status,409)
+                            self.assertIn('JSON body',json.loads(response.read())['error'])
+                        finally:connection.close()
+                self.assertEqual(calls,['collection']);self.assertIsNone(device.runtime)
+            finally:
+                device.closed.set();server.shutdown();server.server_close();thread.join(1)
+
     def test_collection_initial_sample_after_handoff_uses_cached_feedback_while_IO_blocks(self):
         with TemporaryDirectory() as folder:
             device=protocol_fake(Path(folder))
