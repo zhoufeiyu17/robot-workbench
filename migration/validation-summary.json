@@ -1,67 +1,35 @@
 {
-  "status": "current-cpu-l1-passed-full-l2-incomplete",
-  "updated_at": "2026-10-10T19:07:44.200632+08:00",
+  "status": "grasp-native-and-raw-qualified-source-replay-recovered-cold-suite-pending",
+  "updated_at": "2026-10-11T00:08:30.522492+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "900673e",
-  "qualification_scope": "Current CPU and L1 passed. Warm173414 qualified first-frame coverage but raw event starvation and native contact failure prevent full acceptance. Diagnostic run stopped and all owned GPU processes released. Cold suite remains 0/3; hardware unqualified.",
+  "candidate_commit_before_summary": "e67cf7e",
+  "qualification_scope": "e67cf7e CPU/L1 passed. Frozen bda3c8c warm223638 native task, raw and L3 independently passed; original export failed and teardown persisted stopped. Fixed source replay independently recovered using unchanged raw in CPU replay000106. Original workflow not reclassified. Cold suite0/3; hardware unqualified.",
   "cpu": {
-    "calibration_tests": 479,
-    "calibration_skipped": 4,
-    "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
-    "runtime_tests": 16,
-    "http_tests": 21,
-    "workflow_adapter_tests": 24,
-    "target_preview_tests": 11,
+    "source_equivalent_commit": "e67cf7e",
+    "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/receipt.json",
     "full_check_exit_code": 0,
-    "full_check_log_sha256": "324a7fd9849ef0a6bc6b4cf09e289a0a94a7fe9e95e7d771d1fa071a073cc706",
-    "preview_http_tests": 10,
-    "preview_lifecycle_tests": 4,
-    "collection_setup_role_variants": [
-      4,
-      5
-    ],
-    "collection_preparation_http_tests": 4,
-    "full_check_log": ".evidence/s2/post-warm173414-final-cpu.log",
-    "detector_release_preflight_tests": 4,
-    "real_release_fixture_explicitly_enabled": true,
-    "local_execution_tests": 12,
-    "shared_gateway_tests": 4,
-    "atomic_evidence_save_tests": 2,
-    "plant_bias_serve_tests": 6,
-    "sample_clock_tests": 17,
-    "warm_diagnostic_tests": 12,
-    "a1_supplement_log": ".evidence/s2/position-a1-geometry-cpu.log",
-    "a1_supplement_tests": 4,
-    "cup_reference_tests": 9,
-    "preview_subscription_tests": 4,
-    "position_boundaries_tests": 5,
-    "recording_preparation_tests": 9,
-    "recording_clock_tests": 14,
-    "final_renewal_scope": "Included with all current product fixes in final whole check and unchanged-source L1",
-    "recording_io_tests": 5,
-    "full_check_source_equivalent_commit": "900673e",
-    "source_equivalence_note": "Test ran against final working-tree sources; later commit 900673e seals those sources. Documentation-only commits do not imply a new test run.",
-    "unittest_executions_in_full_log": 755,
-    "unittest_passed_in_full_log": 751,
-    "unittest_skipped_in_full_log": 4,
-    "count_note": "Execution counts, not a deduplicated count of independent tests; script PASS lines/L1/A1 supplements are not added."
+    "unittest_executions_in_full_log": 760,
+    "unittest_passed_in_full_log": 759,
+    "unittest_skipped_in_full_log": 1,
+    "skip_detail": "old-model mesh fixture; actual pinned A1/native checks enabled",
+    "source_files": 371,
+    "source_unchanged": true,
+    "native_unchanged": true,
+    "detector_unchanged": true,
+    "count_note": "execution counts, not unique tests; L1 and supplemental counts are not added"
   },
   "l1": {
-    "status": "passed",
-    "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
-    "matrix_passed": 27,
-    "matrix_total": 27,
+    "evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/l1/l1-fault-matrix.json",
+    "cases_passed": 27,
+    "cases_total": 27,
+    "exit_code": 0,
     "source_unchanged": true,
-    "receipt_sha256": "e1c4a2205a05a667dd39e794a1c5e85c63b36658028876c32818c03e130d63fd",
-    "stop_normal_sdk_samples": 30,
-    "stop_request_to_software_barrier_p95_ms": 2.2887499071657658,
-    "stop_request_to_software_barrier_max_ms": 3.095125313848257,
-    "physical_stop_qualified": false,
-    "tested_functional_commit": "900673e",
-    "receipt": ".evidence/s2/l1-io-and-state-final/l1-fault-matrix.json",
-    "fingerprint_scope": "320 Python files in robot_workbench, rule_based_workbench, calibration and tests; excludes web, scripts, configs and external dependencies",
-    "current_python_hashes_rechecked": 320
+    "python_source_files": 324,
+    "stop_barrier_samples": 30,
+    "stop_barrier_p95_ms": 2.2483328357338905,
+    "stop_barrier_max_ms": 3.5922499373555183,
+    "scope": "Mac L1 protocol fake only; not physical stopping or GPU task qualification"
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -81,7 +49,7 @@
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
     "latest_cold_attempt": "full-20261010-123915",
-    "latest_diagnostic": "warm-20261010-173414",
+    "latest_diagnostic": "warm-20261010-223638",
     "meaning": "0/3 counts complete empty-store calibration-to-successful-collection/raw/playback cases; calibration subpipeline has passed"
   },
   "browser": {
@@ -89,14 +57,14 @@
     "protocol_fake_manual_preview_execute": "passed",
     "explicit_handoff_keeps_connection_hold": "passed",
     "tab_switch_does_not_handoff": "passed",
-    "full_business_and_preview_performance": "preview qualified on stated warm145124 host/profile; full business pending",
+    "full_business_and_preview_performance": "one warm task/native/raw plus separately recovered source replay; cold suite pending; preview has stated warm145124 qualification",
     "initial_loading_clears": "passed after fix",
     "image_recovery_and_l1_scope": "passed on real browser; protocol-only service",
     "renderer_gpu_lifecycle": "pending",
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
-    "latest_scope_screenshot": ".evidence/s2/ui-warm-173414-observed.png",
-    "temporary_loopback_forward": "18867 -> 734:43759 temporary SSH PID99471 closed during requested intermediate closeout; original network authorization unchanged",
+    "latest_scope_screenshot": ".evidence/s2/warm-223638-ui-export-failure.jpg",
+    "temporary_loopback_forward": "18867 closed; no listener after run teardown",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
     "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
@@ -108,14 +76,19 @@
       "off": ".evidence/s2/warm-145124-browser-mesh-off.json",
       "on": ".evidence/s2/warm-145124-browser-mesh-on.json"
     },
-    "current_UI_scope": "18866 protocol fake retained; latest D task-state fix has HTTP/DOM tests, next actual DSW browser revalidation pending",
-    "performance_windows_ref": "event_driven_preview.off.windows and event_driven_preview.on.windows"
+    "current_UI_scope": "18866 L1 retained; actual223638 browser progress and separate motion/data/native outcomes verified; original overall export failure preserved",
+    "performance_windows_ref": "event_driven_preview.off.windows and event_driven_preview.on.windows",
+    "live_collection_progress_fix": {
+      "commit": "30fc9f3",
+      "evidence": ".evidence/s2/collection-ui-progress-20261010/receipt.json",
+      "actual_gpu_revalidated": true,
+      "actual_gpu_evidence": ".evidence/s2/warm-223638-ui-running.jpg"
+    }
   },
   "remaining": [
-    "align whether to add grasp planning height margin; 2mm is proposed, not approved",
-    "revalidate latest recording/state/native-interface fixes on actual PhysX fake and complete data/native task/both replay paths",
-    "three declared empty-store full cases and remaining old-feature parity through new entry",
-    "separate physical SDK/stop/timing qualification and single-writer cutover"
+    "完成最终版本三个预声明空库全链案例；warm复用旧标定，不能计入0/3。",
+    "补完新入口的旧功能对照及导出/封存性能整理。",
+    "单独完成真机SDK、现场止动、时延、载荷与单writer正式切换。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -447,7 +420,7 @@
     "connection_idle_timeout_s": 5
   },
   "current_gpu_run": null,
-  "last_gpu_run": "warm-20261010-173414",
+  "last_gpu_run": "warm-20261010-223638",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -459,27 +432,85 @@
   "recording_source_freshness": {
     "commit": "684abe1",
     "cpu_passed": true,
-    "actual_raw_qualified": false,
+    "actual_raw_qualified": true,
     "evidence": ".evidence/s2/full-123915-camera-status-25s.json",
-    "physical_policy_unchanged": true
+    "physical_policy_unchanged": true,
+    "qualification_evidence": ".evidence/s2/warm-223638-offline-archive-audit-20261011-001.json"
   },
   "latest_warm_diagnostic": {
-    "run": "warm-20261010-173414",
-    "source_commit": "7d1a5dd",
+    "run": "warm-20261010-223638",
+    "source_commit": "bda3c8c",
     "fresh_C_completed": false,
     "diagnostic_only": true,
-    "source_origin_verified": true,
-    "new_D_profile_model_verified": true,
-    "execution_identity_verified": true,
-    "motion_outcome": "diagnostically_stopped",
-    "first_frame_coverage_passed": true,
-    "capture_status": "incomplete",
-    "task_outcome": "unverifiable_in_original_receipt",
-    "reconstructed_native_first_failure": "finger_cup_forbidden_contact",
-    "auxiliary_replay": "incomplete_after_diagnostic_stop",
-    "artifacts": ".evidence/s2/warm-173414-artifact-verification.json",
-    "teardown": ".evidence/s2/warm-173414-teardown.json",
-    "released": true
+    "motion_outcome": "completed",
+    "execution_tick_count": 3669,
+    "native_task_outcome": "success",
+    "native_task_qualified": true,
+    "observed_physics_samples": 29355,
+    "outlet_alignment_error_mm": 1.7905,
+    "raw_complete": true,
+    "command_count": 3669,
+    "feedback_count": 12232,
+    "camera_frames": {
+      "base_0": 3681,
+      "left_wrist_0": 3681,
+      "right_wrist_0": 3681
+    },
+    "camera_source_drops": 0,
+    "auxiliary_replay": "completed and independently verified",
+    "original_workflow": "export_failed_then_stopped_at_teardown",
+    "original_failure": "source video duration122.698s vs122.700s; accumulated per-frame microsecond truncation",
+    "original_workflow_reclassified": false,
+    "source_replay_recovery": {
+      "schema": "source_replay_recovery.v1",
+      "status": "passed",
+      "gpu_used": false,
+      "started_wall_ns": 1791648072888683688,
+      "finished_wall_ns": 1791648395558796210,
+      "origin_run": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638",
+      "origin_job": "/mnt/data/feiyu.zhou/runs/robot-workbench/warm-20261010-223638/collection-2c7420bda31c720d-1791643105028188257/playground/jobs/f9ead4dbad3849208864c1a64710a945",
+      "original_workflow_reclassified": false,
+      "raw_manifest_sha256": "3987743ed0c14a2f7d8023e5684913b4c67e9bb965a5d294d7fa3ec6043982f4",
+      "native_receipt_sha256": "2d29c832f4ba7859b368f42eee680ab5120027e9eadbec7ff565d0b99d30bf13",
+      "module_sha256": "f54ac8d2454d274c4a390c2a5f097ab0e0c376ec3360b3f62f86e159590eef12",
+      "execution_timeline_digest": "72ff09bdcf0aa327a37246d9640d18409fae60c330648936617b202d67320be5",
+      "source_clock_id": "physx-78e33d1df45b36aa5f25ca82de558331",
+      "source_replay_manifest": "/mnt/data/feiyu.zhou/runs/robot-workbench/replay-20261011-000106/playback/manifest.json",
+      "source_replay_manifest_sha256": "74aa4740fe98d31d2e549ea546bae3f8c9cd161d93ec1a52cb099660ef882ea8",
+      "camera_checks": {
+        "base_0": {
+          "frames": 3681,
+          "duration_s": 122.7,
+          "expected_duration_s": 122.7,
+          "maximum_frame_pts_error_s": 0.0003333330000003798,
+          "sha256": "eabaeb8b65600c4b42c58042c115bd7281c47029880b4742d8616240b6c7b4b4",
+          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+        },
+        "left_wrist_0": {
+          "frames": 3681,
+          "duration_s": 122.7,
+          "expected_duration_s": 122.7,
+          "maximum_frame_pts_error_s": 0.0003333330000003798,
+          "sha256": "aa44863bd33a234e334417a393232679fbe2ac8a84f0ac95329247763df219eb",
+          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+        },
+        "right_wrist_0": {
+          "frames": 3681,
+          "duration_s": 122.7,
+          "expected_duration_s": 122.7,
+          "maximum_frame_pts_error_s": 0.0003333330000003798,
+          "sha256": "51b4db55bc47baeda48d014d9984f06d6d7967a3b3efea42e9a9722d1e3bd655",
+          "packet_timing_sha256": "e7d1656ea4ffcff483f0e348e50a779b690f5641ab446d4346e386f57ac7dae8"
+        }
+      },
+      "qualification_scope": "new CPU-derived source replay of the completed frozen raw; original workflow failure retained, no cold-case qualification"
+    },
+    "artifact_audit": ".evidence/s2/warm-223638-offline-archive-audit-20261011-001.json",
+    "native_evidence": ".evidence/s2/warm-223638-native-task-receipt.json",
+    "teardown": ".evidence/s2/warm-20261010-223638-teardown.json",
+    "released": true,
+    "temporary_spool_cleanup": ".evidence/s2/warm-223638-spool-cleanup.json",
+    "qualifies_cold_case": false
   },
   "preview_three_slot_measurement": {
     "off": {
@@ -782,21 +813,7 @@
     },
     "preserved_receipt": ".evidence/s2/warm-20261010-145124-browser-evidence-qualified-preserved.json"
   },
-  "pending_behavior_decisions": {
-    "grasp_height_reserve": {
-      "status": "awaiting user decision",
-      "proposed_reserve_m": 0.002,
-      "scope": "new planning parameter and regenerated closing evidence; not native acceptance relaxation",
-      "constraints_unchanged": {
-        "accepted_contact_band_m": [
-          0.035,
-          0.1
-        ],
-        "numeric_height_tolerance_m": 0.0001,
-        "grasp_depth_m": 0.016
-      }
-    }
-  },
+  "pending_behavior_decisions": {},
   "approved_behavior_contracts": {
     "source": "user approvals in current session; _context design 06",
     "fake_lease_preparation": "<=1 wall second after confirmation, then original .3 source-second stationary gate; never recording.ready",
@@ -810,7 +827,26 @@
       "4c8c740",
       "7d1a5dd"
     ],
-    "gpu_revalidated": false
+    "gpu_revalidated": true,
+    "grasp_height_reserve": {
+      "status": "approved_and_implemented",
+      "implementation_commit": "1166cd6",
+      "minimum_margin_m": 0.002,
+      "nominal_band_m": [
+        0.035,
+        0.1
+      ],
+      "planned_region_m": [
+        0.037,
+        0.098
+      ],
+      "grasp_depth_m": 0.016,
+      "native_numerical_tolerance_m": 0.0001,
+      "acceptance_unchanged": true,
+      "gpu_qualified": true,
+      "qualification_scope": "one warm frozen native task, not cold suite/hardware"
+    },
+    "gpu_revalidation_scope": "warm223638 native/raw/L3 checks; source export required separate fixed CPU recovery"
   },
   "warm_173414": {
     "commit": "7d1a5dd",
@@ -934,6 +970,85 @@
       "teardown": ".evidence/s2/warm-153813-teardown.json",
       "released": true,
       "source_replay_scope": "four-frame incomplete recording fragments; verifier source_replay pass does not establish complete episode replay"
+    },
+    "warm-20261010-203935": {
+      "run": "warm-20261010-203935",
+      "source_commit": "2ba56f3",
+      "fresh_C_completed": false,
+      "motion_outcome": "not_started",
+      "task_outcome": "not_run",
+      "error": "single-pose backend rejected multi-candidate goalset",
+      "teardown": ".evidence/s2/warm-203935-teardown.json",
+      "released": true
+    },
+    "warm-20261010-205517": {
+      "run": "warm-20261010-205517",
+      "source_commit": "3fed20b",
+      "fresh_C_completed": false,
+      "motion_outcome": "not_started",
+      "selected_grasp_closing_passed": true,
+      "contact_height_interval_m": [
+        0.0384756457409285,
+        0.07956384430796926
+      ],
+      "minimum_margin_m": 0.0034756457409285,
+      "task_path_semantics_passed": true,
+      "failed_gate": "support conservative bound unresolved at one sample",
+      "exact_native_source_query": ".evidence/s2/warm-205517-support-exact-v2.json",
+      "exact_support_ok": true,
+      "exact_support_contact": false,
+      "unchanged_support_limit_m": 0.0012,
+      "teardown": ".evidence/s2/warm-20261010-205517-teardown.json",
+      "released": true
+    },
+    "warm-20261010-173414": {
+      "run": "warm-20261010-173414",
+      "source_commit": "7d1a5dd",
+      "fresh_C_completed": false,
+      "diagnostic_only": true,
+      "source_origin_verified": true,
+      "new_D_profile_model_verified": true,
+      "execution_identity_verified": true,
+      "motion_outcome": "diagnostically_stopped",
+      "first_frame_coverage_passed": true,
+      "capture_status": "incomplete",
+      "task_outcome": "unverifiable_in_original_receipt",
+      "reconstructed_native_first_failure": "finger_cup_forbidden_contact",
+      "auxiliary_replay": "incomplete_after_diagnostic_stop",
+      "artifacts": ".evidence/s2/warm-173414-artifact-verification.json",
+      "teardown": ".evidence/s2/warm-173414-teardown.json",
+      "released": true
+    },
+    "warm-20261010-212644": {
+      "run": "warm-20261010-212644",
+      "source_commit": "2e82725",
+      "fresh_C_completed": false,
+      "diagnostic_only": true,
+      "source_origin_verified": true,
+      "new_D_profile_model_verified": true,
+      "motion_outcome": "completed",
+      "execution_tick_count": 3671,
+      "grasp_contact_height_interval_m": [
+        0.0437903683027901,
+        0.0856255129233044
+      ],
+      "native_task_outcome": "failed",
+      "native_failure": "release_timeout during home_gripper_restore; current release fact is recomputed after real release",
+      "raw_complete": false,
+      "camera_frames": {
+        "base_0": 2007,
+        "left_wrist_0": 2009,
+        "right_wrist_0": 2009
+      },
+      "camera_source_drops": 1,
+      "raw_failure": "producer encoder/spool queue overflow; original error overwritten in ZIP metadata",
+      "auxiliary_replay": "exit124 after600wallseconds;3237/3671commands",
+      "source_videos": "incomplete at frozen resident deadline",
+      "artifacts": ".evidence/s2/warm-212644-raw-manifest-summary.json",
+      "native_evidence": ".evidence/s2/warm-212644-terminal-state.json",
+      "plan_evidence": ".evidence/s2/warm-212644-plan-qualification.json",
+      "teardown": ".evidence/s2/warm-20261010-212644-teardown.json",
+      "released": true
     }
   },
   "historical_browser_measurements": {
@@ -1019,7 +1134,138 @@
       "integration": "current lead session",
       "original_collection": "baseline and policy facts; original code/runtime unchanged",
       "hardware_branch": "retains hardware candidate; unified physical deployment not qualified",
-      "new_grasp_policy": "user decision pending"
+      "new_grasp_policy": "historical decision pending at that closeout; subsequently approved and implemented"
+    },
+    "historical_only": true
+  },
+  "historical_cpu_qualifications": [
+    {
+      "calibration_tests": 479,
+      "calibration_skipped": 4,
+      "skip_detail": "three A1 asset fixtures subsequently passed with sealed A1 assets; one old-model planning fixture remains skipped",
+      "runtime_tests": 16,
+      "http_tests": 21,
+      "workflow_adapter_tests": 24,
+      "target_preview_tests": 11,
+      "full_check_exit_code": 0,
+      "full_check_log_sha256": "324a7fd9849ef0a6bc6b4cf09e289a0a94a7fe9e95e7d771d1fa071a073cc706",
+      "preview_http_tests": 10,
+      "preview_lifecycle_tests": 4,
+      "collection_setup_role_variants": [
+        4,
+        5
+      ],
+      "collection_preparation_http_tests": 4,
+      "full_check_log": ".evidence/s2/post-warm173414-final-cpu.log",
+      "detector_release_preflight_tests": 4,
+      "real_release_fixture_explicitly_enabled": true,
+      "local_execution_tests": 12,
+      "shared_gateway_tests": 4,
+      "atomic_evidence_save_tests": 2,
+      "plant_bias_serve_tests": 6,
+      "sample_clock_tests": 17,
+      "warm_diagnostic_tests": 12,
+      "a1_supplement_log": ".evidence/s2/position-a1-geometry-cpu.log",
+      "a1_supplement_tests": 4,
+      "cup_reference_tests": 9,
+      "preview_subscription_tests": 4,
+      "position_boundaries_tests": 5,
+      "recording_preparation_tests": 9,
+      "recording_clock_tests": 14,
+      "final_renewal_scope": "Included with all current product fixes in final whole check and unchanged-source L1",
+      "recording_io_tests": 5,
+      "full_check_source_equivalent_commit": "900673e",
+      "source_equivalence_note": "Test ran against final working-tree sources; later commit 900673e seals those sources. Documentation-only commits do not imply a new test run.",
+      "unittest_executions_in_full_log": 755,
+      "unittest_passed_in_full_log": 751,
+      "unittest_skipped_in_full_log": 4,
+      "count_note": "Execution counts, not a deduplicated count of independent tests; script PASS lines/L1/A1 supplements are not added."
+    },
+    {
+      "source_equivalent_commit": "2e82725",
+      "evidence": ".evidence/s2/grasp-support-cpu-20261010-2123/receipt.json",
+      "full_check_exit_code": 0,
+      "supplemental_entries_passed": 14,
+      "unittest_executions_in_full_log": 755,
+      "unittest_passed_in_full_log": 754,
+      "unittest_skipped_in_full_log": 1,
+      "skip_detail": "old-model mesh fixture remains skipped; native support test directly enabled",
+      "full_check_log": ".evidence/s2/grasp-support-cpu-20261010-2123/full-check.log",
+      "source_files": 371,
+      "source_unchanged": true,
+      "count_note": "Execution counts, not unique tests; do not sum script checks, L1 and supplement counts."
+    },
+    {
+      "source_equivalent_commit": "bda3c8c",
+      "evidence": ".evidence/s2/grasp-terminal-spool-cpu-20261010-2234/receipt.json",
+      "full_check_exit_code": 0,
+      "supplemental_entries_passed": 14,
+      "unittest_executions_in_full_log": 759,
+      "unittest_passed_in_full_log": 758,
+      "unittest_skipped_in_full_log": 1,
+      "skip_detail": "old-model mesh fixture; actual pinned A1/native checks enabled",
+      "source_files": 371,
+      "source_unchanged": true,
+      "count_note": "Execution counts, not unique tests; script and L1 counts are not added"
     }
+  ],
+  "grasp_contact_reserve": {
+    "cpu_evidence": ".evidence/s2/final-e67cf7e-full-l1-20261010T155918Z/receipt.json",
+    "candidate_analysis": ".evidence/s2/warm-173414-grasp-reserve-candidate-cpu-20261010.json",
+    "candidates_examined": 90,
+    "candidates_geometry_passed": 2,
+    "geometry_seconds": 1.26,
+    "new_pose_source_certificate": true,
+    "source_truth_used_for_planning": false,
+    "status": "actual GPU plan, complete motion and native task passed on warm223638; raw and independent replay verified; cold suite not qualified",
+    "single_pose_fix": {
+      "commit": "3fed20b",
+      "cause": "real MotionGenerator accepts one goal; CPU mock incorrectly accepted multiple",
+      "regression_log": ".evidence/s2/grasp-single-pose-cpu.log",
+      "motiongen_plan_exit_code": 0,
+      "planner_service_exit_code": 0,
+      "scope": "sequential pregrasp/approach/closing candidates; no backend or threshold change"
+    },
+    "support_exact_fallback": {
+      "commit": "2e82725",
+      "scope": "broadphase unresolved samples only; unchanged original triangle support policy and original input precision",
+      "support_limit_m": 0.0012,
+      "source_sample_evidence": ".evidence/s2/warm-205517-support-original-command.json"
+    },
+    "native_task_evidence": ".evidence/s2/warm-223638-native-task-receipt.json",
+    "actual_contact_height_interval_m": [
+      0.0437903683027901,
+      0.0856255129233044
+    ]
+  },
+  "storage_probe": {
+    "evidence": ".evidence/s2/spool-io-20261010-221556-result.json",
+    "CPFS_publish_median_ms": 132.74094049120322,
+    "local_publish_median_ms": 0.1978925138246268,
+    "gpu": false,
+    "local_probe_cleaned": true,
+    "full_recording_qualification": true
+  },
+  "source_replay_fix": {
+    "commit": "e67cf7e",
+    "scope": "absolute-offset quantization; original2ms duration gate unchanged",
+    "probe": ".evidence/s2/replay-timing-probe-20261010-2344/receipt.json",
+    "full_recovery": ".evidence/s2/replay-000106-recovery.json",
+    "interrupted_attempt": ".evidence/s2/replay-235514-stopped-budget.json"
+  },
+  "governance_shadow_accounting": {
+    "blocking": false,
+    "runtime": "M2.2 shadow / M3 active-limited",
+    "settlement_declared": true,
+    "validation_status": "invalid",
+    "context_codes": [
+      "CONFLICTING_SETTLEMENT",
+      "UNRECONCILED_STATUS_DELTA"
+    ],
+    "repository_codes": [
+      "AMBIGUOUS_DOCUMENT_KIND",
+      "UNRECONCILED_STATUS_DELTA"
+    ],
+    "scope": "governance accounting diagnostics; not a product test or runtime blocker"
   }
 }
