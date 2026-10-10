@@ -1,6 +1,8 @@
 """Live loopback HTTP + real shared Owner. Protocol fake only, no SDK/GPU."""
 from pathlib import Path
+from http.client import HTTPConnection
 import json
+import socket
 import sys
 import threading
 import time
@@ -426,6 +428,89 @@ class HTTPTest(unittest.TestCase):
             self.http.open(Request(self.url+'/api/media/head?environment=fake',headers={'If-None-Match':'"1"'}))
         self.assertEqual(error.exception.code,304)
         self.assertFalse(self.state()['runtime']['connected'])
+
+
+class HTTPTransportTest(unittest.TestCase):
+    """Real TCP connections, without starting a runtime or hardware worker."""
+    def setUp(self):
+        self.device=Device('transport-cpu','fake',None)
+        self.app=Application({'fake':self.device});self.server=serve(self.app,port=0)
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+        self.addCleanup(lambda:(self.server.shutdown(),self.server.server_close(),self.thread.join(1)))
+        self.host='127.0.0.1:'+str(self.server.server_port)
+
+    def test_same_socket_handles_state_post_304_and_fully_consumed_error(self):
+        connection=HTTPConnection('127.0.0.1',self.server.server_port,timeout=2);self.addCleanup(connection.close)
+        setup=self.server.RequestHandlerClass.setup;settings=[]
+        def inspect_setup(request):
+            setup(request);settings.append((request.connection.gettimeout(),request.connection.getsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY)))
+        with patch.object(self.server.RequestHandlerClass,'setup',inspect_setup):
+            connection.request('GET','/api/state');response=connection.getresponse();state=json.loads(response.read())
+        self.assertEqual(response.version,11);self.assertEqual(response.status,200);self.assertEqual(len(settings),1)
+        self.assertEqual(settings[0][0],5.);self.assertTrue(settings[0][1],'TCP_NODELAY must be enabled on the accepted server socket')
+        original=connection.sock
+        headers={'Origin':'http://'+self.host,'X-CSRF-Token':state['csrf'],'Content-Type':'application/json'}
+        body=json.dumps(dict(environment='fake',business='calibration',request_id='keep-alive-stop'))
+        connection.request('POST','/api/actions/stop',body,headers);response=connection.getresponse();response.read()
+        self.assertEqual(response.status,200);self.assertIs(connection.sock,original)
+        self.device.media['head']=SimpleNamespace(frame=lambda:(b'jpeg',dict(etag='"frame"',frame_id='one',source_wall_ns=123)),snapshot=lambda:{})
+        connection.request('GET','/api/media/head',headers={'If-None-Match':'"frame"'});response=connection.getresponse()
+        self.assertEqual(response.status,304);self.assertEqual(response.read(),b'');self.assertIs(connection.sock,original)
+        connection.request('POST','/api/actions/stop','{',headers);response=connection.getresponse();response.read()
+        self.assertEqual(response.status,409);self.assertNotEqual(response.getheader('Connection'),'close')
+        connection.request('GET','/api/state');response=connection.getresponse();response.read()
+        self.assertEqual(response.status,200);self.assertIs(connection.sock,original)
+
+    def test_unread_or_ambiguous_body_closes_without_running_embedded_request(self):
+        self.app.state=Mock(wraps=self.app.state)
+        poison=f'GET /api/state HTTP/1.1\r\nHost: {self.host}\r\n\r\n'.encode()
+        auth=[('Origin','http://'+self.host),('X-CSRF-Token',self.app.csrf)]
+        cases=[
+            ('POST','/api/actions/stop',[],[('Content-Length',str(len(poison)))],403),
+            ('POST','/not-an-action',auth,[('Content-Length',str(len(poison)))],404),
+            ('POST','/api/actions/stop',auth,[],409),
+            ('POST','/api/actions/stop',auth,[('Content-Length','-1')],409),
+            ('POST','/api/actions/stop',auth,[('Content-Length',str(4*1024*1024+1))],413),
+            ('POST','/api/actions/stop',auth,[('Content-Length','2'),('Content-Length',str(len(poison)))],409),
+            ('POST','/api/actions/stop',auth,[('Content-Length',str(len(poison))),('Transfer-Encoding','chunked')],409),
+            ('GET','/api/state',[],[('Content-Length',str(len(poison)))],409),
+            ('TRACE','/api/state',[],[('Content-Length',str(len(poison)))],501),
+        ]
+        for method,path,authorization,framing,status in cases:
+            with self.subTest(method=method,path=path,framing=framing),socket.create_connection(('127.0.0.1',self.server.server_port),timeout=2) as client:
+                headers=[('Host',self.host),*authorization,*framing]
+                request=f'{method} {path} HTTP/1.1\r\n'+''.join(f'{key}: {value}\r\n' for key,value in headers)+'\r\n'
+                client.sendall(request.encode()+poison+poison);chunks=[]
+                while True:
+                    try:data=client.recv(65536)
+                    except ConnectionResetError:break
+                    if not data:break
+                    chunks.append(data)
+                reply=b''.join(chunks)
+                self.assertTrue(reply.startswith(f'HTTP/1.1 {status} '.encode()),reply[:80])
+                self.assertIn(b'connection: close\r\n',reply.lower());self.assertEqual(reply.count(b'HTTP/1.1 '),1)
+        self.app.state.assert_not_called()
+
+    def test_idle_keep_alive_connection_expires(self):
+        self.assertEqual(self.server.RequestHandlerClass.timeout,5)
+        self.server.RequestHandlerClass.timeout=.08
+        connection=HTTPConnection('127.0.0.1',self.server.server_port,timeout=2);self.addCleanup(connection.close)
+        connection.request('GET','/api/state');response=connection.getresponse();response.read()
+        self.assertEqual(response.status,200);self.assertEqual(connection.sock.recv(1),b'')
+
+    def test_incomplete_declared_body_closes_without_dispatch(self):
+        self.app.action=Mock(wraps=self.app.action)
+        with socket.create_connection(('127.0.0.1',self.server.server_port),timeout=2) as client:
+            client.sendall((f'POST /api/actions/stop HTTP/1.1\r\nHost: {self.host}\r\nOrigin: http://{self.host}\r\n'
+                f'X-CSRF-Token: {self.app.csrf}\r\nContent-Length: 10\r\n\r\n{{}}').encode())
+            client.shutdown(socket.SHUT_WR);chunks=[]
+            while True:
+                data=client.recv(65536)
+                if not data:break
+                chunks.append(data)
+            reply=b''.join(chunks)
+        self.assertTrue(reply.startswith(b'HTTP/1.1 409 '));self.assertIn(b'connection: close\r\n',reply.lower())
+        self.app.action.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

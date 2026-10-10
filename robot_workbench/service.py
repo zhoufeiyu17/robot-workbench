@@ -548,14 +548,18 @@ class Application:
 
 def handler(app):
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+        timeout = 5
+        disable_nagle_algorithm = True
         def log_message(self,*args):pass
         def send(self,code,value,kind='application/json',headers=None):
             raw=json.dumps(value,ensure_ascii=False,allow_nan=False).encode() if kind=='application/json' else value
             self.send_response(code)
             self.send_header('Content-Type',kind)
-            self.send_header('Content-Length',str(len(raw)))
+            if code!=304:self.send_header('Content-Length',str(len(raw)))
             self.send_header('Cache-Control','no-store')
             self.send_header('X-Content-Type-Options','nosniff')
+            if self.close_connection:self.send_header('Connection','close')
             for key,value in (headers or {}).items():self.send_header(key,str(value))
             self.end_headers()
             try:self.wfile.write(raw)
@@ -563,7 +567,10 @@ def handler(app):
         def valid_host(self):
             return self.headers.get('Host') in self.server.allowed_hosts
         def do_GET(self):
-            if not self.valid_host():return self.send(403,{'error':'invalid Host'})
+            if not self.valid_host():
+                self.close_connection=True;return self.send(403,{'error':'invalid Host'})
+            if self.headers.get('Transfer-Encoding') is not None or self.headers.get_all('Content-Length',[]) not in ([],['0']):
+                self.close_connection=True;return self.send(409,{'error':'GET request body is not supported'})
             path=urlsplit(self.path);query=parse_qs(path.query)
             try:
                 if path.path=='/api/state':
@@ -603,15 +610,24 @@ def handler(app):
             except (ValueError,KeyError,PermissionError) as error:self.send(409,{'error':str(error)})
             except Exception as error:self.send(503,{'error':str(error)})
         def do_POST(self):
+            # A rejected or partial body must never become the next request on this socket.
+            keep_alive=not self.close_connection;self.close_connection=True
             if (not self.valid_host() or self.headers.get('Origin') not in (None,'http://'+self.headers['Host'])
                     or not secrets.compare_digest(self.headers.get('X-CSRF-Token',''),app.csrf)):
                 return self.send(403,{'error':'invalid request origin or token'})
             try:
-                size=int(self.headers.get('Content-Length','0'))
-                if not 0<size<=4*1024*1024:raise ValueError('small JSON required')
+                lengths=self.headers.get_all('Content-Length',[])
+                if self.headers.get('Transfer-Encoding') is not None or len(lengths)!=1 or not lengths[0].isascii() or not lengths[0].isdigit():
+                    raise ValueError('one explicit Content-Length and no Transfer-Encoding required')
+                size=int(lengths[0])
+                if size>4*1024*1024:return self.send(413,{'error':'small JSON required'})
+                if size<=0:raise ValueError('small JSON required')
                 path=urlsplit(self.path).path
                 if not path.startswith('/api/actions/'):return self.send(404,{'error':'not found'})
-                result=app.action(path.removeprefix('/api/actions/'),json.loads(self.rfile.read(size)))
+                raw=self.rfile.read(size)
+                if len(raw)!=size:raise ValueError('request body is incomplete')
+                self.close_connection=not keep_alive
+                result=app.action(path.removeprefix('/api/actions/'),json.loads(raw))
                 self.send(202 if result.get('job_id') else 200,result)
             except (ValueError,KeyError,TypeError,PermissionError) as error:self.send(409,{'error':str(error)})
             except Exception as error:self.send(503,{'error':str(error)})
