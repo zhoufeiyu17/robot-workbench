@@ -155,7 +155,7 @@ def same_support_source(a,b):
 
 
 class SupportBounds:
-    """Native GPU FK plus conservative component boxes for the local support policy."""
+    """GPU bounds first; original source triangles resolve only unproven samples."""
     def __init__(self, engine, planner, urdf, *, active_joints=None):
         import json
         from pathlib import Path
@@ -165,6 +165,10 @@ class SupportBounds:
         from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
         self.torch=engine.torch;self.args=engine.tensor_args
         self.support=planner.support_contact
+        from copy import deepcopy
+        self._exact_pair=getattr(self.support,'_pair',None)  # Capture before runtime replaces support.check.
+        self._exact_identity=deepcopy(self.support.identity)
+        self._exact_fk=None;self._exact_urdf=Path(urdf)
         self.certificate=json.loads(certificate_path('a1_support_domain.json',urdf).read_text())
         if not same_support_source(self.certificate['support_identity'],self.support.identity):
             raise ValueError('support domain source identity differs')
@@ -229,7 +233,29 @@ class SupportBounds:
                     self.near_domains[(*pair,*indices)]=(keys,tensor)
 
 
+    def _source_pair(self,pair,row):
+        """Use original input precision and the same hash-bound native policy."""
+        import numpy as np
+        if self.support.identity!=self._exact_identity or not callable(self._exact_pair):
+            raise ValueError('exact support source identity or native checker differs')
+        if self._exact_fk is None:
+            from robot_sim.tasks.manager_based.coffee_make.m1_robot_geometry import M1RobotKinematics
+            self._exact_fk=M1RobotKinematics(self._exact_urdf)
+        raw=row.detach().cpu().tolist() if hasattr(row,'detach') else list(row)
+        if len(raw)!=len(self.order) or any(not math.isfinite(v) for v in raw):raise ValueError('finite exact support coordinates required')
+        state={**self.fixed,**dict(zip(self.order,map(float,raw),strict=True))}
+        frames=self._exact_fk.forward(state)
+        relative=np.linalg.inv(frames[pair[0]])@frames[pair[1]]
+        result=self._exact_pair(*pair,tuple(relative.ravel()))
+        if (tuple(result.get('pair',()))!=pair or result.get('limit_m')!=.0012
+                or result.get('metric')!='separation_along_link2_positive_z'
+                or any(type(result.get(key)) is not bool for key in ('ok','contact','over_limit','outside_support'))
+                or result['ok']!=(not result['over_limit'] and not result['outside_support'])):
+            raise ValueError('exact support result differs from the frozen 1.2 mm policy')
+        return raw,result
+
     def check(self,q):
+        from integration import _digest
         torch=self.torch;started=time.perf_counter()
         values=self.args.to_device(q)
         if values.ndim!=2 or values.shape[1]!=len(self.order) or not torch.isfinite(values).all():raise ValueError('finite support path required')
@@ -266,11 +292,28 @@ class SupportBounds:
                 inside=((coordinates[:,None]>=domain[None,:,:,0])&(coordinates[:,None]<=domain[None,:,:,1])).all(-1).any(-1)
                 clear[:,ci,cj]|=inside
             okay=clear.all(dim=(1,2))
+            broad_indices=(~okay).nonzero().reshape(-1).cpu().tolist()
+            broad_pairs=(~clear).any(0).nonzero().cpu().tolist()
+            exact=[];exact_started=time.perf_counter()
+            for index in broad_indices:
+                began=time.perf_counter()
+                try:
+                    raw,result=self._source_pair((a,b),q[index])
+                    exact.append(dict(sample_index=index,q_model_rad=raw,result=result,wall_seconds=time.perf_counter()-began))
+                    if result['ok']:clear[index]=True;okay[index]=True
+                except Exception as error:
+                    exact.append(dict(sample_index=index,passed=False,error=f'{type(error).__name__}: {error}',wall_seconds=time.perf_counter()-began))
             checks.append(dict(pair=[a,b],passed=bool(okay.all()),unresolved_samples=int((~okay).sum()),
                 component_counts=[len(aa),len(bb)],selected_components=[ai,bi],
                 unresolved_pairs=(~clear).any(0).nonzero().cpu().tolist(),
+                broadphase_unresolved_samples=len(broad_indices),broadphase_unresolved_pairs=broad_pairs,
+                source_exact_fallback=dict(sample_count=len(exact),checks=exact,
+                    source_identity_digest=_digest(self._exact_identity) if exact else None,
+                    wall_seconds=time.perf_counter()-exact_started if exact else 0.,
+                    method='original hash-bound native triangle SAT/containment and unchanged 1.2 mm support policy'),
                 unresolved_joint_min=values[~okay].min(0).values.cpu().tolist() if (~okay).any() else None,
-                unresolved_joint_max=values[~okay].max(0).values.cpu().tolist() if (~okay).any() else None,method='conservative oriented component boxes / shifted support component only'))
+                unresolved_joint_max=values[~okay].max(0).values.cpu().tolist() if (~okay).any() else None,
+                method='conservative oriented component boxes / shifted support component; native source check when unproven'))
         return dict(passed=all(row['passed'] for row in checks),checks=checks,wall_seconds=time.perf_counter()-started)
 
 
@@ -299,7 +342,8 @@ def bind_runtime_support_gpu(runtime, urdf):
     checker.support_contact.check=support_check
     checker.check=check
     return dict(backend='existing GPU SupportBounds',active_joints=list(active),support_identity=checker.support_contact.identity,
-                cpu_support_triangle_checks=False,remaining_convex_self_checks_unchanged=True)
+                cpu_support_triangle_checks=True,cpu_support_triangle_scope='GPU/continuous-domain unresolved samples only; saved native pair checker, original-coordinate CPU FK',
+                remaining_convex_self_checks_unchanged=True)
 
 
 def fixed_self_check(engine, planner, exported):

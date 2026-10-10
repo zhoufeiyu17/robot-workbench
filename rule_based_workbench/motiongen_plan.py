@@ -731,10 +731,13 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
         closing=closing['gpu_sweep'],support=support_acceptance,task_semantics=task_acceptance,
         receiving_goal=dict(passed=True,metric=targets['placement_goal']['metric'],
             distance_m=receiving_distance,tolerance_m=targets['placement_goal']['tolerance_m']),
-        online_cpu_mesh_audit=True,online_cpu_mesh_scope='selected-pose native linked-jaw closing source proof; not IK or path search',
+        online_cpu_mesh_audit=True,online_cpu_mesh_scope='selected-pose native closing and unresolved source support checks; not IK or path search',
         contact_source_preparation_seconds=certificate.get('source_preparation_seconds'),retimed_collision_audit=False)
     diagnostic('gpu-final-acceptance.json',acceptance)
-    if not acceptance['passed']:raise ValueError('GPU final acceptance failed')
+    if not acceptance['passed']:
+        failed=[name for name in ('closing','support','task_semantics','receiving_goal') if not acceptance[name]['passed']]
+        if any(not row['passed'] for row in jaw_acceptance):failed.append('jaw_sweeps')
+        raise ValueError('GPU final acceptance failed: '+', '.join(failed))
     run_id = source['run_id']+'-motiongen-'+uuid4().hex[:10]
     base = freeze(stages, source, data, grip, spec, run_id=run_id+'-base')
     plan = freeze(derived_stages, source, data, grip, spec, run_id=run_id)
