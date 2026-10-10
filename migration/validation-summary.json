@@ -1,6 +1,6 @@
 {
   "status": "current-cpu-l1-passed-full-l2-incomplete",
-  "updated_at": "2026-10-10T18:30:14.615319+08:00",
+  "updated_at": "2026-10-10T19:07:44.200632+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
   "candidate_commit_before_summary": "900673e",
@@ -16,23 +16,22 @@
     "full_check_exit_code": 0,
     "full_check_log_sha256": "324a7fd9849ef0a6bc6b4cf09e289a0a94a7fe9e95e7d771d1fa071a073cc706",
     "preview_http_tests": 10,
-    "preview_lifecycle_tests": 3,
+    "preview_lifecycle_tests": 4,
     "collection_setup_role_variants": [
       4,
       5
     ],
     "collection_preparation_http_tests": 4,
     "full_check_log": ".evidence/s2/post-warm173414-final-cpu.log",
-    "full_check_commit": "99e99b8",
     "detector_release_preflight_tests": 4,
     "real_release_fixture_explicitly_enabled": true,
     "local_execution_tests": 12,
     "shared_gateway_tests": 4,
     "atomic_evidence_save_tests": 2,
-    "plant_bias_serve_tests": 5,
+    "plant_bias_serve_tests": 6,
     "sample_clock_tests": 17,
     "warm_diagnostic_tests": 12,
-    "a1_supplement_log": ".evidence/s2/warm-cup-a1-cpu.log",
+    "a1_supplement_log": ".evidence/s2/position-a1-geometry-cpu.log",
     "a1_supplement_tests": 4,
     "cup_reference_tests": 9,
     "preview_subscription_tests": 4,
@@ -40,7 +39,13 @@
     "recording_preparation_tests": 9,
     "recording_clock_tests": 14,
     "final_renewal_scope": "Included with all current product fixes in final whole check and unchanged-source L1",
-    "recording_io_tests": 5
+    "recording_io_tests": 5,
+    "full_check_source_equivalent_commit": "900673e",
+    "source_equivalence_note": "Test ran against final working-tree sources; later commit 900673e seals those sources. Documentation-only commits do not imply a new test run.",
+    "unittest_executions_in_full_log": 755,
+    "unittest_passed_in_full_log": 751,
+    "unittest_skipped_in_full_log": 4,
+    "count_note": "Execution counts, not a deduplicated count of independent tests; script PASS lines/L1/A1 supplements are not added."
   },
   "l1": {
     "status": "passed",
@@ -54,7 +59,9 @@
     "stop_request_to_software_barrier_max_ms": 3.095125313848257,
     "physical_stop_qualified": false,
     "tested_functional_commit": "900673e",
-    "receipt": ".evidence/s2/l1-io-and-state-final/l1-fault-matrix.json"
+    "receipt": ".evidence/s2/l1-io-and-state-final/l1-fault-matrix.json",
+    "fingerprint_scope": "320 Python files in robot_workbench, rule_based_workbench, calibration and tests; excludes web, scripts, configs and external dependencies",
+    "current_python_hashes_rechecked": 320
   },
   "l2_probe_historical": {
     "status": "calibration-control-causality-passed",
@@ -70,20 +77,12 @@
     "gpu_released": true
   },
   "l2_complete": {
-    "status": "head_capture_timeout_not_qualified",
+    "status": "full_pipeline_not_qualified",
     "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "latest_run": "full-20261010-115724",
-    "frozen_implementation": "45aac47",
-    "head_capture_count": 32,
-    "expected_head_capture_count": 34,
-    "installation_completed": false,
-    "collection_started": false,
-    "gpu_released": true,
-    "owned_gpu_processes_exited": true,
-    "failure": "C capture total wall deadline used source motion duration; unchanged original thresholds",
-    "failure_evidence": ".evidence/s2/full-115724-head-timeout-evidence.json",
-    "teardown_evidence": ".evidence/s2/full-20261010-115724-teardown.json"
+    "latest_cold_attempt": "full-20261010-123915",
+    "latest_diagnostic": "warm-20261010-173414",
+    "meaning": "0/3 counts complete empty-store calibration-to-successful-collection/raw/playback cases; calibration subpipeline has passed"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
@@ -96,83 +95,27 @@
     "renderer_gpu_lifecycle": "pending",
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
-    "latest_scope_screenshot": ".evidence/s2/ui-full-fake-115724.jpg",
-    "temporary_loopback_forward": "explicitly user approved; same route retained for next validation run",
+    "latest_scope_screenshot": ".evidence/s2/ui-warm-173414-observed.png",
+    "temporary_loopback_forward": "18867 -> 734:43759 temporary SSH PID99471 closed during requested intermediate closeout; original network authorization unchanged",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
-    "continuous_mesh_off": "failed throughput and P95; all dispatched targets now presented",
-    "continuous_mesh_on": "not measured",
-    "performance_evidence": ".evidence/s2/full-123915-browser-mesh-off.json",
-    "performance_windows": [
-      {
-        "raw_inputs": 1498,
-        "dispatched_inputs": 341,
-        "coalesced_inputs": 1157,
-        "other_undispatched_inputs": 0,
-        "matched_inputs": 341,
-        "unmatched_inputs": 0,
-        "cancelled_requests": 0,
-        "failed_requests": 0,
-        "new_presentations": 339,
-        "duplicate_frames": 1091,
-        "unattributed_frames": 0,
-        "new_display_fps": 5.65,
-        "latency_p95_ms": 241.7999997138977,
-        "latency_p99_ms": 267.59999990463257,
-        "latency_max_ms": 295.6000003814697,
-        "latency_p95_unbounded": false,
-        "latency_p99_unbounded": false,
-        "latency_max_unbounded": false
-      },
-      {
-        "raw_inputs": 1503,
-        "dispatched_inputs": 333,
-        "coalesced_inputs": 1170,
-        "other_undispatched_inputs": 0,
-        "matched_inputs": 333,
-        "unmatched_inputs": 0,
-        "cancelled_requests": 0,
-        "failed_requests": 0,
-        "new_presentations": 331,
-        "duplicate_frames": 1077,
-        "unattributed_frames": 0,
-        "new_display_fps": 5.516666666666667,
-        "latency_p95_ms": 250.40000009536743,
-        "latency_p99_ms": 283.90000009536743,
-        "latency_max_ms": 349.40000009536743,
-        "latency_p95_unbounded": false,
-        "latency_p99_unbounded": false,
-        "latency_max_unbounded": false
-      },
-      {
-        "raw_inputs": 1507,
-        "dispatched_inputs": 332,
-        "coalesced_inputs": 1175,
-        "other_undispatched_inputs": 0,
-        "matched_inputs": 332,
-        "unmatched_inputs": 0,
-        "cancelled_requests": 0,
-        "failed_requests": 0,
-        "new_presentations": 330,
-        "duplicate_frames": 1081,
-        "unattributed_frames": 0,
-        "new_display_fps": 5.5,
-        "latency_p95_ms": 252,
-        "latency_p99_ms": 288.90000009536743,
-        "latency_max_ms": 306.40000009536743,
-        "latency_p95_unbounded": false,
-        "latency_p99_unbounded": false,
-        "latency_max_unbounded": false
-      }
-    ],
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
     "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
     "position_boundary_review": "18866 actual UI accepted 3.144 rad request at upper3.14; preview only, cancelled without execution",
-    "position_boundary_screenshot": ".evidence/s2/ui-position-boundary-review.png"
+    "position_boundary_screenshot": ".evidence/s2/ui-position-boundary-review.png",
+    "continuous_mesh_off": "passed on warm-145124 stated host/profile",
+    "continuous_mesh_on": "passed on warm-145124 stated host/profile",
+    "performance_evidence": {
+      "off": ".evidence/s2/warm-145124-browser-mesh-off.json",
+      "on": ".evidence/s2/warm-145124-browser-mesh-on.json"
+    },
+    "current_UI_scope": "18866 protocol fake retained; latest D task-state fix has HTTP/DOM tests, next actual DSW browser revalidation pending",
+    "performance_windows_ref": "event_driven_preview.off.windows and event_driven_preview.on.windows"
   },
   "remaining": [
-    "actual warm D/native task/complete RGB-D and both playback paths on current fixes",
-    "three predeclared empty-store cold cases and full new-entry feature parity",
-    "physical SDK/stop/timing qualification and single-writer cutover"
+    "align whether to add grasp planning height margin; 2mm is proposed, not approved",
+    "revalidate latest recording/state/native-interface fixes on actual PhysX fake and complete data/native task/both replay paths",
+    "three declared empty-store full cases and remaining old-feature parity through new entry",
+    "separate physical SDK/stop/timing qualification and single-writer cutover"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -221,56 +164,45 @@
     "source": "remote full-045936/runtime-boundary-20261010-054145/conversion/result.json"
   },
   "last_installed_attempt": {
-    "status": "calibration_installed_collection_scene_failed",
-    "latest_run": "full-20261010-104952",
-    "frozen_implementation": "3ff70d2",
+    "status": "calibration_passed_collection_plan_failed",
+    "latest_run": "full-20261010-123915",
+    "frozen_implementation": "b6a5e5f",
     "installation_completed": true,
-    "collection_started": false,
-    "gpu_released": true,
     "head_capture_count": 34,
     "wrist_capture_count": 29,
+    "new_D_profile_model_passed": true,
+    "collection_motion_started": false,
+    "full_pipeline_qualified": false,
+    "gpu_released": true,
     "installed_evidence": {
-      "head_id": "229f39461e42b8bca760a77c3d3db82400df21807d78729db27f47dc4a78dbc1",
-      "wrist_id": "64d1a6f2c306cc4e0fc41177cc5c5d73754d6f63365ce07a8ba9b8ca14b31563",
-      "wrist_dependency": "229f39461e42b8bca760a77c3d3db82400df21807d78729db27f47dc4a78dbc1",
+      "head_id": "8290663527ec08631f0f1b11a53add10fe97d866ea6dfc12170cd6b9c2ae6bb4",
+      "wrist_id": "49e6fec3f8b23977918172dad11b2517758820745d7d19ca1dc479fcf7fa7c58",
+      "wrist_dependency": "8290663527ec08631f0f1b11a53add10fe97d866ea6dfc12170cd6b9c2ae6bb4",
       "clock": {
         "environment": "fake",
         "clock_domain": "simulation",
-        "source_clock_id": "physx-36b399c044f5631e2cc39543510e52ed"
+        "source_clock_id": "physx-7834bbcb0c9b25de8122199b198b327e"
       },
       "batches": {
         "head": {
-          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-104952/calibration-workbench/batch-hardware-94633adccf/capture",
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-123915/calibration-workbench/batch-hardware-adcfae1ceb/capture",
           "frames": 34,
-          "dataset_sha256": "32d52e48b894b64475438f1e9b25e76427c8e178559eed44db7057b008f2c761"
+          "dataset_sha256": "5783d3712596702f653a3a372bb86fc5a08ee83f2cdf9f31585f371f1117c752"
         },
         "wrist": {
-          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-104952/calibration-workbench/batch-hardware-49f4043ede/capture",
+          "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-123915/calibration-workbench/batch-hardware-9b47b07631/capture",
           "frames": 29,
-          "dataset_sha256": "8d22032f41c24d01a266fe98cec331e3b7e9def52ebe734ad80fe6bdc3266d90"
+          "dataset_sha256": "69188db58ebbcfd0104570b86b1cdc11e258e046453e0774e039c74d54c12a7f"
         }
       },
       "active_sha256": {
-        "head.json": "1ced2d8a8c25de0360cc128ebe5030e6d6f2be55a39bb5560c51ac7dc5498299",
-        "wrist.json": "b92386d34a3fe3540cdae9060739d3ceb27615ad849751e50217df48ff178332",
-        "manifest.json": "f62f063c8484e19a2d8ba07373cdabcf6030b2527c5a04a2c363a0975d96214e"
+        "head.json": "5a004556084117a7d4ed357d723cc7a5d57aa565ec964ea2dddcc714f10c7dcf",
+        "wrist.json": "d4841c4a088c525e39ab5e7c8cd3cb40ca46af4960a28f0ef848e1413fec8ea1",
+        "manifest.json": "2c7420bda31c720de80188db13ef331b8e82badba026b4563e8a091c54af8a61"
       }
     },
-    "new_D_profile_model_passed": true,
-    "observation": {
-      "frames": 9,
-      "source_span_s": 8.133333334,
-      "wall_elapsed_s": 33.946842946
-    },
-    "detection": {
-      "valid_observations": 8,
-      "contiguous_span_s": 7.1
-    },
-    "collection_failure": "old A1 support sidecar/certificates tied to the baseline URDF instead of the derived optical-only URDF",
-    "artifact_audit": ".evidence/s2/full-104952-artifact-verification.json",
-    "observation_detection_audit": ".evidence/s2/full-104952-observation-detection-verification.json",
-    "failure_evidence": ".evidence/s2/full-104952-geometry-failure-and-stop.json",
-    "teardown_evidence": ".evidence/s2/full-20261010-104952-teardown.json"
+    "artifact_audit": ".evidence/s2/full-123915-artifact-verification.json",
+    "collection_failure": "cup-relative reference tied to old URDF; subsequent optical-only derivation fix does not retroactively qualify this run"
   },
   "historical_installed_attempt": {
     "status": "calibration_installed_collection_setup_failed",
@@ -532,22 +464,22 @@
     "physical_policy_unchanged": true
   },
   "latest_warm_diagnostic": {
-    "run": "warm-20261010-153813",
-    "source_commit": "3f2f60a",
+    "run": "warm-20261010-173414",
+    "source_commit": "7d1a5dd",
     "fresh_C_completed": false,
     "diagnostic_only": true,
     "source_origin_verified": true,
     "new_D_profile_model_verified": true,
     "execution_identity_verified": true,
-    "motion_outcome": "completed",
-    "execution_tick_count": 3692,
+    "motion_outcome": "diagnostically_stopped",
+    "first_frame_coverage_passed": true,
     "capture_status": "incomplete",
-    "task_outcome": "unverifiable",
-    "auxiliary_replay": "failed-model-prefix-limit",
-    "artifacts": ".evidence/s2/warm-153813-artifact-verification.json",
-    "teardown": ".evidence/s2/warm-153813-teardown.json",
-    "released": true,
-    "source_replay_scope": "four-frame incomplete recording fragments; verifier source_replay pass does not establish complete episode replay"
+    "task_outcome": "unverifiable_in_original_receipt",
+    "reconstructed_native_first_failure": "finger_cup_forbidden_contact",
+    "auxiliary_replay": "incomplete_after_diagnostic_stop",
+    "artifacts": ".evidence/s2/warm-173414-artifact-verification.json",
+    "teardown": ".evidence/s2/warm-173414-teardown.json",
+    "released": true
   },
   "preview_three_slot_measurement": {
     "off": {
@@ -911,5 +843,183 @@
       ".evidence/s2/warm-173414-artifact-verification.json",
       ".evidence/s2/warm-173414-teardown.json"
     ]
+  },
+  "historical_full_attempts": {
+    "full-20261010-115724": {
+      "status": "head_capture_timeout_not_qualified",
+      "normal_cases_passed": 0,
+      "required_normal_cases": 3,
+      "latest_run": "full-20261010-115724",
+      "frozen_implementation": "45aac47",
+      "head_capture_count": 32,
+      "expected_head_capture_count": 34,
+      "installation_completed": false,
+      "collection_started": false,
+      "gpu_released": true,
+      "owned_gpu_processes_exited": true,
+      "failure": "C capture total wall deadline used source motion duration; unchanged original thresholds",
+      "failure_evidence": ".evidence/s2/full-115724-head-timeout-evidence.json",
+      "teardown_evidence": ".evidence/s2/full-20261010-115724-teardown.json"
+    }
+  },
+  "historical_installed_attempts": {
+    "full-20261010-104952": {
+      "status": "calibration_installed_collection_scene_failed",
+      "latest_run": "full-20261010-104952",
+      "frozen_implementation": "3ff70d2",
+      "installation_completed": true,
+      "collection_started": false,
+      "gpu_released": true,
+      "head_capture_count": 34,
+      "wrist_capture_count": 29,
+      "installed_evidence": {
+        "head_id": "229f39461e42b8bca760a77c3d3db82400df21807d78729db27f47dc4a78dbc1",
+        "wrist_id": "64d1a6f2c306cc4e0fc41177cc5c5d73754d6f63365ce07a8ba9b8ca14b31563",
+        "wrist_dependency": "229f39461e42b8bca760a77c3d3db82400df21807d78729db27f47dc4a78dbc1",
+        "clock": {
+          "environment": "fake",
+          "clock_domain": "simulation",
+          "source_clock_id": "physx-36b399c044f5631e2cc39543510e52ed"
+        },
+        "batches": {
+          "head": {
+            "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-104952/calibration-workbench/batch-hardware-94633adccf/capture",
+            "frames": 34,
+            "dataset_sha256": "32d52e48b894b64475438f1e9b25e76427c8e178559eed44db7057b008f2c761"
+          },
+          "wrist": {
+            "path": "/mnt/data/feiyu.zhou/runs/robot-workbench/full-20261010-104952/calibration-workbench/batch-hardware-49f4043ede/capture",
+            "frames": 29,
+            "dataset_sha256": "8d22032f41c24d01a266fe98cec331e3b7e9def52ebe734ad80fe6bdc3266d90"
+          }
+        },
+        "active_sha256": {
+          "head.json": "1ced2d8a8c25de0360cc128ebe5030e6d6f2be55a39bb5560c51ac7dc5498299",
+          "wrist.json": "b92386d34a3fe3540cdae9060739d3ceb27615ad849751e50217df48ff178332",
+          "manifest.json": "f62f063c8484e19a2d8ba07373cdabcf6030b2527c5a04a2c363a0975d96214e"
+        }
+      },
+      "new_D_profile_model_passed": true,
+      "observation": {
+        "frames": 9,
+        "source_span_s": 8.133333334,
+        "wall_elapsed_s": 33.946842946
+      },
+      "detection": {
+        "valid_observations": 8,
+        "contiguous_span_s": 7.1
+      },
+      "collection_failure": "old A1 support sidecar/certificates tied to the baseline URDF instead of the derived optical-only URDF",
+      "artifact_audit": ".evidence/s2/full-104952-artifact-verification.json",
+      "observation_detection_audit": ".evidence/s2/full-104952-observation-detection-verification.json",
+      "failure_evidence": ".evidence/s2/full-104952-geometry-failure-and-stop.json",
+      "teardown_evidence": ".evidence/s2/full-20261010-104952-teardown.json"
+    }
+  },
+  "historical_warm_diagnostics": {
+    "warm-20261010-153813": {
+      "run": "warm-20261010-153813",
+      "source_commit": "3f2f60a",
+      "fresh_C_completed": false,
+      "diagnostic_only": true,
+      "source_origin_verified": true,
+      "new_D_profile_model_verified": true,
+      "execution_identity_verified": true,
+      "motion_outcome": "completed",
+      "execution_tick_count": 3692,
+      "capture_status": "incomplete",
+      "task_outcome": "unverifiable",
+      "auxiliary_replay": "failed-model-prefix-limit",
+      "artifacts": ".evidence/s2/warm-153813-artifact-verification.json",
+      "teardown": ".evidence/s2/warm-153813-teardown.json",
+      "released": true,
+      "source_replay_scope": "four-frame incomplete recording fragments; verifier source_replay pass does not establish complete episode replay"
+    }
+  },
+  "historical_browser_measurements": {
+    "full-123915": {
+      "continuous_mesh_off": "failed throughput and P95; all dispatched targets now presented",
+      "continuous_mesh_on": "not measured",
+      "performance_evidence": ".evidence/s2/full-123915-browser-mesh-off.json",
+      "performance_windows": [
+        {
+          "raw_inputs": 1498,
+          "dispatched_inputs": 341,
+          "coalesced_inputs": 1157,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 341,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 339,
+          "duplicate_frames": 1091,
+          "unattributed_frames": 0,
+          "new_display_fps": 5.65,
+          "latency_p95_ms": 241.7999997138977,
+          "latency_p99_ms": 267.59999990463257,
+          "latency_max_ms": 295.6000003814697,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1503,
+          "dispatched_inputs": 333,
+          "coalesced_inputs": 1170,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 333,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 331,
+          "duplicate_frames": 1077,
+          "unattributed_frames": 0,
+          "new_display_fps": 5.516666666666667,
+          "latency_p95_ms": 250.40000009536743,
+          "latency_p99_ms": 283.90000009536743,
+          "latency_max_ms": 349.40000009536743,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        },
+        {
+          "raw_inputs": 1507,
+          "dispatched_inputs": 332,
+          "coalesced_inputs": 1175,
+          "other_undispatched_inputs": 0,
+          "matched_inputs": 332,
+          "unmatched_inputs": 0,
+          "cancelled_requests": 0,
+          "failed_requests": 0,
+          "new_presentations": 330,
+          "duplicate_frames": 1081,
+          "unattributed_frames": 0,
+          "new_display_fps": 5.5,
+          "latency_p95_ms": 252,
+          "latency_p99_ms": 288.90000009536743,
+          "latency_max_ms": 306.40000009536743,
+          "latency_p95_unbounded": false,
+          "latency_p99_unbounded": false,
+          "latency_max_unbounded": false
+        }
+      ]
+    }
+  },
+  "intermediate_closeout": {
+    "scope": "status, evidence and runtime accounting only; no new code/experiments",
+    "product_source_commit": "900673e",
+    "pre_closeout_document_commit": "089cc3a",
+    "overall_development_complete": false,
+    "grasp_policy_changed": false,
+    "gpu_owned_processes_remaining": 0,
+    "local_protocol_fake_port": 18866,
+    "temporary_forward_18867": "closed",
+    "runtime_evidence": ".evidence/s2/interim-closeout-runtime-1791630245162083000.json",
+    "responsibility": {
+      "integration": "current lead session",
+      "original_collection": "baseline and policy facts; original code/runtime unchanged",
+      "hardware_branch": "retains hardware candidate; unified physical deployment not qualified",
+      "new_grasp_policy": "user decision pending"
+    }
   }
 }
