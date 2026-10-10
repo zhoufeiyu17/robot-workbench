@@ -460,7 +460,7 @@ def legal_tray_contact(evaluator, sample, scene, contacts, dt):
 
 def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     """Frozen success timing and explicit, contact-scoped supported unloading."""
-    from gripper_distance_plan import NATIVE_DISTANCE_ENCODING
+    from gripper_distance_plan import NATIVE_DISTANCE_ENCODING, validate_release_control
     if applied_context is not None and not callable(applied_context):
         raise ValueError('applied command context must be callable')
     if (plan.get('planner_id') != CUROBO_PLANNER_ID or plan.get('schema_version') != 'dual_gpu_pipeline.v1'
@@ -491,14 +491,9 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
         raise ValueError('one explicit frozen opening stage required')
     index = opening[0]
     begin, end = starts[index], starts[index+1] if index+1 < len(starts) else len(ticks)
-    rows = [tick['target'] for tick in ticks[begin:end]]
     policy = plan['gripper_distance_control']
     closed = policy['closed_metal_gap_mm']-policy['native_travel_offset_mm']
-    if (abs(rows[0]['left_gripper']-closed) > 1e-9
-            or abs(rows[-1]['left_gripper']-plan['gripper_opening_mm']) > 1e-9
-            or any(any(row[key] != rows[0][key] for key in ('left_arm_joints', 'right_arm_joints', 'right_gripper')) for row in rows)
-            or any(not 0 <= b['left_gripper']-a['left_gripper'] <= .20000001 for a, b in zip(rows, rows[1:]))):
-        raise ValueError('release budget requires the declared stationary continuous open ramp')
+    validate_release_control(plan, closed=closed, opening=plan['gripper_opening_mm'], legacy=True)
     start = runtime.loop.physics_steps
     if type(start) is not int or start < 0 or evaluator.previous.physics_step != start:
         raise ValueError('evaluator and execution loop must share the starting physics step')

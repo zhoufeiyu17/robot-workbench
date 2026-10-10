@@ -179,12 +179,55 @@ def validate_model_evidence(plan,source):
             if (parent.get('receipt_index') not in selected
                     or normalization!=records[parent['receipt_index']].get('position_normalization')):
                 raise ValueError('joined parent position normalization differs from its selected GPU receipt')
+    cartesian={row.get('receipt_index'):row for row in receipt.get('cartesian_stages',[])}
+    if len(cartesian)!=len(receipt.get('cartesian_stages',[])):
+        raise ValueError('duplicate Cartesian stage proof')
+    for index in selected:
+        row=records[index]
+        if row.get('method')!='A1Kinematics.batch_ik':continue
+        proof=cartesian.get(index,{})
+        timing=row.get('timing',{});control=timing.get('control_validation',{})
+        checks=[proof.get('gpu',{}),proof.get('support',{}),row.get('gpu',{})]
+        budget=proof.get('nominal_budget_s')
+        if (proof.get('schema')!='cartesian_stage_derivation.v1' or proof.get('method')!=row['method']
+                or proof.get('source_digest')!=_digest(source) or row.get('source_digest')!=_digest(source)
+                or row.get('urdf_sha256')!=binding['urdf_sha256']
+                or proof.get('input_joint_path_sha256')!=row.get('path_sha256')
+                or proof.get('emitted_joint_path_sha256')!=row.get('emitted_joint_path_sha256')
+                or proof.get('previous_command_target_q')!=row.get('previous_command_target_q')
+                or proof.get('goal_pose')!=row.get('goal_pose') or proof.get('timing')!=timing
+                or type(budget) not in (int,float) or not math.isfinite(budget) or budget<=0
+                or row.get('ticks')!=round(budget*30) or timing.get('applied_command_count')!=row['ticks']
+                or not math.isclose(timing.get('applied_duration_s',math.inf),budget,abs_tol=1e-9,rel_tol=0)
+                or timing.get('budget_extended') is not False or timing.get('final_arrival_commands')!=2
+                or control.get('passed') is not True
+                or control.get('velocity_limit_rad_s')!=plan['control']['max_target_velocity_rad_s']
+                or control.get('acceleration_limit_rad_s2')!=plan['control']['max_target_acceleration_rad_s2']
+                or any(check.get('passed') is not True for check in checks)
+                or proof.get('task_corridor',{}).get('success') is not True
+                or row.get('task_corridor',{}).get('success') is not True
+                or proof['gpu'].get('path_sha256')!=proof.get('complete_joint_path_sha256')
+                or proof['task_corridor'].get('path_sha256')!=proof.get('complete_joint_path_sha256')
+                or type(row.get('maximum_waypoint_error_m')) not in (int,float)
+                or not 0<=row['maximum_waypoint_error_m']<=1e-5):
+            raise ValueError('Cartesian stage lacks current-model fixed-clock and complete path evidence')
+        if receipt.get('derivation') is None:
+            matched=[(i,stage) for i,stage in enumerate(stages) if stage.get('motiongen_receipt_index')==index]
+            if len(matched)!=1:raise ValueError('Cartesian proof must bind one emitted stage')
+            i,stage=matched[0];begin=stage['start_tick'];end=stages[i+1]['start_tick'] if i+1<len(stages) else len(plan['ticks'])
+            joints=[tick['target']['left_arm_joints'] for tick in plan['ticks'][begin:end]]
+            if (len(joints)!=row['ticks'] or _digest(joints)!=proof['emitted_joint_path_sha256']
+                    or _digest([proof['previous_command_target_q'],*joints])!=proof['complete_joint_path_sha256']
+                    or begin==0 or plan['ticks'][begin-1]['target']['left_arm_joints']!=proof['previous_command_target_q']):
+                raise ValueError('Cartesian emitted commands or their preceding target differ')
     policy=plan.get('gripper_distance_control',{})
     if (plan.get('native_action_encoding')!=NATIVE_DISTANCE_ENCODING
             or policy.get('schema_version')!='sim_gripper_distance_control.v1'
             or policy.get('closed_metal_gap_mm')!=65. or policy.get('rubber_gap_mm')!=62.
             or abs(policy.get('native_travel_offset_mm',math.inf)-gripper_offset_mm(source['calibration_profile']))>1e-9):
         raise ValueError('physical and GPU 65/62 mm distance definitions differ')
+    from gripper_distance_plan import validate_release_control
+    validate_release_control(plan,closed=65.-policy['native_travel_offset_mm'],opening=plan.get('gripper_opening_mm'))
 
 
 def freeze_physical(plan,source,binding,*,environment='physical'):
@@ -262,7 +305,7 @@ def validate_evidence(plan,source):
 def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
     """Reuse the existing GPU planner's stage time interpolation, without queries."""
     from real_contract import validate_real_plan
-    from motiongen_plan import scaled_stages,freeze
+    from motiongen_plan import scaled_stages,freeze,WAITS
     from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
     validate_real_plan(plan,source,binding,environment=environment)
     model=validate_evidence(plan,source)
@@ -275,7 +318,8 @@ def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
             rows=[row['target'] for row in model['ticks'][begin:end]],
             native_actions=model['native_actions'][begin:end],receipt_index=stage.get('motiongen_receipt_index')))
     spec=ac_one_dual_arm_zero_home_action_spec()
-    scaled,times=scaled_stages(stages,speed_scale,spec,model['gripper_opening_mm'])
+    fixed=WAITS|{'open'} if model.get('gripper_release',{}).get('schema_version')=='commanded_gap_release.v3' else WAITS
+    scaled,times=scaled_stages(stages,speed_scale,spec,model['gripper_opening_mm'],fixed_stages=fixed)
     grip=model['gripper_distance_control']['geometry_derivation']
     encoded=freeze(scaled,source,dict(native_identity=model['native_identity']),grip,spec,
                    run_id=model['run_id']+'-speed-'+str(speed_scale))
@@ -293,4 +337,5 @@ def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
         method='uniform_source_time_stage_scale',parent_timeline_digest=model['timeline_digest'],
         parent_receipt_sha256=_digest(model['planning_validation']),speed_scale=speed_scale,
         parent_stage_sample_times=times,collision_audit_rerun=False))
+    if 'normal_recipe' in derived:derived['normal_recipe']['requested_speed_scale']=speed_scale
     return freeze_physical(derived,source,binding,environment=environment)

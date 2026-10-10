@@ -66,11 +66,9 @@ class FrozenExecutor:
         hz, nominal = control.get("physics_hz"), control.get("substeps")
         steps = plan.get("native_substeps")
         self.ticks = self.plan["ticks"]
-        from gripper_distance_plan import validate_distance_control, holding_ticks
+        from gripper_distance_plan import validate_distance_control, validate_release_control
         self.holding_ticks = validate_distance_control(self.plan, source)
-        self.unloading_ticks = (holding_ticks(self.plan, {'open'})
-            if self.plan.get('gripper_release',{}).get('schema_version')=='commanded_gap_release.v2'
-            else [False]*len(self.ticks))
+        self.unloading_ticks = validate_release_control(self.plan)
         if (type(hz) is not int or hz <= 0 or type(nominal) is not int or nominal <= 0
                 or not isinstance(steps, list) or len(steps) != len(self.ticks)
                 or any(type(n) is not int or not 1 <= n <= nominal for n in steps)

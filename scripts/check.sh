@@ -42,6 +42,7 @@ python rule_based_workbench/test_fake_device_pipeline.py
 python rule_based_workbench/test_grasp_contact_geometry.py
 python rule_based_workbench/test_grasp_contact_certificate.py
 python rule_based_workbench/test_motiongen_pipeline.py
+python rule_based_workbench/test_gripper_release.py
 python rule_based_workbench/test_sample_clock.py
 python rule_based_workbench/test_recording_wall_clock.py
 python rule_based_workbench/test_a1_asset_derivation.py

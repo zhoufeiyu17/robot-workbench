@@ -268,7 +268,7 @@ def stage_position_normalization(stage):
         geometric_validation=deepcopy(stage.get('position_projection_validation')))
 
 
-def scaled_stages(stages, speed, spec, opening):
+def scaled_stages(stages, speed, spec, opening, *, fixed_stages=WAITS):
     """Uniformly resample source time; preserve stage endpoints and fixed waits."""
     if type(speed) not in (int, float) or not math.isfinite(speed) or not .1 <= speed <= 1.:
         raise ValueError('speed must be between 0.1 and 1.0')
@@ -277,7 +277,7 @@ def scaled_stages(stages, speed, spec, opening):
     from isaac_lane import native_target
     for stage in stages:
         rows = stage['rows']
-        if stage['name'] in WAITS:
+        if stage['name'] in fixed_stages:
             result.append(deepcopy(stage)); mapping.append(list(range(len(rows))))
             continue
         intervals = math.ceil(Fraction(len(rows)-1)/scale)
@@ -311,6 +311,8 @@ def enforce_stage_motion_limits(stages, control, spec, opening):
         for _ in range(8):
             check=discrete_motion([r['left_arm_joints'] for r in stage['rows']],velocity,acceleration)
             if check['passed']:break
+            if stage.get('nominal_budget_s') is not None:
+                raise ValueError('normal-v31 stage exceeds motion limits within its fixed nominal budget')
             if original['name'] in WAITS:raise ValueError('stationary wait has invalid arm motion')
             speed*=.9*min(1.,velocity/max(check['max_velocity_rad_s'],1e-12),
                           acceleration/max(check['max_acceleration_rad_s2'],1e-12))
@@ -367,7 +369,7 @@ def freeze(stages, source, data, grip, spec, *, run_id):
             geometry_derivation=grip, contact_detection=False, force_control=False),
         gripper_closing=dict(schema_version='commanded_gap_closing.v1',maximum_step_mm=2.,
                              initial_model_gap_mm=grip['open_travel_mm'],target_model_gap_mm=grip['closed_travel_mm'],arm_motion=False),
-        gripper_release=dict(schema_version='commanded_gap_release.v2', maximum_step_mm=.2,
+        gripper_release=dict(schema_version='commanded_gap_release.v3', duration_s=1.5,maximum_gap_speed_mm_s=20.,
                              initial_model_gap_mm=grip['closed_travel_mm'], arm_motion=False))
     from control_motion import validate_control
     plan['control_validation']=validate_control(plan)
@@ -534,26 +536,13 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     def base_pose(pose):
         return asdict(base_from_world.compose(RigidTransform(**pose)))
 
-    def continuous_stage(parents, name, substage, gap, *, tcp_speed=None, frontloaded=False,duration_s=None):
+    def continuous_stage(parents, name, substage, gap, *, goal=None, linear_axis=None, project_to_goal_frame=True,
+                         tcp_speed=None, frontloaded=False,duration_s=None):
         from motiongen_motion import continuous_path
         joined=[r['left_arm_joints'] for p in parents for r in p['rows']]
         positions=None
         if tcp_speed is not None:
             positions=engine.generator.kinematics.get_state(engine.tensor_args.to_device(joined)).ee_position.detach().cpu().tolist()
-        removed=0
-        if substage=='lower':
-            # Native trajectory optimization can overshoot a 5mm descent.
-            # Keep its monotone vertices; the final GPU query covers new chords.
-            direction=[b-a for a,b in zip(positions[0],positions[-1])]
-            squared=sum(v*v for v in direction)
-            if squared<=1e-16:raise ValueError('lower requires a nonzero descent')
-            indices=[0];previous=0.
-            for i,point in enumerate(positions[1:-1],1):
-                fraction=sum((a-b)*d for a,b,d in zip(point,positions[0],direction))/squared
-                if previous<fraction<1.:
-                    indices.append(i);previous=fraction
-            indices.append(len(joined)-1);removed=len(joined)-len(indices)
-            joined=[joined[i] for i in indices];positions=[positions[i] for i in indices]
         control=data['native_identity']['control']
         path,proof=continuous_path(joined,control['max_target_velocity_rad_s'],control['max_target_acceleration_rad_s2'],
             positions=positions,tcp_speed=tcp_speed,frontloaded=frontloaded,duration_s=duration_s)
@@ -562,8 +551,13 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
         proof['parent_paths']=[dict(receipt_index=p['receipt_index'],input_joint_path_sha256=p['input_joint_path_sha256'],
             emitted_joint_path_sha256=_digest([r['left_arm_joints'] for r in p['rows']]),encoding_roundoff_rad=p['encoding_roundoff_rad'],
             position_normalization=stage_position_normalization(p)) for p in parents]
-        proof['gpu']=engine.validate_continuous_path([r['left_arm_joints'] for r in merged['rows']])
-        proof['removed_reverse_vertices']=removed
+        emitted=[r['left_arm_joints'] for r in merged['rows']]
+        if goal is not None:
+            proof['task_corridor']=dict(success=True)
+            engine.validate_held_path(emitted,goal.position,goal.orientation_wxyz,name=substage,
+                receipt=proof['task_corridor'],linear_axis=linear_axis,project_to_goal_frame=project_to_goal_frame)
+        proof['gpu']=engine.validate_continuous_path(emitted)
+        proof['removed_reverse_vertices']=0  # Any native-path derivation is retained in its receipt.
         merged['cross_continuity' if substage=='cross' else 'motion_continuity']=proof
         return merged
 
@@ -624,32 +618,30 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             diagnostic('carry-route-'+candidate['candidate_id']+'.json',route)
             current = grasp_q
             for row in route['stages']:
-                trial_start=len(trial)
                 goal=RigidTransform(**base_pose(row['world_from_tool']))
-                if row['name']=='cross':
-                    state={**contact,**dict(zip(LEFT,current))}
-                    begin=planner.fk.pose(planner.fk.forward(state)['left_link6'])
-                    goals=straight_waypoints(begin,goal)
-                else:goals=[goal]
-                for part_index,goal in enumerate(goals):
-                    name=candidate['candidate_id']+'/'+row['name']+(f'/{part_index}' if len(goals)>1 else '')
-                    vertical=row['name'] in ('lift','raise','front_height','lower')
-                    axis=2 if vertical else (1 if row['name']=='cross' else (0 if row['name']=='insert' else None))
-                    path,_=move('plan_pose',current,[asdict(goal)],name,hold_orientation=True,linear_axis=axis,
-                        project_to_goal_frame=not (vertical or row['name']=='insert'))
-                    stage=row['name'] if row['name'] in ('lift','raise','lower') else 'transport'
-                    trial.append(encode(dict(name=stage,substage=row['name'],rows=[target(q,right,closed,right_gap) for q in path],
-                        receipt_index=len(engine.receipts)-1)))
-                    current=trial[-1]['rows'][-1]['left_arm_joints']
-                if row['name']=='cross':
-                    parents=trial[trial_start:]
-                    merged=continuous_stage(parents,'transport','cross',closed)
-                    trial[trial_start:]=[merged]
-                    current=merged['rows'][-1]['left_arm_joints']
-                elif row['name']=='raise':
-                    trial[-2:]=[continuous_stage(trial[-2:],'lift','lift_raise',closed,tcp_speed=.04,duration_s=2.2)]
-                elif row['name'] in ('front_height','insert','lower'):
-                    trial[-1]=continuous_stage(trial[-1:],stage,row['name'],closed,tcp_speed=.01 if row['name'] in ('front_height','lower') else .06)
+                budget=route['nominal_stage_duration_s'][row['name']]
+                path,receipt=move('plan_cartesian',current,asdict(goal),candidate['candidate_id']+'/'+row['name'],
+                    urdf_path=urdf_path,movable=planner.fk.movable,duration_s=budget)
+                if len(path)!=round(budget*30):raise ValueError('normal-v31 Cartesian stage changed its command budget')
+                stage='lift' if row['name']=='lift_withdraw' else 'lower' if row['name']=='lower' else 'transport'
+                emitted=encode(dict(name=stage,substage=row['name'],rows=[target(q,right,closed,right_gap) for q in path],
+                    receipt_index=len(engine.receipts)-1,nominal_budget_s=budget))
+                joints=[r['left_arm_joints'] for r in emitted['rows']]
+                complete=[list(current),*joints]
+                proof=dict(schema='cartesian_stage_derivation.v1',method='A1Kinematics.batch_ik',
+                    receipt_index=emitted['receipt_index'],source_digest=source_digest,
+                    previous_command_target_q=list(current),goal_pose=asdict(goal),nominal_budget_s=budget,
+                    input_joint_path_sha256=emitted['input_joint_path_sha256'],emitted_joint_path_sha256=_digest(joints),
+                    complete_joint_path_sha256=_digest(complete),timing=deepcopy(receipt['timing']),
+                    task_corridor=dict(success=True))
+                engine.validate_held_path(complete,goal.position,goal.orientation_wxyz,name=row['name'],
+                    receipt=proof['task_corridor'],linear_axis=0,project_to_goal_frame=False)
+                proof['gpu']=engine.validate_continuous_path(complete)
+                proof['support']=support_checker.check(complete)
+                if not proof['support']['passed']:raise ValueError('normal-v31 Cartesian stage exceeds original support domain')
+                emitted['cartesian_derivation']=proof
+                trial.append(emitted)
+                current=joints[-1]
             place_state = {**contact, **dict(zip(LEFT, current))}
             placed_tool = planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(place_state)['left_link6']))
             placed_cup = placed_tool.compose(relation)
@@ -660,7 +652,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             if receiving_distance>targets['placement_goal']['tolerance_m']:
                 raise ValueError('MotionGen endpoint misses receiving goal: '+str(receiving_distance))
             trial.append(encode(dict(name='support_settle', rows=[target(current, right, closed, right_gap)]*3)))
-            trial.append(encode(dict(name='open', rows=jaw_rows(current, right, closed, opening, right_gap))))
+            trial.append(encode(dict(name='open',rows=[target(current,right,
+                closed+(opening-closed)*(1-math.cos(math.pi*i/44))/2,right_gap) for i in range(45)])))
             trial.append(encode(dict(name='release_hold', rows=[target(current, right, opening, right_gap)]*6)))
             engine.generator.detach_object_from_robot(link_name='attached_object')
             world, _, world_description = world_config(planner, placed_cup, fixed_meshes)
@@ -669,7 +662,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             engine.update_locked_joints({name: opened[name] for name in engine.config['kinematics']['lock_joints']})
             # Return through the accepted insertion lane before moving sideways;
             # a diagonal departure can sweep an open pad back into the cup.
-            exit_goal=RigidTransform(**next(row['world_from_tool'] for row in route['stages'] if row['name']=='front_height'))
+            exit_goal=RigidTransform(**next(row['world_from_tool'] for row in route['stages'] if row['name']=='cross'))
             path,_=move('plan_pose',current,[asdict(base_from_world.compose(exit_goal))],
                 'retreat_insert',hold_orientation=True)
             trial.append(encode(dict(name='retreat',substage='retreat_insert',
@@ -713,15 +706,21 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                 raise ValueError('arm motion lacks a MotionGen stage receipt')
         else:
             row = engine.receipts[index]
-            if (row.get('success') is not True or row.get('method') not in
-                    ('MotionGen.plan_single', 'MotionGen.plan_goalset', 'MotionGen.plan_single_js')
+            cartesian=stage.get('cartesian_derivation')
+            valid_method=(row.get('method') in ('MotionGen.plan_single','MotionGen.plan_goalset','MotionGen.plan_single_js')
+                or row.get('method')=='A1Kinematics.batch_ik' and cartesian is not None
+                and cartesian['receipt_index']==index and cartesian['input_joint_path_sha256']==row.get('path_sha256')
+                and cartesian['emitted_joint_path_sha256']==_digest(joints)
+                and cartesian['gpu'].get('passed') is True and cartesian['support'].get('passed') is True
+                and cartesian['task_corridor'].get('success') is True)
+            if (row.get('success') is not True or not valid_method
                     or row.get('path_sha256') != stage['input_joint_path_sha256']):
                 raise ValueError('emitted arm path differs from its successful MotionGen receipt')
             row.update(emitted_joint_path_sha256=_digest(joints), encoding_roundoff_rad=stage['encoding_roundoff_rad'],
                        position_normalization=stage_position_normalization(stage))
             selected_receipts.append(index)
     stages,control_adjustments=enforce_stage_motion_limits(stages,data['native_identity']['control'],spec,opening)
-    derived_stages, source_times = scaled_stages(stages, speed_scale, spec, opening)
+    derived_stages, source_times = scaled_stages(stages, speed_scale, spec, opening,fixed_stages=WAITS|{'open'})
     diagnostic('candidate-stages.json',dict(executable=False,stages=stages,closing=closing))
     diagnostic('motiongen-receipts-latest', deepcopy(engine.receipts))
     support_acceptance=support_checker.check([row['left_arm_joints'] for stage in stages for row in stage['rows']])
@@ -769,10 +768,15 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
         value['planning_validation']['continuous_cross']=[stage['cross_continuity'] for stage in stages
             if stage.get('cross_continuity')]
         value['planning_validation']['continuous_motion']=[stage['motion_continuity'] for stage in stages if stage.get('motion_continuity')]
+        value['planning_validation']['cartesian_stages']=[stage['cartesian_derivation'] for stage in stages if stage.get('cartesian_derivation')]
+        value['normal_recipe']=dict(id='normal-v31-dynamic-targets',nominal_speed_scale=1.,
+            requested_speed_scale=speed_scale if value is plan else 1.,
+            fixed_release_duration_s=1.5,source_fixture_replayed=False,
+            endpoint_source='current calibrated model and fresh observed scene')
         value['planning_validation']['native_output_control_time_adjustments']=control_adjustments
     plan['planning_validation']['derivation'] = dict(method='uniform_source_time_stage_scale',
         parent_timeline_digest=base['timeline_digest'], parent_receipt_sha256=_digest(base['planning_validation']),
-        speed_scale=speed_scale, parent_stage_sample_times=source_times, fixed_wait_stages=sorted(WAITS), collision_audit_rerun=False)
+        speed_scale=speed_scale, parent_stage_sample_times=source_times, fixed_wait_stages=sorted(WAITS|{'open'}), collision_audit_rerun=False)
     plan['planning_validation']['derivation']['max_joint_interpolation_roundoff_rad'] = max(stage.get('interpolation_roundoff_rad', 0.) for stage in derived_stages)
     if physical:
         from physical_motiongen import freeze_physical

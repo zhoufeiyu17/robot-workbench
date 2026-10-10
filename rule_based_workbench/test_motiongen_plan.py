@@ -30,6 +30,7 @@ def main(native_code, urdf):
     from robot_sim.specs.action import ArmCommand, DualArmCommand
     from integration import DualGpuPipeline, _digest
     import motiongen_plan
+    from motiongen_motion import diagonal_waypoints,discrete_motion
 
     spec=ac_one_dual_arm_zero_home_action_spec()
     motion=encode_stage(dict(name='approach',rows=[target([i*.008,0.,0.,0.,0.,0.],
@@ -40,6 +41,11 @@ def main(native_code, urdf):
     assert len(evidence)==1 and evidence[0]['control_validation']['passed']
     assert adjusted[0]['rows'][0]==motion['rows'][0] and adjusted[0]['rows'][-1]==motion['rows'][-1]
     assert adjusted[1]==wait and len(adjusted[1]['rows'])==18
+    # Fixed-budget Cartesian stages must fail, never silently inherit legacy retiming.
+    try:enforce_stage_motion_limits([dict(motion,nominal_budget_s=len(motion['rows'])/30)],
+        dict(max_target_velocity_rad_s=2.,max_target_acceleration_rad_s2=5.),spec,82.992)
+    except ValueError as error:assert 'fixed nominal budget' in str(error),error
+    else:raise AssertionError('fixed-budget Cartesian stage silently extended its clock')
 
     def forbidden(*args, **kwargs):
         raise AssertionError('legacy CPU planner/IK/continuous trajectory was invoked')
@@ -92,6 +98,8 @@ def main(native_code, urdf):
     class Engine:
         twist = False
         projection_noise = False
+        reject_held_stage = None
+        extra_cartesian_command = False
         def __init__(self, config, world, model_report=None):
             self.config = deepcopy(config); self.receipts = []
             report={}
@@ -115,6 +123,15 @@ def main(native_code, urdf):
         def validate_continuous_path(self,path):
             from integration import _digest
             return dict(passed=True,path_sha256=_digest(path),fixture=True)
+        def validate_held_path(self,path,goal_position,goal_quaternion,*,name,receipt,
+                               linear_axis=None,project_to_goal_frame=True):
+            if name==self.reject_held_stage:
+                receipt['success']=False
+                raise ValueError('fixture merged stage violates task corridor')
+            receipt.update(success=True,start_position=path[0][:3],goal_position=list(goal_position),
+                goal_quaternion=list(goal_quaternion),linear_axis=linear_axis,
+                project_to_goal_frame=project_to_goal_frame,path_sha256=_digest(path))
+            return receipt
         def update_world(self, world): self.generator.update_world(world)
         def update_locked_joints(self, values): self.config['kinematics']['lock_joints'] = dict(values)
         def path(self,start,end):
@@ -124,7 +141,6 @@ def main(native_code, urdf):
             if len(goals)!=1:raise ValueError('this rule chain uses one pose goal per stage')
             end = [*goals[0]['position'], *start[3:]]
             rows=self.path(start,end)
-            if self.twist and name.endswith('/cross'):rows[len(rows)//2][3]=.01
             if self.projection_noise and name in ('approach_pre','retreat_insert'):
                 rows[len(rows)//2][3]=0.  # Owner lower bound is model +.002 in the projection fixture.
             receipt = dict(stage=name, method='MotionGen.plan_goalset', success=True)
@@ -134,6 +150,28 @@ def main(native_code, urdf):
             rows=self.path(start,goal)
             receipt = dict(stage=name, method='MotionGen.plan_single_js', success=True)
             self.receipts.append(receipt); return rows, receipt
+        def plan_cartesian(self,start,goal,*,name,urdf_path,movable,duration_s):
+            # Numerical CPU fixture only: the real shared clock is exercised,
+            # while FK maps the first three joints directly to XYZ; no GPU IK ran.
+            waypoints,progress=diagonal_waypoints(dict(position=start[:3],orientation_wxyz=goal['orientation_wxyz']),goal,duration_s)
+            rows=[[*point['position'],*start[3:]] for point in waypoints]
+            if self.twist and name.endswith('/cross'):
+                for i,row in enumerate(rows):row[3]+=.01*math.sin(math.pi*i/(len(rows)-1))**2
+            if self.extra_cartesian_command:rows.append(rows[-1])
+            locked=self.config['kinematics']['lock_joints']
+            identity=dict(urdf_sha256=hashlib.sha256(urdf_path.read_bytes()).hexdigest(),locked_positions=deepcopy(locked))
+            complete=[start]+rows
+            receipt=dict(stage=name,method='A1Kinematics.batch_ik',success=True,fixture=True,ticks=len(rows),
+                identity=identity,urdf_sha256=identity['urdf_sha256'],solver_identity_sha256=_digest(identity),
+                locked_positions_sha256=_digest(locked),previous_command_target_q=list(start),
+                start_q_sha256=_digest(start),goal_pose=deepcopy(goal),goal_pose_sha256=_digest(goal),
+                maximum_waypoint_error_m=0.,gpu=self.validate_continuous_path(complete),
+                task_corridor=dict(success=True,path_sha256=_digest(complete),fixture=True),
+                timing=dict(applied_command_count=len(rows),applied_duration_s=len(rows)/30,
+                    final_arrival_commands=2,measured_start_command_duplicated=False,budget_extended=False,
+                    shared_cartesian_progress=progress,control_validation=discrete_motion(complete,2.,5.)))
+            self.receipts.append(receipt)
+            return rows,receipt
 
     source, _ = motiongen_fixture()
     state = dict.fromkeys(FK.movable, 0.)
@@ -178,9 +216,11 @@ def main(native_code, urdf):
             kinematics=dict(joints={name: {'velocity': 5.5} for name in LEFT}))
 
     def route(*args, **kwargs):
-        return dict(stages=[dict(name=name, world_from_tool=asdict(Pose(point))) for name, point in
-            (('lift', (.2, .2, .32)), ('raise', (.2, .2, .35)), ('withdraw', (.2, .17, .35)),
-             ('cross', (.3, .17, .35)), ('front_height', (.3, .17, .305)), ('insert', (.3, .2, .305)), ('lower', (.3, .2, .3)))])
+        return dict(recipe='normal-v31-dynamic-targets',
+            nominal_stage_duration_s=dict(lift_withdraw=4.3,cross=170/30,insert=3.,lower=29/30),
+            stages=[dict(name=name,world_from_tool=asdict(Pose(point))) for name,point in
+                (('lift_withdraw',(.2,.17,.35)),('cross',(.3,.17,.305)),
+                 ('insert',(.3,.2,.305)),('lower',(.3,.2,.3)))])
 
     legacy_trajectory = ModuleType('robot_sim.policies.continuous_motion')
     legacy_trajectory.continuous_trajectory = forbidden
@@ -201,7 +241,7 @@ def main(native_code, urdf):
         patch('curobo_robot_model.build_conservative_robot_model', side_effect=model),
         patch('curobo_robot_model.fixed_world_mesh_descriptors', return_value=[]),
         patch('motiongen_targets.generate_targets', return_value=targets),
-        patch('motiongen_targets.straight_waypoints',side_effect=lambda begin,end:[end]), patch('motiongen_targets.carry_targets', side_effect=route),
+        patch('motiongen_targets.straight_waypoints',side_effect=forbidden), patch('motiongen_targets.carry_targets', side_effect=route),
         patch('motiongen_motion.MotionGenerator', Engine), patch('curobo_whole_geometry.CuroboWholeGeometry', side_effect=lambda value: value),
         patch('curobo_relative_geometry.install',side_effect=forbidden),
         patch.object(Geo,'closing_sweep',side_effect=forbidden),
@@ -243,7 +283,8 @@ def main(native_code, urdf):
         assert len(model_calls)==before+2, 'changed geometry reused a stale sphere model'
         bridge = DualGpuPipeline(); bridge.ingest_source(source); bridge.accept_plan(plan)
         assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_single_js'] == 1
-        assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_goalset'] == 10
+        assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_goalset'] == 3
+        assert plan['planning_validation']['selected_motiongen_method_counts']['A1Kinematics.batch_ik'] == 4
         assert any(row.get('substage')=='retreat_insert' for row in plan['stages'])
         assert all(row['claw_cup_allowance_m']==0. for row in plan['motiongen_receipts'] if row['stage']=='home')
         assert not plan['planning_validation']['cpu_search_fallback']
@@ -270,9 +311,91 @@ def main(native_code, urdf):
                 if stage['name'] == 'open':
                     gaps = [row['target']['left_gripper'] for row in candidate['ticks'][stage['start_tick']:end]]
                     assert abs(gaps[0]-64.992) < 1e-9 and abs(gaps[-1]-82.992) < 1e-9
-                    assert all(0 <= b-a <= .20000001 for a, b in zip(gaps, gaps[1:]))
+                    assert len(gaps)==45 and candidate['gripper_release']['schema_version']=='commanded_gap_release.v3'
+                    assert np.allclose(gaps,[64.992+18*(1-math.cos(math.pi*i/44))/2 for i in range(45)],rtol=0.,atol=1e-12)
+                    assert all(0 <= b-a <= 20/30+1e-8 for a,b in zip(gaps,gaps[1:]))
+                if stage['name']=='release_hold':assert end-stage['start_tick']==6
         assert evidence['gpu_final_acceptance']['task_semantics']['checked_cross_samples'] > 0
         assert evidence['gpu_final_acceptance']['task_semantics']['max_ee_orientation_error_rad'] == 0.
+        # A diagonal insert uses its complete start-goal line, not a fixed Y
+        # plane or the old independent height stage. Exact budgets are nominal;
+        # user speed scaling can lengthen arm motion, but not the release.
+        diagonal_route=route()
+        for row in diagonal_route['stages']:
+            if row['name'] in ('lift_withdraw','cross'):
+                position=list(row['world_from_tool']['position'])
+                position[0]=.3-.094695459
+                position[1]=.2 if row['name']=='lift_withdraw' else .2-.002477275
+                row['world_from_tool']['position']=position
+        with patch('motiongen_targets.carry_targets',return_value=diagonal_route):
+            diagonal_base,diagonal_plan,diagonal_evidence=plan_loaded(planner,observation,data,source,urdf,speed_scale=.3)
+        budgets=diagonal_route['nominal_stage_duration_s']
+        for value in (diagonal_base,diagonal_plan):
+            assert not any(stage['substage'] in ('raise','withdraw','front_height') for stage in value['stages'])
+            proofs=value['planning_validation']['cartesian_stages']
+            assert len(proofs)==4
+            for name,proof in zip(budgets,proofs,strict=True):
+                index=proof['receipt_index'];receipt=value['motiongen_receipts'][index]
+                assert index in value['planning_validation']['selected_motiongen_receipt_indices']
+                assert receipt['stage']=='placement/'+name and receipt['method']=='A1Kinematics.batch_ik'
+                assert receipt['fixture'] is True, 'CPU numerical fixture is never GPU evidence'
+                assert proof['source_digest']==receipt['source_digest']==_digest(source)
+                assert receipt['urdf_sha256']==data['urdf_sha256']
+                assert receipt['start_q_sha256']==_digest(proof['previous_command_target_q'])
+                assert receipt['goal_pose_sha256']==_digest(proof['goal_pose'])
+                assert proof['nominal_budget_s']==budgets[name]
+                assert proof['timing']==receipt['timing']
+                assert proof['timing']['applied_command_count']==round(budgets[name]*30)
+                assert proof['timing']['applied_duration_s']==budgets[name]
+                assert proof['timing']['budget_extended'] is False
+                assert proof['input_joint_path_sha256']==receipt['path_sha256']
+                assert proof['emitted_joint_path_sha256']==receipt['emitted_joint_path_sha256']
+                assert proof['complete_joint_path_sha256']==proof['gpu']['path_sha256']==proof['task_corridor']['path_sha256']
+                assert proof['task_corridor']['success'] and proof['support']['passed'] and proof['gpu']['passed']
+                assert proof['task_corridor']['project_to_goal_frame'] is False
+                assert proof['task_corridor']['start_position']==proof['previous_command_target_q'][:3]
+                assert proof['task_corridor']['goal_position']==list(proof['goal_pose']['position'])
+                stage_index=next(i for i,stage in enumerate(value['stages']) if stage['substage']==name)
+                stage=value['stages'][stage_index];end=value['stages'][stage_index+1]['start_tick']
+                rows=[tick['target']['left_arm_joints'] for tick in value['ticks'][stage['start_tick']:end]]
+                assert rows[0]!=proof['previous_command_target_q'], 'start must not be emitted twice'
+                if value is diagonal_base:
+                    assert len(rows)==round(budgets[name]*30)
+                    assert _digest(rows)==proof['emitted_joint_path_sha256']
+                else:assert len(rows)>round(budgets[name]*30)
+            insert=proofs[2]
+            assert np.allclose(insert['previous_command_target_q'][:3],diagonal_route['stages'][1]['world_from_tool']['position'])
+            assert insert['goal_pose']==diagonal_route['stages'][2]['world_from_tool']
+            assert value['planning_validation']['gpu_final_acceptance']['task_semantics']['passed']
+        with patch.object(Engine,'reject_held_stage','insert'):
+            rejected=[]
+            try:plan_loaded(planner,observation,data,source,urdf,speed_scale=.3,
+                diagnostic=lambda name,value:rejected.append((name,deepcopy(value))))
+            except ValueError as error:assert 'no complete placement' in str(error),error
+            else:raise AssertionError('merged task corridor failure produced a plan')
+            failed=next(value for name,value in rejected if name=='placement-failures.json')
+            assert failed[0]['error']=='fixture merged stage violates task corridor'
+        with patch.object(Engine,'extra_cartesian_command',True):
+            rejected=[]
+            try:plan_loaded(planner,observation,data,source,urdf,
+                diagnostic=lambda name,value:rejected.append((name,deepcopy(value))))
+            except ValueError as error:assert 'no complete placement' in str(error),error
+            else:raise AssertionError('Cartesian command budget overrun produced a plan')
+            failed=next(value for name,value in rejected if name=='placement-failures.json')
+            assert 'changed its command budget' in failed[0]['error']
+        with patch('gpu_acceptance.SupportBounds',return_value=NS(check=lambda q:dict(passed=False))):
+            try:plan_loaded(planner,observation,data,source,urdf)
+            except ValueError as error:assert 'no complete placement' in str(error),error
+            else:raise AssertionError('Cartesian support failure produced a plan')
+        native_gpu_check=Engine.validate_continuous_path
+        def reject_cross_gpu(engine,path):
+            proof=native_gpu_check(engine,path)
+            if len(path)==171:proof['passed']=False
+            return proof
+        with patch.object(Engine,'validate_continuous_path',reject_cross_gpu):
+            try:plan_loaded(planner,observation,data,source,urdf)
+            except ValueError as error:assert 'successful MotionGen receipt' in str(error),error
+            else:raise AssertionError('Cartesian complete-path GPU failure produced a plan')
         alternatives=deepcopy(targets)
         alternatives['grasp_candidates']=[dict(grasp,candidate_id='rejected-pregrasp',world_from_pregrasp=asdict(Pose((.151,.2,.3)))),
             dict(grasp,candidate_id='rejected-contact'),
@@ -337,6 +460,9 @@ def main(native_code, urdf):
             holds=adjusted['stages']
             index=next(i for i,s in enumerate(holds) if s['name']=='close_and_hold')
             assert holds[index+1]['start_tick']-holds[index]['start_tick']==18
+            for name,count in (('open',45),('release_hold',6)):
+                index=next(i for i,s in enumerate(holds) if s['name']==name)
+                assert holds[index+1]['start_tick']-holds[index]['start_tick']==count
         # A real model/Owner-domain projection must retain its proof after both
         # continuous stage merge and subsequent physical-plan retiming.
         noisy_source=deepcopy(physical_source)
@@ -379,6 +505,25 @@ def main(native_code, urdf):
             if stage['substage']=='retreat_insert')['position_normalization']['corrections']
         from physical_motiongen import validate_evidence,validate_model_evidence
         checked=validate_evidence(noisy_base,noisy_source)
+        for mutation in ('drop_cartesian','extend_budget','wrong_source','forge_complete_path'):
+            bad=deepcopy(checked)
+            proof=bad['planning_validation']['cartesian_stages'][0]
+            receipt=bad['motiongen_receipts'][proof['receipt_index']]
+            if mutation=='drop_cartesian':bad['planning_validation']['cartesian_stages'].pop(0)
+            elif mutation=='extend_budget':
+                receipt['ticks']+=1
+                receipt['timing'].update(applied_command_count=receipt['ticks'],
+                    applied_duration_s=receipt['ticks']/30,budget_extended=True)
+                proof['timing']=deepcopy(receipt['timing'])
+            elif mutation=='wrong_source':proof['source_digest']='f'*64
+            else:
+                proof['complete_joint_path_sha256']='f'*64
+                proof['gpu']['path_sha256']=proof['task_corridor']['path_sha256']='f'*64
+            # Re-seal outer receipt metadata, so semantic binding must reject it.
+            bad['planning_validation']['motiongen_receipts_sha256']=_digest(bad['motiongen_receipts'])
+            try:validate_model_evidence(bad,noisy_source)
+            except ValueError as error:assert 'Cartesian' in str(error),error
+            else:raise AssertionError('tampered Cartesian proof accepted: '+mutation)
         for mutation in ('drop_stage','drop_geometry','forge_geometry','drop_parent'):
             bad=deepcopy(checked)
             stage=next(stage for stage in bad['stages'] if stage['substage']=='retreat_insert')

@@ -33,6 +33,25 @@ def main(native_code):
     assert len(sequence)==2 and sequence[-1]==end
     assert np.allclose(sequence[0].position,((np.array(begin.position)+end.position)/2))
     assert all(p.orientation_wxyz==end.orientation_wxyz for p in sequence)
+    # Insert is free along base X, even while the tool is pitched. The cold
+    # scene's 2.477 mm Y component needs two subgoals; warm's 0.791 mm does not.
+    pitch=.6370061007603225
+    orientation=(math.cos(pitch/2),0.,math.sin(pitch/2),0.)
+    for y,count in ((.002477275,2),(.000790675,1)):
+        begin=Pose((.232715,-.049877,.097782),orientation)
+        end=Pose((begin.position[0]+.094695459,begin.position[1]+y,begin.position[2]),orientation)
+        sequence=straight_waypoints(begin,end,linear_axis=0,project_to_goal_frame=False)
+        assert len(sequence)==count and sequence[-1]==end
+        previous=begin
+        for index,point in enumerate(sequence,1):
+            assert abs(point.position[1]-previous.position[1])<=.0015+1e-12
+            assert np.allclose(point.position,np.array(begin.position)+
+                               (np.array(end.position)-begin.position)*index/count)
+            assert point.orientation_wxyz==end.orientation_wxyz
+            previous=point
+        assert len(straight_waypoints(begin,end,linear_axis=0))>count, 'pitched goal frame must differ from base X'
+    vertical=Pose((begin.position[0],begin.position[1],begin.position[2]-.005),orientation)
+    assert straight_waypoints(begin,vertical,linear_axis=2,project_to_goal_frame=False)==[vertical]
     class FakeFK:
         def forward(self, state):
             result = {name: np.eye(4) for name in ('left_link6', 'left_link7', 'left_link8')}
@@ -104,9 +123,27 @@ def main(native_code):
     deeper_route=carry_targets(planner,deeper,grasp,placement)
     assert deeper_route['lane_projection_m']>=route['lane_projection_m']+.079
     assert deeper_route['tray_exit']['clearance_m']>=deeper_route['solver_pose_reserve_m']-1e-12
-    assert [row['name'] for row in route['stages']] == ['lift', 'raise', 'withdraw', 'cross', 'front_height', 'insert', 'lower']
+    assert route['recipe']=='normal-v31-dynamic-targets'
+    assert [row['name'] for row in route['stages']] == ['lift_withdraw','cross','insert','lower']
+    assert route['nominal_stage_duration_s']==dict(lift_withdraw=4.3,cross=170/30,insert=3.,lower=29/30)
+    rear,entry,hover,lower=[row['world_from_cup']['position'] for row in route['stages']]
+    assert rear[2]>entry[2] and entry[2]==hover[2]==lower[2]+.005
+    assert route['cross_cup_bottom_height_range_m']==[entry[2],rear[2]]
+    assert [row['support_contact'] for row in route['stages']]==[False,False,False,True]
+    assert deeper_route['stages'][0]['world_from_cup']!=route['stages'][0]['world_from_cup']
+    assert deeper_route['stages'][1]['world_from_cup']!=route['stages'][1]['world_from_cup']
     assert len({row['world_from_tool']['orientation_wxyz'] for row in route['stages']}) == 1
     assert route['stages'][-1]['world_from_cup'] == placement['world_from_cup']
+    # A low obstruction misses the old high cross, but intersects its new
+    # descending tail. The lane must cover the whole height interval.
+    descending=deepcopy(observation)
+    descending.scene.sites=(NS(site_id='liquid_outlet',position_world_m=(.55,-.1,2.)),)
+    high_route=carry_targets(planner,descending,grasp,placement,travel_lift_m=.1)
+    descending.scene.shapes+= (NS(shape_path='low-front-obstruction',
+        world_from_shape=Pose((.55,-.6,.79)),dimensions_m=(.3,.2,.02)),)
+    obstructed=carry_targets(planner,descending,grasp,placement,travel_lift_m=.1)
+    assert obstructed['lane_projection_m']>high_route['lane_projection_m']+.1
+    assert obstructed['conservative_cross_clearance_m']>=.017-1e-12
     low_outlet=deepcopy(observation)
     low_outlet.scene.sites=(NS(site_id='liquid_outlet',position_world_m=(.55,-.1,.92)),)
     capped=carry_targets(planner,low_outlet,grasp,placement)
@@ -152,6 +189,13 @@ def main(native_code):
                        grasp['world_from_tool']['position'], translation)
     assert np.allclose(np.array(moved_targets['placement_candidates'][0]['world_from_cup']['position'])-
                        placement['world_from_cup']['position'], translation)
+    moved_route=carry_targets(planner,moved,moved_targets['grasp_candidates'][0],moved_targets['placement_candidates'][0])
+    for original,translated in zip(route['stages'],moved_route['stages'],strict=True):
+        assert original['name']==translated['name']
+        for key in ('world_from_cup','world_from_tool'):
+            assert np.allclose(np.array(translated[key]['position'])-original[key]['position'],translation)
+            assert translated[key]['orientation_wxyz']==original[key]['orientation_wxyz']
+    assert moved_route['nominal_stage_duration_s']==route['nominal_stage_duration_s']
     # An unsupported receiving goal cannot fall back to an arbitrary tray corner.
     narrow = deepcopy(observation)
     narrow.scene.support_polygon_world_m = tuple(support.transform_point(p) for p in

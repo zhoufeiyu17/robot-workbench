@@ -95,6 +95,26 @@ def segment_errors(positions, origin, goal):
     return ((positions-origin-fraction[...,None]*direction)**2).sum(-1)**.5
 
 
+def diagonal_waypoints(start, end, duration_s):
+    """Normal-v31 shared Cartesian quintic clock; start is not a new command."""
+    if type(duration_s) not in (int,float) or not math.isfinite(duration_s) or duration_s<=0:
+        raise ValueError('finite positive Cartesian duration required')
+    ticks=round(duration_s*30)
+    if ticks<3 or not math.isclose(ticks/30,duration_s,rel_tol=0,abs_tol=1e-9):
+        raise ValueError('duration must cover an exact number of 30Hz commands')
+    origin,rotation=checked_pose(start);goal,goal_rotation=checked_pose(end)
+    sign=1 if sum(a*b for a,b in zip(rotation,goal_rotation))>=0 else -1
+    points=[];progress=[]
+    for i in range(1,ticks-1):
+        t=i/(ticks-2);s=10*t**3-15*t**4+6*t**5
+        quaternion=[a+(sign*b-a)*s for a,b in zip(rotation,goal_rotation)]
+        norm=math.sqrt(sum(v*v for v in quaternion))
+        points.append(dict(position=[a+(b-a)*s for a,b in zip(origin,goal)],
+            orientation_wxyz=[v/norm for v in quaternion]))
+        progress.append(s)
+    return points+[deepcopy(points[-1]) for _ in range(2)],progress+[1.]*2
+
+
 def discrete_motion(path, velocity_limit, acceleration_limit, dt=1/30):
     """The native executor uses target differences, including zero-speed joins."""
     if len(path)<2 or not all(math.isfinite(v) and v>0 for v in (velocity_limit,acceleration_limit,dt)):
@@ -305,39 +325,131 @@ class MotionGenerator:
         position_error, angle_error, passed = task_pose_error(end.ee_position[0].detach().cpu().tolist(),
             end.ee_quaternion[0].detach().cpu().tolist(), goal_position, goal_quaternion)
         receipt.update(task_position_error_m=position_error, task_orientation_error_rad=angle_error)
-        if hold_orientation:
-            # Validate the actual native path's task semantics, not only its end.
-            # Later user speed interpolation does not rerun collision checks.
-            path_state=self.generator.kinematics.get_state(self.tensor_args.to_device(path))
-            quaternions=path_state.ee_quaternion.double()
-            reference=self.tensor_args.to_device(goal_quaternion).double()
-            dots=(quaternions*reference).sum(-1).abs()/(self.torch.linalg.vector_norm(quaternions,dim=-1)*self.torch.linalg.vector_norm(reference))
-            maximum=float((2*self.torch.acos(dots.clamp(0.,1.))).max())
-            receipt['maximum_path_orientation_error_rad']=maximum
-            if not math.isfinite(maximum) or maximum>TASK_ORIENTATION_TOLERANCE_RAD+1e-6:
-                receipt['success']=False
-                raise ValueError(f'MotionGen {name} exceeds 0.5deg along the held-orientation path')
-            if linear_axis is not None:
-                if linear_axis==0 and project_to_goal_frame:
-                    local=metric_goal.compute_local_pose(Pose(position=path_state.ee_position,quaternion=path_state.ee_quaternion))
-                    errors=self.torch.linalg.vector_norm(local.position[...,1:],dim=-1)
-                    reference='tool-X goal-frame line'
-                else:
-                    errors=segment_errors(path_state.ee_position,path_state.ee_position[0],self.tensor_args.to_device(goal_position))
-                    reference='actual start-goal segment'
-                transverse=float(errors.max())
-                receipt['maximum_linear_transverse_error_m']=transverse
-                receipt['linear_axis_goal_frame']=linear_axis
-                receipt['linear_acceptance_reference']=reference
-                if linear_approach:receipt['maximum_approach_transverse_error_m']=transverse
-                if not math.isfinite(transverse) or transverse>TASK_POSITION_TOLERANCE_M+1e-7:
-                    receipt['success']=False
-                    receipt['unaccepted_path_joints']=path
-                    raise ValueError(f'MotionGen {name} exceeds the straight-motion 2mm corridor')
         if not passed:
             receipt['success'] = False
             raise ValueError(f'MotionGen {name} exceeds accepted 2mm/0.5deg pose tolerance')
+        if hold_orientation:
+            self.validate_held_path(path,goal_position,goal_quaternion,name=name,receipt=receipt,
+                linear_axis=linear_axis,project_to_goal_frame=project_to_goal_frame)
+            if linear_approach:receipt['maximum_approach_transverse_error_m']=receipt['maximum_linear_transverse_error_m']
         return path, receipt
+
+    def plan_cartesian(self,start,goal,*,name,urdf_path,movable,duration_s,end_q=None):
+        """GPU waypoint IK on one fixed Cartesian clock; no path-search claim."""
+        from curobo_planning import A1Kinematics
+        from pathlib import Path
+        import hashlib
+        began=time.perf_counter()
+        receipt=dict(stage=name,method='A1Kinematics.batch_ik',success=False,
+            recipe_source=dict(file='scripts/alignment_fragments.py',functions=['diagonal_waypoints','cartesian_motion'],
+                sha256='03d2c519e5fc039c6cf2da3a7cc72ddbce7b0d0680fa4cf22bbe84f6963fb5a5'))
+        self.receipts.append(receipt)
+        try:
+            self.cup_contact.assert_ready(self)
+            start=finite_vector(start,6,'Cartesian start model joints')
+            position,quaternion=checked_pose(goal)
+            limits=self.motion_control_limits
+            if not limits or any(type(limits.get(key)) not in (int,float) or not math.isfinite(limits[key]) or limits[key]<=0
+                    for key in ('max_velocity_rad_s','max_acceleration_rad_s2')):
+                raise ValueError('Cartesian path requires original finite positive motion limits')
+            locked=dict(self.config['kinematics']['lock_joints'])
+            state={**locked,**dict(zip(LEFT_JOINTS,start))}
+            origin=self.generator.kinematics.get_state(self.tensor_args.to_device([start]))
+            start_pose=dict(position=origin.ee_position[0].detach().cpu().tolist(),
+                orientation_wxyz=normalized_fk_quaternion(origin.ee_quaternion[0].detach().cpu().tolist()))
+            waypoints,progress=diagonal_waypoints(start_pose,goal,duration_s)
+            if not task_pose_error([0.,0.,0.],start_pose['orientation_wxyz'],[0.,0.,0.],quaternion)[2]:
+                raise ValueError('Cartesian held orientation differs from start by more than 0.5deg')
+            solver=A1Kinematics(urdf_path,movable,state)
+            current_urdf_sha256=hashlib.sha256(Path(self.config['kinematics']['urdf_path']).read_bytes()).hexdigest()
+            if (solver.identity['urdf_sha256']!=current_urdf_sha256 or
+                    any(solver.identity[key]!=self.config['kinematics'][key] for key in ('base_link','ee_link'))):
+                raise ValueError('Cartesian IK URDF/frame differs from current collision model')
+            receipt.update(identity=deepcopy(solver.identity),urdf_sha256=current_urdf_sha256,
+                solver_identity_sha256=_digest(solver.identity),locked_positions_sha256=_digest(locked),
+                previous_command_target_q=start,start_q_sha256=_digest(start),goal_pose=deepcopy(goal),goal_pose_sha256=_digest(goal),
+                start_reference='previous command target in model space',start_pose=start_pose,
+                endpoint_seed_source='new GPU endpoint IK' if end_q is None else 'explicit model joint endpoint')
+            if end_q is None:
+                endpoint=solver.batch_ik([position],[quaternion],[start])
+                if not bool(endpoint.success.all()):raise ValueError('Cartesian endpoint IK failed')
+                end_q=endpoint.solution.detach().cpu().reshape(-1,6).tolist()[0]
+            end_q=finite_vector(end_q,6,'Cartesian endpoint model joints')
+            seeds=[[a+(b-a)*s for a,b in zip(start,end_q)] for s in progress[:-2]]
+            solved=solver.batch_ik([p['position'] for p in waypoints[:-2]],
+                [p['orientation_wxyz'] for p in waypoints[:-2]],seeds)
+            if not bool(solved.success.all()):raise ValueError('Cartesian waypoint IK failed')
+            path=[finite_vector(row,6,'Cartesian IK solution') for row in solved.solution.detach().cpu().reshape(-1,6).tolist()]
+            if len(path)!=len(waypoints)-2:raise ValueError('Cartesian IK returned an incomplete waypoint batch')
+            branch_error=max(abs(a-b) for a,b in zip(path[-1],end_q))
+            if branch_error>.001:raise ValueError('Cartesian endpoint changed the seeded joint branch')
+            path[-1]=list(end_q)
+            path+=[list(end_q) for _ in range(2)]
+            complete=[start]+path
+            control=discrete_motion(complete,limits['max_velocity_rad_s'],limits['max_acceleration_rad_s2'])
+            timing=dict(method='Cartesian line shared quintic progress; GPU waypoint IK',
+                applied_command_count=len(path),applied_duration_s=len(path)/30,
+                final_arrival_commands=2,measured_start_command_duplicated=False,
+                shared_cartesian_progress=progress,control_validation=control,
+                motion_mode='synchronous Cartesian diagonal',budget_extended=False)
+            receipt.update(timing=timing,endpoint_q=end_q,endpoint_branch_error_rad=branch_error,
+                ticks=len(path),interpolation_dt=1/30,path_sha256=_digest(path))
+            if not control['passed']:raise ValueError('Cartesian path exceeds original joint motion limits within its fixed budget')
+            actual=self.generator.kinematics.get_state(self.tensor_args.to_device(path))
+            errors=[task_pose_error(p,q,w['position'],w['orientation_wxyz']) for p,q,w in zip(
+                actual.ee_position.detach().cpu().tolist(),actual.ee_quaternion.detach().cpu().tolist(),waypoints)]
+            maximum=max(row[0] for row in errors)
+            receipt.update(maximum_waypoint_error_m=maximum,
+                maximum_waypoint_orientation_error_rad=max(row[1] for row in errors),
+                maximum_position_error_m=float(solved.position_error.max()),
+                maximum_rotation_error_native=float(solved.rotation_error.max()))
+            if (maximum>1e-5 or not all(row[2] for row in errors) or
+                    not all(math.isfinite(receipt[key]) for key in ('maximum_position_error_m','maximum_rotation_error_native'))):
+                raise ValueError('Cartesian waypoint FK exceeds 10um / 0.5deg acceptance')
+            receipt['task_corridor']=dict(success=True)
+            self.validate_held_path(complete,position,quaternion,name=name,receipt=receipt['task_corridor'],
+                linear_axis=0,project_to_goal_frame=False)
+            self._reset_region_counters()
+            receipt['gpu']=self.validate_continuous_path(complete)
+            if receipt['gpu'].get('passed') is not True:raise ValueError('Cartesian GPU path rejected')
+            self.torch.cuda.synchronize()
+            receipt['success']=True
+            return path,receipt
+        except Exception as error:
+            receipt['error']=f'{type(error).__name__}: {error}'
+            raise
+        finally:
+            receipt['wall_seconds']=time.perf_counter()-began
+
+    def validate_held_path(self,path,goal_position,goal_quaternion,*,name,receipt,linear_axis=None,project_to_goal_frame=True):
+        """Check the emitted path, including resampled and joined native segments."""
+        path_state=self.generator.kinematics.get_state(self.tensor_args.to_device(path))
+        quaternions=path_state.ee_quaternion.double()
+        reference=self.tensor_args.to_device(goal_quaternion).double()
+        dots=(quaternions*reference).sum(-1).abs()/(self.torch.linalg.vector_norm(quaternions,dim=-1)*self.torch.linalg.vector_norm(reference))
+        maximum=float((2*self.torch.acos(dots.clamp(0.,1.))).max())
+        receipt['maximum_path_orientation_error_rad']=maximum
+        if not math.isfinite(maximum) or maximum>TASK_ORIENTATION_TOLERANCE_RAD+1e-6:
+            receipt['success']=False
+            raise ValueError(f'MotionGen {name} exceeds 0.5deg along the held-orientation path')
+        if linear_axis is not None:
+            if linear_axis==0 and project_to_goal_frame:
+                from curobo.types.math import Pose
+                goal=Pose(position=self.tensor_args.to_device([goal_position]),quaternion=self.tensor_args.to_device([goal_quaternion]))
+                local=goal.compute_local_pose(Pose(position=path_state.ee_position,quaternion=path_state.ee_quaternion))
+                errors=self.torch.linalg.vector_norm(local.position[...,1:],dim=-1)
+                reference='tool-X goal-frame line'
+            else:
+                errors=segment_errors(path_state.ee_position,path_state.ee_position[0],self.tensor_args.to_device(goal_position))
+                reference='actual start-goal segment'
+            transverse=float(errors.max())
+            receipt.update(maximum_linear_transverse_error_m=transverse,linear_axis_goal_frame=linear_axis,
+                linear_acceptance_reference=reference,path_sha256=_digest(path))
+            if not math.isfinite(transverse) or transverse>TASK_POSITION_TOLERANCE_M+1e-7:
+                receipt['success']=False
+                receipt['unaccepted_path_joints']=path
+                raise ValueError(f'MotionGen {name} exceeds the straight-motion 2mm corridor')
+        return receipt
 
     def plan_joint(self, start, goal, *, name):
         """Use MotionGen's joint-space search/trajectory optimization for return-home."""

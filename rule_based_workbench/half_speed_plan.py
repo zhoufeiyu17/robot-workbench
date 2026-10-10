@@ -54,6 +54,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
             or any(not math.isclose(t['time_s'],i*nominal/hz,abs_tol=1e-9,rel_tol=0) for i,t in enumerate(plan['ticks']))):
         raise ValueError('original native cadence and duration must be consistent')
     stages=deepcopy(plan.get('stages',[]))
+    wait_stages = WAIT_STAGES | ({'open'} if plan.get('gripper_release', {}).get('schema_version') == 'commanded_gap_release.v3' else set())
     starts=[]
     for stage in stages:
         index=stage.get('start_tick')
@@ -62,7 +63,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
         starts.append(index)
     for index,stage in enumerate(stages):
         end=starts[index+1] if index+1<len(starts) else len(plan['ticks'])
-        if stage['name'] in WAIT_STAGES:
+        if stage['name'] in wait_stages:
             reference=plan['ticks'][starts[index]]['target']
             if any(any(t['target'][key]!=reference[key] for key in ('left_arm_joints','right_arm_joints'))
                    for t in plan['ticks'][starts[index]:end]):
@@ -71,7 +72,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
     rates=[]
     for i,n in enumerate(plan['native_substeps']):
         stage_index=bisect_right(starts,i)-1
-        wait=stage_index>=0 and stages[stage_index]['name'] in WAIT_STAGES
+        wait=stage_index>=0 and stages[stage_index]['name'] in wait_stages
         rate=Fraction(1) if wait else scale
         rates.append(rate)
         boundaries.append(boundaries[-1]+Fraction(n)/rate)
@@ -125,7 +126,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
                       parent_vertex_ticks=vertices,
                       maximum_local_speed_scale=max((1/(vertices[i+1]-vertices[i]) for i in range(len(vertices)-1) if rates[i]!=1),default=1.),
                       source_phase='cumulative retimed boundaries rounded up to control ticks; local speed quantized, stationary waits exact',
-                      unscaled_wait_stages=sorted(WAIT_STAGES),
+                      unscaled_wait_stages=sorted(wait_stages),
                       corner_sampling='every parent tick vertex preserved exactly; interpolation only within each parent edge',
                       gripper_interpolation=('distance_linear_within_stage; stage_boundary_previous_hold'
                                              if plan.get('native_action_encoding') else

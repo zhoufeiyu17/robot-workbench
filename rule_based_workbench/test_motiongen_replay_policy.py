@@ -1,5 +1,6 @@
 """Native guarded-loop CPU fixtures for frozen success timing and release budget."""
 import argparse
+import math
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -318,11 +319,13 @@ def main(native_code):
     from robot_sim.asset_cfg.objects.cup import CupBand, CupInteractionProfile
     from robot_sim.tasks.manager_based.coffee_make.interaction_evaluation import (
         EpisodeAcceptanceSpec, InteractionEvaluator, PhysicalSample)
-    def native_restore_case(*,owner=True,retain=True,fault=None):
+    def native_restore_case(*,owner=True,retain=True,fault=None,v3=False):
         runtime,plan,_=fixture()
         base=replace(EpisodeAcceptanceSpec.development(),open_position_m=.041496)
+        opening=([64.992+18*(1-math.cos(math.pi*i/44))/2 for i in range(45)] if v3
+                 else [64.992+18*i/300 for i in range(301)])
         stages=[('initial_hold',[82.992]),('close_and_hold',[64.992]),
-            ('open',[64.992+18*i/300 for i in range(301)]),('release_hold',[82.992]*6),
+            ('open',opening),('release_hold',[82.992]*6),
             ('home',[82.992]*521),
             ('home_gripper_restore',[82.992+(71.22663408517838-82.992)*i/197 for i in range(198)]),
             ('home_hold',[71.22663408517838]*9)]
@@ -333,9 +336,10 @@ def main(native_code):
                 ticks.append(dict(tick=len(ticks),time_s=len(ticks)/30,target=dict(
                     left_arm_joints=[0.]*6,right_arm_joints=[0.]*6,left_gripper=gap,right_gripper=82.992)))
                 stage_names.append(name)
-        plan.update(ticks=ticks,native_substeps=[8]*len(ticks),timeline_digest=_digest(ticks),
+        plan.update(ticks=ticks,native_substeps=[8]*len(ticks),duration_s=len(ticks)/30,timeline_digest=_digest(ticks),
             native_identity=dict(acceptance=asdict(base)),task_targets={'placement_goal':dict(
                 schema_version='cup_outlet_goal.v1',metric='cup_mouth_world_xy_to_liquid_outlet',tolerance_m=.01)})
+        if v3:plan['gripper_release']=dict(schema_version='commanded_gap_release.v3',duration_s=1.5,maximum_gap_speed_mm_s=20.)
         cup=CupInteractionProfile('fixture','c'*64,(CupBand('/Cup/Collisions/MiddleBody',0.,.13,.0347),),
             .0347,.13,(.04,.065),())
         initial=PhysicalSample('fixture',40,Pose(),Pose((.2,0,.04)),(0.,)*3,(0.,)*3,
@@ -388,7 +392,7 @@ def main(native_code):
         passed=True
         try:finish_motiongen_replay_policy(runtime)
         except (ValueError,RuntimeError):passed=False
-        assert runtime.spec.acceptance is base and evaluator.spec==replace(base,release_timeout_s=1.+301/30)
+        assert runtime.spec.acceptance is base and evaluator.spec==replace(base,release_timeout_s=1.+len(opening)/30)
         return passed,evaluator,receipt,context
 
     passed,evaluator,receipt,context=native_restore_case(retain=False)
@@ -407,6 +411,19 @@ def main(native_code):
         assert not passed and evaluator.first_failure_reason==reason,(fault,evaluator.first_failure_reason)
         if fault=='never_released':assert receipt['progress']['release_confirmed_physics_step'] is None
         else:assert receipt['progress']['deferred_success_count']>0, 'negative case must follow real native success'
+    for owner in (False,True):
+        passed,evaluator,receipt,_=native_restore_case(owner=owner,v3=True)
+        assert passed and evaluator.first_failure_reason is None
+        assert receipt['configuration']['planned_open_duration_s']==1.5
+        assert receipt['progress']['release_confirmed_physics_step'] is not None
+        assert evaluator.previous.jaw_positions==(71.22663408517838/2000,)*2
+    for fault,reason in [('collision','robot_forbidden_contact'),('recontact','finger_cup_forbidden_contact'),
+            ('force','contact_force_limit'),('unstable','released_cup_unstable'),('outlet','outlet_misaligned'),
+            ('incomplete','contact_report_incomplete'),('never_released','release_timeout'),('home',None),('clearance',None)]:
+        passed,evaluator,receipt,_=native_restore_case(fault=fault,v3=True)
+        assert not passed and evaluator.first_failure_reason==reason,(fault,evaluator.first_failure_reason)
+        if fault=='never_released':assert receipt['progress']['release_confirmed_physics_step'] is None
+        else:assert receipt['progress']['deferred_success_count']>0
     print('MotionGen replay policy: real native 71.226634 mm restore, earned release, late contact/force/stability/home/outlet failures, unchanged samples and final success: PASS')
 
 

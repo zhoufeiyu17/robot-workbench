@@ -27,6 +27,79 @@ def holding_ticks(plan, stage_names=HOLDING_STAGES):
     return [name in stage_names for name in names]
 
 
+def validate_release_control(plan, *, closed=None, opening=None, legacy=False):
+    """Validate the frozen release before granting its one-sided tracking window."""
+    release = plan.get('gripper_release')
+    if release is None:
+        if not legacy:
+            return [False] * len(plan['ticks'])
+        release = {'schema_version': 'commanded_gap_release.v2'}
+    if not isinstance(release, dict) or release.get('schema_version') not in (
+            'commanded_gap_release.v2', 'commanded_gap_release.v3'):
+        raise ValueError('unsupported commanded gap release policy')
+    v3 = release['schema_version'] == 'commanded_gap_release.v3'
+    if (release.get('arm_motion', False) is not False
+            or not v3 and (release.get('maximum_step_mm', .2) != .2
+                           or 'maximum_gap_speed_mm_s' in release)
+            or v3 and 'maximum_step_mm' in release):
+        raise ValueError('release declaration conflicts with its versioned limits')
+    mask = holding_ticks(plan, {'open'})
+    indices = [i for i, active in enumerate(mask) if active]
+    if (sum(stage['name'] == 'open' for stage in plan['stages']) != 1 or not indices
+            or indices[0] == 0 or not holding_ticks(plan)[indices[0]-1]):
+        raise ValueError('one contiguous preload release must follow holding')
+    rows = [plan['ticks'][i]['target'] for i in indices]
+    policy = plan.get('gripper_distance_control', {})
+    if closed is None:
+        closed = policy.get('closed_metal_gap_mm', rows[0]['left_gripper'])
+        if policy.get('schema_version') == 'sim_gripper_distance_control.v1':
+            closed -= policy['native_travel_offset_mm']
+    if opening is None:
+        opening = (rows[-1]['left_gripper'] if policy.get('schema_version') == 'gripper_distance_control.v2'
+                   else plan.get('gripper_opening_mm', rows[-1]['left_gripper']))
+    gaps = [row['left_gripper'] for row in rows]
+    stationary = ('left_arm_joints', 'right_arm_joints', 'right_gripper')
+    if (any(type(gap) not in (int, float) or not math.isfinite(gap) for gap in [closed, opening, *gaps])
+            or not closed < opening or abs(gaps[0]-closed) > 1e-9 or abs(gaps[-1]-opening) > 1e-9
+            or any(any(row[key] != rows[0][key] for key in stationary) for row in rows)
+            or any(not 0 <= b-a <= (20/30+1e-8 if v3 else .20000001) for a,b in zip(gaps,gaps[1:]))):
+        raise ValueError('release requires stationary arms and a continuous target-to-open ramp')
+    if v3:
+        if (set(release) - {'schema_version', 'duration_s', 'maximum_gap_speed_mm_s', 'initial_model_gap_mm', 'arm_motion'}
+                or plan.get('native_action_encoding') != NATIVE_DISTANCE_ENCODING
+                or len(rows) != 45 or release.get('duration_s') != 1.5
+                or release.get('maximum_gap_speed_mm_s') != 20.):
+            raise ValueError('v3 release requires 45 commands, 1.5 seconds and a 20 mm/s gap limit')
+        offset = policy.get('native_travel_offset_mm', 0.) if policy.get('schema_version') == 'gripper_distance_control.v2' else 0.
+        initial = release.get('initial_model_gap_mm', closed-offset)
+        if type(initial) not in (int, float) or not math.isfinite(initial) or abs(initial+offset-closed) > 1e-9:
+            raise ValueError('v3 release initial model gap differs from its closed target')
+        expected = [closed+(opening-closed)*(1-math.cos(math.pi*i/44))/2 for i in range(45)]
+        if any(abs(gap-value) > 1e-9 for gap,value in zip(gaps,expected)):
+            raise ValueError('v3 release must retain its frozen cosine curve')
+        hz, nominal = plan.get('control', {}).get('physics_hz'), plan.get('control', {}).get('substeps')
+        counts, ticks, duration = plan.get('native_substeps'), plan['ticks'], plan.get('duration_s')
+        if (type(hz) is not int or type(nominal) is not int or nominal <= 0 or hz != 30*nominal
+                or not isinstance(counts, list) or len(counts) != len(ticks)
+                or any(type(n) is not int or not 0 < n <= nominal for n in counts)
+                or any(n != nominal for n in counts[:-1])
+                or any(type(tick.get('time_s')) not in (int, float) or not math.isfinite(tick['time_s'])
+                       or tick.get('tick') != i or abs(tick['time_s']-i/30) > 1e-9 for i,tick in enumerate(ticks))
+                or type(duration) not in (int, float) or not math.isfinite(duration)
+                or abs(duration-sum(counts)/hz) > 1e-9):
+            raise ValueError('v3 release requires the actual 30 Hz native clock and duration')
+        if any((b-a)/(ticks[j]['time_s']-ticks[i]['time_s']) > 20.+1e-8
+               for i,j,a,b in zip(indices,indices[1:],gaps,gaps[1:])):
+            raise ValueError('v3 commanded gap speed exceeds 20 mm/s')
+        end = indices[-1]+1
+        hold = [i for i, active in enumerate(holding_ticks(plan, {'release_hold'})) if active]
+        if (hold != list(range(end, end+6)) or any(counts[i] != nominal for i in [*indices, *hold])
+                or any(ticks[i]['target'] != rows[-1] for i in hold)
+                or any(ticks[indices[0]-1]['target'][key] != rows[0][key] for key in stationary)):
+            raise ValueError('v3 release must preserve stationary arms and its 0.2 second release hold')
+    return mask
+
+
 def validate_distance_control(plan, source):
     policy = plan.get('gripper_distance_control', {})
     if policy.get('schema_version') != 'gripper_distance_control.v2':
@@ -61,16 +134,7 @@ def validate_distance_control(plan, source):
                 raise ValueError('physical/native gripper distance targets differ')
         if held and tick['target']['left_gripper'] != target:
             raise ValueError('holding stage requires the declared metal-gap target')
-    if plan.get('gripper_release',{}).get('schema_version')=='commanded_gap_release.v2':
-        opening=holding_ticks(plan, {'open'})
-        indices=[i for i,active in enumerate(opening) if active]
-        if not indices or indices[0]==0 or not holding[indices[0]-1]:
-            raise ValueError('preload release must follow holding')
-        rows=[plan['ticks'][i]['target'] for i in indices]
-        if (rows[0]['left_gripper']!=target or abs(rows[-1]['left_gripper']-maximum)>1e-9
-                or any(any(row[k]!=rows[0][k] for k in ('left_arm_joints','right_arm_joints','right_gripper')) for row in rows)
-                or any(not 0<=b['left_gripper']-a['left_gripper']<=.20000001 for a,b in zip(rows,rows[1:]))):
-            raise ValueError('preload release requires stationary arms and a continuous target-to-open ramp')
+    validate_release_control(plan, closed=target, opening=maximum)
     return holding
 
 

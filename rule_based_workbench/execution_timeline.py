@@ -19,9 +19,9 @@ def prepare(plan):
             or not math.isfinite(duration) or duration <= times[-1]
             or plan['timeline_digest'] != _digest(rows)):
         raise ValueError('sealed ordered parent timeline required')
-    from gripper_distance_plan import holding_ticks
+    from gripper_distance_plan import holding_ticks, validate_release_control
     holding = holding_ticks(plan)
-    unloading = holding_ticks(plan, {'open'}) if plan.get('gripper_release',{}).get('schema_version')=='commanded_gap_release.v2' else [False]*len(rows)
+    unloading = validate_release_control(plan)
     starts = [s['start_tick'] for s in plan['stages']]
     commands=[]
     for i,row in enumerate(rows):

@@ -185,12 +185,13 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
                 no_horizontal_transport_twist=True)
 
 
-def straight_waypoints(start, goal, *, linear_axis=1, spacing_m=.0015):
+def straight_waypoints(start, goal, *, linear_axis=1, spacing_m=.0015, project_to_goal_frame=True):
     """Short collinear goals for the native axis-aligned partial pose metric."""
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     if type(linear_axis) is not int or not 0<=linear_axis<3 or not math.isfinite(spacing_m) or spacing_m<=0:
         raise ValueError('valid linear axis and positive spacing required')
-    local=goal.inverse().compose(start).position
+    local=(goal.inverse().compose(start).position if project_to_goal_frame else
+           tuple(a-b for a,b in zip(start.position,goal.position)))
     transverse=math.sqrt(sum(v*v for i,v in enumerate(local) if i!=linear_axis))
     count=max(1,math.ceil(transverse/spacing_m))
     return [RigidTransform(tuple(a+(b-a)*i/count for a,b in zip(start.position,goal.position)),goal.orientation_wxyz)
@@ -243,7 +244,9 @@ def carry_targets(planner, observation, grasp, placement, *, jaw_position_m=None
         low, high = min(p[2] for p in corners), max(p[2] for p in corners)
         for name, offsets in rotated_components:
             required=max(0.,solver_reserve-ALLOWANCE_M) if name.startswith('cup/') else lane_clearance
-            vertical = max(z+min(p[2] for p in offsets)-high, low-z-max(p[2] for p in offsets), 0.)
+            # The continuous cross also descends to the insertion height.
+            vertical = max(min(z,hover.position[2])+min(p[2] for p in offsets)-high,
+                           low-max(z,hover.position[2])-max(p[2] for p in offsets), 0.)
             nearest = min(map(projection, offsets))
             if vertical < required:
                 lane = max(lane, front+required-nearest)
@@ -263,16 +266,18 @@ def carry_targets(planner, observation, grasp, placement, *, jaw_position_m=None
     rear = on_lane(raised.position)
     front = on_lane((goal.position[0], goal.position[1], z))
     lowered_front = RigidTransform((front.position[0], front.position[1], hover.position[2]), cup.orientation_wxyz)
-    stages = [(name, pose) for name, pose in (('lift', lifted), ('raise', raised), ('withdraw', rear),
-              ('cross', front), ('front_height', lowered_front), ('insert', hover), ('lower', goal))]
+    stages = [('lift_withdraw',rear),('cross',lowered_front),('insert',hover),('lower',goal)]
     clearance = min((max(vertical, lane+nearest-edge) for _,name,vertical,nearest,edge in pair_bounds
                      if not name.startswith('cup/')),default=math.inf)
-    return dict(stages=[dict(name=name, world_from_cup=asdict(pose),
+    return dict(recipe='normal-v31-dynamic-targets',
+                nominal_stage_duration_s=dict(lift_withdraw=4.3,cross=170/30,insert=3.,lower=29/30),
+                stages=[dict(name=name, world_from_cup=asdict(pose),
                             world_from_tool=asdict(pose.compose(cup_from_tool)), support_contact=name == 'lower')
                         for name, pose in stages], required_transport_clearance_m=.017,
                 base_clearance_m=.015, tracking_reserve_m=.002,
                 solver_pose_reserve_m=solver_reserve,planned_lane_clearance_m=lane_clearance,
                 cup_environment_allowance_m=ALLOWANCE_M,cross_cup_bottom_world_z_m=z,
+                cross_cup_bottom_height_range_m=[min(z,hover.position[2]),max(z,hover.position[2])],
                 cross_cup_top_clearance_m=outlet_position(observation.scene)[2]-z-cup_top,
                 conservative_cross_clearance_m=clearance if math.isfinite(clearance) else None,
                 outward_world=outward, lane_projection_m=lane, yaw_change_rad=0.,

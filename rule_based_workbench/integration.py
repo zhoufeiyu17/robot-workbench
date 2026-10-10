@@ -412,7 +412,7 @@ def _validate_scene(scene: Any) -> None:
 
 def validate_sim_distance_plan(plan, source):
     """Simulation model-space distance commands; no physical calibration binding."""
-    from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING, holding_ticks
+    from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING, holding_ticks, validate_release_control
     policy = plan.get('gripper_distance_control', {})
     if not isinstance(policy, dict):
         raise ValueError('simulation distance policy must be an object')
@@ -462,6 +462,7 @@ def validate_sim_distance_plan(plan, source):
                 or any(any(row[k]!=rows[0][k] for k in ('left_arm_joints','right_arm_joints','right_gripper')) for row in rows)
                 or any(not 0<=a['left_gripper']-b['left_gripper']<=2.00000001 for a,b in zip(rows,rows[1:]))):
             raise ValueError('closing requires stationary arms and a continuous open-to-command ramp')
+    validate_release_control(plan, closed=65.0-offset, opening=opening)
     return held
 
 
