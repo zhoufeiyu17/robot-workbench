@@ -292,22 +292,29 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   function manualReady() {
     const m=state?.manual;
-    return m?.joint_names?.length===12 && m.positions?.length===12 && m.positions.every(Number.isFinite) && m.limits?.length===12 && m.limits.every(v=>Array.isArray(v)&&v.length===2&&v.every(Number.isFinite)&&v[0]<=v[1]) && m.jaw_gaps_mm?.length===2 && m.jaw_gaps_mm.every(Number.isFinite);
+    return m?.joint_names?.length===12 && m.positions?.length===12 && m.positions.every(Number.isFinite) && m.limits?.length===12 && m.limits.every(v=>Array.isArray(v)&&v.length===2&&v.every(Number.isFinite)&&v[0]<=v[1]) && m.jaw_gaps_mm?.length===2 && m.jaw_gaps_mm.every(value=>Number.isFinite(value)&&value>=-2&&value<=85);
+  }
+  function fillFeedbackInputs(){
+    if(!manualReady())return;
+    jointInputs('position').forEach((input,i)=>input.value=state.manual.positions[i]);
+    const gaps=state.manual.jaw_gaps_mm.map(value=>Math.max(0,Math.min(83,value)));
+    el('jaw-left').value=gaps[0];el('jaw-right').value=gaps[1];
   }
   function renderManual() {
     const m=state?.manual, signature=JSON.stringify([key(),m?.joint_names,m?.limits]);
-    if(signature===manualKey)return; manualKey=signature;
+    if(signature===manualKey)return;
     el('joint-inputs').replaceChildren();
     if(!manualReady())return;
+    manualKey=signature;
     m.joint_names.forEach((name,index)=>{
       const label=make('label',name+' · rad'), input=make('input'); input.type='number';input.step='0.01';input.id='joint-'+index;
       input.dataset.role='position';
-      input.min=m.limits[index][0];input.max=m.limits[index][1];input.value=m.positions[index];input.disabled=true;input.setAttribute('aria-label',name+' 目标 rad');
+      input.min=m.limits[index][0];input.max=m.limits[index][1];input.disabled=true;input.setAttribute('aria-label',name+' 目标 rad');
       input.addEventListener('input',editManual);
       const speed=make('input');speed.type='number';speed.min='0.001';speed.step='0.01';speed.value=m.default_joint_speed_rad_s??.2;speed.dataset.role='speed';speed.setAttribute('aria-label',name+' 速度 rad/s');speed.addEventListener('input',editManual);
       label.append(input,make('small','速度 · rad/s'),speed);el('joint-inputs').append(label);
     });
-    el('jaw-left').value=m.jaw_gaps_mm[0];el('jaw-right').value=m.jaw_gaps_mm[1];
+    fillFeedbackInputs();
     el('manual-speed').value=m.default_joint_speed_rad_s??.2;el('jaw-speed').value=m.default_jaw_speed_mm_s??10;
   }
   function editManual(){
@@ -878,7 +885,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('queue-preview').addEventListener('click',()=>send('manual_queue_preview',{queue_revision:state?.manual?.queue?.revision}));
     el('queue-clear').addEventListener('click',()=>send('manual_queue',{operation:'clear',queue_revision:state?.manual?.queue?.revision}));
     el('apply-manual-speed').addEventListener('click',()=>{const speed=Number(el('manual-speed').value);if(!Number.isFinite(speed)||speed<=0){notice('统一关节速度必须为正数');return;}for(const input of jointInputs('speed'))input.value=speed;editManual();});
-    el('use-feedback').addEventListener('click',()=>{if(!manualReady())return;jointInputs('position').forEach((input,i)=>input.value=state.manual.positions[i]);el('jaw-left').value=state.manual.jaw_gaps_mm[0];el('jaw-right').value=state.manual.jaw_gaps_mm[1];editManual();});
+    el('use-feedback').addEventListener('click',()=>{if(!manualReady())return;fillFeedbackInputs();editManual();});
     el('zero-preview').addEventListener('click',()=>{for(const input of jointInputs('position'))input.value=0;el('jaw-left').value=83;el('jaw-right').value=83;editManual();});
     doc.addEventListener('visibilitychange',()=>{if(doc.hidden){finishAudit('页面进入后台');cancelTarget('页面进入后台');clearMedia();}else{renderMedia();void poll();}});
     render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250));

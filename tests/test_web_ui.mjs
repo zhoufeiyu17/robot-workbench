@@ -516,4 +516,19 @@ function deletionSnapshot(){
   assert.match(h.get('audit-status').textContent,/测量视口已改变/);assert.equal(h.requests[1].options.signal.aborted,true);h.app.destroy();
   if(originalWidth===undefined)delete globalThis.innerWidth;else globalThis.innerWidth=originalWidth;
 }
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.manual.jaw_gaps_mm=[83.00000236797332,-.000002];h.reply(0,value);await settle();
+  assert.equal(h.get('jaw-left').value,83);assert.equal(h.get('jaw-right').value,0);assert.equal(h.get('audit-start').disabled,false);
+  assert.deepEqual(h.app.state.manual.jaw_gaps_mm,[83.00000236797332,-.000002],'command fields must not mutate measured feedback');
+  h.get('jaw-left').value='84';h.get('show-target').events.click();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'an explicit command outside 0–83 is rejected, not clamped');
+  value.manual.jaw_gaps_mm=[-2,85];h.get('use-feedback').events.click();assert.equal(h.get('jaw-left').value,0);assert.equal(h.get('jaw-right').value,83);
+  assert.deepEqual(value.manual.jaw_gaps_mm,[-2,85]);h.get('audit-start').events.click();assert.deepEqual(JSON.parse(h.requests[1].options.body).jaw_gap_mm,[0,83]);h.app.destroy();
+  for(const invalid of [-2.00001,85.00001,NaN,Infinity]){
+    const rejected=harness({audit:true});rejected.app.start();const bad=previewSnapshot();bad.manual.jaw_gaps_mm=[invalid,80];rejected.reply(0,bad);await settle();
+    assert.equal(rejected.get('use-feedback').disabled,true);assert.equal(rejected.get('audit-start').disabled,true);assert.equal(rejected.get('jaw-left').value,'','invalid feedback is never silently converted into a target');
+    assert(Object.is(rejected.app.state.manual.jaw_gaps_mm[0],invalid));
+    bad.revision=2;bad.manual.jaw_gaps_mm=[83.00000236797332,80];rejected.app.poll();rejected.reply(1,bad);await settle();
+    assert.equal(rejected.get('jaw-left').value,83,'valid recovered feedback initializes the previously unavailable command fields');rejected.app.destroy();
+  }
+}
 console.log('PASS unified web: instance/media guards, bounded display-only browser presentation audit and uncensored latency evidence.');
