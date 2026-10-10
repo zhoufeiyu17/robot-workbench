@@ -82,6 +82,10 @@ class FakePlant(SimulatedBackend):
 
 
 class FakeOwner(Owner):
+    def __init__(self,*args,**kwargs):
+        kwargs['position_environment']='fake'  # hardware=True is only the legacy bridge protocol shape.
+        super().__init__(*args,**kwargs)
+
     def tick(self):
         alive=super().tick()
         # A completed fake trajectory needs no motor hold monitor. Leaving its

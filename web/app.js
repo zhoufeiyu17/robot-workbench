@@ -98,7 +98,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   const jointInputs=role=>[...el('joint-inputs').querySelectorAll('input')].filter(input=>input.dataset.role===role);
   function displayPose(){
     const inputs=jointInputs('position'),q12=inputs.map(input=>Number(input.value));
-    if(inputs.length!==12||inputs.some((input,i)=>String(input.value).trim()===''||!Number.isFinite(q12[i])||q12[i]<Number(input.min)||q12[i]>Number(input.max)))throw Error('关节目标必须是各自限位内的有限数值');
+    const noise=state?.manual?.position_noise_rad??0;
+    if(inputs.length!==12||inputs.some((input,i)=>String(input.value).trim()===''||!Number.isFinite(q12[i])||q12[i]<Number(input.min)-noise||q12[i]>Number(input.max)+noise))throw Error('关节目标超出限位及允许的位置噪声范围');
     const values=[el('jaw-left').value,el('jaw-right').value],jaw_gap_mm=values.map(Number);
     if(values.some((value,i)=>String(value).trim()===''||!Number.isFinite(jaw_gap_mm[i])||jaw_gap_mm[i]<0||jaw_gap_mm[i]>83))throw Error('夹爪目标必须在 0–83 mm 之间');
     return {q12,jaw_gap_mm};

@@ -44,6 +44,11 @@ def read_initial_sample(read_owner, *, wall_ns=time.time_ns, environment='physic
     evidence = dict(pid=owner.get('pid'), command_epoch=owner.get('command_epoch'),
                     sample_time_s=feedback.get('sample_time_s'), sample_wall_ns=stamp,
                     received_wall_ns=received, sample_age_s=age)
+    if owner.get('joint_limits') is not None:
+        limits=owner['joint_limits']
+        if len(limits)!=14:raise ValueError('fourteen Owner command limits required')
+        evidence['reported_joint_limits']={side+'_arm_joints':deepcopy(limits[start:start+6])
+            for side,start in (('left',0),('right',7))}
     if environment == 'fake':
         identity=owner_identity(owner,pid_key='pid')
         expected = clock or clock_spec('fake', clock_domain=feedback.get('clock_domain'), source_clock_id=feedback.get('source_clock_id'))
@@ -67,6 +72,8 @@ def seal_initial_state(before, after, profile):
                  model=convert_state(planned, profile, to_reported=False),
                  jaw_normalization='clamp_to_model_command_limits_within_2mm',
                  owner_samples=[evidence, after[1]], after_observation_reported=after[0])
+    if 'reported_joint_limits' in evidence:
+        value['reported_joint_limits']=deepcopy(evidence['reported_joint_limits'])
     if evidence.get('clock_domain')=='simulation':
         clock=clock_spec('fake',clock_domain=evidence['clock_domain'],source_clock_id=evidence['source_clock_id'])
         assert_progress(sample_stamp(evidence,clock,wall_key='sample_wall_ns'),sample_stamp(after[1],clock,wall_key='sample_wall_ns'))

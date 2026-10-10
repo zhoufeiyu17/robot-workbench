@@ -5,6 +5,33 @@ import math
 
 from integration import _digest
 from contract import validate_physical14, validate_physical_feedback
+from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
+
+
+def model_joint_limits(spec, source=None):
+    """Use the intersection of model limits and the observed Owner command domain."""
+    limits={side+'_arm_joints':list(zip(getattr(spec,side).arm.soft_lower_limits_rad,
+        getattr(spec,side).arm.soft_upper_limits_rad)) for side in ('left','right')}
+    reported=(source or {}).get('initial_state',{}).get('reported_joint_limits')
+    if reported is not None:
+        delta=offsets(source['calibration_profile'])
+        for side, start in (('left',0),('right',6)):
+            key=side+'_arm_joints'
+            limits[key]=[(max(lo,rlo+d),min(hi,rhi+d))
+                for (lo,hi),(rlo,rhi),d in zip(limits[key],reported[key],delta[start:start+6],strict=True)]
+            if any(lo>hi for lo,hi in limits[key]):raise ValueError('model and Owner joint limits do not intersect')
+    return limits
+
+
+def project_model_state(state, spec, *, environment, source=None):
+    """Project position noise before encoding; keep raw input and jaw semantics."""
+    result, changes = deepcopy(state), []
+    limits=model_joint_limits(spec,source)
+    for side in ('left', 'right'):
+        key = side+'_arm_joints'
+        result[key], corrections = project_joint_positions(state[key],limits[key], environment=environment)
+        changes.extend(dict(row, side=side) for row in corrections)
+    return result, changes
 
 
 def state_near(actual, expected, *, joint_rad=.01):
@@ -39,6 +66,16 @@ def validate_initial_state(initial, profile):
     evidence = initial.get('owner_samples')
     if not isinstance(evidence, list) or len(evidence) != 2:
         raise ValueError('initial state requires before/after observation owner samples')
+    reported=initial.get('reported_joint_limits')
+    if reported is not None:
+        if any(sample.get('reported_joint_limits')!=reported for sample in evidence):
+            raise ValueError('Owner command limits changed during observation')
+        if set(reported)!={'left_arm_joints','right_arm_joints'}:raise ValueError('two arm limit sets required')
+        for key in reported:
+            if len(reported[key])!=6:raise ValueError('six Owner joint limits required')
+            for pair in reported[key]:
+                if len(pair)!=2 or any(type(v) not in (int,float) or not math.isfinite(v) for v in pair) or pair[0]>pair[1]:
+                    raise ValueError('finite ordered Owner joint limits required')
     for sample in evidence:
         if (any(type(sample.get(k)) is not int or sample[k] < 0 for k in ('pid', 'command_epoch', 'sample_wall_ns', 'received_wall_ns'))
                 or sample['pid'] == 0 or sample['sample_wall_ns'] == 0
@@ -105,6 +142,20 @@ def convert_state(state, profile, *, to_reported):
     return result
 
 
+def reported_command(state, source):
+    """Convert a checked model command, removing only arithmetic boundary roundoff."""
+    result=convert_state(state,source['calibration_profile'],to_reported=True)
+    limits=source.get('initial_state',{}).get('reported_joint_limits')
+    if limits is not None:
+        for key in ('left_arm_joints','right_arm_joints'):
+            for index,(lo,hi) in enumerate(limits[key]):
+                original=result[key][index];bounded=min(hi,max(lo,original))
+                if abs(bounded-original)>1e-12:
+                    raise ValueError('model command was not normalized to observed Owner limits before encoding')
+                result[key][index]=bounded
+    return result
+
+
 def contract(profile, native_actions):
     offsets(profile)
     return {'schema_version': 'physical_joint_space.v1',
@@ -143,9 +194,10 @@ def validate(plan, source):
                         or not initial['planned_reported']['left_gripper']<=resume.get('measured_metal_gap_mm',-1)<=first['left_gripper']):
                     raise ValueError('invalid stationary initial-opening resume receipt')
                 first['left_gripper']=initial['planned_reported']['left_gripper']
-            if (first is None or not state_near(first,initial['planned_reported'],joint_rad=.005)
+            allowance = position_noise_rad(source.get('environment', 'physical'))
+            if (first is None or not state_near(first,initial['planned_reported'],joint_rad=allowance)
                     or not state_near(plan['ticks'][-1]['target'],initial['planned_reported'])):
-                raise ValueError('native first target must match measured start within 0.005 rad/2 mm; return within 0.01 rad/2 mm')
+                raise ValueError(f'native first target must match measured start within {allowance:g} rad/2 mm; return within 0.01 rad/2 mm')
         elif 'initial_state_digest' in plan:
             raise ValueError('initial state plan marker requires sealed source')
     elif 'joint_space' in plan:
@@ -161,7 +213,7 @@ def freeze_reported(plan, source):
     if 'joint_space' in plan:
         raise ValueError('joint-space conversion has already been applied')
     marker = contract(source['calibration_profile'], plan['native_actions'])
-    ticks = [{**tick, 'target': convert_state(tick['target'], source['calibration_profile'], to_reported=True)}
+    ticks = [{**tick, 'target': reported_command(tick['target'], source)}
              for tick in plan['ticks']]
     plan.update(ticks=ticks, timeline_digest=_digest(ticks), joint_space=marker)
     if source.get('environment') == 'fake':

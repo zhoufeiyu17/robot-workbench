@@ -68,6 +68,21 @@ class PreviewHTTPTests(unittest.TestCase):
         self.post('stop')
         self.assertTrue(self.device.stop_latched)
 
+    def test_display_tolerates_position_noise_with_raw_correction_receipt(self):
+        self.device.connect({})
+        def close_device():
+            self.device.submit(self.device.runtime.holder,dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
+            self.device.thread.join(1);self.device.runtime.close();self.device.closed.set()
+        self.addCleanup(close_device)
+        q=[0.]*12;q[0]=3.144
+        result=self.post('preview_target',q12=q,jaw_gap_mm=[80.,80.])
+        correction=result['position_normalization']['corrections'][0]
+        self.assertEqual(correction['original_rad'],3.144)
+        self.assertEqual(correction['bounded_rad'],3.14)
+        self.assertEqual(self.preview.target['q'][0],3.14)
+        self.assertEqual(q[0],3.144)
+        with self.assertRaises(HTTPError):self.post('preview_target',q12=[3.146]+q[1:],jaw_gap_mm=[80.,80.])
+
     def test_diagnostic_candidates_are_read_only_preview_inputs_not_current_results(self):
         self.device.diagnostic_calibration=dict(mode='warm_diagnostic',fresh_C_completed=False,source_run='origin')
         self.device.diagnostic_mesh_candidates=[dict(id='origin-head',kind='head',label='复用标定诊断',status='diagnostic_readonly')]

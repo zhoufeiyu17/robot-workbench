@@ -11,7 +11,7 @@ class FakeHardwareTest(unittest.TestCase):
    owner=FakeOwner(plant,FakeSafety,hardware=True)
    for _ in range(12):owner.tick();clock[0]+=.04
    feedback=owner.snapshot()['calibration_feedback']
-   plan=make_plan('both',feedback['qpos'],feedback['qpos'],owner.snapshot()['joint_limits'],kind='workbench',created_at_s=clock[0])
+   plan=make_plan('both',feedback['qpos'],feedback['qpos'],owner.snapshot()['joint_limits'],kind='workbench',created_at_s=clock[0],environment='fake')
    owner.active_epoch=owner.epoch;owner.review_press=owner.pedal_snapshot()[0]
    owner.capture_sample='sample-0'
    owner.start_motion(plan,feedback)

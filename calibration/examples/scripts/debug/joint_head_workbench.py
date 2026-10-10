@@ -729,6 +729,13 @@ class Workbench:
         if len(rows)!=len(self.queue):return False
         return all(np.allclose(self.geometry._q(a['q']),self.geometry._q(b['q']),atol=1e-9) for a,b in zip(rows,self.queue))
 
+    def bounded_joint_pose(self,value):
+        from robot_workbench.joint_bounds import project_joint_positions
+        raw=self.geometry._q(value)
+        bounded,corrections=project_joint_positions(raw.tolist(),np.asarray(self.geometry.limits,float).tolist(),
+            environment=transport_environment(self.config))
+        return np.asarray(bounded),dict(requested_q=raw.tolist(),command_q=bounded,corrections=corrections)
+
     def require_checked_path(self,rows,start):
         """Refuse motion whose swept path this workbench has not geometrically checked.
 
@@ -759,21 +766,32 @@ class Workbench:
             if not self.hardware_connected():raise ValueError('真机反馈已断开；请重新检查接入状态')
             rows=json.loads(json.dumps(body.get('waypoints'),allow_nan=False))
             if not isinstance(rows,list) or not rows:raise ValueError('轨迹须包含路径点')
-            waypoints=[]
+            waypoints=[];checked_waypoints=[];boundary_rows=[]
             for row in rows:
                 q=self.geometry._q(row['q']);speeds=np.asarray(row.get('speeds',[.2]*12),float)
+                bounded,boundary=self.bounded_joint_pose(q);boundary_rows.append(boundary)
                 if speeds.shape!=(12,) or not np.isfinite(speeds).all() or np.any(speeds<=0):raise ValueError('真机各关节速度须为有限正数')
                 waypoint={'q':q.tolist(),'speeds':speeds.tolist()}
                 if 'jaw_gap_mm' in row:waypoint['jaw_gap_mm']=jaw_gaps(row['jaw_gap_mm']).tolist()
                 if 'jaw_speed_mm_s' in row:waypoint['jaw_speed_mm_s']=row['jaw_speed_mm_s']
                 waypoints.append(waypoint)
-            checked=self.queue_is_plan_checked(rows);start=self.current_pose().copy()
+                checked_waypoints.append(dict(waypoint,q=bounded.tolist()))
+            checked=self.queue_is_plan_checked(rows);start,start_boundary=self.bounded_joint_pose(self.current_pose())
         progress=self.begin_preflight('正在检查路径')
         try:
-            if not checked:self.require_checked_path(waypoints,start)
+            if not checked:self.require_checked_path(checked_waypoints,start)
             self.require_review(review)
             self.preflight_progress(progress,'正在生成执行预览并核验冻结路径')
             result=self.control_request('trajectory-preview',{'waypoints':waypoints},review=review)
+            if start_boundary['corrections'] or any(row['corrections'] for row in boundary_rows):
+                plans=result.get('plans') or []
+                if len(plans)!=len(boundary_rows) or any(not np.allclose(
+                        [plan['q_target'][i] for i in (*range(6),*range(7,13))],row['command_q'],atol=1e-12,rtol=0)
+                        for plan,row in zip(plans,boundary_rows)):
+                    self.hardware_tokens.discard(result.get('token'))
+                    raise ValueError('控制器合法目标与已检查的边界投影不同，请重新生成执行预览')
+                result=dict(result,position_boundary=dict(environment=transport_environment(self.config),
+                    start=start_boundary,waypoints=boundary_rows))
             self.preflight_progress(progress,'执行预览已就绪，等待审阅',done=True)
             return result
         except Exception as exc:
@@ -785,17 +803,18 @@ class Workbench:
             self.idle();review=self.review_snapshot() if review is None else review
             self.require_review(review)
             q=self.geometry._q(body['q']);gaps=jaw_gaps(body.get('jaw_gap_mm',self.jaw_mm))
+            bounded,boundary=self.bounded_joint_pose(q)
             speeds=np.asarray(body.get('speeds',[.2]*12),float);jaw_speed=body.get('jaw_speed_mm_s',10.)
             if speeds.shape!=(12,) or not np.isfinite(speeds).all() or np.any(speeds<=0):raise ValueError('invalid queued speeds')
             if type(jaw_speed) not in (int,float) or not np.isfinite(jaw_speed) or jaw_speed<=0:raise ValueError('positive jaw speed required')
             hardware=self.control_mode=='hardware_sync'
             if hardware and not self.hardware_connected():raise ValueError('真机反馈已断开；请重新检查接入状态')
-            start=self.current_pose().copy() if hardware else self.q.copy()
+            start,start_boundary=self.bounded_joint_pose(self.current_pose() if hardware else self.q)
             queue=json.loads(json.dumps(self.queue));geometry=self.geometry
         progress=self.begin_preflight('正在检查待加入队列的路径')
         try:
-            if hardware:self.require_checked_path([{'q':q.tolist()}],start)
-            elif not geometry.with_gaps(83.,83.).path_check(start,q)['ok']:raise ValueError('目标未通过路径检查')
+            if hardware:self.require_checked_path([{'q':bounded.tolist()}],start)
+            elif not geometry.with_gaps(83.,83.).path_check(start,bounded)['ok']:raise ValueError('目标未通过路径检查')
             with self.mode_lock,self.lock:
                 with self.review_lock:
                     self.require_review(review);self.idle()
@@ -804,6 +823,8 @@ class Workbench:
                     self.invalidate_reviews()
                     if not self.queue:self.plan_geometry_id=self.geometry_id
                     self.queue.append({'name':f'手动姿态 {len(self.queue)+1}','q':q.tolist(),'jaw_gap_mm':gaps.tolist(),'capture':False,'jaw_speed_mm_s':jaw_speed,'speeds':speeds.tolist()})
+                    if boundary['corrections'] or start_boundary['corrections']:
+                        self.queue[-1]['position_boundary']=dict(start=start_boundary,target=boundary,environment=transport_environment(self.config))
                     self.plan=None
                 self.persist()
             return {'message':'已加入队列'}

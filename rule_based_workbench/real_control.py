@@ -151,7 +151,8 @@ def classes(ref, *, jaw_mapping_file=None):
     class Runner(MotionRunner):
         def __init__(self, owner, proxy, payload, frozen, base):
             super().__init__(proxy, begin=owner.begin_collection, send=lambda q: owner.send('both', q),
-                             stop=owner.motion_fault, consumed=owner.consumed, arm_tolerance=owner.arm_tolerance)
+                             stop=owner.motion_fault, consumed=owner.consumed, arm_tolerance=owner.arm_tolerance,
+                             environment=owner.environment or 'physical')
             self.owner = owner
             self.payload, self.base = payload, base
             self.recording = None
@@ -179,7 +180,8 @@ def classes(ref, *, jaw_mapping_file=None):
                 lo, hi = limits[slot]
                 physical_limits[side+'_gripper'] = [max(0., jaw.command_gap_mm(side, lo)),
                                                     min(maximum, jaw.command_gap_mm(side, hi))]
-            timeline = initialize(self.base, current_state=physical_feedback(q), limits=physical_limits)
+            timeline = initialize(self.base, current_state=physical_feedback(q), limits=physical_limits,
+                environment=self.owner.environment or 'physical')
             # The immutable suffix was checked at preview; only new return commands
             # need SDK conversion and limits checks in the compilation worker.
             for command in timeline['commands']:
@@ -514,7 +516,8 @@ def classes(ref, *, jaw_mapping_file=None):
                     review = super().submit(dict(action='preview', active_arm=side, q_target=target))
                     plans, epoch, press, pid, samples = self.pending[review['token']]
                     plan = make_plan(side, plans[0].q_start, target, plans[0].joint_limits,
-                                     max_velocity=.01, created_at_s=plans[0].created_at_s)
+                                     max_velocity=.01, created_at_s=plans[0].created_at_s,
+                                     environment=self.environment or 'physical')
                     self.pending[review['token']] = ((plan,), epoch, press, pid, samples)
                     self.frozen_payloads.clear()
                     self.alignment_plans = {plan.sha256: plan}
@@ -581,7 +584,8 @@ def classes(ref, *, jaw_mapping_file=None):
                 # The first absolute command initializes the planned start.
                 # Ordinary tracking protection applies after command submission.
                 proxy = make_plan('both', sdk_target(first), sdk_target(first), limits,
-                                  kind='workbench', q_start_is_command=True, created_at_s=self.control_time())
+                                  kind='workbench', q_start_is_command=True, created_at_s=self.control_time(),
+                                  environment=self.environment or 'physical')
                 self.pending.clear()
                 self.frozen_payloads.clear()
                 self.alignment_plans.clear()

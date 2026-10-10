@@ -531,4 +531,12 @@ function deletionSnapshot(){
     assert.equal(rejected.get('jaw-left').value,83,'valid recovered feedback initializes the previously unavailable command fields');rejected.app.destroy();
   }
 }
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.manual.position_noise_rad=.005;value.manual.positions[0]=1.004;
+  h.reply(0,value);await settle();h.get('show-target').events.click();
+  assert.equal(JSON.parse(h.requests[1].options.body).q12[0],1.004,'raw boundary input reaches backend for recorded normalization');
+  assert.equal(h.app.state.manual.positions[0],1.004);h.app.destroy();
+  const bad=harness();bad.app.start();value.manual.positions[0]=1.006;bad.reply(0,value);await settle();bad.get('show-target').events.click();
+  assert.equal(bad.requests.filter(row=>row.options.method==='POST').length,0,'beyond-tolerance position stays rejected');bad.app.destroy();
+}
 console.log('PASS unified web: instance/media guards, bounded display-only browser presentation audit and uncensored latency evidence.');

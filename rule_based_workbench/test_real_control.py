@@ -301,7 +301,7 @@ def main(root, jaw_mapping_file=None):
             def kp(self):return self.p
             def kd(self):return self.d
         outside = ref.SimulatedBackend(raw(plan['ticks'][0]['target']))
-        outside.q[0]=.08
+        outside.q[0]=.054  # 4 mrad boundary noise; larger excess is rejected separately.
         outside.q[6]=interpolate(87.,GAP_MM['left'],FEEDBACK['left'])
         limits=outside.get_bimanual_joint_position_limits();limits[0]=[-.05,.05]
         outside.get_bimanual_joint_position_limits=lambda:limits
@@ -340,13 +340,13 @@ def main(root, jaw_mapping_file=None):
             if runner.runtime_started:assert runner.runtime_ready.wait(2)
             if runner.last_sent_index>=0:
                 outside.q=raw(runner.frozen.ticks[runner.last_sent_index]['target'])
-                outside.q[0]+=.2  # Ordinary tracking error is observed throughout motion.
+                outside.q[1]+=.2  # Ordinary tracking error stays inside this joint's legal range.
             outside_owner.tick();clock[0]+=.01
             if runner.status=='READY':break
             assert runner.status!='FAULT',outside_owner.snapshot()
         assert outside_owner.runner.status=='READY',outside_owner.snapshot()
         initialization=failed_sessions[0].timeline['initialization']
-        assert initialization['actual_start']['left_arm_joints'][0]==.08
+        assert initialization['actual_start']['left_arm_joints'][0]==.054
         assert abs(initialization['actual_start']['left_gripper']-87.)<1e-9
         assert initialization['legal_start']['left_arm_joints'][0]==.05
         assert initialization['legal_start']['left_gripper']==83.

@@ -22,7 +22,8 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'infra'))
 from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity
-from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command
+from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command, project_arm_positions
+from robot_workbench.joint_bounds import position_noise_rad
 
 
 def legacy_modules(source):
@@ -103,7 +104,11 @@ def hardware_backend(*, passive_left_jaw=False):
                 raise ValueError('measured begin pose changed')
             exact = list(physical14)
             exact[start:end], exact[end] = q, jaw
-            hold = list(feedback_to_command(exact, np.asarray(self.get_bimanual_joint_position_limits(),dtype=float).tolist()))
+            corrections=[]
+            hold = list(feedback_to_command(exact, np.asarray(self.get_bimanual_joint_position_limits(),dtype=float).tolist(),
+                environment='physical',corrections=corrections))
+            self.last_begin_position_boundary=dict(raw_qpos=list(exact),command_qpos=hold[:],corrections=corrections,
+                environment='physical',position_noise_rad=position_noise_rad('physical'))
             self.send(side, hold)  # Hold the measured physical gap in command units before position gains.
             gain = self._arx5.Gain(6)
             gain.kp()[:], gain.kd()[:] = cfg.default_kp, cfg.default_kd
@@ -117,6 +122,7 @@ def hardware_backend(*, passive_left_jaw=False):
             result=super().read_calibration_state()
             result['gripper_torque']=[float(self._controllers[side].get_joint_state().gripper_torque) for side in self.sides]
             result['gripper_contact_detection']='unvalidated; torque telemetry only'
+            result['last_begin_position_boundary']=getattr(self,'last_begin_position_boundary',None)
             return result
 
         def send(self, side, physical14):
@@ -176,8 +182,10 @@ class SimulatedBackend:
 
 class Owner:
     """HTTP only queues commands or reads cache. tick() alone touches the SDK."""
-    def __init__(self, backend, safety, *, listener=None, hardware=False, stop_scale=1., event=None, control_clock=None):
+    def __init__(self, backend, safety, *, listener=None, hardware=False, stop_scale=1., event=None, control_clock=None,position_environment=None):
         self.backend, self.listener, self.hardware = backend, listener, hardware
+        self.position_environment=position_environment or ('physical' if hardware else 'fake')
+        position_noise_rad(self.position_environment)
         if control_clock is not None and not callable(control_clock):
             raise TypeError("control_clock must be callable")
         self.control_clock = control_clock
@@ -340,13 +348,13 @@ class Owner:
                         elif sample is not None:raise ValueError('sample_id requires capture=true')
                         samples.append(sample if capture else None)
                         motion.append({k:v for k,v in row.items() if k not in ('capture','sample_id')})
-                    plans = make_workbench_plans(q_start, motion, current['joint_limits'], created_at_s=self.control_time())
+                    plans = make_workbench_plans(q_start, motion, current['joint_limits'], created_at_s=self.control_time(),environment=self.position_environment)
                 elif action == 'preview_both_home':
                     target = list(q_start)
                     for a, b in ARM_SLICES.values():
                         target[a:b] = [0.]*6
                         target[b] = command_sdk('left' if b==6 else 'right',83)
-                    plans = (make_plan('both', q_start, target, current['joint_limits'], kind='both_home', created_at_s=self.control_time()),)
+                    plans = (make_plan('both', q_start, target, current['joint_limits'], kind='both_home', created_at_s=self.control_time(),environment=self.position_environment),)
                 elif action == 'preview_jaw_target' and command['active_arm'] == 'both':
                     if getattr(self.backend, 'passive_jaws', ()):
                         raise ValueError('both jaws must be active')
@@ -356,7 +364,7 @@ class Owner:
                         raise ValueError('finite left and right SDK gaps required')
                     target = list(q_start)
                     target[6], target[13] = gaps['left'] / 1000., gaps['right'] / 1000.
-                    plans = (make_plan('both', q_start, target, current['joint_limits'], kind='jaw_target', created_at_s=self.control_time()),)
+                    plans = (make_plan('both', q_start, target, current['joint_limits'], kind='jaw_target', created_at_s=self.control_time(),environment=self.position_environment),)
                 elif action != 'preview':
                     if command['active_arm'] not in ARM_SLICES:
                         raise ValueError('active_arm must be left or right')
@@ -376,11 +384,11 @@ class Owner:
                         if kind == 'home':
                             target[b] = command_sdk('left' if b==6 else 'right',83)
                     plan = make_plan(command['active_arm'], q_start, target, current['joint_limits'],
-                                     kind=kind, created_at_s=self.control_time())
+                                     kind=kind, created_at_s=self.control_time(),environment=self.position_environment)
                     plans = (plan,)
                 else:
                     plan = make_plan(command['active_arm'], q_start, command['q_target'], current['joint_limits'],
-                                     created_at_s=self.control_time())
+                                     created_at_s=self.control_time(),environment=self.position_environment)
                     plans = (plan,)
                 token = secrets.token_urlsafe(24)
                 self.pending.clear()
@@ -593,6 +601,11 @@ class Owner:
             limits = self.backend.get_bimanual_joint_position_limits()
             if hasattr(limits, 'tolist'):
                 limits = limits.tolist()
+            corrections=[]
+            bounded=project_arm_positions(feedback['qpos'],limits,environment=self.position_environment,corrections=corrections)
+            feedback['position_boundary']=dict(environment=self.position_environment,
+                position_noise_rad=position_noise_rad(self.position_environment),corrections=corrections,
+                command_joint_positions_rad=[bounded[i] for i in active_indices('both')])
             capture_ack = None
             while not self.commands.empty():
                 action, epoch, review = self.commands.get_nowait()
@@ -605,7 +618,7 @@ class Owner:
                 if action == 'recover':
                     with self.lock:
                         if (epoch != self.epoch or review != self.pedal_snapshot() or not self.recovery_ready()
-                                or any(not lo <= q <= hi for q, (lo, hi) in zip(feedback['qpos'], limits))):
+                                or any(not lo <= q <= hi for q, (lo, hi) in zip(bounded, limits))):
                             self.event('recover_rejected', reason='owner/feedback/pedal changed')
                             continue
                         reason = self.recoverable_fault
@@ -753,7 +766,8 @@ class Owner:
                                     plan_sha256=plan.sha256, sample_id=self.capture_sample) if plan.kind == 'workbench' else None
         self.runner = MotionRunner(plan, begin=lambda q: self.begin(plan.active_arm, q),
                                    send=lambda q: self.send(plan.active_arm, q),
-                                   stop=self.motion_fault, consumed=self.consumed, arm_tolerance=self.arm_tolerance, arm_tolerances=self.arm_tolerances)
+                                   stop=self.motion_fault, consumed=self.consumed, arm_tolerance=self.arm_tolerance, arm_tolerances=self.arm_tolerances,
+                                   environment=self.position_environment)
         self.runner.start(self.control_time(), feedback, reviewed_deadline=reviewed_deadline,
                           review_age_s=self.review_age())
 
@@ -798,6 +812,7 @@ class Owner:
                      feedback_healthy=self.feedback_healthy,
                      arm_arrival_tolerance_rad=self.arm_tolerance if self.arm_tolerances is None else None,
                      arm_arrival_tolerances_rad=list(arrival_tolerances(self.arm_tolerance,self.arm_tolerances)),
+                     position_noise_rad=position_noise_rad(self.position_environment),position_environment=self.position_environment,
                      stationary=self.stationary,
                      local_gains=self.backend.read_gains() if self.backend.is_connected else None,
                      release_requires='ARMS_SUPPORTED_RELEASE', stop_damping_scale=self.stop_scale,
@@ -814,6 +829,9 @@ class Owner:
                                                                  capture_source_clock_id=self.capture_wait.get('source_clock_id') if self.capture_wait else None,
                                                                  plan_sha256=self.runner.plan.sha256,
                                                                  active_arm=self.runner.plan.active_arm,
+                                                                 position_boundary=dict(environment=self.runner.plan.environment,
+                                                                     plan_corrections=self.runner.plan.position_corrections,
+                                                                     execution_start_corrections=self.runner.execution_start_corrections),
                                                                  target_error=self.runner.target_error),
                      sdk_stop_limit='Software stop cannot interrupt a blocked native SDK call')
         with self.lock:

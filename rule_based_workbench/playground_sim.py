@@ -91,24 +91,27 @@ def decode_target(raw, target, source, spec):
     return values
 
 
-def normalize_initial_arm_limits(state, spec, tolerance_rad=.005):
+def normalize_initial_arm_limits(state, spec, environment='fake'):
     """Admit a measured start just outside a soft limit; reset inside the model."""
+    from robot_workbench.joint_bounds import project_joint_positions
     result=deepcopy(state); changes=[]
     for side in ('left','right'):
         arm=getattr(spec,side).arm
         key=side+'_arm_joints'
         if not (len(state[key])==len(arm.soft_lower_limits_rad)==len(arm.soft_upper_limits_rad)==6):
             raise ValueError('six initial joints and soft limits required per arm')
-        for index,(value,lower,upper) in enumerate(zip(state[key],arm.soft_lower_limits_rad,
-                                                         arm.soft_upper_limits_rad)):
-            if not math.isfinite(value) or value<lower-tolerance_rad or value>upper+tolerance_rad:
-                raise ValueError(f'{side} joint {index+1} initial pose exceeds the 0.005 rad soft-limit allowance')
-            bounded=min(max(value,lower),upper)
-            result[key][index]=bounded
-            if bounded!=value:
-                changes.append(dict(joint=f'{side}_{index+1}',measured_model_rad=value,
-                                    reset_model_rad=bounded,delta_rad=bounded-value))
+        result[key],projected=project_joint_positions(state[key],list(zip(arm.soft_lower_limits_rad,arm.soft_upper_limits_rad)),environment=environment)
+        changes.extend(dict(joint=f'{side}_{row["index"]+1}',measured_model_rad=row['original_rad'],
+            reset_model_rad=row['bounded_rad'],delta_rad=row['delta_rad']) for row in projected)
     return result,changes
+
+
+def source_environment(source):
+    from real_contract import namespace,validate_namespace
+    environment=source.get('environment','physical' if source.get('schema_version')=='physical_collection_source.v1' else None)
+    if source.get('schema_version')!=namespace(environment)['source_schema']:raise ValueError('L3 source environment/schema differ')
+    validate_namespace(source,environment)
+    return environment
 
 
 def validate_inputs(source,binding,suite,plan=None,execution_timeline=None,*,environment='physical'):
@@ -149,26 +152,66 @@ def validate_inputs(source,binding,suite,plan=None,execution_timeline=None,*,env
         validate(execution_timeline,plan)
 
 
-def runtime_replay_plan(plan,source,timeline,spec):
-    """Consume shared commands without rewriting their parent planning proof."""
+def validate_l3_replay_derivation(plan,source,timeline,spec,saved=None):
+    """Rebuild or verify the bounded L3-only prefix derivation from its frozen parents."""
+    from control_motion import validate_control
     from execution_timeline import validate
+    from frozen_executor import validate_plan_evidence
+    from robot_workbench.joint_bounds import position_noise_rad
     from robot_sim.specs.action import ArmCommand,DualArmCommand
+    environment=source_environment(source)
+    validate_initial_state(source['initial_state'],source['calibration_profile'])
+    validate_plan_evidence(plan,source)
     validate(timeline,plan)
-    commands=timeline['commands'];prefix=len(commands)-len(plan['ticks'])
-    actions=[]
+    commands=deepcopy(timeline['commands']);prefix=len(commands)-len(plan['ticks'])
+    actions=[];adjustments=[]
     for row in commands:
         if row['source_tick'] is not None:
             raw=deepcopy(plan['native_actions'][row['source_tick']])
         else:
             target=convert_state(row['target'],source['calibration_profile'],to_reported=False)
+            target,changes=normalize_initial_arm_limits(target,spec,environment=environment)
+            if changes:
+                reported=convert_state(target,source['calibration_profile'],to_reported=True)
+                for change in changes:
+                    side,index=change['joint'].rsplit('_',1);index=int(index)-1;key=side+'_arm_joints'
+                    adjustments.append(dict(tick=row['tick'],source_tick=None,joint=change['joint'],
+                        parent_reported_rad=row['target'][key][index],derived_reported_rad=reported[key][index],
+                        parent_model_rad=change['measured_model_rad'],derived_model_rad=change['reset_model_rad'],
+                        delta_rad=change['delta_rad']))
+                    # Only the admitted arm coordinate changes; preserve every other original field exactly.
+                    row['target'][key][index]=reported[key][index]
             raw=list(spec.encode(DualArmCommand(ArmCommand(tuple(target['left_arm_joints']),True),
                                                 ArmCommand(tuple(target['right_arm_joints']),True))))
             raw[6],raw[13]=target['left_gripper'],target['right_gripper']
         decode_target(raw,row['target'],source,spec)
         actions.append(raw)
-    return dict(plan,ticks=deepcopy(commands),native_actions=actions,
+    view=dict(deepcopy(plan),ticks=commands,native_actions=actions,
         native_substeps=[plan['control']['substeps']]*prefix+deepcopy(plan['native_substeps']),
         duration_s=timeline['duration_s'])
+    control=validate_control(view)
+    derivation=dict(schema_version='l3_initialization_derivation.v1',scope='L3_auxiliary_simulation_only',
+        command_authority=False,task_outcome='unverified',source_environment=environment,limit_allowance_rad=position_noise_rad(environment),
+        source_digest=_digest(source),calibration_profile_digest=_digest(source['calibration_profile']),
+        source_initial_state_digest=_digest(source['initial_state']),parent_timeline_digest=plan['timeline_digest'],
+        execution_timeline_digest=timeline['timeline_digest'],shared_commands_digest=_digest(timeline['commands']),
+        parent_native_actions_sha256=_digest(plan['native_actions']),
+        native_arm_limits={side:dict(lower=list(getattr(spec,side).arm.soft_lower_limits_rad),
+                                    upper=list(getattr(spec,side).arm.soft_upper_limits_rad)) for side in ('left','right')},
+        prefix_count=prefix,prefix_commands=deepcopy(commands[:prefix]),prefix_native_actions=deepcopy(actions[:prefix]),
+        adjustments=adjustments,derived_commands_digest=_digest(commands),derived_native_actions_sha256=_digest(actions),
+        derived_native_substeps_sha256=_digest(view['native_substeps']),duration_s=view['duration_s'],
+        replay_matches_shared_commands=commands==timeline['commands'],control_validation=control,
+        parent_suffix_unchanged=True,planning_evidence_unchanged=True,collision_audit_rerun=False)
+    derivation['derivation_digest']=_digest(derivation)
+    if saved is not None and saved!=derivation:
+        raise ValueError('L3 initialization derivation differs from the frozen parents or bounded projection')
+    view.update(l3_derivation=derivation,l3_control_validation=control)
+    return view
+
+
+def runtime_replay_plan(plan,source,timeline,spec):
+    return validate_l3_replay_derivation(plan,source,timeline,spec)
 
 
 def runtime_initial_model(source,timeline):
@@ -217,11 +260,15 @@ def setup(args,source,suite,plan,execution_timeline=None):
             initial=convert_state(plan['ticks'][0]['target'],source['calibration_profile'],to_reported=False)
             episode_data['metadata'].update(initial_robot_state=initial,initial_robot_state_digest=_digest(initial))
         from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
-        initial,adjustments=normalize_initial_arm_limits(episode_data['metadata']['initial_robot_state'],
-                                                          ac_one_dual_arm_zero_home_action_spec())
+        from robot_workbench.joint_bounds import position_noise_rad
+        environment=source_environment(source)
+        original=episode_data['metadata']['initial_robot_state']
+        initial,adjustments=normalize_initial_arm_limits(original,
+            ac_one_dual_arm_zero_home_action_spec(),environment=environment)
         episode_data['metadata'].update(initial_robot_state=initial,initial_robot_state_digest=_digest(initial))
         normalization=dict(source_initial_digest=_digest(source['initial_state']['model']),
-              reset_initial_digest=_digest(initial),limit_allowance_rad=.005,adjustments=adjustments)
+              input_initial_digest=_digest(original),reset_initial_digest=_digest(initial),
+              source_environment=environment,limit_allowance_rad=position_noise_rad(environment),adjustments=adjustments)
         if execution_timeline is not None:
             normalization.update(execution_timeline_digest=execution_timeline['timeline_digest'],
                 initialization=deepcopy(execution_timeline.get('initialization')),
@@ -248,11 +295,9 @@ def setup(args,source,suite,plan,execution_timeline=None):
         bind_effective_gripper_identity(runtime,acceptance.open_position_m,env.action_manager.get_term('guarded').gripper_limits())
         _,info=env.reset(options={'episode':episode})
         observed,_=runtime.read(runtime.loop.physics_steps)
-        original=source['initial_state']['model'] if execution_timeline is None else runtime_initial_model(source,execution_timeline)
-        if (max(abs(a-b) for a,b in zip(observed.arm_positions,
-                initial['left_arm_joints']+initial['right_arm_joints']))>.005
-                or max(abs(a-b) for a,b in zip(observed.arm_positions,
-                original['left_arm_joints']+original['right_arm_joints']))>.005):
+        # Projection was checked above; readback independently retains the reset tracking gate.
+        if max(abs(a-b) for a,b in zip(observed.arm_positions,
+                initial['left_arm_joints']+initial['right_arm_joints']))>.005:
             raise ValueError('simulated reset differs from its accepted initial state by over 0.005 rad')
         runtime._render()
         return app,env,runtime,episode,control,acceptance,info,materials
@@ -325,6 +370,7 @@ def replay(args,source,plan,env,runtime,sensors,execution_timeline=None):
     if execution_timeline is not None:
         plan=runtime_replay_plan(plan,source,execution_timeline,spec)
         write(args.output/'execution-timeline.json',execution_timeline)
+        write(args.output/'l3-initialization-derivation.json',plan['l3_derivation'])
     robot=env.scene['robot']
     decoded=[decode_target(raw,tick['target'],source,spec) for raw,tick in zip(plan['native_actions'],plan['ticks'],strict=True)]
     names=list(decoded[0]);ids=robot.find_joints(names,preserve_order=True)[0]
@@ -372,7 +418,9 @@ def replay(args,source,plan,env,runtime,sensors,execution_timeline=None):
                 record=dict(tick=tick['tick'],target=tick['target'],native_joint_targets=row,
                     measured_joint_positions=dict(zip(names,measured)),actual_substeps=count,
                     contact_count=contact_count,task_outcome='unverified')
-                if execution_timeline is not None:record['shared_command']=tick
+                if execution_timeline is not None:
+                    record['shared_command']=execution_timeline['commands'][tick['tick']]
+                    record['l3_derived_command']=tick
                 execution.write(json.dumps(record)+'\n')
                 completed+=1
         for process in writers.values():process.stdin.close()
@@ -396,7 +444,12 @@ def replay(args,source,plan,env,runtime,sensors,execution_timeline=None):
             result.update(parent_timeline_digest=plan['timeline_digest'],execution_timeline_digest=execution_timeline['timeline_digest'],
                 command_count=completed,parent_command_count=len(execution_timeline['commands'])-sum(row['source_tick'] is None for row in execution_timeline['commands']),
                 initialization_duration_s=execution_timeline['initialization_duration_s'],
-                execution_derivation=execution_timeline['derivation'],planning_evidence_unchanged=True,collision_audit_rerun=False,
+                execution_derivation='L3-only initialization projection within the source-environment position allowance; original shared commands retained',
+                replay_matches_shared_commands=plan['l3_derivation']['replay_matches_shared_commands'],
+                l3_derivation_digest=plan['l3_derivation']['derivation_digest'],
+                l3_commands_digest=plan['l3_derivation']['derived_commands_digest'],
+                l3_derivation_ref='l3-initialization-derivation.json',l3_derivation_sha256=file_sha256(args.output/'l3-initialization-derivation.json'),
+                planning_evidence_unchanged=True,collision_audit_rerun=False,
                 execution_timeline_ref='execution-timeline.json',execution_timeline_sha256=file_sha256(args.output/'execution-timeline.json'))
         write(args.output/'manifest.json',result)
         return result

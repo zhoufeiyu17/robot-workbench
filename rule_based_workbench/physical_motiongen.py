@@ -25,13 +25,49 @@ def vector_target(values):
     return target
 
 
-def reported_target(target,profile):
-    converted=convert_state(target,profile,to_reported=True)
+def reported_target(target,profile,source=None):
+    from joint_space import reported_command
+    converted=reported_command(target,source) if source is not None else convert_state(target,profile,to_reported=True)
     # Only arithmetic roundoff at the declared metal endpoints is canonicalized.
     for key in ('left_gripper','right_gripper'):
         for endpoint in (65.,profile['gripper']['max_opening_mm']):
             if abs(converted[key]-endpoint)<=1e-10:converted[key]=endpoint
     return converted
+
+
+def validate_position_normalization(value,source):
+    """A material model projection needs its own checked geometry, beyond codec roundoff."""
+    if value is None:return
+    from robot_workbench.joint_bounds import position_noise_rad
+    environment=source.get('environment','physical');allowance=position_noise_rad(environment)
+    if (not isinstance(value,dict) or value.get('environment')!=environment
+            or value.get('allowance_rad')!=allowance
+            or value.get('row_index_space')!='original stage input rows before any merge or time resampling'
+            or type(value.get('input_row_count')) is not int or value['input_row_count']<=0
+            or any(not isinstance(value.get(key),str) or len(value[key])!=64
+                   for key in ('input_joint_path_sha256','normalized_joint_path_sha256'))
+            or not isinstance(value.get('corrections'),list) or not value['corrections']):
+        raise ValueError('position normalization source policy or original row provenance differs')
+    material=False
+    for row in value['corrections']:
+        if (not isinstance(row,dict) or type(row.get('row')) is not int or not 0<=row['row']<value['input_row_count']
+                or not isinstance(row.get('changes'),list) or not row['changes']):
+            raise ValueError('position normalization requires original stage row corrections')
+        for change in row['changes']:
+            if (not isinstance(change,dict) or change.get('side') not in ('left','right')
+                    or type(change.get('index')) is not int or not 0<=change['index']<6
+                    or any(type(change.get(key)) not in (int,float) or not math.isfinite(change[key])
+                           for key in ('original_rad','bounded_rad','delta_rad'))
+                    or abs(change['bounded_rad']-change['original_rad']-change['delta_rad'])>1e-12
+                    or abs(change['delta_rad'])>allowance+1e-12):
+                raise ValueError('position normalization correction exceeds its source policy')
+            material |= abs(change['delta_rad'])>1e-12
+    if material:
+        check=value.get('geometric_validation') or {}
+        digest=value.get('normalized_joint_path_sha256')
+        if (not isinstance(digest,str) or len(digest)!=64 or not isinstance(check,dict) or check.get('passed') is not True
+                or check.get('path_sha256')!=digest):
+            raise ValueError('material position normalization requires bound passed geometry validation')
 
 
 def validate_model_evidence(plan,source):
@@ -69,10 +105,31 @@ def validate_model_evidence(plan,source):
         raise ValueError('frozen movement stage is not covered by selected GPU receipts')
     if any(i not in selected for row in stages for i in row.get('motiongen_receipt_indices',[])):
         raise ValueError('joined movement stage has an unselected parent GPU receipt')
+    for index in selected:
+        normalization=records[index].get('position_normalization')
+        validate_position_normalization(normalization,source)
+        if normalization is not None and (normalization['input_joint_path_sha256']!=records[index].get('path_sha256')
+                or normalization['normalized_joint_path_sha256']!=records[index].get('emitted_joint_path_sha256')):
+            raise ValueError('position normalization differs from the input or emitted GPU path')
+    for stage in stages:
+        normalization=stage.get('position_normalization')
+        validate_position_normalization(normalization,source)
+        index=stage.get('motiongen_receipt_index')
+        if index is not None:
+            original=({key:value for key,value in normalization.items() if key!='inherited_from'}
+                      if normalization is not None else None)
+            if original!=records[index].get('position_normalization'):
+                raise ValueError('stage position normalization differs from its selected GPU receipt')
     for joined in [*receipt.get('continuous_cross',[]),*receipt.get('continuous_motion',[])]:
         if (joined.get('gpu',{}).get('passed') is not True
                 or any(i not in selected for i in joined.get('parent_receipt_indices',[]))):
             raise ValueError('continuous cross GPU derivation is incomplete')
+        for parent in joined.get('parent_paths',[]):
+            normalization=parent.get('position_normalization')
+            validate_position_normalization(normalization,source)
+            if (parent.get('receipt_index') not in selected
+                    or normalization!=records[parent['receipt_index']].get('position_normalization')):
+                raise ValueError('joined parent position normalization differs from its selected GPU receipt')
     policy=plan.get('gripper_distance_control',{})
     if (plan.get('native_action_encoding')!=NATIVE_DISTANCE_ENCODING
             or policy.get('schema_version')!='sim_gripper_distance_control.v1'
@@ -100,7 +157,7 @@ def freeze_physical(plan,source,binding,*,environment='physical'):
                endpoint_gap_roundoff_mm=1e-10,hardware_validated=False)
     freeze_reported(result,source)
     for row,old in zip(result['ticks'],plan['ticks']):
-        row['target']=reported_target(old['target'],source['calibration_profile'])
+        row['target']=reported_target(old['target'],source['calibration_profile'],source)
     result.update(timeline_digest=_digest(result['ticks']),initial_state_digest=_digest(source['initial_state']),
                   physical_gpu_conversion=proof)
     from control_motion import validate_control
@@ -147,7 +204,7 @@ def validate_evidence(plan,source):
         raise ValueError('original GPU model timeline differs')
     validate_model_evidence(model,source)
     for row,values in zip(plan['ticks'],vectors):
-        if row['target']!=reported_target(vector_target(values),source['calibration_profile']):
+        if row['target']!=reported_target(vector_target(values),source['calibration_profile'],source):
             raise ValueError('reported target does not match the checked model-space target')
     validate_distance_control(plan,source)
     return model
@@ -173,6 +230,13 @@ def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
     grip=model['gripper_distance_control']['geometry_derivation']
     encoded=freeze(scaled,source,dict(native_identity=model['native_identity']),grip,spec,
                    run_id=model['run_id']+'-speed-'+str(speed_scale))
+    # New clocks replace only timing fields; the original path proof still owns its input indices.
+    encoded['stages']=[dict(deepcopy(parent),**stage) for parent,stage in zip(starts,encoded['stages'],strict=True)]
+    for index,stage in enumerate(encoded['stages']):
+        if stage.get('position_normalization'):
+            stage['position_normalization']['inherited_from']=dict(
+                model_timeline_digest=model['timeline_digest'],stage_index=index,start_tick=starts[index]['start_tick'],
+                operation='uniform source-time interpolation; correction rows remain original stage input indices')
     derived=deepcopy(model)
     for key in ('run_id','ticks','timeline_digest','native_actions','native_substeps','duration_s','stages','control_validation'):
         derived[key]=encoded[key]

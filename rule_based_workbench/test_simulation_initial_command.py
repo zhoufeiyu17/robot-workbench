@@ -26,6 +26,16 @@ def main(native_code):
             raise AssertionError('invalid input accepted: '+text)
 
     spec, opening = ac_one_dual_arm_zero_home_action_spec(), 82.992
+    for environment, allowance in (('fake',.005),('physical',.01)):
+        row=target([0.,-allowance,0.,0.,0.,0.],[0.]*6,opening,opening)
+        original=deepcopy(row)
+        encoded=encode_stage(dict(name='initial_hold',rows=[row]),spec,opening,{},environment=environment)
+        assert row==original and encoded['rows'][0]['left_arm_joints'][1]==0.
+        assert encoded['position_corrections'][0]['changes'][0]['original_rad']==-allowance
+        decoded=native_target(encoded['native_actions'][0],spec,opening,distance=True)
+        assert decoded==encoded['rows'][0] and encoded['encoding_roundoff_rad']<=1e-12
+        row['left_arm_joints'][1]-=.000001
+        rejects(lambda:encode_stage(dict(name='initial_hold',rows=[row]),spec,opening,{},environment=environment),'position-boundary')
     raw = list(spec.encode(DualArmCommand(ArmCommand((0.,)*6, True), ArmCommand((0.,)*6, True))))
     frozen = simulation_initial_command(raw, spec, opening, 7)
     feedback = deepcopy(frozen['target'])

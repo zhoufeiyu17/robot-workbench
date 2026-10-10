@@ -91,6 +91,7 @@ def main(native_code, urdf):
 
     class Engine:
         twist = False
+        projection_noise = False
         def __init__(self, config, world, model_report=None):
             self.config = deepcopy(config); self.receipts = []
             report={}
@@ -123,6 +124,8 @@ def main(native_code, urdf):
             end = [*goals[0]['position'], *start[3:]]
             rows=self.path(start,end)
             if self.twist and name.endswith('/cross'):rows[len(rows)//2][3]=.01
+            if self.projection_noise and name in ('approach_pre','retreat_insert'):
+                rows[len(rows)//2][3]=0.  # Owner lower bound is model +.002 in the projection fixture.
             receipt = dict(stage=name, method='MotionGen.plan_single' if len(goals) == 1 else 'MotionGen.plan_goalset', success=True)
             self.receipts.append(receipt)
             return rows, receipt
@@ -291,6 +294,65 @@ def main(native_code, urdf):
             holds=adjusted['stages']
             index=next(i for i,s in enumerate(holds) if s['name']=='close_and_hold')
             assert holds[index+1]['start_tick']-holds[index]['start_tick']==18
+        # A real model/Owner-domain projection must retain its proof after both
+        # continuous stage merge and subsequent physical-plan retiming.
+        noisy_source=deepcopy(physical_source)
+        delta=noisy_source['calibration_profile']['joints']['zero_offsets_rad']
+        limits=[]
+        for side,offset in (('left',0),('right',6)):
+            arm=getattr(spec,side).arm
+            limits.extend([[lo-d,hi-d] for lo,hi,d in zip(arm.soft_lower_limits_rad,
+                arm.soft_upper_limits_rad,delta[offset:offset+6])])
+            limits.append([.008,83.])
+        limits[3][0]=.002-delta[3]
+        before=read_initial_sample(lambda:dict(owner(reported),joint_limits=limits),wall_ns=lambda:1_003_000_000)
+        after=read_initial_sample(lambda:dict(owner(reported,stamp=9_000_000_000),joint_limits=limits),wall_ns=lambda:9_003_000_000)
+        noisy_source['initial_state']=seal_initial_state(before,after,noisy_source['calibration_profile'])
+        noisy_binding=dict(binding,source_digest=_digest(noisy_source),initial_state=noisy_source['initial_state'])
+        with patch.object(Engine,'projection_noise',True):
+            noisy_base,noisy_plan,_=plan_loaded(planner,observation,data,noisy_source,urdf,
+                speed_scale=.3,physical_binding=noisy_binding)
+        original=deepcopy(noisy_base)
+        noisy_slow=retime_physical(noisy_base,noisy_source,noisy_binding,.55)
+        assert noisy_base==original
+        for value in (noisy_base,noisy_plan,noisy_slow):
+            validate_real_plan(value,noisy_source,noisy_binding)
+            proof=value['physical_gpu_conversion']['model_validation']
+            merged=next(row for row in proof['continuous_motion']
+                        if any(parent.get('position_normalization') for parent in row['parent_paths']))
+            normalization=next(parent['position_normalization'] for parent in merged['parent_paths']
+                               if parent.get('position_normalization'))
+            assert normalization['corrections'][0]['changes'][0]['original_rad']==0.
+            assert normalization['corrections'][0]['changes'][0]['bounded_rad']==.002
+            assert normalization['normalized_joint_path_sha256']==normalization['geometric_validation']['path_sha256']
+            assert 'original stage input rows' in normalization['row_index_space']
+            assert next(stage for stage in value['stages'] if stage['substage']=='approach_pre')['motiongen_receipt_indices']
+            direct=next(stage for stage in value['stages'] if stage['substage']=='retreat_insert')['position_normalization']
+            assert direct['geometric_validation']['passed']
+            assert direct['normalized_joint_path_sha256']==direct['geometric_validation']['path_sha256']
+        direct=next(stage for stage in noisy_slow['stages'] if stage['substage']=='retreat_insert')['position_normalization']
+        assert direct['inherited_from']['model_timeline_digest']==noisy_base['physical_gpu_conversion']['model_timeline_digest']
+        assert direct['corrections']==next(stage for stage in noisy_base['stages']
+            if stage['substage']=='retreat_insert')['position_normalization']['corrections']
+        from physical_motiongen import validate_evidence,validate_model_evidence
+        checked=validate_evidence(noisy_base,noisy_source)
+        for mutation in ('drop_stage','drop_geometry','forge_geometry','drop_parent'):
+            bad=deepcopy(checked)
+            stage=next(stage for stage in bad['stages'] if stage['substage']=='retreat_insert')
+            if mutation=='drop_stage':stage.pop('position_normalization')
+            elif mutation=='drop_parent':
+                parent=next(parent for row in bad['planning_validation']['continuous_motion']
+                            for parent in row['parent_paths'] if parent.get('position_normalization'))
+                parent.pop('position_normalization')
+            else:
+                normalization=stage['position_normalization']
+                if mutation=='drop_geometry':normalization.pop('geometric_validation')
+                else:normalization['geometric_validation']['path_sha256']='f'*64
+                bad['motiongen_receipts'][stage['motiongen_receipt_index']]['position_normalization']=deepcopy(normalization)
+                bad['planning_validation']['motiongen_receipts_sha256']=_digest(bad['motiongen_receipts'])
+            try:validate_model_evidence(bad,noisy_source)
+            except ValueError as error:assert 'normalization' in str(error),error
+            else:raise AssertionError('missing/forged projection proof accepted: '+mutation)
         # Explicit fake-device goes through this same numerical producer and
         # retiming path; it never gains physical evidence labels or permission.
         fake_source=deepcopy(physical_source)

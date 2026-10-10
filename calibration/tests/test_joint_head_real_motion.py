@@ -80,7 +80,7 @@ class RealMotionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 command_sdk('left', gap)
 
-    def test_numeric_arm_boundary_preserves_raw_and_rejects_requested_overflow(self):
+    def test_numeric_arm_boundary_preserves_raw_and_seals_projected_request(self):
         bounds = limits();bounds[8] = [0., 2.]
         raw = [0.]*14;raw[8] = -2.0976735626e-10
         command = feedback_to_command(raw, bounds)
@@ -100,13 +100,39 @@ class RealMotionTest(unittest.TestCase):
         held = make_plan('left', raw, target, bounds)
         self.assertEqual(held.q_target[8], 0.)
         MotionRunner(held, begin=lambda q:q, send=lambda q:None, stop=lambda reason:None)
-        with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
-            make_plan('both', raw, raw, bounds, kind='workbench')
-        too_far = raw[:];too_far[8] = -1.001e-6
-        with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
+        projected=make_plan('both', raw, raw, bounds, kind='workbench')
+        self.assertEqual(projected.requested_q_target,tuple(raw));self.assertEqual(projected.q_target[8],0.)
+        self.assertTrue(projected.position_corrections)
+        too_far = raw[:];too_far[8] = -.010001
+        with self.assertRaisesRegex(ValueError, 'position-boundary'):
             make_workbench_plans(too_far, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds)
         with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
             make_plan('both', raw, [0.]*14, bounds, kind='workbench', q_start_is_command=True)
+
+    def test_explicit_environment_tolerance_and_reviewed_projection_are_frozen(self):
+        for environment,tolerance in (('fake',.005),('physical',.01)):
+            bounds=limits();bounds[0]=[0.,2.]
+            raw=[0.]*14;raw[0]=-tolerance
+            requested=raw[:];requested[0]=-tolerance/2
+            plan=make_plan('both',raw,requested,bounds,kind='workbench',environment=environment,created_at_s=8500.)
+            self.assertEqual(plan.q_start,tuple(raw));self.assertEqual(plan.requested_q_target,tuple(requested))
+            self.assertEqual(plan.q_target[0],0.)
+            self.assertEqual({row['source'] for row in plan.position_corrections},{'q_start','q_target'})
+            runner=MotionRunner(plan,begin=lambda q:q,send=lambda q:None,stop=lambda reason:None,environment=environment)
+            self.assertEqual(runner.start(8500.,feedback(8500.,raw)),'VERIFYING')
+            self.assertEqual(runner.feedback_position_corrections[0]['original_rad'],-tolerance)
+            self.assertEqual(raw[0],-tolerance)
+            with self.assertRaisesRegex(ValueError,'environment differs'):
+                MotionRunner(plan,begin=lambda q:q,send=lambda q:None,stop=lambda reason:None,
+                    environment='physical' if environment=='fake' else 'fake')
+            altered=list(plan.requested_q_target);altered[0]=-tolerance/3
+            with self.assertRaisesRegex(ValueError,'canonical contents'):
+                MotionRunner(replace(plan,requested_q_target=tuple(altered)),begin=lambda q:q,send=lambda q:None,stop=lambda reason:None)
+            beyond=raw[:];beyond[0]=-tolerance-.000001
+            with self.assertRaisesRegex(ValueError,'position-boundary'):
+                make_plan('both',beyond,requested,bounds,kind='workbench',environment=environment)
+            with self.assertRaisesRegex(ValueError,'position-boundary'):
+                make_plan('both',[0.]*14,beyond,bounds,kind='workbench',environment=environment)
 
     def test_quintic_endpoint_does_not_emit_a_negative_zero_limit_target(self):
         bounds=limits();bounds[8]=[0.,2.]
@@ -222,7 +248,7 @@ class RealMotionTest(unittest.TestCase):
             changed = target.copy(); changed[index] += .001
             with self.assertRaisesRegex(ValueError, "inactive arm and jaws"):
                 make_plan("right", start, changed, limits())
-        for value in (2.01, math.nan, math.inf, True):
+        for value in (2.01001, math.nan, math.inf, True):
             changed = target.copy(); changed[7] = value
             with self.assertRaises(ValueError):
                 make_plan("right", start, changed, limits())
@@ -259,7 +285,7 @@ class RealMotionTest(unittest.TestCase):
         too_far = start.copy(); too_far[0] = .601
         make_plan("left", too_far, target, limits(), kind="home")
         restrictive = limits(); restrictive[0] = [.01, 2.]
-        with self.assertRaisesRegex(ValueError, "outside SDK limit"):
+        with self.assertRaisesRegex(ValueError, "exactly zero"):
             make_plan("left", start, target, restrictive, kind="home")
         forged = replace(home, kind="target")
         with self.assertRaises(ValueError):
@@ -377,8 +403,8 @@ class RealMotionTest(unittest.TestCase):
             elif kind == "jaw":
                 state["qpos"][13] += .003
             else:
-                state["qpos"][7] = 2.01
-                expected = "outside SDK limit"
+                state["qpos"][7] = 2.01001
+                expected = "position-boundary"
             self.assertEqual(runner.tick(8500.35, state), "FAULT")
             self.assertIn(expected, runner.reason)
             self.assertEqual(calls[-1][0], "stop")

@@ -5,6 +5,7 @@ import math
 
 from contract import ARM_KEYS, GRIPPER_KEYS, validate_physical14
 from integration import _digest
+from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
 
 CONTROL_HZ = 30
 
@@ -38,16 +39,17 @@ def prepare(plan):
         planning_evidence_unchanged=True,collision_audit_rerun=False)
 
 
-def initialize(base,current_state,limits):
+def initialize(base,current_state,limits,*,environment='physical'):
     """Compile off-thread. Measured values remain raw; only issued targets are bounded."""
     from contract import validate_physical_feedback
     validate_physical_feedback(current_state, enforce_range=False)
     if base.get('schema_version')!='execution_timeline.v1' or base.get('control_hz')!=CONTROL_HZ:
         raise ValueError('prepared 30 Hz base required')
-    goal=base['commands'][0]['target'];legal=deepcopy(current_state)
+    goal=base['commands'][0]['target'];legal=deepcopy(current_state);corrections=[]
     for key in ARM_KEYS:
         if len(limits[key])!=6:raise ValueError('six physical joint limits required')
-        legal[key]=[min(hi,max(lo,v)) for v,(lo,hi) in zip(current_state[key],limits[key])]
+        legal[key], changes=project_joint_positions(current_state[key],limits[key],environment=environment)
+        corrections.extend(dict(row,arm=key) for row in changes)
     for key in GRIPPER_KEYS:
         lo,hi=limits[key];legal[key]=min(hi,max(lo,current_state[key]))
     for key in (*ARM_KEYS,*GRIPPER_KEYS):
@@ -70,6 +72,7 @@ def initialize(base,current_state,limits):
     commands=prefix+[dict(row,tick=row['tick']+intervals,time_s=row['time_s']+duration) for row in base['commands']]
     initialization=dict(actual_start=deepcopy(current_state),legal_start=legal,target=deepcopy(goal),
         command_limits=deepcopy(limits),duration_s=duration,command_projection=legal!=current_state,
+        environment=environment,position_noise_rad=position_noise_rad(environment),position_corrections=corrections,
         arm_speed_rad_s=.08,jaw_speed_mm_s=6.)
     return dict(base,commands=commands,duration_s=base['duration_s']+duration,
         times=[row['time_s'] for row in commands],holding_ticks=[row['holding'] for row in commands],
@@ -79,9 +82,9 @@ def initialize(base,current_state,limits):
         digest_kind='base command digest plus initialization prefix and its measured provenance')
 
 
-def build(plan,*,current_state=None,limits=None):
+def build(plan,*,current_state=None,limits=None,environment='physical'):
     base=prepare(plan)
-    if current_state is not None:return initialize(base,current_state,limits)
+    if current_state is not None:return initialize(base,current_state,limits,environment=environment)
     return dict(base,timeline_digest=base['base_timeline_digest'],digest_kind='base commands')
 
 
@@ -90,7 +93,7 @@ def validate(timeline,plan):
     expected=prepare(plan)
     if timeline.get('initialization'):
         init=timeline['initialization']
-        expected=initialize(expected,init['actual_start'],init['command_limits'])
+        expected=initialize(expected,init['actual_start'],init['command_limits'],environment=init['environment'])
     else:
         expected=dict(expected,timeline_digest=expected['base_timeline_digest'],digest_kind='base commands')
     if timeline!=expected:raise ValueError('execution timeline differs from its sealed parent/initialization')

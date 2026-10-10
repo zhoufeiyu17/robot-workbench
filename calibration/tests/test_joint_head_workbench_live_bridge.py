@@ -143,6 +143,38 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([call[0] for call in seen],['trajectory-preview'])
         self.assertEqual(len(checks),2)
 
+    def test_boundary_preview_checks_legal_path_but_owner_receives_original_request(self):
+        a=self.app;a.geometry_id='geometry';a.plan=None;a.queue=[];a.hardware_connected=lambda:True
+        a.geometry.limits[0]=[0.,2.]
+        calls=[];checks=[]
+        a.require_checked_path=lambda rows,start:checks.append((rows,start.copy()))
+        def gateway(action,body,**kwargs):
+            calls.append(body)
+            return {'token':'bounded','plans':[{'q_target':[0.]*14}]}
+        a.control_request=gateway
+        for environment,tolerance in (('fake',.005),('physical',.01)):
+            a.config=dict(environment=environment,simulation_only=environment=='fake',
+                robot_source='simulated' if environment=='fake' else 'physical')
+            raw=[0.]*12;raw[0]=-tolerance
+            a.current_pose=lambda:np.asarray(raw)
+            requested=raw[:];requested[0]=-tolerance/2
+            value=a.hardware_trajectory_preview({'waypoints':[dict(q=requested)]})
+            self.assertEqual(calls[-1]['waypoints'][0]['q'],requested)
+            self.assertEqual(checks[-1][0][0]['q'][0],0.)
+            self.assertEqual(checks[-1][1][0],0.)
+            self.assertEqual(value['position_boundary']['start']['requested_q'],raw)
+            self.assertEqual(value['position_boundary']['waypoints'][0]['command_q'][0],0.)
+            self.assertTrue(value['position_boundary']['waypoints'][0]['corrections'])
+            beyond=requested[:];beyond[0]=-tolerance-.0001;count=len(calls)
+            with self.assertRaisesRegex(ValueError,'position-boundary'):
+                a.hardware_trajectory_preview({'waypoints':[dict(q=beyond)]})
+            self.assertEqual(len(calls),count)
+        a.hardware_tokens.add('bounded')
+        a.control_request=lambda *args,**kwargs:{'token':'bounded','plans':[{'q_target':[.1]*14}]}
+        with self.assertRaisesRegex(ValueError,'合法目标与已检查'):
+            a.hardware_trajectory_preview({'waypoints':[dict(q=requested)]})
+        self.assertNotIn('bounded',a.hardware_tokens)
+
     def test_plan_backed_queue_keeps_the_checks_its_planner_already_ran(self):
         a=self.app
         a.geometry_id='geometry';a.queue=[{'q':[0.]*12,'speeds':[.2]*12}];a.plan={'plan_complete':True};a.plan_geometry_id='geometry'
@@ -426,7 +458,7 @@ class BridgeTests(unittest.TestCase):
         a.mode_lock=threading.RLock();a.control_mode="hardware_sync";a.hardware_tokens=set()
         a.live=True;a.remote={'mode':'simulation','status':'READY','capabilities':{'jaw_gap_mm':True}};a.jaw_mm=np.array([83.,83.]);a.remote_received=time.monotonic();a.remote_error=None
         a.q=np.zeros(12);a.velocity_limits=np.ones(12);a.tokens={};a.lock=threading.RLock();a.stop=threading.Event();a.status='READY';a.importing=False;a.pending_capture=None;a.preview_revision=16;a.last_remote_timestamp=None;a.remote_advanced=0.;a.calibration=None;a.fit_result=None;a.selected_batch='test-batch'
-        a.geometry=SimpleNamespace(_q=lambda q:np.array(q))
+        a.geometry=SimpleNamespace(_q=lambda q:np.array(q),limits=np.array([[-3.14,3.5]]*12))
         # The real geometry always offers both; previews now check the swept path in
         # the renderer branch too, so the fixture must model that surface.
         a.geometry.with_gaps=lambda *gaps:a.geometry

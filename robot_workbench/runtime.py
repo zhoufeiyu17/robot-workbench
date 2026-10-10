@@ -51,6 +51,8 @@ class Runtime:
         hardware = environment == 'physical'
         if 'hardware' in owner_options and owner_options.pop('hardware') != hardware:
             raise ValueError('hardware flag differs from runtime namespace')
+        if owner_options.get('position_environment',environment)!=environment:
+            raise ValueError('position-boundary policy differs from runtime namespace')
         self.device_id, self.environment = device_id, environment
         self.nonce, self.holder = secrets.token_hex(24), initial_holder
         self.lock, self.tick_lock = threading.RLock(), threading.Lock()

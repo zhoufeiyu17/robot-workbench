@@ -158,6 +158,9 @@ def initial_motion_state(planner, data, source, spec, opening):
         raise ValueError('nonfinite simulation initial feedback')
     start, projections = dict(measured), []
     physical=is_device_source(source)
+    from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
+    environment=source.get('environment','physical') if physical else 'fake'
+    allowance=position_noise_rad(environment)
     if physical:
         from joint_space import validate_initial_state
         initial=validate_initial_state(source.get('initial_state'),source['calibration_profile'])
@@ -182,21 +185,25 @@ def initial_motion_state(planner, data, source, spec, opening):
             (measured['left_joint7']+measured['left_joint8'])*1000,
             (measured['right_joint17']+measured['right_joint18'])*1000)
     start.update(zip(RIGHT, command['right_arm_joints']))
-    for names, arm in ((LEFT, spec.left.arm), (RIGHT, spec.right.arm)):
-        for name, lo, hi in zip(names, arm.soft_lower_limits_rad, arm.soft_upper_limits_rad, strict=True):
+    from joint_space import model_joint_limits
+    bounds=model_joint_limits(spec,source)
+    for names, key in ((LEFT,'left_arm_joints'),(RIGHT,'right_arm_joints')):
+        for name, (lo,hi) in zip(names,bounds[key],strict=True):
             original = start[name]
             if not math.isfinite(original):
                 raise ValueError('nonfinite simulation initial joint: '+name)
-            projected = min(hi, max(lo, original))
-            if abs(projected-original) > .005+1e-12 or (names == RIGHT and not offline and not physical and original != projected):
+            try:projected=project_joint_positions([original],[(lo,hi)],environment=environment)[0][0]
+            except ValueError as error:
+                raise ValueError('simulation initial joint exceeds soft-limit allowance: '+name) from error
+            if names == RIGHT and not offline and not physical and original != projected:
                 raise ValueError('simulation initial joint exceeds soft-limit allowance: '+name)
             if original != projected:
                 projections.append(dict(joint=name, measured_rad=original, projected_rad=projected,
                                         lower_rad=lo, upper_rad=hi))
             start[name] = projected
     maximum = max(abs(start[name]-measured[name]) for name in (*LEFT, *RIGHT))
-    if maximum > .005+1e-12:
-        raise ValueError('measured/planned initial arm difference exceeds 0.005 rad')
+    if maximum > allowance+1e-12:
+        raise ValueError(f'measured/planned initial arm difference exceeds {allowance:g} rad')
     for side, names in (('left', ('left_joint7', 'left_joint8')), ('right', ('right_joint17', 'right_joint18'))):
         gap = command[side+'_gripper']
         if not math.isfinite(gap) or not 0 <= gap <= opening:
@@ -210,18 +217,22 @@ def initial_motion_state(planner, data, source, spec, opening):
                           start['left_joint7']*2000, start['right_joint17']*2000))
     return start, dict(simulation_initial_command=deepcopy(frozen), measured_joint_state=measured,
         planned_joint_state=start, soft_limit_projection=projections, max_arm_adjustment_rad=maximum,
-        arm_allowance_rad=.005, inactive_arm_source=frozen['evidence_source'],
+        arm_allowance_rad=allowance, position_noise_environment=environment, inactive_arm_source=frozen['evidence_source'],
         measured_to_planned_geometry_checked_by='gpu_final_acceptance',
         max_finger_adjustment_mm=max(abs(start[n]-measured[n])*1000 for n in
                                     ('left_joint7', 'left_joint8', 'right_joint17', 'right_joint18')))
 
 
-def encode_stage(stage, spec, opening, cache):
+def encode_stage(stage, spec, opening, cache, *, environment='fake', source=None):
     """Freeze arms once; decoded commands are the geometry and replay truth."""
     from isaac_lane import native_target
     from robot_sim.specs.action import ArmCommand, DualArmCommand
-    result, actions, error = [], [], 0.
-    for row in stage['rows']:
+    from joint_space import project_model_state
+    from robot_workbench.joint_bounds import position_noise_rad
+    result, actions, corrections, error = [], [], [], 0.
+    for index, original in enumerate(stage['rows']):
+        row, changes = project_model_state(original,spec,environment=environment,source=source)
+        if changes:corrections.append(dict(row=index,changes=changes))
         key = tuple(row['left_arm_joints']+row['right_arm_joints'])
         if key not in cache:
             action = list(spec.encode(DualArmCommand(ArmCommand(tuple(row['left_arm_joints']), True),
@@ -238,7 +249,23 @@ def encode_stage(stage, spec, opening, cache):
             raise ValueError('native action encoding changed model joints beyond roundoff')
         actions.append(action); result.append(decoded)
     return dict(stage, rows=result, native_actions=actions, encoding_roundoff_rad=error,
+                position_corrections=corrections,position_noise_environment=environment,
+                position_noise_rad=position_noise_rad(environment),
+                input_row_count=len(stage['rows']),
+                normalized_joint_path_sha256=_digest([row['left_arm_joints'] for row in result]),
                 input_joint_path_sha256=_digest([row['left_arm_joints'] for row in stage['rows']]))
+
+
+def stage_position_normalization(stage):
+    """Keep original input-row indices even when a later stage changes its clock."""
+    if not stage.get('position_corrections'):return None
+    return dict(corrections=deepcopy(stage['position_corrections']),
+        environment=stage['position_noise_environment'],allowance_rad=stage['position_noise_rad'],
+        input_joint_path_sha256=stage['input_joint_path_sha256'],
+        normalized_joint_path_sha256=stage['normalized_joint_path_sha256'],
+        input_row_count=stage['input_row_count'],
+        row_index_space='original stage input rows before any merge or time resampling',
+        geometric_validation=deepcopy(stage.get('position_projection_validation')))
 
 
 def scaled_stages(stages, speed, spec, opening):
@@ -310,6 +337,8 @@ def freeze(stages, source, data, grip, spec, *, run_id):
         starts.append(dict(name=stage['name'], substage=stage.get('substage', stage['name']),
                            start_tick=len(ticks), start_s=len(ticks)/30,
                            motiongen_receipt_index=stage.get('receipt_index')))
+        if stage.get('position_corrections'):
+            starts[-1]['position_normalization']=stage_position_normalization(stage)
         derivation=stage.get('cross_continuity') or stage.get('motion_continuity')
         if derivation:
             starts[-1]['motiongen_receipt_indices']=derivation['parent_receipt_indices']
@@ -355,7 +384,7 @@ def freeze(stages, source, data, grip, spec, *, run_id):
 def code_identity(urdf_path=None):
     names = ('playground_geometry','gpu_acceptance','cup_envelope','cup_contact','region_self_collision','conservative_spheres','motiongen_motion', 'motiongen_self_collision', 'motiongen_targets', 'curobo_robot_model', 'curobo_planning',
              'curobo_whole_geometry', 'curobo_relative_geometry', 'integration', 'gripper_distance_plan', 'isaac_lane',
-             'control_motion','physical_motiongen','real_contract','joint_space')
+             'control_motion','physical_motiongen','real_contract','joint_space','robot_workbench.joint_bounds')
     paths = [Path(__file__).resolve(),Path(__file__).with_name('a1_conservative_refinement.json'),Path(__file__).with_name('a1_self_domain_certificate.json'),Path(__file__).with_name('a1_grasp_contact.json'),Path(__file__).with_name('a1_cup_inset.json'), Path(__file__).with_name('a1_support_domain.json'), Path(__file__).with_name('a1_support_near.json'), Path(__file__).with_name('a1_fixed_domain.json'), *(Path(importlib.import_module(name).__file__).resolve() for name in names)]
     paths.append(Path(__file__).with_name('a1_asset_derivation.py'))
     if urdf_path is not None:
@@ -463,9 +492,17 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     source_digest = _digest(source)
     stages = []
 
+    def encode(stage):
+        value=encode_stage(stage,spec,opening,action_cache,
+            environment=source.get('environment','physical') if physical else 'fake',source=source)
+        if value['position_corrections']:
+            check=engine.validate_continuous_path([row['left_arm_joints'] for row in value['rows']])
+            if not check['passed']:raise ValueError('normalized model path failed geometric validation')
+            value['position_projection_validation']=check
+        return value
+
     def add(name, rows, substage=None, receipt_index=None):
-        stages.append(encode_stage(dict(name=name, substage=substage or name, rows=rows, receipt_index=receipt_index),
-                                   spec, opening, action_cache))
+        stages.append(encode(dict(name=name, substage=substage or name, rows=rows, receipt_index=receipt_index)))
 
     def hold(name, q, gap, seconds):
         add(name, [target(q, right, gap, right_gap) for _ in range(round(seconds*30))])
@@ -518,10 +555,11 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
         control=data['native_identity']['control']
         path,proof=continuous_path(joined,control['max_target_velocity_rad_s'],control['max_target_acceleration_rad_s2'],
             positions=positions,tcp_speed=tcp_speed,frontloaded=frontloaded,duration_s=duration_s)
-        merged=encode_stage(dict(name=name,substage=substage,rows=[target(q,right,gap,right_gap) for q in path]),spec,opening,action_cache)
+        merged=encode(dict(name=name,substage=substage,rows=[target(q,right,gap,right_gap) for q in path]))
         proof['parent_receipt_indices']=[p['receipt_index'] for p in parents]
         proof['parent_paths']=[dict(receipt_index=p['receipt_index'],input_joint_path_sha256=p['input_joint_path_sha256'],
-            emitted_joint_path_sha256=_digest([r['left_arm_joints'] for r in p['rows']]),encoding_roundoff_rad=p['encoding_roundoff_rad']) for p in parents]
+            emitted_joint_path_sha256=_digest([r['left_arm_joints'] for r in p['rows']]),encoding_roundoff_rad=p['encoding_roundoff_rad'],
+            position_normalization=stage_position_normalization(p)) for p in parents]
         proof['gpu']=engine.validate_continuous_path([r['left_arm_joints'] for r in merged['rows']])
         proof['removed_reverse_vertices']=removed
         merged['cross_continuity' if substage=='cross' else 'motion_continuity']=proof
@@ -590,8 +628,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                     path,_=move('plan_pose',current,[asdict(goal)],name,hold_orientation=True,linear_axis=axis,
                         project_to_goal_frame=not (vertical or row['name']=='insert'))
                     stage=row['name'] if row['name'] in ('lift','raise','lower') else 'transport'
-                    trial.append(encode_stage(dict(name=stage,substage=row['name'],rows=[target(q,right,closed,right_gap) for q in path],
-                        receipt_index=len(engine.receipts)-1),spec,opening,action_cache))
+                    trial.append(encode(dict(name=stage,substage=row['name'],rows=[target(q,right,closed,right_gap) for q in path],
+                        receipt_index=len(engine.receipts)-1)))
                     current=trial[-1]['rows'][-1]['left_arm_joints']
                 if row['name']=='cross':
                     parents=trial[trial_start:]
@@ -611,9 +649,9 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             receiving_distance=outlet_distance(observation.scene,planner.cup,placed_cup)
             if receiving_distance>targets['placement_goal']['tolerance_m']:
                 raise ValueError('MotionGen endpoint misses receiving goal: '+str(receiving_distance))
-            trial.append(encode_stage(dict(name='support_settle', rows=[target(current, right, closed, right_gap)]*3), spec, opening, action_cache))
-            trial.append(encode_stage(dict(name='open', rows=jaw_rows(current, right, closed, opening, right_gap)), spec, opening, action_cache))
-            trial.append(encode_stage(dict(name='release_hold', rows=[target(current, right, opening, right_gap)]*6), spec, opening, action_cache))
+            trial.append(encode(dict(name='support_settle', rows=[target(current, right, closed, right_gap)]*3)))
+            trial.append(encode(dict(name='open', rows=jaw_rows(current, right, closed, opening, right_gap))))
+            trial.append(encode(dict(name='release_hold', rows=[target(current, right, opening, right_gap)]*6)))
             engine.generator.detach_object_from_robot(link_name='attached_object')
             world, _, world_description = world_config(planner, placed_cup, fixed_meshes)
             engine.update_world(world)
@@ -624,12 +662,11 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             exit_goal=RigidTransform(**next(row['world_from_tool'] for row in route['stages'] if row['name']=='front_height'))
             path,_=move('plan_pose',current,[asdict(base_from_world.compose(exit_goal))],
                 'retreat_insert',hold_orientation=True)
-            trial.append(encode_stage(dict(name='retreat',substage='retreat_insert',
-                rows=[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1),
-                spec,opening,action_cache))
+            trial.append(encode(dict(name='retreat',substage='retreat_insert',
+                rows=[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)))
             engine.cup_contact.allow_claw_contact(False)
             path, _ = move('plan_joint', trial[-1]['rows'][-1]['left_arm_joints'], home_q, 'home')
-            trial.append(encode_stage(dict(name='home', rows=[target(q, right, opening, right_gap) for q in path], receipt_index=len(engine.receipts)-1), spec, opening, action_cache))
+            trial.append(encode(dict(name='home', rows=[target(q, right, opening, right_gap) for q in path], receipt_index=len(engine.receipts)-1)))
             jaw_acceptance.extend(trial_jaws)
             stages.extend(trial)
             selected_placement = candidate
@@ -658,7 +695,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                 if receipt.get('success') is not True or receipt.get('path_sha256')!=parent['input_joint_path_sha256']:
                     raise ValueError('joined cross parent differs from MotionGen path')
                 receipt.update(emitted_joint_path_sha256=parent['emitted_joint_path_sha256'],
-                               encoding_roundoff_rad=parent['encoding_roundoff_rad'])
+                               encoding_roundoff_rad=parent['encoding_roundoff_rad'],
+                               position_normalization=deepcopy(parent['position_normalization']))
                 selected_receipts.append(parent['receipt_index'])
         elif index is None:
             if any(row != joints[0] for row in joints):
@@ -669,7 +707,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                     ('MotionGen.plan_single', 'MotionGen.plan_goalset', 'MotionGen.plan_single_js')
                     or row.get('path_sha256') != stage['input_joint_path_sha256']):
                 raise ValueError('emitted arm path differs from its successful MotionGen receipt')
-            row.update(emitted_joint_path_sha256=_digest(joints), encoding_roundoff_rad=stage['encoding_roundoff_rad'])
+            row.update(emitted_joint_path_sha256=_digest(joints), encoding_roundoff_rad=stage['encoding_roundoff_rad'],
+                       position_normalization=stage_position_normalization(stage))
             selected_receipts.append(index)
     stages,control_adjustments=enforce_stage_motion_limits(stages,data['native_identity']['control'],spec,opening)
     derived_stages, source_times = scaled_stages(stages, speed_scale, spec, opening)

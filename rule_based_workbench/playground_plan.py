@@ -6,7 +6,7 @@ import struct
 import time
 
 from integration import _digest, SIM_PLANNER_ID, SIM_POLICY_ID
-from joint_space import convert_state, freeze_reported, gripper_offset_mm
+from joint_space import convert_state, freeze_reported, gripper_offset_mm, project_model_state
 
 
 def build(planner, observation, initial, source, identity, speed_scale=.3, *, environment='physical'):
@@ -30,11 +30,14 @@ def build(planner, observation, initial, source, identity, speed_scale=.3, *, en
     opening = planner.open_position_m*2000
     initial_gap = source['initial_state']['model']['left_gripper']
     right_gap = source['initial_state']['model']['right_gripper']
-    ticks, actions, stages = [], [], []
+    ticks, actions, stages, corrections = [], [], [], []
 
     def emit(q, opened):
         from isaac_lane import physical
-        action = list(spec.encode(DualArmCommand(ArmCommand(tuple(q), opened), ArmCommand(right, True))))
+        model,changes=project_model_state(dict(left_arm_joints=list(q),right_arm_joints=list(right)),spec,environment=environment,source=source)
+        if changes:corrections.append(dict(tick=len(ticks),changes=changes))
+        action = list(spec.encode(DualArmCommand(ArmCommand(tuple(model['left_arm_joints']), opened),
+                                               ArmCommand(tuple(model['right_arm_joints']), True))))
         ticks.append(dict(tick=len(ticks), time_s=len(ticks)/30, target=physical(spec.decode(action), opening)))
         ticks[-1]['target']['right_gripper']=right_gap
         actions.append(action)
@@ -112,7 +115,9 @@ def build(planner, observation, initial, source, identity, speed_scale=.3, *, en
                   geometric_contact_model_gap_mm=contact_gap,
                   contact_state_digest=_digest(contact),maximum_step_mm=.2,rate_mm_s=6.,
                   arm_motion=False,tracking_protection='opening lag guarded; wider contact-limited gap allowed during unloading'),
-              simulation=dict(validated=False,outcome='not_run'),initial_state_digest=_digest(source['initial_state']))
+              simulation=dict(validated=False,outcome='not_run'),initial_state_digest=_digest(source['initial_state']),
+              position_normalization=dict(environment=environment,corrections=corrections,
+                  input_timeline_digest=_digest(ticks),row_index_space='original model ticks before reported conversion and time resampling'))
     freeze_reported(plan,source)
     plan=distance_plan(plan,source,close_metal_gap_mm=65.)
     audit(plan,source,planner,observation,initial)

@@ -356,10 +356,16 @@ def main():
                      camera_frames=dict.fromkeys(('base_0','left_wrist_0','right_wrist_0'),2))
         raw_verify.return_value=(capture,source,plan)
         runtime={'timeline_digest':'shared-execution','duration_s':65.,'initialization_duration_s':64.9}
+        saved_derivation=b'{"fixture":"verified by dedicated L3 tests"}'
+        stack.enter_context(patch.object(pipeline,'verify_l3_derivation',return_value={'passed':True}))
         def fetch_shared(remote,local,**kw):
+            if remote.endswith('/l3-initialization-derivation.json'):
+                Path(local).write_bytes(saved_derivation);return
             fetch_replay(remote,local,**kw)
             if remote.endswith('/result.json'):
                 value=json.loads(Path(local).read_text());value['execution_timeline_digest']='shared-execution'
+                value.update(l3_derivation_ref='l3-initialization-derivation.json',
+                    l3_derivation_sha256=__import__('hashlib').sha256(saved_derivation).hexdigest())
                 Path(local).write_text(json.dumps(value))
         transport.side_effect=fetch_shared
         with patch.object(pipeline,'execution_runtime',return_value=runtime), \

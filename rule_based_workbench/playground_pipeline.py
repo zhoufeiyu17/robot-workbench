@@ -36,6 +36,22 @@ def save(path,value):
     temporary.replace(path)
 
 
+def verify_l3_derivation(sim, saved, plan, source, timeline, *, spec=None):
+    """Verify association and adjusted targets separately; never trust replay limits."""
+    if spec is None:
+        from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
+        spec=ac_one_dual_arm_zero_home_action_spec()
+    from playground_sim import validate_l3_replay_derivation
+    derivation=validate_l3_replay_derivation(plan,source,timeline,spec,saved)['l3_derivation']
+    expected=dict(execution_timeline_digest=timeline['timeline_digest'],
+        l3_derivation_digest=derivation['derivation_digest'],
+        l3_commands_digest=derivation['derived_commands_digest'],
+        replay_matches_shared_commands=derivation['replay_matches_shared_commands'])
+    if any(sim.get(key)!=value for key,value in expected.items()):
+        raise ValueError('L3 result differs from independently verified command derivation')
+    return dict(passed=True,scope='L3 auxiliary command derivation; no task qualification',**expected)
+
+
 def prepare_environment(config,progress=None,cancel=None):
     cfg,contract,_=load_config(Path(config['pipeline_config']))
     checks=[]
@@ -501,7 +517,7 @@ def prepare_remote_runtime(cfg,parent_path,timeline,*,cancel=None):
 sys.path[:0]=[sys.argv[1],sys.argv[1].rsplit("/",1)[0]]
 from execution_timeline import prepare,initialize,validate
 plan=json.loads(pathlib.Path(sys.argv[2]).read_text());init=json.loads(sys.argv[3]);p=pathlib.Path(sys.argv[4])
-runtime=initialize(prepare(plan),init['actual_start'],init['command_limits'])
+runtime=initialize(prepare(plan),init['actual_start'],init['command_limits'],environment=init['environment'])
 assert runtime['timeline_digest']==sys.argv[5],'shared execution derivation differs'
 if p.exists():
  assert validate(json.loads(p.read_text()),plan)['timeline_digest']==sys.argv[5]
@@ -754,8 +770,16 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         if sim.get('status')=='completed' and (sim.get('source_run_id')!=source['run_id']
                 or sim.get('plan_run_id')!=plan_value['run_id'] or sim.get('timeline_digest')!=plan_value['timeline_digest']):
             raise ValueError('simulation replay belongs to another source or timeline')
-        if runtime is not None and sim.get('status')=='completed' and sim.get('execution_timeline_digest')!=runtime['timeline_digest']:
-            raise ValueError('simulation did not execute the shared command sequence')
+        if runtime is not None and sim.get('status')=='completed':
+            if sim.get('l3_derivation_ref')!='l3-initialization-derivation.json':
+                raise ValueError('L3 replay lacks its explicit command derivation')
+            derivation_path=output/'l3-initialization-derivation.json'
+            fetch(remote+'/l3-initialization-derivation.json',derivation_path,cancel=cancel,execution_config=cfg)
+            if hashlib.sha256(derivation_path.read_bytes()).hexdigest()!=sim.get('l3_derivation_sha256'):
+                raise ValueError('L3 derivation artifact digest differs')
+            proof=verify_l3_derivation(sim,json.loads(derivation_path.read_text()),plan_value,source,runtime)
+            save(output/'l3-derivation-verification.json',proof)
+            sim['derivation_verification']=proof;save(output/'simulation-result.json',sim)
         for camera in ('base_0','left_wrist_0','right_wrist_0'):
             path=output/f'sim-{camera}.mp4'
             fetch(remote+'/'+f'{camera}.mp4',path,cancel=cancel,execution_config=cfg)

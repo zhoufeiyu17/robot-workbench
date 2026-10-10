@@ -12,6 +12,7 @@ import time
 import uuid
 from urllib.parse import parse_qs, urlsplit,urlencode
 from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS
+from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection')
@@ -310,6 +311,7 @@ class Application:
             from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
             manual=dict(joint_names=[side+' J'+str(i) for side in ('左','右') for i in range(1,7)],
                 positions=raw[:6]+raw[7:13], limits=limits[:6]+limits[7:13],jaw_gaps_mm=feedback_gaps(raw),
+                position_noise_rad=position_noise_rad(environment),
                 default_joint_speed_rad_s=DEFAULT_VELOCITY,default_jaw_speed_mm_s=10.)
         manual['queue']=queue
         calibration=device.workflows.get('calibration')
@@ -366,10 +368,18 @@ class Application:
                             body.get('display_context')!=context['display_context'] or body.get('renderer_id')!=context['renderer_id']
                             or body.get('view_revision')!=context['revisions']['overview']):
                         raise ValueError('target input or presentation ACK belongs to another display context')
-                    result=provider.target_pose(body['q12'],body['jaw_gap_mm'],display_context=context['display_context'],
+                    q=body['q12'];corrections=[]
+                    runtime=device.runtime
+                    limits=None
+                    if runtime:
+                        with runtime.owner.lock:limits=runtime.owner.cache.get('joint_limits')
+                    if limits:
+                        q,corrections=project_joint_positions(q,limits[:6]+limits[7:13],environment=environment)
+                    result=provider.target_pose(q,body['jaw_gap_mm'],display_context=context['display_context'],
                         renderer_instance_id=context['renderer_id'],view_revision=context['revisions']['overview'],
                         presented_through_revision=body.get('presented_through_revision'))
-                    result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'],view_revision=context['revisions']['overview'])
+                    result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'],view_revision=context['revisions']['overview'],
+                        position_normalization=dict(environment=environment,corrections=corrections))
                 elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.))
                 elif action=='preview_mesh':result=provider.mesh(body['enabled'],camera=body.get('camera','head'),candidate_id=body.get('candidate_id'))
                 else:

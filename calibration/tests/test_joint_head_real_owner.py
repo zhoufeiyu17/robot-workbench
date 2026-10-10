@@ -44,10 +44,36 @@ class OwnerTest(unittest.TestCase):
         self.assertIsNone(state['arm_arrival_tolerance_rad'])
         self.assertEqual(state['arm_arrival_tolerances_rad'],self.owner.arm_tolerances)
         feedback=state['calibration_feedback']
-        plan=make_plan('both',feedback['qpos'],feedback['qpos'],state['joint_limits'],kind='workbench',created_at_s=self.now)
+        plan=make_plan('both',feedback['qpos'],feedback['qpos'],state['joint_limits'],kind='workbench',created_at_s=self.now,
+                       environment=self.owner.position_environment)
         self.owner.start_motion(plan,feedback)
         self.assertEqual(self.owner.runner.arm_tolerances,tuple(self.owner.arm_tolerances))
         self.assertEqual(self.owner.runner.plan.q_target,tuple(feedback['qpos']))
+
+    def test_raw_boundary_feedback_and_review_keep_distinct_legal_commands(self):
+        self.owner.backend.q[0]=-3.143
+        for _ in range(10):self.advance(.04)
+        value=self.owner.snapshot();raw=value['calibration_feedback']
+        self.assertEqual(raw['qpos'][0],-3.143)
+        self.assertEqual(raw['position_boundary']['command_joint_positions_rad'][0],-3.14)
+        self.assertAlmostEqual(raw['position_boundary']['corrections'][0]['delta_rad'],.003)
+        self.assertEqual(value['position_noise_rad'],.005)
+        target=raw['qpos'][:];target[0]=-3.142
+        preview=self.owner.submit(dict(action='preview',active_arm='left',q_target=target))
+        self.assertEqual(preview['plan']['requested_q_target'][0],-3.142)
+        self.assertEqual(preview['plan']['q_target'][0],-3.14)
+        self.assertEqual(preview['plan']['environment'],'fake')
+        from arx_env.joint_head_real_motion import MotionTrackingError
+        self.owner.motion_fault(MotionTrackingError('fixture recoverable fault'));self.advance(.04)
+        count=len(self.owner.backend.events)
+        self.owner.submit(dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',
+            owner_pid=self.owner.snapshot()['pid'],command_epoch=self.owner.epoch))
+        self.advance(.04)
+        self.assertEqual(self.owner.snapshot()['state'],'STOPPED_DAMPING_HOLD')
+        self.assertEqual(len(self.owner.backend.events),count,'recovery does not issue a new target')
+        self.owner.backend.q[0]=-3.146;self.advance(.04)
+        self.assertFalse(self.owner.snapshot()['feedback_healthy'])
+        self.assertIn('position-boundary',self.owner.snapshot()['reason'])
 
     def test_arrival_cli_rejects_conflicts_and_invalid_vector_before_backend(self):
         import io
@@ -545,6 +571,14 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(exact[6],.02, 'resampled feedback remains in the feedback domain')
         self.assertAlmostEqual(b._controllers['left'].calls[0][1].gripper_pos,
                                command_sdk('left',feedback_gaps(q)[0]))
+        noisy=q[:];noisy[0]=3.009;b._controllers['left'].state.p[0]=3.009
+        exact=b.begin('left',noisy)
+        self.assertEqual(exact[0],3.009)
+        self.assertEqual(b._controllers['left'].calls[-2][1].pos()[0],3.)
+        self.assertEqual(b.last_begin_position_boundary['corrections'][0]['original_rad'],3.009)
+        with self.assertRaisesRegex(ValueError,'invalid single-arm target'):b.send('left',noisy)
+        noisy[0]=3.0101;b._controllers['left'].state.p[0]=3.0101
+        with self.assertRaisesRegex(ValueError,'position-boundary'):b.begin('left',noisy)
         b.set_damping_hold(manual=True)
         for controller in b._controllers.values():
             gain=controller.calls[-1][1]

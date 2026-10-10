@@ -24,6 +24,7 @@ class Arm:
 class Dual:
     def __init__(self,left,right): self.left=left; self.right=right
 class Spec:
+    left=right=NS(arm=NS(soft_lower_limits_rad=(-2.,)*6,soft_upper_limits_rad=(2.,)*6))
     def encode(self,q): return [v/2 for v in q.left.joint_positions_rad]+[1 if q.left.gripper_open else -1]+[v/2 for v in q.right.joint_positions_rad]+[1 if q.right.gripper_open else -1]
     def decode(self,raw): return Dual(Arm(tuple(v*2 for v in raw[:6]),raw[6]==1),Arm(tuple(v*2 for v in raw[7:13]),raw[13]==1))
 class Row(list):
