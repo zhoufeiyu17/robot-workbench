@@ -214,7 +214,8 @@ def run(args, base, nominal):
             return RecordingSession(recording_root/secrets.token_hex(16)/'raw',
                 payload['source'],payload['plan'],binding,camera_directories=producer.directories,
                 execution_timeline=payload['execution_timeline'],environment='fake',
-                execution_owner=payload.get('execution_owner'),on_fault=on_fault)
+                execution_owner=payload.get('execution_owner'),on_fault=on_fault,
+                resident_deadline_wall_ns=resident_deadline_wall_ns)
         token_files={};tokens={}
         for business in ('calibration','collection'):
             path=args.output/(business+'-gateway-token')

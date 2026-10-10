@@ -419,6 +419,26 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     return manifest
 
 
+def _renew_recording_lease(request,token,previous_deadline,new_deadline,*,clock_ns,active):
+    """Replace only this live token; retain RawSpool's bounded 600 s window."""
+    before=request.read_bytes();lease=json.loads(before);now=clock_ns()
+    if (lease.get('run_id')!=token or lease.get('deadline_wall_ns')!=previous_deadline
+            or not lease['start_wall_ns']<=now<previous_deadline
+            or not previous_deadline<new_deadline<=now+600_000_000_000):
+        raise ValueError('recording lease ownership/window changed; expired leases cannot resume')
+    temporary=request.with_name(token+'.renew.tmp')
+    try:
+        with temporary.open('x') as stream:
+            json.dump(dict(run_id=token,start_wall_ns=now,deadline_wall_ns=new_deadline),stream)
+        if not active():return False
+        if request.read_bytes()!=before or clock_ns()>=previous_deadline:
+            raise ValueError('recording lease changed or expired before renewal')
+        os.replace(temporary,request)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 class RecordingSession:
     """Bounded nonblocking owner input; this worker alone writes recording files.
 
@@ -427,7 +447,8 @@ class RecordingSession:
     Tests may omit directories and submit paired bundles through the same queue.
     """
     def __init__(self,root,source,plan,binding,*,camera_directories=None,clock_ns=time.time_ns,
-                 capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None):
+                 capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None,
+                 resident_deadline_wall_ns=None):
         import queue
         import threading
         self.root=Path(root)
@@ -444,6 +465,7 @@ class RecordingSession:
         self.on_fault=on_fault
         self.clock_ns=clock_ns
         self.camera_directories=camera_directories
+        self.resident_deadline_wall_ns=resident_deadline_wall_ns
         self.recorder=None
         self.execution_timeline=execution_timeline
         self.thread=threading.Thread(target=self._run,args=(source,plan,binding,recorder_factory),daemon=True)
@@ -486,6 +508,7 @@ class RecordingSession:
         cursors={}
         leases=[]
         lease_deadline_wall_ns=None
+        recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
         try:
             self.recorder=factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
                 **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
@@ -493,14 +516,23 @@ class RecordingSession:
                     'execution_owner':self.execution_owner} if self.environment=='fake' else {}))
             if self.camera_directories is not None:
                 if set(self.camera_directories)!=set(CAMERAS):raise ValueError('three native RGB-D spool directories required')
-                duration=self.recorder.frozen.duration_s+15
-                if not 0 < duration <= 600:raise ValueError('raw recording supports at most 585 seconds of execution')
+                if self.environment=='fake':
+                    if type(self.resident_deadline_wall_ns) is not int:
+                        raise ValueError('fake recording requires the fixed resident wall deadline')
+                    now=self.clock_ns();recording_deadline_wall_ns=self.resident_deadline_wall_ns-45_000_000_000
+                    if now>=recording_deadline_wall_ns:raise ValueError('resident recording budget exhausted; 45 s cleanup reserve required')
+                    recording_deadline_monotonic=time.monotonic()+(recording_deadline_wall_ns-now)/1e9
+                    lease_deadline_wall_ns=min(recording_deadline_wall_ns,now+600_000_000_000)
+                    renew_at_wall_ns=now+(lease_deadline_wall_ns-now)//2
+                else:
+                    duration=self.recorder.frozen.duration_s+15
+                    if not 0 < duration <= 600:raise ValueError('raw recording supports at most 585 seconds of execution')
                 for camera,value in self.camera_directories.items():
                     directory=Path(value).resolve(strict=True)
                     if json.loads((directory/'recording-service.json').read_text()).get('schema') != 'rgbd_lease.v1':
                         raise ValueError(camera+': on-demand recording service required')
                     start=self.clock_ns()
-                    deadline_wall_ns=start+round(duration*1e9)
+                    deadline_wall_ns=lease_deadline_wall_ns if self.environment=='fake' else start+round(duration*1e9)
                     lease_deadline_wall_ns=min(lease_deadline_wall_ns or deadline_wall_ns,deadline_wall_ns)
                     token=uuid.uuid4().hex
                     request=directory/'recording-request.json'
@@ -513,6 +545,9 @@ class RecordingSession:
                     cursors[camera]=(directory/token,1)
                 ready_deadline=time.monotonic()+5
                 while True:
+                    if recording_deadline_wall_ns is not None and (self.clock_ns()>=recording_deadline_wall_ns
+                            or time.monotonic()>=recording_deadline_monotonic):
+                        raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
                     first=[]
                     for camera,(directory,index) in cursors.items():
                         path=directory/f'{index:09d}.zip'
@@ -534,8 +569,21 @@ class RecordingSession:
                     raise ValueError('native raw stream absent or stale')
             self.ready.set()
             while True:
-                if lease_deadline_wall_ns is not None and self.clock_ns()>=lease_deadline_wall_ns:
+                now=self.clock_ns()
+                if recording_deadline_wall_ns is not None and (now>=recording_deadline_wall_ns
+                        or time.monotonic()>=recording_deadline_monotonic):
+                    raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                if lease_deadline_wall_ns is not None and now>=lease_deadline_wall_ns:
                     raise ValueError('recording lease actual wall deadline exceeded')
+                if (recording_deadline_wall_ns is not None and lease_deadline_wall_ns<recording_deadline_wall_ns
+                        and now>=renew_at_wall_ns and self.terminal is None):
+                    renewed=min(recording_deadline_wall_ns,now+600_000_000_000)
+                    for request,token in leases:
+                        if not _renew_recording_lease(request,token,lease_deadline_wall_ns,renewed,
+                                clock_ns=self.clock_ns,active=lambda:self.terminal is None):break
+                    else:
+                        lease_deadline_wall_ns=renewed
+                        renew_at_wall_ns=now+(renewed-now)//2
                 try:
                     kind,fields=self.events.get(timeout=.01)
                 except queue.Empty:pass

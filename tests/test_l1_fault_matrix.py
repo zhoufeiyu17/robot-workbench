@@ -177,6 +177,7 @@ class Harness:
             entered,release=threading.Event(),threading.Event();self.release_gates.append(release)
             session=RecordingSession(path,payload['source'],payload['plan'],self.binding,
                 execution_timeline=payload['execution_timeline'],environment='fake',execution_owner=payload['execution_owner'],
+                resident_deadline_wall_ns=time.time_ns()+60_000_000_000,
                 on_fault=on_fault,capacity=1 if kind=='queue_overflow' else 512,recorder_factory=recorder,**kwargs)
             self.sessions.append(session)
             if kind in ('wrong_serial','pair_mismatch'):
