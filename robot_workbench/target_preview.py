@@ -117,7 +117,7 @@ class TargetPreview:
         q=vector(q12,12,'target q12');gaps=vector(jaw_gap_mm,2,'target gaps')
         if self.validate_pose is not None:self.validate_pose(q,gaps)
         with self.lock:
-            self.target=dict(q=q,jaw_gap_mm=gaps);self.revisions['target']+=1;self.frames.pop('target',None)
+            self.target=dict(q=q,jaw_gap_mm=gaps);self.revisions['target']+=1
             self.requested_wall_ns['target']=time.time_ns()
             revision=self.revisions['target']
         self.changed.set();return dict(queued=True,client_revision=revision,display_only=True,token=None)
@@ -176,6 +176,7 @@ class TargetPreview:
 
     def _preview_loop(self):
         sent=dict(target=-1,view=-1,mirror=-1);target_revision=None;view_revision=None
+        target_complete=True;target_requested=0
         while not self.closed.is_set():
             started=time.monotonic()
             with self.lock:
@@ -189,12 +190,16 @@ class TargetPreview:
                     raise ValueError('renderer restarted; explicit rebind required')
                 # Candidate mesh uses stateless observed pixels only, not duplicate continuous overlays.
                 if remote.get('mesh_rendering_enabled') is not False:self.client.request('/overlay-rendering',{'enabled':False})
-                if target is not None and sent['target']!=current['target']:
-                    target_revision=max(remote.get('preview_revision',-1)+1,(target_revision or 0)+1)
-                    self.client.request('/preview',dict(target,revision=target_revision));sent['target']=current['target']
                 if view is not None and sent['view']!=current['view']:
                     view_revision=max(remote.get('overview_revision',0)+1,(view_revision or 0)+1)
                     self.client.request('/overview-view',dict(view,revision=view_revision));sent['view']=current['view']
+                    # A new view invalidates the old in-flight target; resend the latest pose.
+                    target_complete=True;sent['target']=-1
+                if target is not None and target_complete and sent['target']!=current['target']:
+                    # Keep one target in flight until its pixels arrive; newer inputs stay coalesced in self.target.
+                    target_revision=max(remote.get('preview_revision',-1)+1,(target_revision or 0)+1)
+                    self.client.request('/preview',dict(target,revision=target_revision));sent['target']=current['target']
+                    target_requested=requested['target'];target_complete=False
                 if mirror is not None and sent['mirror']!=current['mirror']:
                     try:
                         self.client.request('/mirror',mirror)
@@ -226,10 +231,15 @@ class TargetPreview:
                             or type(metadata.get('source_timestamp_ns')) is not int or metadata['source_timestamp_ns']<=0):
                         raise ValueError('renderer pixels have no matching atomic display metadata')
                     with self.lock:
-                        if current['view']==self.revisions['view'] and (name=='overview' or current['target']==self.revisions['target']):
-                            stamp=max(requested.values()) if name=='target' else requested['view']
+                        if current['view']==self.revisions['view']:
+                            previous=self.frames.get(name)
+                            if previous and metadata['source_timestamp_ns']<previous[1]['source_timestamp_ns']:
+                                raise ValueError('renderer display timestamp moved backwards')
+                            stamp=max(target_requested,requested['view']) if name=='target' else requested['view']
                             timing=dict(client_requested_wall_ns=stamp,display_latency_ms=(metadata['source_timestamp_ns']-stamp)/1e6) if stamp else {}
-                            self.frames[name]=(raw,dict(metadata,client_revision=current['target'],client_view_revision=current['view'],**timing),time.monotonic())
+                            self.frames[name]=(raw,dict(metadata,client_revision=sent['target'] if name=='target' else current['target'],
+                                client_view_revision=current['view'],**timing),time.monotonic())
+                            if name=='target':target_complete=True
                 with self.lock:self.last_health=time.monotonic();self.error=None
             except Exception as error:
                 with self.lock:self.error=str(error)

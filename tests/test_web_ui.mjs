@@ -264,6 +264,30 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   const target={...media,preview_view:'target',view_revision:9},targetMeta={...meta,view:'target',view_revision:9};
   assert.equal(verifyPreviewFrame(target,targetMeta,'fake'),targetMeta);
   assert.throws(()=>verifyPreviewFrame(target,{...targetMeta,view_revision:8},'fake'),/观察视角修订/);
+  const bound={...target,minimum_revision:2,revision:5,server_instance_id:'server',display_context:'installed-current'};
+  const completed={...targetMeta,revision:3,server_instance_id:'server',display_context:'installed-current'};
+  assert.equal(verifyPreviewFrame(bound,completed,'fake'),completed,'same-context completed targets may trail the requested revision');
+  for(const change of [{revision:1},{revision:6},{server_instance_id:'old-server'},{display_context:'old-install'},{renderer_id:'old-renderer'}])assert.throws(()=>verifyPreviewFrame(bound,{...completed,...change},'fake'));
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  const positions=h.get('joint-inputs').querySelectorAll('input').filter(row=>row.dataset.role==='position');
+  h.get('show-target').events.click();assert.equal(h.get('show-target').disabled,false,'the shared latest-input queue remains available while HTTP is in flight');
+  positions[0].value='.2';positions[0].events.input();h.get('show-target').events.click();positions[0].value='.3';positions[0].events.input();h.get('show-target').events.click();
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'ordinary target edits use the bounded presentation queue');
+  h.reply(1,{client_revision:8});await settle();value.revision=2;value.preview.revisions.target=8;h.reply(2,value);await settle();
+  h.reply(3,{},previewHeaders('target',8));await settle();h.paint();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'HTTP ACK and image decode cannot release the next target before presentation');
+  h.advance(16);h.paint();await settle();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,2);
+  assert.equal(JSON.parse(h.requests[4].options.body).q12[0],.3,'only the latest unsent ordinary target is dispatched');
+  h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.display_context='installed-a';value.preview.target_floor=0;
+  h.reply(0,value);await settle();h.get('show-target').events.click();h.get('show-target').events.click();h.app.poll();
+  value.revision=2;value.runtime.calibration_revision=2;value.preview.display_context='installed-b';value.preview.target_floor=8;
+  h.reply(2,value);await settle();assert.equal(h.requests[1].options.signal.aborted,true,'installation changes cancel the ordinary target flight and pending input');
+  h.reply(1,{client_revision:8,display_context:'installed-a',renderer_id:'renderer-one'});await settle();
+  assert.equal(h.get('media-preview').querySelector('img').hidden,true);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'old pending target is never replayed into the new installed context');h.app.destroy();
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();
@@ -273,11 +297,12 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   assert.deepEqual(JSON.parse(h.requests[1].options.body).q12,Array(12).fill(.1));assert.equal(h.get('clearance').checked,true,'read-only display must not revoke a motion review');
   h.reply(1,{client_revision:8,token:null});await request;await settle();
   value.revision=2;value.preview.frames.target.ready=true;h.reply(2,value);await settle();
-  assert.equal(h.requests.length,3,'older state revision cannot start an image request for a newer target');
-  value.revision=3;value.preview.revisions.target=8;value.preview.frames.target.revision=8;h.app.poll();h.reply(3,value);await settle();
-  assert.match(h.requests[4].url,/view=target/);h.reply(4,{},previewHeaders('target',7));await settle();
-  assert.equal(h.get('media-preview').querySelector('img').hidden,true);assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/修订不匹配/);
-  h.nextFrame();h.reply(5,{},previewHeaders('target',8));await settle();assert.equal(h.get('media-preview').querySelector('img').hidden,false);
+  assert.equal(h.requests.length,4,'target completion polling must not wait for the requested revision to appear in a state snapshot');
+  assert.match(h.requests[3].url,/view=target/);h.reply(3,{},previewHeaders('target',7));await settle();
+  assert.equal(h.get('media-preview').querySelector('img').hidden,false);assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/最新完成目标/);
+  h.nextFrame();h.reply(4,{},previewHeaders('target',8));await settle();const completedImage=h.get('media-preview').querySelector('img').src;
+  h.nextFrame();h.reply(5,{},previewHeaders('target',7));await settle();assert.equal(h.get('media-preview').querySelector('img').src,completedImage,'completed revisions must never move backwards');
+  assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/倒退/);
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1,'target image never invokes motion preview or confirm');h.app.destroy();
 }
 {
@@ -422,9 +447,9 @@ function deletionSnapshot(){
   const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;h.reply(0,value);await settle();
   h.reply(1,{},previewHeaders('target',7));await settle();h.get('audit-start').events.click();h.reply(2,{client_revision:8});await settle();
   value.revision=2;value.preview.revisions.target=8;value.preview.frames.target.revision=8;h.reply(3,value);await settle();
-  h.reply(4,{},previewHeaders('target',8,{frame_id:'frame-7'}));await settle();h.paint();h.advance(16);h.paint();
+  h.fireTimer(ms=>ms!==2500&&Math.abs(ms-1000/30)>.01);h.reply(4,{},previewHeaders('target',8,{frame_id:'frame-7'}));await settle();h.paint();h.advance(16);h.paint();
   h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
-  assert.equal(evidence.windows[0].summary.duplicate_frames,1,'a reused source frame cannot become new just because its revision metadata changed');
+  assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/身份复用/,'a reused source frame is rejected even if its revision metadata changed');
   assert.equal(evidence.windows[0].summary.matched_inputs,0);assert.equal(evidence.windows[0].summary.latency_p95_unbounded,true);h.app.destroy();
 }
 {

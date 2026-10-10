@@ -45,8 +45,13 @@ export function safeMediaUrl(value, origin) {
 }
 
 export function verifyPreviewFrame(media,metadata,environment){
-  if(!metadata||metadata.environment!==environment||metadata.view!==media.preview_view||metadata.revision!==media.revision)
+  const matchingRevision=media.preview_view==='target'&&Number.isInteger(media.minimum_revision)
+    ?Number.isInteger(metadata?.revision)&&metadata.revision>=media.minimum_revision&&metadata.revision<=media.revision
+    :metadata?.revision===media.revision;
+  if(!metadata||metadata.environment!==environment||metadata.view!==media.preview_view||!matchingRevision)
     throw Error('预览帧身份或修订不匹配，等待当前请求的画面');
+  if(media.server_instance_id&&metadata.server_instance_id!==media.server_instance_id)throw Error('预览服务实例已变化，丢弃旧画面');
+  if(media.display_context&&metadata.display_context!==media.display_context)throw Error('安装或控制上下文已变化，丢弃旧画面');
   if(media.renderer_id&&metadata.renderer_id!==media.renderer_id)throw Error('渲染服务身份已变化，丢弃旧画面');
   if(media.preview_view!=='mesh'&&metadata.view_revision!==media.view_revision)throw Error('观察视角修订不匹配，丢弃旧画面');
   if(media.preview_view==='mesh'&&(metadata.camera!==media.camera||metadata.candidate_id!==media.candidate_id))
@@ -87,6 +92,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   let previewView='target',meshCamera='head',meshCandidate='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
   let overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0},overviewDirty=false,overviewSending=false,overviewPointer=null;
   const displayRequests=new Map(),previewFloors=new Map(),previewErrors=new Map(),planPreviewButtons=[];
+  let targetFlight=null,targetPending=null;
   const auditEnabled=new URL(location.href).searchParams.get('preview-audit')==='1';let audit=null,auditDownload=null;
   const jointInputs=role=>[...el('joint-inputs').querySelectorAll('input')].filter(input=>input.dataset.role===role);
   function displayPose(){
@@ -102,6 +108,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
     ? {allowed:false,reason:'本次删除确认已提交，请查看删除回执；旧预览不能重复确认'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
   const make = (tag, content, className) => { const node = doc.createElement(tag); if (content !== undefined) node.textContent = textValue(content); if(className)node.className=className; return node; };
+  const targetBinding=()=>JSON.stringify([key(),previewView,serverInstance,state?.preview?.renderer_id,state?.preview?.display_context,state?.preview?.revisions?.overview,
+    state?.runtime?.runtime_nonce,state?.runtime?.command_epoch,state?.runtime?.calibration_revision,state?.runtime?.calibration_snapshot_id,state?.runtime?.holder,state?.runtime?.execution_instance_id]);
   const auditBinding=()=>JSON.stringify([key(),previewView,serverInstance,state?.preview?.renderer_id,state?.preview?.revisions?.overview,
     state?.runtime?.runtime_nonce,state?.runtime?.command_epoch,state?.runtime?.calibration_revision,state?.runtime?.calibration_snapshot_id,
     state?.runtime?.holder,state?.runtime?.execution_instance_id,state?.preview?.mesh,state?.manual?.limits]);
@@ -115,6 +123,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const mesh=state.preview.mesh;
     if(typeof mesh?.requested!=='boolean'||mesh.applied!==mesh.requested)return '等待 mesh 开关的后端生效状态一致';
     if(displayRequests.size)return '等待当前只读显示请求结束';
+    if(targetFlight||targetPending)return '等待当前目标呈现或结束';
     return '';
   }
   function renderAudit(){
@@ -129,8 +138,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function closeAuditWindow(reason){
     const w=audit.window;w.status=reason?'interrupted':'completed';w.ended_ms=clock.now();
     for(const row of w.inputs)if(row.presented_ms===undefined&&!row.error)row.cancelled=row.cancelled||reason||'未在尾部等待窗口内呈现';
-    if(w.controller){w.controller.abort();if(displayRequests.get('target')===w.controller)displayRequests.delete('target');}
-    for(const id of w.rafIds)cancelAnimationFrame?.(id);w.rafIds.clear();w.latest=null;
+    if(targetFlight?.auditRequest?.window===w||targetPending?.auditRequest?.window===w)cancelTarget('诊断窗口已结束');
+    for(const id of w.rafIds)cancelAnimationFrame?.(id);w.rafIds.clear();
   }
   function finishAudit(reason){
     if(!audit?.active)return;
@@ -139,15 +148,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('preview-audit').open=true;renderAudit();
   }
   function beginAuditWindow(){
-    const w={started_ms:clock.now(),status:'running',inputs:[],frames:[],duplicates:0,seen:new Set(),byRevision:new Map(),painted:new Map(),rafIds:new Set(),sending:false,latest:null,controller:null};
+    const w={started_ms:clock.now(),status:'running',inputs:[],frames:[],duplicates:0,seen:new Set(),byRevision:new Map(),painted:new Map(),rafIds:new Set()};
     const media=mediaSlots.get('preview')?.media;if(media?.frame_id)w.seen.add(JSON.stringify([media.renderer_id,media.frame_id]));
     audit.window=w;audit.windows.push(w);tickAudit();
-  }
-  async function pumpAuditInput(){
-    const session=audit,w=session?.window;if(!session?.active||w.sending||!w.latest||displayRequests.has('target'))return;
-    const input=w.latest;w.latest=null;w.sending=true;
-    await sendDisplay('preview_target',{q12:input.q12,jaw_gap_mm:session.base.jaw_gap_mm},{session,window:w,row:input.row});
-    if(audit===session&&session.active&&session.window===w){w.sending=false;if(clock.now()<w.started_ms+60000)void pumpAuditInput();}
   }
   function tickAudit(){
     if(!audit?.active)return;renderAudit();if(!audit.active)return;
@@ -155,9 +158,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(elapsed>=62000){closeAuditWindow(null);if(audit.windows.length===3){finishAudit(null);renderGates();return;}beginAuditWindow();return;}
     if(elapsed<60000){
       if(w.inputs.length>=2400||w.frames.length>=4000){finishAudit('达到有界样本上限');return;}
-      if(w.latest){w.latest.row.cancelled='较新输入合并，未发送';w.latest.row.coalesced=true;}
       const q12=[...audit.base.q12],value=audit.center+audit.amplitude*Math.sin(w.inputs.length*.21);q12[audit.joint]=value;
-      const row={input_id:w.inputs.length,input_ms:elapsed,target_joint_value_rad:value};w.inputs.push(row);w.latest={row,q12};void pumpAuditInput();
+      const row={input_id:w.inputs.length,input_ms:elapsed,target_joint_value_rad:value};w.inputs.push(row);
+      void sendDisplay('preview_target',{q12,jaw_gap_mm:audit.base.jaw_gap_mm},{session:audit,window:w,row});
     }
     audit.timer=setTimeout(tickAudit,1000/30);
   }
@@ -178,20 +181,26 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     previewView='target';el('preview-view').value='target';el('preview-audit').open=false;
     el('media-preview').scrollIntoView?.({block:'center'});beginAuditWindow();renderGates();
   }
-  function auditPresentation(slot,metadata){
-    const session=audit,w=session?.window;
-    if(!session?.active||!metadata?.frame_id||metadata.view!=='target')return;
-    const version=slot.version,blob=slot.blob;
-    const next=callback=>{const id=requestAnimationFrame(()=>{w.rafIds.delete(id);callback();});w.rafIds.add(id);};
+  function targetPresentation(slot,metadata){
+    const session=audit,w=session?.active?session.window:null;
+    if(!metadata?.frame_id||metadata.view!=='target'||typeof requestAnimationFrame!=='function')return;
+    const version=slot.version,blob=slot.blob,binding=targetBinding();
+    const next=callback=>{const id=requestAnimationFrame(()=>{w?.rafIds.delete(id);callback();});w?.rafIds.add(id);};
     next(()=>next(()=>{
-      if(audit!==session||!session.active||session.window!==w||slot.version!==version||slot.blob!==blob||doc.hidden||el('work-pane').hidden)return;
+      if(slot.version!==version||slot.blob!==blob||doc.hidden||el('work-pane').hidden)return;
       const rect=slot.image.getBoundingClientRect?.();if(!rect||rect.width<=0||rect.height<=0||rect.bottom<=0||rect.right<=0||rect.top>=(globalThis.innerHeight||Infinity)||rect.left>=(globalThis.innerWidth||Infinity))return;
-      if(session.binding!==auditBinding()||!online||!options().fresh||slot.error)return;
-      const identity=JSON.stringify([metadata.renderer_id,metadata.frame_id]);
-      if(w.seen.has(identity)){w.duplicates++;return;}w.seen.add(identity);
-      const frame={frame_id:metadata.frame_id,revision:metadata.revision,view_revision:metadata.view_revision,source_wall_ns:metadata.source_wall_ns,presented_ms:clock.now()-w.started_ms};
-      const row=w.byRevision.get(metadata.revision);if(row){frame.input_id=row.input_id;if(row.presented_ms===undefined){row.presented_ms=frame.presented_ms;row.frame_id=frame.frame_id;}}
-      if(!w.painted.has(metadata.revision))w.painted.set(metadata.revision,frame);w.frames.push(frame);
+      if(binding!==targetBinding()||!online||!options().fresh||slot.error)return;
+      if(w&&audit===session&&session.active&&session.window===w&&session.binding===auditBinding()){
+        const identity=JSON.stringify([metadata.renderer_id,metadata.frame_id]);
+        if(w.seen.has(identity))w.duplicates++;
+        else{
+          w.seen.add(identity);
+          const frame={frame_id:metadata.frame_id,revision:metadata.revision,view_revision:metadata.view_revision,source_wall_ns:metadata.source_wall_ns,presented_ms:clock.now()-w.started_ms};
+          const row=w.byRevision.get(metadata.revision);if(row){frame.input_id=row.input_id;if(row.presented_ms===undefined){row.presented_ms=frame.presented_ms;row.frame_id=frame.frame_id;}}
+          if(!w.painted.has(metadata.revision))w.painted.set(metadata.revision,frame);w.frames.push(frame);
+        }
+      }
+      if(targetFlight?.revision===metadata.revision){clearTimeout(targetFlight.timer);targetFlight=null;void dispatchTarget();}
     }));
   }
   function exportAudit(){
@@ -203,7 +212,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       count_relationship:'raw_inputs = dispatched_inputs + coalesced_inputs + other_undispatched_inputs; dispatched_inputs = matched_inputs + unmatched_inputs',
       qualification:'browser measurement only; join with frozen run contract and measurement-host CPU/GPU load evidence; no automatic pass',
       mode:audit.mode,status:audit.status,reason:audit.reason,context:audit.context,started_wall_iso:audit.started_wall_iso,
-      profile:{input_hz:30,window_seconds:60,windows:3,tail_wait_seconds:2,base:audit.base,base_source:audit.base_source,joint_index:audit.joint,center_rad:audit.center,amplitude_rad:audit.amplitude},
+      profile:{input_hz:30,window_seconds:60,windows:3,tail_wait_seconds:2,dispatch_policy:'shared product target queue: one dispatched target until matching visible presentation; latest unsent input replaces pending input',base:audit.base,base_source:audit.base_source,joint_index:audit.joint,center_rad:audit.center,amplitude_rad:audit.amplitude},
       thresholds:{new_display_fps:audit.mode==='mesh_off'?20:10,latency_p95_ms:audit.mode==='mesh_off'?200:300},
       windows:audit.windows.map((w,index)=>({index:index+1,status:w.status,started_performance_ms:w.started_ms,ended_performance_ms:w.ended_ms,
         summary:previewAuditSummary(w),inputs:w.inputs,frames:w.frames}))};
@@ -231,7 +240,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const preview=state?.preview,displayBusy=view=>displayRequests.has(view)||displayRequests.has('recovery');
     gate('mesh',preview?'preview_mesh':'mesh',preview&&displayBusy('mesh')?'叠加设置正在更新':preview&&permission('preview_mesh').allowed&&!meshCandidate&&!preview.mesh?.requested?'请选择与相机匹配的标定候选':'');
     gate('manual-preview','manual_preview',manualReady() ? '' : '尚无完整关节定义、限位与实测反馈');
-    gate('show-target','preview_target',displayBusy('target')?'目标图像请求正在处理':manualReady()?'':'尚无完整关节定义、限位与实测反馈');
+    gate('show-target','preview_target',displayRequests.has('recovery')?'渲染服务正在恢复':manualReady()?'':'尚无完整关节定义、限位与实测反馈');
     const manualDisabled = el('manual-preview').disabled&&el('show-target').disabled;
     for(const input of el('joint-inputs').querySelectorAll('input')) input.disabled=manualDisabled;
     for(const id of ['jaw-left','jaw-right','jaw-speed','manual-speed','apply-manual-speed','use-feedback','zero-preview']) el(id).disabled=manualDisabled;
@@ -267,7 +276,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     gate('overview-reset','preview_overview',displayBusy('overview')?'视角正在更新':'');
     for(const id of ['overview-preset','overview-zoom'])el(id).disabled=!permission('preview_overview').allowed||displayRequests.has('recovery');
     for(const id of ['mesh-camera','mesh-candidate'])el(id).disabled=!permission('preview_mesh').allowed||displayBusy('mesh');
-    for(const button of planPreviewButtons)button.disabled=!permission('preview_target').allowed||displayBusy('target');
+    for(const button of planPreviewButtons)button.disabled=!permission('preview_target').allowed||displayRequests.has('recovery');
     gate('preview-recover','preview_recover',!preview?.recovery?.allowed?(preview?.recovery?.reason||'当前没有后端允许的渲染恢复操作'):displayRequests.has('recovery')?'渲染服务恢复请求正在处理':'');
     gate('delete-all','delete_preview',(state?.results||[]).some(row=>row.kind==='capture')?'':'当前没有可删除的原始批次');
     gate('delete-confirm','delete_confirm');gate('delete-cancel','delete_cancel');
@@ -296,6 +305,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('manual-speed').value=m.default_joint_speed_rad_s??.2;el('jaw-speed').value=m.default_jaw_speed_mm_s??10;
   }
   function editManual(){
+    finishAudit('人工姿态草稿改变');
     if(state?.workflow?.primary_action?.id==='manual_execute'&&state.workflow.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     if(state?.preview){previewErrors.set('target','人工姿态草稿已改变，请重新查看目标图像。');renderMedia();}
     clearReview();renderGates();
@@ -357,6 +367,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function clearReview() { el('clearance').checked=false; }
   function renderPreview(){
     const preview=state?.preview,mesh=preview?.mesh||state?.mesh||{};
+    if(targetFlight&&targetFlight.binding!==targetBinding()||targetPending&&targetPending.binding!==targetBinding())cancelTarget('显示上下文已改变');
     if(preview?.renderer_id!==previewRenderer){previewRenderer=preview?.renderer_id;previewFloors.clear();previewErrors.clear();}
     const meshKey=JSON.stringify([key(),mesh.camera,mesh.candidate_id]);
     if(meshKey!==meshStateKey&&!displayRequests.has('mesh')){meshStateKey=meshKey;meshCamera=mesh.camera||meshCamera;meshCandidate=mesh.candidate_id||'';}
@@ -433,9 +444,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function updateMediaLabel(slot) {
     const m=slot.media, age=frameAgeSeconds(m,state,clock.now()-receivedAt),staticTarget=m?.preview_view==='target',preview=state?.preview;
     const currentTarget=preview?.connected===true&&options().fresh&&!!m?.renderer_id&&m.renderer_id===preview.renderer_id
-      &&m.revision===preview.revisions?.target&&m.view_revision===preview.revisions?.overview;
+      &&Number.isInteger(m.applied_revision)&&m.applied_revision>=m.minimum_revision&&m.applied_revision<=m.revision&&m.view_revision===preview.revisions?.overview;
     const stale=!online||!!slot.error||(staticTarget?!currentTarget:age===null||age>3);
-    const ageLabel=staticTarget?(age===null?'生成时间未知':'静态目标 · 生成于 '+age.toFixed(1)+' s 前'):
+    const ageLabel=staticTarget?(age===null?'生成时间未知':(m.applied_revision<m.revision?'最新完成目标，较新目标待呈现':'静态目标')+' · 生成于 '+age.toFixed(1)+' s 前'):
       age===null?'源时间未知':(age>3?'画面冻结 · ':'源帧龄 ')+age.toFixed(1)+' s';
     slot.card.classList.toggle('stale',stale);
     slot.card.querySelector('.media-meta').textContent=[ENVIRONMENT[context.environment],{actual:'实际画面',target:'目标预览',overview:'整机视角',mesh:'实际图像上的 mesh',replay:'录制回放'}[m?.kind]||'来源未知',m?.preview_view==='mesh'&&m.candidate_id?'候选 '+m.candidate_id.slice(0,12):'',ageLabel,slot.error||m?.error].filter(Boolean).join(' · ');
@@ -447,23 +458,26 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function clearSlot(slot) {
     cancelMediaRequest(slot);if(slot.blob)urls.revokeObjectURL(slot.blob);slot.blob=null;
     slot.streamKey=null;slot.media=null;slot.etag=null;slot.headerFrame=null;slot.headerSource=null;
+    slot.appliedRevision=null;
     slot.image.hidden=true;slot.image.removeAttribute('src');slot.empty.hidden=false;slot.error='';
   }
   function clearMedia() {for(const slot of mediaSlots.values())clearSlot(slot);}
   function previewMedia(view){
-    const preview=state?.preview,frame=preview?.frames?.[view]||{},mesh=preview?.mesh||{},expected=preview?.revisions?.[view];
+    const preview=state?.preview,frame=preview?.frames?.[view]||{},mesh=preview?.mesh||{},expected=view==='target'?Math.max(preview?.revisions?.target??0,previewFloors.get('target')??0):preview?.revisions?.[view];
     let error=previewErrors.get(view)||frame.error||preview?.error||'';
-    if(displayRequests.has(view)||displayRequests.has('recovery')||(previewFloors.has(view)&&expected<previewFloors.get(view)))error='等待本次只读预览的匹配画面';
+    if(view!=='target'&&displayRequests.has(view)||displayRequests.has('recovery')||(view!=='target'&&previewFloors.has(view)&&expected<previewFloors.get(view)))error='等待本次只读预览的匹配画面';
     if(view!=='mesh'&&(displayRequests.has('overview')||(previewFloors.has('overview')&&preview?.revisions?.overview<previewFloors.get('overview'))))error=previewErrors.get('overview')||'等待当前观察视角的匹配画面';
     if(preview?.connected===false)error=preview.error||'渲染服务未连接，请查看设备诊断中的图像恢复指引';
     if(preview?.status==='unconfigured')error='当前环境尚未配置目标渲染服务；重新连接画面不能代替环境配置。';
     if(view==='mesh'&&!mesh.requested)error='实时 mesh 叠加已关闭；原始相机画面保持独立。';
     if(view==='mesh'&&mesh.requested&&(mesh.camera!==meshCamera||mesh.candidate_id!==meshCandidate))error='等待当前相机与所选候选的匹配画面';
-    if(frame.revision!==undefined&&frame.revision!==expected)error='渲染结果仍属于旧修订，等待当前请求';
+    if(view!=='target'&&frame.revision!==undefined&&frame.revision!==null&&frame.revision!==expected)error='渲染结果仍属于旧修订，等待当前请求';
     if(view!=='mesh'&&frame.view_revision!==undefined&&frame.view_revision!==preview?.revisions?.overview)error='观察视角已更新，等待匹配的新画面';
     return {...frame,id:'preview-'+view,kind:view,preview_view:view,revision:expected,view_revision:preview?.revisions?.overview,renderer_id:preview?.renderer_id,
+      ...(preview?.display_context?{display_context:preview.display_context,server_instance_id:serverInstance}:{}),
+      ...(view==='target'?{minimum_revision:preview?.target_floor??0}:{}),
       ...(view==='mesh'?{camera:mesh.camera,candidate_id:mesh.candidate_id}:{}),
-      ready:frame.ready===true&&Number.isInteger(expected)&&!error,error:error||(!frame.ready?'尚无此视图的画面，请先提交只读预览请求':''),poll_hz:frame.poll_hz||25};
+      ready:(frame.ready===true||view==='target'&&Number.isInteger(targetFlight?.revision))&&Number.isInteger(expected)&&!error,error:error||(!frame.ready&&!targetFlight?'尚无此视图的画面，请先提交只读预览请求':''),poll_hz:frame.poll_hz||25};
   }
   function renderMedia() {
     const actual=(state?.media||[]).filter(m=>m.kind==='actual'), used=new Set();
@@ -479,9 +493,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(!slot){slot={card,image:card.querySelector('img'),empty:card.querySelector('.empty'),version:0};mediaSlots.set(id,slot);}
     if(doc.hidden || !m){clearSlot(slot);slot.empty.textContent=doc.hidden?'页面后台，画面订阅已暂停':state?.device?.id==='protocol-fake'?'协议 Fake（L1）不提供 PhysX 相机图像；完整 Fake 需要配置仿真与图像服务。':'尚无当前环境的可核验画面';updateMediaLabel(slot);return;}
     const url=safeMediaUrl(m.url,location.href);
-    const streamKey=JSON.stringify([key(),m.id,m.kind,m.candidate_revision??null,m.revision??null,m.view_revision??null,m.preview_view,m.renderer_id,m.camera,m.candidate_id,url]);
+    const streamKey=JSON.stringify([key(),m.id,m.kind,m.candidate_revision??null,m.preview_view==='target'?targetBinding():m.revision??null,m.view_revision??null,m.preview_view,m.renderer_id,m.display_context,m.camera,m.candidate_id,url]);
     if(slot.streamKey!==streamKey){clearSlot(slot);slot.streamKey=streamKey;slot.url=url;}
-    slot.media={...m,...(slot.headerFrame!==null?{frame_id:slot.headerFrame}:{}),...(slot.headerSource!==null?{source_wall_ns:slot.headerSource}:{})};
+    slot.media={...m,...(slot.headerFrame!==null?{frame_id:slot.headerFrame}:{}),...(slot.headerSource!==null?{source_wall_ns:slot.headerSource}:{}),applied_revision:slot.appliedRevision};
     if(!m.ready||!url){cancelMediaRequest(slot);slot.error=m.error||(!url?'尚无有效的同源画面地址':'画面尚未就绪');slot.empty.textContent=slot.error;if(m.preview_view&&slot.blob){urls.revokeObjectURL(slot.blob);slot.blob=null;slot.image.removeAttribute('src');}if(!slot.blob){slot.image.hidden=true;slot.empty.hidden=false;}updateMediaLabel(slot);return;}
     updateMediaLabel(slot);
     if(!slot.controller&&!slot.timer)void nextMediaFrame(slot,slot.version);
@@ -495,8 +509,11 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       const response=await request(slot.url,{signal:controller.signal,cache:'no-store',headers:slot.etag?{'If-None-Match':slot.etag}:{}});
       if(version!==slot.version||at!==generation||controller.signal.aborted)return;
       if(response.status===304){slot.error='';return;}
+      if(response.status===409&&slot.media.preview_view==='target')return;
       if(!response.ok)throw Error('画面接口 '+response.status);
       const metadata=slot.media.preview_view?verifyPreviewFrame(slot.media,JSON.parse(response.headers?.get('X-Frame-Metadata')||'null'),context.environment):null;
+      if(metadata?.view==='target'&&(metadata.revision<slot.appliedRevision||slot.headerSource!==null&&metadata.source_wall_ns<slot.headerSource
+          ||slot.headerFrame===metadata.frame_id&&slot.appliedRevision!==metadata.revision))throw Error('完成目标帧发生倒退或身份复用，丢弃旧画面');
       const blob=await response.blob();
       if(version!==slot.version||at!==generation||controller.signal.aborted)return;
       const source=metadata?.source_wall_ns??response.headers?.get('X-Source-Wall-Ns'),frame=metadata?.frame_id??response.headers?.get('X-Frame-Id');
@@ -507,9 +524,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       // Only a decoded source frame establishes liveness; HTTP arrival and 304 do not.
       if(Number.isFinite(sourceNs)){slot.headerSource=sourceNs;slot.media.source_wall_ns=sourceNs;}
       if(frame!==null&&frame!==undefined){slot.headerFrame=frame;slot.media.frame_id=frame;}
+      if(metadata?.view==='target'){slot.appliedRevision=metadata.revision;slot.media.applied_revision=metadata.revision;}
       slot.etag=response.headers?.get('ETag')||null;slot.image.src=blobUrl;
       if(slot.blob)urls.revokeObjectURL(slot.blob);slot.blob=blobUrl;blobUrl=null;slot.error='';slot.image.hidden=false;slot.empty.hidden=true;
-      auditPresentation(slot,metadata);
+      targetPresentation(slot,metadata);
     } catch(error) {
       if(blobUrl)urls.revokeObjectURL(blobUrl);
       if(version===slot.version&&at===generation&&(!controller.signal.aborted||timedOut)){
@@ -606,6 +624,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     // Legacy snapshots may be read before upgrading, but cannot replace a known instance.
     if(instance===null||retiredServerInstances.has(instance))return false;
     finishAudit('服务实例变化');
+    cancelTarget('服务实例变化');
     if(serverInstance!==null)retiredServerInstances.add(serverInstance);
     serverInstance=instance;generation++;revision=-1;displayedRequest=++requestSequence;
     for(const request of pending.values())request.controller.abort();pending.clear();
@@ -619,35 +638,65 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return true;
   }
   function barrier() {
+    cancelTarget('页面控制或上下文已改变');
     generation++;polling?.abort();polling=null;clearReview();
     for(const slot of mediaSlots.values())cancelMediaRequest(slot);
   }
-  async function sendDisplay(action,extra={},auditRequest=null){
+  function cancelTarget(reason){
+    for(const job of [targetFlight,targetPending])if(job){
+      const row=job.auditRequest?.row;if(row&&row.presented_ms===undefined)row.cancelled=row.cancelled||reason;
+      clearTimeout(job.timer);job.controller?.abort();job.resolve();
+      if(displayRequests.get('target')===job.controller)displayRequests.delete('target');
+    }
+    targetFlight=null;targetPending=null;
+  }
+  async function dispatchTarget(){
+    if(targetFlight||!targetPending)return;
+    const job=targetPending;targetPending=null;targetFlight=job;
+    if(job.binding!==targetBinding()){cancelTarget('目标输入的上下文已改变');return;}
+    job.timer=setTimeout(()=>{
+      if(targetFlight!==job)return;
+      const pending=targetPending;targetPending=null;cancelTarget('目标未在2.5秒内完成匹配呈现');targetPending=pending;void dispatchTarget();renderGates();
+    },2500);
+    await dispatchDisplay('preview_target',job.extra,job.auditRequest,job);job.resolve();
+    if(targetFlight===job&&!Number.isInteger(job.revision)){clearTimeout(job.timer);targetFlight=null;void dispatchTarget();}
+  }
+  function sendDisplay(action,extra={},auditRequest=null){
+    if(action!=='preview_target'){cancelTarget('显示视角、模式或服务正在改变');return dispatchDisplay(action,extra,auditRequest);}
+    if(audit?.active&&!auditRequest)finishAudit('手动更改显示');
+    previewErrors.delete('target');
+    if(targetPending){const row=targetPending.auditRequest?.row;if(row){row.cancelled='较新输入合并，未发送';row.coalesced=true;}targetPending.resolve();}
+    return new Promise(resolve=>{targetPending={extra,auditRequest,resolve,binding:targetBinding()};void dispatchTarget();renderMedia();});
+  }
+  async function dispatchDisplay(action,extra={},auditRequest=null,targetJob=null){
     const allowed=permission(action),view={preview_target:'target',preview_overview:'overview',preview_mesh:'mesh',preview_recover:'recovery'}[action];
     if(!allowed.allowed){if(auditRequest)auditRequest.row.error=String(allowed.reason).slice(0,500);notice(allowed.reason);return;}
     if(displayRequests.has(view)||displayRequests.has('recovery')){if(auditRequest)auditRequest.row.cancelled='只读请求通道忙碌，未发送';return;}
     if(action==='preview_recover'&&state?.preview?.recovery?.allowed!==true){notice(state?.preview?.recovery?.reason||'当前后端未允许恢复渲染服务');return;}
     if(audit?.active&&!auditRequest)finishAudit('手动更改显示');
     const requestContext=key(),requestInstance=serverInstance,controller=new AbortController(),sequence=++requestSequence;
-    if(auditRequest){auditRequest.window.controller=controller;auditRequest.row.submitted_ms=clock.now()-auditRequest.window.started_ms;}
+    if(targetJob)targetJob.controller=controller;
+    if(auditRequest)auditRequest.row.submitted_ms=clock.now()-auditRequest.window.started_ms;
     displayedRequest=sequence;displayRequests.set(view,controller);previewErrors.delete(view);
     const affected=view==='recovery'?['target','overview','mesh']:[view];
-    for(const name of affected){const slot=mediaSlots.get(name==='mesh'?'mesh':'preview');if(slot)clearSlot(slot);if(view!=='recovery')previewFloors.set(name,(state.preview?.revisions?.[name]??0)+1);}
+    for(const name of affected){const slot=mediaSlots.get(name==='mesh'?'mesh':'preview');if(slot&&name!=='target')clearSlot(slot);if(view!=='recovery'&&name!=='target')previewFloors.set(name,(state.preview?.revisions?.[name]??0)+1);}
     renderMedia();renderGates();notice(view==='recovery'?'已请求恢复本会话的渲染服务；机器人控制保持独立。':'正在提交只读显示请求，不执行机器人动作。',true);
     try{
       const response=await request('/api/actions/'+action,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
         body:JSON.stringify({environment:context.environment,business:context.business,request_id:crypto.randomUUID(),...extra}),signal:controller.signal});
       const result=await response.json();if(!response.ok)throw Error(result.error||result.message||'显示请求被拒绝');
       if(requestContext!==key()||requestInstance!==serverInstance||controller.signal.aborted)return;
+      if(targetJob&&(targetJob!==targetFlight||targetJob.binding!==targetBinding()||result.display_context&&result.display_context!==state.preview?.display_context||result.renderer_id&&result.renderer_id!==state.preview?.renderer_id))throw Error('目标响应属于已变化的显示上下文');
       if(view==='recovery'){previewFloors.clear();previewErrors.clear();}
       else{if(!Number.isInteger(result.client_revision))throw Error('后端未返回可核验的预览修订');previewFloors.set(view,result.client_revision);}
+      if(targetJob)targetJob.revision=result.client_revision;
       if(auditRequest&&audit===auditRequest.session&&audit.active){
         const {window,row}=auditRequest;row.revision=result.client_revision;row.acknowledged_ms=clock.now()-window.started_ms;window.byRevision.set(row.revision,row);
         const painted=window.painted.get(row.revision);if(painted&&painted.presented_ms>=row.input_ms){painted.input_id=row.input_id;row.presented_ms=painted.presented_ms;row.frame_id=painted.frame_id;}
       }
       if(displayedRequest===sequence)notice(result.message||'只读显示请求已受理，等待对应修订的画面。');
     }catch(error){if(auditRequest&&!auditRequest.row.cancelled)auditRequest.row.error=String(error.message).slice(0,500);if(requestContext===key()&&requestInstance===serverInstance&&!controller.signal.aborted){previewErrors.set(view,error.message);if(displayedRequest===sequence)notice('只读显示请求失败：'+error.message);}}
-    finally{if(displayRequests.get(view)===controller)displayRequests.delete(view);if(requestContext===key()&&requestInstance===serverInstance){renderMedia();renderGates();void poll();}}
+    finally{if(displayRequests.get(view)===controller)displayRequests.delete(view);if(requestContext===key()&&requestInstance===serverInstance){void poll();renderMedia();renderGates();}}
   }
   function showTarget(q12,jaw_gap_mm){
     if(!Array.isArray(q12)||q12.length!==12||!q12.every(Number.isFinite)||!Array.isArray(jaw_gap_mm)||jaw_gap_mm.length!==2||!jaw_gap_mm.every(value=>Number.isFinite(value)&&value>=0&&value<=83)){notice('目标图像需要12个有效关节位置及0–83 mm夹爪开度');return;}
@@ -777,7 +826,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('apply-manual-speed').addEventListener('click',()=>{const speed=Number(el('manual-speed').value);if(!Number.isFinite(speed)||speed<=0){notice('统一关节速度必须为正数');return;}for(const input of jointInputs('speed'))input.value=speed;editManual();});
     el('use-feedback').addEventListener('click',()=>{if(!manualReady())return;jointInputs('position').forEach((input,i)=>input.value=state.manual.positions[i]);el('jaw-left').value=state.manual.jaw_gaps_mm[0];el('jaw-right').value=state.manual.jaw_gaps_mm[1];editManual();});
     el('zero-preview').addEventListener('click',()=>{for(const input of jointInputs('position'))input.value=0;el('jaw-left').value=83;el('jaw-right').value=83;editManual();});
-    doc.addEventListener('visibilitychange',()=>{if(doc.hidden){finishAudit('页面进入后台');clearMedia();}else{renderMedia();void poll();}});
+    doc.addEventListener('visibilitychange',()=>{if(doc.hidden){finishAudit('页面进入后台');cancelTarget('页面进入后台');clearMedia();}else{renderMedia();void poll();}});
     render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250));
   }
   function destroy(){finishAudit('页面关闭');if(auditDownload)urls.revokeObjectURL(auditDownload);stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}

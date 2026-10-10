@@ -72,6 +72,34 @@ class PreviewHTTPTests(unittest.TestCase):
         with self.assertRaises(HTTPError):self.http.open(self.url+value['frames']['mesh']['url'])
         with self.assertRaises(HTTPError):self.post('preview_recover')
 
+    def test_completed_target_keeps_its_revision_while_newer_target_is_pending(self):
+        self.post('preview_target',q12=[.1]*12,jaw_gap_mm=[80.,80.]);self.frame('target',{})
+        before=self.state()['preview'];self.post('preview_target',q12=[.2]*12,jaw_gap_mm=[80.,80.])
+        value=self.state()['preview']
+        self.assertEqual(value['revisions']['target'],2);self.assertEqual(value['frames']['target']['revision'],1)
+        self.assertTrue(value['frames']['target']['ready']);self.assertEqual(value['display_context'],before['display_context'])
+        with self.http.open(self.url+value['frames']['target']['url']) as response:metadata=json.loads(response.headers['X-Frame-Metadata'])
+        self.assertEqual(metadata['revision'],1,'a completed frame must never be relabeled as the latest request')
+        self.assertEqual(metadata['display_context'],value['display_context']);self.assertEqual(metadata['server_instance_id'],self.app.server_instance_id)
+
+    def test_owner_epoch_and_installation_change_require_a_new_target(self):
+        original=self.device.snapshot;identity={}
+        self.device.snapshot=lambda business:dict(original(business),**identity)
+        self.post('preview_target',q12=[.1]*12,jaw_gap_mm=[80.,80.]);self.frame('target',{})
+        previous=self.state()['preview']
+        for field,new in [('runtime_nonce','new-runtime'),('command_epoch',2),('calibration_revision',2),('calibration_snapshot_id','new-install')]:
+            identity[field]=new;value=self.state()['preview']
+            self.assertNotEqual(value['display_context'],previous['display_context'])
+            self.assertEqual(value['target_floor'],value['revisions']['target']+1);self.assertFalse(value['frames']['target']['ready'])
+            with self.assertRaises(HTTPError):self.http.open(self.url+value['frames']['target']['url'])
+            result=self.post('preview_target',q12=[.2]*12,jaw_gap_mm=[80.,80.])
+            self.assertEqual(result['display_context'],value['display_context'])
+            with self.assertRaises(HTTPError):self.http.open(self.url+value['frames']['target']['url'])
+            self.frame('target',{})
+            with self.http.open(self.url+value['frames']['target']['url']) as response:metadata=json.loads(response.headers['X-Frame-Metadata'])
+            self.assertEqual(metadata['revision'],result['client_revision']);self.assertEqual(metadata['display_context'],value['display_context'])
+            previous=value
+
     def test_recovery_and_health_do_not_wait_for_display_startup(self):
         provider=PreviewService.__new__(PreviewService)
         provider.lock=threading.Lock();provider.closed=threading.Event();provider.thread=None;provider.process=None

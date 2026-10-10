@@ -106,6 +106,7 @@ class Application:
         self.lock = threading.Lock()
         self.revision = 0
         self.display_actions=threading.Lock()
+        self.preview_contexts = {}
         self.jobs, self.requests, self.reviews = {}, OrderedDict(), {}
         self.manual_tasks = {}
         self.generations = {environment: 0 for environment in devices}
@@ -115,19 +116,31 @@ class Application:
             raise ValueError('该环境尚未配置，不能切换到另一个环境代替执行')
         return self.devices[environment]
 
-    def preview_state(self,device):
+    def preview_state(self,device,runtime=None):
         provider=device.preview
         value=provider.state() if provider else dict(connected=False,status='unconfigured',error=None,
             recovery=dict(allowed=False,message='当前环境尚未启用目标图像服务；实际相机画面不能代替目标姿态预览。'))
         raw=value.get('revisions') or {};revisions=dict(target=raw.get('target',0),overview=raw.get('view',0),mesh=raw.get('mesh',0))
+        runtime=device.snapshot('calibration') if runtime is None else runtime
+        binding=(value.get('renderer_instance_id'),*(runtime.get(key) for key in ('runtime_nonce','command_epoch','calibration_revision','calibration_snapshot_id','holder','execution_instance_id')))
+        with self.lock:
+            previous=self.preview_contexts.get(device.environment)
+            if previous is None or previous['binding']!=binding:
+                reset=previous is None or previous['binding'][0]!=binding[0]
+                previous=dict(binding=binding,id=secrets.token_hex(16),floors={view:0 if reset else revision+1 for view,revision in revisions.items()})
+                self.preview_contexts[device.environment]=previous
+            display_context,floors=previous['id'],previous['floors']
         frames={}
         for view in ('target','overview','mesh'):
             meta=(value.get('frames') or {}).get(view) or {}
-            frames[view]=dict(ready=bool(meta and value.get('connected')),url='/api/preview-media?'+urlencode(dict(environment=device.environment,view=view)),
-                revision=revisions[view],view_revision=revisions['overview'],frame_id=meta.get('frame_id'),
+            completed=meta.get('client_revision') if view=='target' else meta.get('client_view_revision') if view=='overview' else meta.get('revision')
+            ready=bool(meta and value.get('connected')) and type(completed) is int and floors[view]<=completed<=revisions[view]
+            if view!='mesh':ready=ready and meta.get('client_view_revision')==revisions['overview']
+            frames[view]=dict(ready=ready,url='/api/preview-media?'+urlencode(dict(environment=device.environment,view=view)),
+                revision=completed,view_revision=meta.get('client_view_revision',revisions['overview']),frame_id=meta.get('frame_id'),
                 source_wall_ns=meta.get('source_wall_ns',meta.get('source_timestamp_ns')),error=value.get('mesh_error') if view=='mesh' else value.get('error'))
         selection=value.get('mesh') or {}
-        return dict(value,renderer_id=value.get('renderer_instance_id'),revisions=revisions,frames=frames,
+        return dict(value,renderer_id=value.get('renderer_instance_id'),display_context=display_context,target_floor=floors['target'],revision_floors=dict(floors),revisions=revisions,frames=frames,
             mesh=dict(requested=selection.get('enabled',False),applied=bool(selection.get('enabled') and frames['mesh']['ready']),
                       camera=selection.get('camera','head'),candidate_id=selection.get('candidate_id')))
 
@@ -135,17 +148,18 @@ class Application:
         device=self.device(environment)
         if device.preview is None:raise ValueError('目标图像服务未配置')
         raw,metadata=device.preview.media(view)
-        state=self.preview_state(device);frame=state['frames'][view]
+        state=self.preview_state(device)
         if metadata.get('renderer_instance_id')!=state.get('renderer_id'):raise ValueError('renderer instance changed while reading display frame')
         revision=metadata.get('client_revision') if view=='target' else metadata.get('client_view_revision') if view=='overview' else metadata.get('revision')
-        if revision!=state['revisions'][view] or view!='mesh' and metadata.get('client_view_revision')!=state['revisions']['overview']:
+        current=type(revision) is int and state['revision_floors'][view]<=revision<=state['revisions'][view]
+        if not current or view!='target' and revision!=state['revisions'][view] or view!='mesh' and metadata.get('client_view_revision')!=state['revisions']['overview']:
             raise ValueError('display frame belongs to an older request')
         selection=state['mesh']
         if view=='mesh' and metadata.get('environment')!=environment:raise ValueError('mesh observation belongs to another device environment')
         if view=='mesh' and (not selection['requested'] or metadata.get('candidate_id')!=selection['candidate_id'] or metadata.get('camera')!=selection['camera']):
             raise ValueError('candidate mesh selection changed')
         return raw,dict(metadata,revision=revision,view_revision=state['revisions']['overview'],view=view,environment=environment,
-            renderer_id=metadata['renderer_instance_id'],source_wall_ns=metadata.get('source_wall_ns',metadata.get('source_timestamp_ns')))
+            server_instance_id=self.server_instance_id,display_context=state['display_context'],renderer_id=metadata['renderer_instance_id'],source_wall_ns=metadata.get('source_wall_ns',metadata.get('source_timestamp_ns')))
 
     @staticmethod
     def preparation_view(preparation):
@@ -245,7 +259,7 @@ class Application:
             reason=allowed['confirm']['reason'] or (None if review else '请先生成并审阅人工姿态'))
         allowed['recover'] = dict(allowed=bool(runtime.get('recoverable_fault')) and holder==business,
             reason=None if runtime.get('recoverable_fault') and holder==business else '当前没有可确认恢复的故障；设备故障请查看诊断')
-        preview=self.preview_state(device)
+        preview=self.preview_state(device,runtime)
         for action in ('preview_target','preview_overview','preview_mesh'):
             allowed[action]=dict(allowed=bool(preview.get('connected')),reason=None if preview.get('connected') else '目标图像服务尚未就绪，请查看画面恢复指引')
         allowed['preview_recover']=dict(allowed=bool(device.preview and hasattr(device.preview,'recover') and preview.get('recovery',{}).get('allowed')),
@@ -323,7 +337,10 @@ class Application:
                     if previous:
                         if previous['body']!=original_body or previous['action']!=action:raise ValueError('同一请求身份不可绑定不同操作')
                         return previous['response']
-                if action=='preview_target':result=provider.target_pose(body['q12'],body['jaw_gap_mm'])
+                if action=='preview_target':
+                    context=self.preview_state(device)
+                    result=provider.target_pose(body['q12'],body['jaw_gap_mm'])
+                    result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'])
                 elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.))
                 elif action=='preview_mesh':result=provider.mesh(body['enabled'],camera=body.get('camera','head'),candidate_id=body.get('candidate_id'))
                 else:
