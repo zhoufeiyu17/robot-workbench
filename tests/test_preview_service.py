@@ -5,10 +5,12 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from tempfile import TemporaryDirectory
 import time
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT),str(ROOT/'rule_based_workbench')]
 from robot_workbench.preview_service import prepare_preview_roles,resident_execution,PreviewService
@@ -78,6 +80,33 @@ class PreviewServiceTest(unittest.TestCase):
         finally:
             if service.process is not None:service.close()
             unrelated.terminate();unrelated.wait(3)
+
+    def test_startup_publishes_adapter_bound_to_latest_context(self):
+        service=PreviewService(execution=self.execution,deadline_wall_ns=time.time_ns()+1_000_000_000_000,
+            deps='/approved/deps',mesh_inputs=None,validate_pose=None)
+        service.bind_context('old-context');service.requested={'view':dict(yaw=.2,pitch=.4,zoom=1.)}
+        entered=threading.Event();release=threading.Event();bound=[];started=[]
+        adapter=Mock()
+        adapter.bind_context.side_effect=lambda context:bound.append(context)
+        def overview(**view):
+            entered.set()
+            if not release.wait(2):raise TimeoutError('controlled startup was not released')
+        adapter.overview.side_effect=overview;adapter.start.side_effect=lambda:started.append(bound[-1])
+        def process(command,**kwargs):
+            output=command[command.index('--output')+1]
+            registration=Path(service.spec['registration']);registration.parent.mkdir(parents=True,exist_ok=True)
+            registration.write_text(json.dumps(dict(argv=[output],status='ready',renderer_instance_id='renderer-fixture')))
+            return Mock(poll=Mock(return_value=None))
+        client=Mock();client.request.return_value=dict(renderer_instance_id='renderer-fixture',capabilities={})
+        with patch.object(service,'_stop_owned'),patch('local_execution.gpu_check'),patch('robot_workbench.preview_service.subprocess.Popen',side_effect=process),patch('robot_workbench.preview_service.RendererClient',return_value=client),patch('robot_workbench.preview_service.TargetPreview',return_value=adapter):
+            service.start()
+            try:
+                self.assertTrue(entered.wait(1),service.error);self.assertIsNone(service.adapter)
+                service.bind_context('new-context')
+            finally:release.set();service.thread.join(2)
+        self.assertFalse(service.thread.is_alive());self.assertEqual(service.status,'ready');self.assertIs(service.adapter,adapter)
+        self.assertEqual(bound,['new-context']);self.assertEqual(started,['new-context'])
+        if service.log:service.log.close()
 
 
 if __name__=='__main__':unittest.main()

@@ -30,6 +30,7 @@ class Session:
     def __init__(self, geometry, output, config):
         self.geometry, self.output = geometry, Path(output)
         self.display_only=config.get('display_only') is True
+        self.active_display_view='target' if self.display_only else None
         self.asset_identity = {key: config[key] for key in ('asset_geometry_id', 'asset_seal_sha256') if config.get(key)}
         self.output.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -107,7 +108,7 @@ class Session:
         with self.lock:
             self.client_seen = time.monotonic()
             self.expire_mirror()
-            return {'mode': 'simulation', 'mesh_rendering_enabled':self.mesh_rendering_enabled, 'state': self.status, 'status': self.status,
+            return {'mode': 'simulation', 'mesh_rendering_enabled':self.mesh_rendering_enabled, 'active_display_view':self.active_display_view, 'state': self.status, 'status': self.status,
                     'renderer_instance_id':self.renderer_instance_id,'overview_revision':self.overview_revision,
                     **self.asset_identity,
                     'jaw_gap_mm':self.jaw_mm.tolist(), 'q': self.q.tolist(), 'qpos12': self.q.tolist(), 'timestamp_s': self.updated,
@@ -171,8 +172,15 @@ class Session:
     def command(self, endpoint, body):
         if not isinstance(body, dict):
             raise ValueError('JSON object required')
-        if self.display_only and endpoint not in ('/preview','/overview-view','/mirror','/overlay-rendering','/stop'):
+        if self.display_only and endpoint not in ('/preview','/overview-view','/display-view','/mirror','/overlay-rendering','/stop'):
             raise ValueError('dedicated target renderer has no execute/capture/configuration authority')
+        if endpoint == '/display-view':
+            if not self.display_only or set(body)!={'view'} or body['view'] not in ('target','overview'):
+                raise ValueError('explicit display-only view subscription required')
+            with self.lock:
+                self.active_display_view=body['view']
+                if body['view']!='target':self.preview=None
+            return {'active_display_view':self.active_display_view}
         if endpoint == '/overlay-rendering':
             if set(body)!={'enabled'} or type(body['enabled']) is not bool:raise ValueError('enabled must be boolean')
             with self.lock:
@@ -467,6 +475,7 @@ class Session:
             # feedback remains fresh at 10 Hz; collection (no preview traffic) stays 30 Hz.
             actual_interval = .1 if time.monotonic()-self.last_preview_received < .3 else 1/30
             render_actual = active is not None or self.actual_render_started is None or time.monotonic()-self.actual_render_started >= actual_interval
+            if self.display_only and self.active_display_view!='overview':render_actual=False
             preview = self.preview
             self.preview = None
         with self.lock:
@@ -474,9 +483,13 @@ class Session:
         if view is not None:
             renderer.set_overview_view(view[0])
             self.overview_revision=view[1]
-            if preview is None:preview=self.last_preview_pose
-            render_actual=True
+            if preview is None and not self.display_only:preview=self.last_preview_pose
+            render_actual=not self.display_only or self.active_display_view=='overview'
         overview_revision=self.overview_revision
+        if self.display_only:
+            if self.active_display_view!='target':preview=None
+            if hasattr(renderer,'actual_updates'):renderer.actual_updates(render_actual)
+            if hasattr(renderer,'preview_updates'):renderer.preview_updates(preview is not None)
         if hasattr(renderer, 'configure_wrist'):
             renderer.configure_wrist(self.wrist_contract)
         # No lock around RTX: stop and health requests remain responsive.

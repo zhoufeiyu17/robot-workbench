@@ -4,6 +4,7 @@ Actual camera input for candidate mesh is supplied independently by the caller;
 target pose edits are sent only to the renderer's separate /Preview scene.
 """
 import base64
+from collections import deque
 from copy import deepcopy
 import hashlib
 import json
@@ -37,7 +38,7 @@ class RendererClient:
 
     def request(self,path,body=None,*,frame=False,binary=False):
         endpoint=urlsplit(path)
-        allowed={'/state','/preview','/overview-view','/mirror','/overlay-rendering','/real-overlay','/frame.jpg'}
+        allowed={'/state','/preview','/overview-view','/display-view','/mirror','/overlay-rendering','/real-overlay','/frame.jpg'}
         if endpoint.path not in allowed or endpoint.scheme or endpoint.netloc or endpoint.fragment:
             raise ValueError('display-only renderer endpoint required')
         raw=None if body is None else json.dumps(body,allow_nan=False).encode()
@@ -92,7 +93,7 @@ def observed_mesh(client,inputs,candidate_id):
 
 
 class TargetPreview:
-    """Two bounded workers: latest target/overview and optional observed mesh.
+    """Two bounded workers: three retained target slots and optional observed mesh.
 
     Constructing is inert. start() starts CPU HTTP workers only; the caller owns
     an already-admitted renderer process and its exact renderer_instance_id.
@@ -102,6 +103,9 @@ class TargetPreview:
         self.client,self.instance=client,renderer_instance_id
         self.validate_pose,self.mesh_inputs=validate_pose,mesh_inputs
         self.lock=threading.Lock();self.closed=threading.Event();self.changed=threading.Event()
+        self.ready=threading.Condition(self.lock);self.slots=deque();self.failures=deque(maxlen=32)
+        self.display_context=None;self.generation=0;self.highest_completed_revision=0;self.renderer_invalid=False
+        self.active_view='target'
         self.threads=[];self.target=None;self.view=None;self.mirror=None
         self.revisions=dict(target=0,view=0,mirror=0,mesh=0)
         self.requested_wall_ns=dict(target=0,view=0)
@@ -113,19 +117,66 @@ class TargetPreview:
         for name,fn in (('target-preview',self._preview_loop),('candidate-mesh',self._mesh_loop)):
             thread=threading.Thread(target=fn,name=name,daemon=True);self.threads.append(thread);thread.start()
 
-    def target_pose(self,q12,jaw_gap_mm):
+    def _retire_locked(self,slot,status,reason):
+        self.slots.remove(slot)
+        self.failures.append(dict(client_revision=slot['revision'],status=status,reason=reason,
+            display_context=slot['display_context'],view_revision=slot['view_revision'],renderer_instance_id=self.instance))
+        self.ready.notify_all()
+
+    def _expire_locked(self):
+        now=time.monotonic()
+        for slot in list(self.slots):
+            if slot['deadline']<=now:self._retire_locked(slot,'expired','2.5 second target slot deadline exceeded')
+
+    def _invalidate_locked(self,reason):
+        for slot in list(self.slots):self._retire_locked(slot,'cancelled',reason)
+        self.generation+=1;self.highest_completed_revision=0;self.target=None
+        self.frames.pop('target',None);self.frames.pop('overview',None);self.ready.notify_all()
+
+    def _identity_locked(self,display_context,renderer_instance_id,view_revision,*,required=False):
+        if self.closed.is_set():raise ValueError('target preview is closed')
+        if self.renderer_invalid:raise ValueError('renderer restarted; explicit rebind required')
+        supplied=(display_context,renderer_instance_id,view_revision)
+        if required or any(value is not None for value in supplied):
+            if (not isinstance(display_context,str) or not display_context or display_context!=self.display_context
+                    or renderer_instance_id!=self.instance or type(view_revision) is not int
+                    or view_revision!=self.revisions['view']):
+                raise ValueError('display context, renderer or view generation changed')
+
+    def bind_context(self,display_context):
+        if not isinstance(display_context,str) or not display_context:raise ValueError('nonempty display context required')
+        with self.lock:
+            if display_context!=self.display_context:
+                self._invalidate_locked('display context changed');self.display_context=display_context;self.active_view='target'
+        self.changed.set()
+
+    def target_pose(self,q12,jaw_gap_mm,*,display_context=None,renderer_instance_id=None,view_revision=None,presented_through_revision=None):
         q=vector(q12,12,'target q12');gaps=vector(jaw_gap_mm,2,'target gaps')
         if self.validate_pose is not None:self.validate_pose(q,gaps)
         with self.lock:
+            self._identity_locked(display_context,renderer_instance_id,view_revision,required=presented_through_revision is not None)
+            self._expire_locked()
+            if presented_through_revision is not None:
+                if type(presented_through_revision) is not int or not 0<=presented_through_revision<=self.highest_completed_revision:
+                    raise ValueError('presentation watermark exceeds this generation completed revision')
+                self.slots=deque(slot for slot in self.slots if not (slot['status']=='completed' and slot['revision']<=presented_through_revision))
+                self.ready.notify_all()
+            if len(self.slots)>=3:raise ValueError('target preview queue is full (3 retained slots)')
+            if self.active_view!='target':self._invalidate_locked('display mode changed')
+            self.active_view='target'
             self.target=dict(q=q,jaw_gap_mm=gaps);self.revisions['target']+=1
             self.requested_wall_ns['target']=time.time_ns()
             revision=self.revisions['target']
+            self.slots.append(dict(revision=revision,generation=self.generation,display_context=self.display_context,
+                view_revision=self.revisions['view'],target=deepcopy(self.target),status='accepted',frame=None,
+                renderer_revision=None,requested_wall_ns=self.requested_wall_ns['target'],deadline=time.monotonic()+2.5))
         self.changed.set();return dict(queued=True,client_revision=revision,display_only=True,token=None)
 
     def overview(self,yaw,pitch,zoom,pan_y=0.):
         values=vector([yaw,pitch,zoom,pan_y],4,'overview')
         if not (-math.pi<=yaw<=math.pi and -.15<=pitch<=1.5 and .4<=zoom<=4 and abs(pan_y)<=2):raise ValueError('overview outside bounds')
         with self.lock:
+            self._invalidate_locked('overview changed');self.active_view='overview'
             self.view=dict(zip(('yaw','pitch','zoom','pan_y'),values));self.revisions['view']+=1
             self.requested_wall_ns['view']=time.time_ns()
             self.frames.pop('overview',None);self.frames.pop('target',None)
@@ -151,16 +202,39 @@ class TargetPreview:
 
     def state(self):
         with self.lock:
-            return dict(renderer_instance_id=self.instance,connected=time.monotonic()-self.last_health<3,
+            self._expire_locked()
+            return dict(renderer_instance_id=self.instance,connected=not self.closed.is_set() and not self.renderer_invalid and time.monotonic()-self.last_health<3,
                 error=self.error,mesh_error=self.mesh_error,mirror_error=self.mirror_error,mesh=deepcopy(self.mesh_selection),
+                display_context=self.display_context,active_view=self.active_view,
+                queue=dict(capacity=3,ttl_ms=2500,occupied=len(self.slots),highest_completed_revision=self.highest_completed_revision,
+                    slots=[dict(client_revision=slot['revision'],status=slot['status'],remaining_ms=max(0,(slot['deadline']-time.monotonic())*1000)) for slot in self.slots]),
+                failures=deepcopy(list(self.failures)),
                 revisions=dict(self.revisions),frames={key:deepcopy(value[1]) for key,value in self.frames.items()
                     if key!='mesh' or self.mesh_selection['enabled'] and value[1]['observed_age_s']+time.monotonic()-value[2]<2},
                 display_only=True,control_authority=False)
 
-    def media(self,view):
+    def media(self,view,revision=None,*,display_context=None,renderer_instance_id=None,view_revision=None,wait_ms=0):
         if view not in ('target','overview','mesh'):raise ValueError('unknown preview view')
-        with self.lock:
-            frame=self.frames.get(view)
+        if type(wait_ms) not in (int,float) or not math.isfinite(wait_ms) or not 0<=wait_ms<=100:
+            raise ValueError('exact target frame wait must be between 0 and 100 ms')
+        if revision is not None and (view!='target' or type(revision) is not int or revision<=0):raise ValueError('exact positive target revision required')
+        if revision is None and wait_ms:raise ValueError('waiting requires an exact target revision')
+        with self.ready:
+            self._identity_locked(display_context,renderer_instance_id,view_revision,required=revision is not None)
+            generation=self.generation;until=time.monotonic()+wait_ms/1000
+            while True:
+                self._expire_locked()
+                self._identity_locked(display_context,renderer_instance_id,view_revision,required=revision is not None)
+                if generation!=self.generation:raise PendingFrame('target generation was cancelled')
+                if revision is None:frame=self.frames.get(view);break
+                slot=next((slot for slot in self.slots if slot['revision']==revision),None)
+                if slot is None:
+                    failure=next((item for item in reversed(self.failures) if item['client_revision']==revision),None)
+                    raise PendingFrame('target revision '+(failure['status']+': '+failure['reason'] if failure else 'is not retained'))
+                if slot['status']=='completed':frame=slot['frame'];break
+                remaining=min(until,slot['deadline'])-time.monotonic()
+                if remaining<=0:raise PendingFrame('exact target revision has not completed')
+                self.ready.wait(remaining)
             if frame is None:raise PendingFrame('current display frame not ready')
             raw,metadata,received=frame
             if view=='mesh':
@@ -171,35 +245,46 @@ class TargetPreview:
 
     def close(self):
         self.closed.set();self.changed.set()
+        with self.lock:self._invalidate_locked('target preview closed')
         # A blocked renderer request cannot block Owner stop or status readers.
         for thread in self.threads:thread.join(timeout=.05)
 
     def _preview_loop(self):
-        sent=dict(target=-1,view=-1,mirror=-1);target_revision=None;view_revision=None
-        target_complete=True;target_requested=0
+        sent=dict(view=-1,mirror=-1,mode='target');target_revision=0;view_revision=None
         while not self.closed.is_set():
-            started=time.monotonic()
+            started=time.monotonic();completed=False
             with self.lock:
-                current=dict(self.revisions);target,view,mirror=deepcopy((self.target,self.view,self.mirror))
-                requested=dict(self.requested_wall_ns)
+                self._expire_locked();current=dict(self.revisions);generation=self.generation;mode=self.active_view
+                view,mirror=deepcopy((self.view,self.mirror));requested=dict(self.requested_wall_ns)
+                slot=next((item for item in self.slots if item['status']!='completed'),None)
             try:
                 remote=self.client.request('/state')
                 if remote.get('renderer_instance_id')!=self.instance:
                     with self.lock:
-                        self.frames.pop('target',None);self.frames.pop('overview',None);self.last_health=0.
+                        if not self.renderer_invalid:self._invalidate_locked('renderer restarted')
+                        self.renderer_invalid=True;self.last_health=0.
                     raise ValueError('renderer restarted; explicit rebind required')
+                if self.renderer_invalid:raise ValueError('renderer restarted; explicit rebind required')
                 # Candidate mesh uses stateless observed pixels only, not duplicate continuous overlays.
                 if remote.get('mesh_rendering_enabled') is not False:self.client.request('/overlay-rendering',{'enabled':False})
+                if sent['mode']!=mode:
+                    self.client.request('/display-view',{'view':mode});sent['mode']=mode
                 if view is not None and sent['view']!=current['view']:
                     view_revision=max(remote.get('overview_revision',0)+1,(view_revision or 0)+1)
                     self.client.request('/overview-view',dict(view,revision=view_revision));sent['view']=current['view']
-                    # A new view invalidates the old in-flight target; resend the latest pose.
-                    target_complete=True;sent['target']=-1
-                if target is not None and target_complete and sent['target']!=current['target']:
-                    # Keep one target in flight until its pixels arrive; newer inputs stay coalesced in self.target.
-                    target_revision=max(remote.get('preview_revision',-1)+1,(target_revision or 0)+1)
-                    self.client.request('/preview',dict(target,revision=target_revision));sent['target']=current['target']
-                    target_requested=requested['target'];target_complete=False
+                if mode=='target' and slot is not None and slot['status']=='accepted':
+                    with self.lock:
+                        self._expire_locked()
+                        valid=generation==self.generation and any(item is slot for item in self.slots)
+                        if valid:
+                            target_revision=max(remote.get('preview_revision',-1)+1,target_revision+1)
+                            slot['renderer_revision']=target_revision;slot['status']='rendering'
+                    if not valid:continue
+                    try:self.client.request('/preview',dict(slot['target'],revision=target_revision))
+                    except Exception:
+                        with self.lock:
+                            if any(item is slot for item in self.slots):self._retire_locked(slot,'failed','renderer target submission failed')
+                        raise
                 if mirror is not None and sent['mirror']!=current['mirror']:
                     try:
                         self.client.request('/mirror',mirror)
@@ -207,11 +292,10 @@ class TargetPreview:
                     except Exception as error:
                         with self.lock:self.mirror_error=str(error)
                     sent['mirror']=current['mirror']
-                for name,renderer_view in (('overview','actual'),('target','preview')):
-                    if name=='target' and target_revision is None:continue
+                for name,renderer_view in (('overview','actual'),) if mode=='overview' else (('target','preview'),) if slot is not None else ():
                     query=dict(view=renderer_view,renderer_instance_id=self.instance,
                                overview_revision=view_revision if view_revision is not None else remote.get('overview_revision',0))
-                    if name=='target':query['target_revision']=target_revision
+                    if name=='target':query['target_revision']=slot['renderer_revision']
                     stamp=(remote.get('frame_timestamp_s') or {}).get(renderer_view)
                     with self.lock:cached=self.frames.get(name)
                     if (cached and type(stamp) in (int,float) and math.isfinite(stamp)
@@ -219,7 +303,7 @@ class TargetPreview:
                             and cached[1]['renderer_instance_id']==self.instance
                             and cached[1]['overview_revision']==query['overview_revision']
                             and remote.get('overview_revision',0)==query['overview_revision']
-                            and (name!='target' or cached[1]['target_revision']==target_revision==remote.get('preview_revision'))):
+                            and name=='overview'):
                         continue
                     try:raw,metadata=self.client.request('/frame.jpg?'+urlencode(query),frame=True)
                     except PendingFrame:continue
@@ -227,22 +311,29 @@ class TargetPreview:
                             or metadata.get('renderer_instance_id')!=self.instance or metadata.get('view')!=renderer_view
                             or metadata.get('source')!=('kinematic_target' if name=='target' else 'kinematic_overview')
                             or metadata.get('overview_revision')!=query['overview_revision']
-                            or name=='target' and metadata.get('target_revision')!=target_revision
+                            or name=='target' and metadata.get('target_revision')!=slot['renderer_revision']
                             or type(metadata.get('source_timestamp_ns')) is not int or metadata['source_timestamp_ns']<=0):
                         raise ValueError('renderer pixels have no matching atomic display metadata')
                     with self.lock:
-                        if current['view']==self.revisions['view']:
+                        self._expire_locked()
+                        if generation==self.generation and (name=='overview' or any(item is slot for item in self.slots)):
                             previous=self.frames.get(name)
                             if previous and metadata['source_timestamp_ns']<previous[1]['source_timestamp_ns']:
                                 raise ValueError('renderer display timestamp moved backwards')
-                            stamp=max(target_requested,requested['view']) if name=='target' else requested['view']
+                            stamp=max(slot['requested_wall_ns'],requested['view']) if name=='target' else requested['view']
                             timing=dict(client_requested_wall_ns=stamp,display_latency_ms=(metadata['source_timestamp_ns']-stamp)/1e6) if stamp else {}
-                            self.frames[name]=(raw,dict(metadata,client_revision=sent['target'] if name=='target' else current['target'],
-                                client_view_revision=current['view'],**timing),time.monotonic())
-                            if name=='target':target_complete=True
+                            self.frames[name]=(raw,dict(metadata,client_revision=slot['revision'] if name=='target' else current['target'],
+                                client_view_revision=current['view'],display_context=self.display_context,**timing),time.monotonic())
+                            if name=='target':
+                                slot['frame']=self.frames[name];slot['status']='completed';completed=True
+                                self.highest_completed_revision=max(self.highest_completed_revision,slot['revision'])
+                            self.last_health=time.monotonic()
+                            self.ready.notify_all()
                 with self.lock:self.last_health=time.monotonic();self.error=None
             except Exception as error:
-                with self.lock:self.error=str(error)
+                with self.lock:
+                    if generation==self.generation or self.renderer_invalid:self.error=str(error)
+            if completed:continue  # Dispatch the next accepted target without an extra polling interval.
             self.changed.wait(max(0.,.025-(time.monotonic()-started)));self.changed.clear()
 
     def _mesh_loop(self):

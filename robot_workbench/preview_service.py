@@ -73,6 +73,7 @@ class PreviewService:
         self.lock=threading.Lock();self.closed=threading.Event();self.thread=None;self.process=None;self.adapter=None
         self.status='configured';self.error=None;self.log=None
         self.requested={}
+        self.display_context=None
 
     def start(self):
         with self.lock:
@@ -90,7 +91,7 @@ class PreviewService:
         adapter=self.adapter;self.adapter=None
         if adapter:
             with adapter.lock:
-                self.requested=deepcopy(dict(target=adapter.target,view=adapter.view,mesh=adapter.mesh_selection))
+                self.requested=deepcopy(dict(view=adapter.view,mesh=adapter.mesh_selection))
             adapter.close()
         process=self.process
         if process and process.poll() is None:
@@ -146,10 +147,11 @@ class PreviewService:
                     raise ValueError('dedicated renderer unexpectedly exposes execution')
                 adapter=TargetPreview(client,state['renderer_instance_id'],validate_pose=self.validate_pose,mesh_inputs=self.mesh_inputs)
                 requested=self.requested
-                if requested.get('target'):adapter.target_pose(requested['target']['q'],requested['target']['jaw_gap_mm'])
                 if requested.get('view'):adapter.overview(**requested['view'])
                 if requested.get('mesh'):adapter.mesh(requested['mesh']['enabled'],camera=requested['mesh']['camera'] or 'head',candidate_id=requested['mesh']['candidate_id'])
-                with self.lock:self.adapter=adapter;self.status='ready'
+                with self.lock:
+                    if self.display_context:adapter.bind_context(self.display_context)
+                    self.adapter=adapter;self.status='ready'
                 adapter.start();return
             raise TimeoutError('renderer startup cancelled or exceeded readiness budget')
         except Exception as error:
@@ -172,10 +174,14 @@ class PreviewService:
         if adapter is None or self.process and self.process.poll() is not None:raise PendingFrame('显示渲染器尚未就绪，请查看恢复指引')
         return adapter
 
-    def target_pose(self,*args):return self.current().target_pose(*args)
+    def bind_context(self,display_context):
+        with self.lock:
+            self.display_context=display_context
+            if self.adapter:self.adapter.bind_context(display_context)
+    def target_pose(self,*args,**kwargs):return self.current().target_pose(*args,**kwargs)
     def overview(self,*args):return self.current().overview(*args)
     def mesh(self,*args,**kwargs):return self.current().mesh(*args,**kwargs)
-    def media(self,*args):return self.current().media(*args)
+    def media(self,*args,**kwargs):return self.current().media(*args,**kwargs)
     def mirror_feedback(self,*args):
         with self.lock:adapter=self.adapter
         if adapter:adapter.mirror_feedback(*args)

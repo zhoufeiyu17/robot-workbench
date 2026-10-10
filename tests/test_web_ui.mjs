@@ -270,15 +270,24 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   for(const change of [{revision:1},{revision:6},{server_instance_id:'old-server'},{display_context:'old-install'},{renderer_id:'old-renderer'}])assert.throws(()=>verifyPreviewFrame(bound,{...completed,...change},'fake'));
 }
 {
-  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.display_context='queue-context';h.reply(0,value);await settle();
   const positions=h.get('joint-inputs').querySelectorAll('input').filter(row=>row.dataset.role==='position');
   h.get('show-target').events.click();assert.equal(h.get('show-target').disabled,false,'the shared latest-input queue remains available while HTTP is in flight');
   positions[0].value='.2';positions[0].events.input();h.get('show-target').events.click();positions[0].value='.3';positions[0].events.input();h.get('show-target').events.click();
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'ordinary target edits use the bounded presentation queue');
-  h.reply(1,{client_revision:8});await settle();value.revision=2;value.preview.revisions.target=8;h.reply(2,value);await settle();
-  h.reply(3,{},previewHeaders('target',8));await settle();h.paint();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'HTTP ACK and image decode cannot release the next target before presentation');
-  h.advance(16);h.paint();await settle();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,2);
-  assert.equal(JSON.parse(h.requests[4].options.body).q12[0],.3,'only the latest unsent ordinary target is dispatched');
+  h.reply(1,{client_revision:8});await settle();assert.equal(JSON.parse(h.requests[3].options.body).q12[0],.3,'only the latest unsent ordinary target is dispatched');
+  h.reply(3,{client_revision:9});await settle();positions[0].value='.4';h.get('show-target').events.click();h.reply(4,{client_revision:10});await settle();
+  positions[0].value='.5';h.get('show-target').events.click();positions[0].value='.6';h.get('show-target').events.click();
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,3,'three slots include accepted, downloading and awaiting presentation');
+  const headers=revision=>previewHeaders('target',revision,{display_context:'queue-context',server_instance_id:'fixture-server'});
+  assert.match(h.requests[2].url,/revision=8/);h.reply(2,{},headers(8));await settle();const firstImage=h.get('media-preview').querySelector('img').src;
+  h.fireTimer(ms=>ms===0);assert.match(h.requests[5].url,/revision=9/);h.reply(5,{},headers(9));await settle();
+  h.fireTimer(ms=>ms===0);assert.match(h.requests[6].url,/revision=10/);h.reply(6,{},headers(10));await settle();
+  assert.equal(h.get('media-preview').querySelector('img').src,firstImage,'prefetched revisions cannot replace the frame before its two RAF callbacks');
+  h.paint();h.advance(16);h.paint();await settle();assert.notEqual(h.get('media-preview').querySelector('img').src,firstImage);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,4);
+  const next=JSON.parse(h.requests[7].options.body);assert.equal(next.q12[0],.6);assert.equal(next.presented_through_revision,8);assert.equal(next.display_context,'queue-context');assert.equal(next.view_revision,3);
+  assert.equal(h.requests.filter(row=>row.url.startsWith('/api/state')).length,1,'target ACKs do not trigger full business state polls');
   h.app.destroy();
 }
 {
@@ -296,13 +305,13 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   const request=h.get('show-target').events.click();assert.equal(h.requests[1].url,'/api/actions/preview_target');
   assert.deepEqual(JSON.parse(h.requests[1].options.body).q12,Array(12).fill(.1));assert.equal(h.get('clearance').checked,true,'read-only display must not revoke a motion review');
   h.reply(1,{client_revision:8,token:null});await request;await settle();
-  value.revision=2;value.preview.frames.target.ready=true;h.reply(2,value);await settle();
-  assert.equal(h.requests.length,4,'target completion polling must not wait for the requested revision to appear in a state snapshot');
-  assert.match(h.requests[3].url,/view=target/);h.reply(3,{},previewHeaders('target',7));await settle();
-  assert.equal(h.get('media-preview').querySelector('img').hidden,false);assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/最新完成目标/);
-  h.nextFrame();h.reply(4,{},previewHeaders('target',8));await settle();const completedImage=h.get('media-preview').querySelector('img').src;
-  h.nextFrame();h.reply(5,{},previewHeaders('target',7));await settle();assert.equal(h.get('media-preview').querySelector('img').src,completedImage,'completed revisions must never move backwards');
+  assert.equal(h.requests.length,3,'exact frame fetch uses the ACK without a global state poll');
+  assert.match(h.requests[2].url,/revision=8/);h.reply(2,{},previewHeaders('target',7));await settle();
+  assert.equal(h.get('media-preview').querySelector('img').hidden,true,'an exact request cannot be satisfied with another completed revision');
+  h.nextFrame();h.reply(3,{},previewHeaders('target',8));await settle();const completedImage=h.get('media-preview').querySelector('img').src;
+  h.paint();h.advance(16);h.paint();await settle();h.reply(4,{},previewHeaders('target',7));await settle();assert.equal(h.get('media-preview').querySelector('img').src,completedImage,'completed revisions must never move backwards');
   assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/倒退/);
+  h.nextFrame();h.reply(5,{},previewHeaders('target',8));await settle();assert.equal(h.get('media-preview').querySelector('img').src,completedImage);assert.equal(h.get('media-preview').classList.contains('stale'),false,'a verified duplicate clears a transient fetch error without replacing the image');
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1,'target image never invokes motion preview or confirm');h.app.destroy();
 }
 {
@@ -432,9 +441,9 @@ function deletionSnapshot(){
   const h=harness({audit:true});h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
   assert.equal(h.get('preview-audit').hidden,false);assert.equal(h.get('audit-start').disabled,false);h.get('audit-start').events.click();
   assert.equal(h.requests[1].url,'/api/actions/preview_target');h.advance(5);h.reply(1,{client_revision:8});await settle();
-  value.revision=2;value.preview.revisions.target=8;value.preview.frames.target={...value.preview.frames.target,ready:true,revision:8};h.reply(2,value);await settle();
-  h.advance(10);h.reply(3,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
-  h.fireTimer(ms=>ms!==2500&&Math.abs(ms-1000/30)>.01);h.reply(4,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
+  h.advance(10);h.reply(2,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
+  const displayed=h.get('media-preview').querySelector('img').src,blobCount=h.blobs.length;
+  h.reply(3,{},previewHeaders('target',8));await settle();assert.equal(h.get('media-preview').querySelector('img').src,displayed);assert.equal(h.blobs.length,blobCount,'identical source frames never decode into a new Blob');
   h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text()),window=evidence.windows[0];
   assert.match(evidence.presentation_endpoint,/two requestAnimationFrame/);assert.match(evidence.presentation_endpoint,/not display photons/);
   assert.equal(evidence.measurement_population,'dispatched display targets');
@@ -445,9 +454,27 @@ function deletionSnapshot(){
 }
 {
   const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;h.reply(0,value);await settle();
+  const latest=h.requests[1];h.get('audit-start').events.click();assert.equal(latest.options.signal.aborted,true,'starting a FIFO cancels an older unversioned latest fetch');
+  h.reply(2,{client_revision:8});await settle();latest.resolve(response({},previewHeaders('target',8)));await settle();
+  assert.equal(h.get('media-preview').querySelector('img').hidden,true,'late latest pixels cannot bypass the exact-revision FIFO');
+  h.reply(3,{},previewHeaders('target',8));await settle();h.paint();h.advance(16);h.paint();
+  h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(evidence.windows[0].summary.matched_inputs,1);assert.equal(evidence.windows[0].summary.unmatched_inputs,0);h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();h.reply(0,previewSnapshot());await settle();h.get('audit-start').events.click();h.reply(1,{client_revision:8});await settle();
+  h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);h.reply(3,{client_revision:9});await settle();
+  h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);h.reply(4,{client_revision:10});await settle();
+  h.reply(2,{},previewHeaders('target',8));await settle();h.fireTimer(ms=>ms===0);
+  h.requests[5].resolve({ok:false,status:503});await settle();h.paint();h.advance(16);h.paint();
+  h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
+  assert.equal(evidence.windows[0].summary.matched_inputs,1,'a later prefetch error cannot cancel the valid head frame presentation');
+  assert.equal(evidence.windows[0].summary.unmatched_inputs,2);assert.equal(evidence.windows[0].summary.latency_p95_unbounded,true,'unfinished dispatched siblings remain in the latency population');h.app.destroy();
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;h.reply(0,value);await settle();
   h.reply(1,{},previewHeaders('target',7));await settle();h.get('audit-start').events.click();h.reply(2,{client_revision:8});await settle();
-  value.revision=2;value.preview.revisions.target=8;value.preview.frames.target.revision=8;h.reply(3,value);await settle();
-  h.fireTimer(ms=>ms!==2500&&Math.abs(ms-1000/30)>.01);h.reply(4,{},previewHeaders('target',8,{frame_id:'frame-7'}));await settle();h.paint();h.advance(16);h.paint();
+  h.reply(3,{},previewHeaders('target',8,{frame_id:'frame-7'}));await settle();h.paint();h.advance(16);h.paint();
   h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
   assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/身份复用/,'a reused source frame is rejected even if its revision metadata changed');
   assert.equal(evidence.windows[0].summary.matched_inputs,0);assert.equal(evidence.windows[0].summary.latency_p95_unbounded,true);h.app.destroy();
@@ -481,5 +508,12 @@ function deletionSnapshot(){
   h.get('audit-stop').events.click();h.get('audit-export').events.click();const evidence=JSON.parse(await h.blobs.at(-1).text());
   assert.deepEqual(evidence.profile.base.q12,Array(12).fill(0));assert.equal(evidence.profile.base_source,'explicit manual display inputs');
   assert.equal(value.manual.positions[0],1.000000001,'display diagnostics do not rewrite measured feedback');h.app.destroy();
+}
+{
+  const originalWidth=globalThis.innerWidth;globalThis.innerWidth=729;
+  const h=harness({audit:true});h.app.start();h.reply(0,previewSnapshot());await settle();h.get('audit-start').events.click();
+  globalThis.innerWidth=730;h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);
+  assert.match(h.get('audit-status').textContent,/测量视口已改变/);assert.equal(h.requests[1].options.signal.aborted,true);h.app.destroy();
+  if(originalWidth===undefined)delete globalThis.innerWidth;else globalThis.innerWidth=originalWidth;
 }
 console.log('PASS unified web: instance/media guards, bounded display-only browser presentation audit and uncensored latency evidence.');

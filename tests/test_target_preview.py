@@ -9,7 +9,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from urllib.parse import parse_qs,urlsplit
-from unittest.mock import Mock
+from unittest.mock import Mock,patch
 import numpy as np
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -36,7 +36,7 @@ class TargetPreviewTests(unittest.TestCase):
         self.fail('CPU preview condition did not complete')
 
     def test_actual_http_frames_bind_target_revision_and_never_mutate_actual_pose(self):
-        session=Session(Geometry(),self.root/'renderer',{})
+        session=Session(Geometry(),self.root/'renderer',{'display_only':True})
         started,release,closed=threading.Event(),threading.Event(),threading.Event()
         class Renderer:
             def __init__(self):self.view=None
@@ -67,10 +67,14 @@ class TargetPreviewTests(unittest.TestCase):
             np.testing.assert_array_equal(session.actual_q,np.zeros(12));np.testing.assert_array_equal(session.q,np.zeros(12))
             old_stamp=meta['source_timestamp_ns']
             preview.overview(.3,.4,1.2)
-            self.wait(lambda:preview.state()['frames'].get('target',{}).get('overview_revision')==1)
-            raw,meta=preview.media('target')
+            self.wait(lambda:preview.state()['frames'].get('overview',{}).get('overview_revision')==1)
+            self.assertNotIn('target',preview.state()['frames'])
+            raw,meta=preview.media('overview')
             self.assertEqual(json.loads(raw)['view']['yaw'],.3)
             self.assertGreater(meta['source_timestamp_ns'],old_stamp)
+            preview.target_pose([.3]*12,[80.,80.])
+            self.wait(lambda:preview.state()['frames'].get('target',{}).get('client_revision')==3)
+            self.assertEqual(json.loads(preview.media('target')[0])['q'],[.3]*12)
             with self.assertRaises(PendingFrame):
                 client.request('/frame.jpg?view=preview&target_revision=999',frame=True)
             with self.assertRaises(ValueError):client.request('/execute',{})
@@ -136,6 +140,7 @@ class TargetPreviewTests(unittest.TestCase):
             if path=='/state':return deepcopy(remote)
             if path=='/preview':remote['preview_revision']=body['revision'];return {}
             if path=='/overview-view':remote['overview_revision']=body['revision'];return {}
+            if path=='/display-view':return {}
             query=parse_qs(urlsplit(path).query);view=query['view'][0];reads.append(view)
             return b'jpeg',dict(schema='target_preview_frame.v1',frame_id=view+str(remote['frame_timestamp_s'][view]),
                 renderer_instance_id='preview',view=view,source='kinematic_target' if view=='preview' else 'kinematic_overview',
@@ -151,8 +156,8 @@ class TargetPreviewTests(unittest.TestCase):
             elif len(rounds)==5:adapter.closed.set()
         adapter.changed.wait=next_iteration
         adapter._preview_loop()
-        self.assertEqual(rounds,[2,2,3,5,6])
-        self.assertEqual(reads,['actual','preview','actual','actual','preview','preview'])
+        self.assertEqual(rounds,[1,1,1,2,3])
+        self.assertEqual(reads,['preview','actual','preview'])
         self.assertEqual(adapter.frames['target'][1]['client_revision'],2)
         self.assertEqual(adapter.frames['target'][1]['client_view_revision'],1)
         mesh=TargetPreview(SimpleNamespace(),'preview')
@@ -161,89 +166,204 @@ class TargetPreviewTests(unittest.TestCase):
             mesh.closed.set()
         mesh.closed.wait=stop_mesh;mesh._mesh_loop()
 
-    def test_delayed_renderer_completes_during_continuous_latest_target_updates(self):
-        pending=None;published=None;rounds=0;sent=[];seen=[];requested={}
-        remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
-        def edit():
-            revision=adapter.target_pose([adapter.revisions['target']/100]*12,[80.,80.])['client_revision']
-            requested[revision]=adapter.requested_wall_ns['target']
-        def request(path,body=None,**kwargs):
-            nonlocal pending,published
-            if path=='/state':return deepcopy(remote)
-            if path=='/preview':
-                self.assertIsNone(pending,'a same-view target must finish before the next renderer request')
-                pending=dict(body,polls=0);sent.append(body['q'][0]);return {}
-            query=parse_qs(urlsplit(path).query)
-            if query['view'][0]=='actual':raise PendingFrame('overview omitted from this fixture')
-            if pending:
-                pending['polls']+=1
-                if pending['polls']<3:raise PendingFrame('delayed renderer')
-                remote['preview_revision']=pending['revision']
-                published=deepcopy(pending);pending=None
-                edit()  # A new input during the read must not relabel or discard the completed pixels.
-            if not published:raise PendingFrame('no completed target')
-            stamp=time.time_ns()
-            return json.dumps(published['q']).encode(),dict(schema='target_preview_frame.v1',frame_id='frame-'+str(published['revision']),
-                renderer_instance_id='preview',view='preview',source='kinematic_target',overview_revision=0,
-                target_revision=published['revision'],source_timestamp_ns=stamp)
-        adapter=TargetPreview(SimpleNamespace(request=request),'preview');edit()
-        def next_iteration(delay):
-            nonlocal rounds
-            rounds+=1
-            if 'target' in adapter.frames:
-                raw,meta=adapter.media('target');revision=meta['client_revision']
-                self.assertEqual(json.loads(raw),[(revision-1)/100]*12)
-                self.assertEqual(meta['client_requested_wall_ns'],requested[revision])
-                self.assertLess(revision,adapter.revisions['target'])
-                seen.append(revision)
-                before=meta['frame_id'];edit()
-                self.assertEqual(adapter.media('target')[1]['frame_id'],before,'new input must retain the completed frame')
-            else:edit()
-            if rounds==12:adapter.closed.set()
-        adapter.changed.wait=next_iteration;adapter._preview_loop()
-        self.assertIsNone(adapter.error)
-        self.assertEqual(len(sent),4);self.assertEqual(len(set(seen)),4)
-        self.assertEqual(seen,sorted(seen));self.assertLess(len(sent),adapter.revisions['target'])
-
-    def test_new_view_interrupts_pending_target_and_rejects_old_generations(self):
-        rounds=0;sent=[];returned=[];pending=None;wrong='view'
+    def test_three_fifo_slots_exact_reads_and_presentation_ack(self):
+        pending=None;waits=[];sent=[];requested={}
         remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
         def request(path,body=None,**kwargs):
             nonlocal pending
             if path=='/state':return deepcopy(remote)
-            if path=='/overview-view':remote['overview_revision']=body['revision'];return {}
-            if path=='/preview':pending=deepcopy(body);sent.append((body['revision'],remote['overview_revision']));return {}
+            if path=='/preview':
+                self.assertIsNone(pending,'a same-view target must finish before the next renderer request')
+                pending=dict(body,polls=0);sent.append((body['q'][0],len(waits)));return {}
             query=parse_qs(urlsplit(path).query)
-            if query['view'][0]=='actual' or rounds==0:raise PendingFrame('old target never completes')
+            self.assertEqual(query['view'],['preview'])
+            pending['polls']+=1
+            if pending['polls']<2:raise PendingFrame('delayed renderer')
+            published=pending;pending=None;remote['preview_revision']=published['revision']
+            return json.dumps(published['q']).encode(),dict(schema='target_preview_frame.v1',frame_id='frame-'+str(published['revision']),
+                renderer_instance_id='preview',view='preview',source='kinematic_target',overview_revision=0,
+                target_revision=published['revision'],source_timestamp_ns=time.time_ns())
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('context')
+        identity=dict(display_context='context',renderer_instance_id='preview',view_revision=0)
+        for revision in range(1,4):
+            self.assertEqual(adapter.target_pose([revision/100]*12,[80.,80.],**identity)['client_revision'],revision)
+            requested[revision]=adapter.requested_wall_ns['target']
+        self.assertEqual(adapter.state()['queue']['occupied'],3)
+        with self.assertRaisesRegex(ValueError,'queue is full'):adapter.target_pose([.04]*12,[80.,80.],**identity)
+        with self.assertRaises(PendingFrame):adapter.media('target',2,**identity)
+        def next_iteration(delay):
+            waits.append(delay)
+            if adapter.highest_completed_revision==3:adapter.closed.set()
+        adapter.changed.wait=next_iteration;adapter._preview_loop();adapter.closed.clear()
+        self.assertIsNone(adapter.error);self.assertEqual(sent,[(.01,0),(.02,1),(.03,2)])
+        for revision in range(1,4):
+            raw,meta=adapter.media('target',revision,**identity)
+            self.assertEqual(json.loads(raw),[revision/100]*12)
+            self.assertEqual(meta['client_revision'],revision)
+            self.assertEqual(meta['client_requested_wall_ns'],requested[revision])
+        self.assertEqual(adapter.state()['queue']['occupied'],3,'GET must not consume completed slots')
+        for fields,watermark in (({},1),(dict(identity,display_context='old'),1),
+                                 (dict(identity,renderer_instance_id='old'),1),(dict(identity,view_revision=1),1),(identity,4)):
+            with self.assertRaises(ValueError):adapter.target_pose([.04]*12,[80.,80.],**fields,presented_through_revision=watermark)
+            self.assertEqual(adapter.state()['queue']['occupied'],3)
+        adapter.target_pose([.04]*12,[80.,80.],**identity,presented_through_revision=2)
+        adapter.target_pose([.05]*12,[80.,80.],**identity,presented_through_revision=2)  # Repeated watermark is harmless.
+        self.assertEqual([slot['revision'] for slot in adapter.slots],[3,4,5])
+        with self.assertRaises(PendingFrame):adapter.media('target',2,**identity)
+        with self.assertRaises(PendingFrame):adapter.media('target',4,**identity)
+        self.assertEqual(adapter.media('target')[1]['client_revision'],3)
+        adapter.target_pose([.06]*12,[80.,80.],**identity,presented_through_revision=3)
+        self.assertEqual([slot['revision'] for slot in adapter.slots],[4,5,6])
+        self.assertEqual(adapter.media('target')[1]['client_revision'],3,'ACK retains latest successful static pixels')
+        deadline=max(slot['deadline'] for slot in adapter.slots)
+        with patch('robot_workbench.target_preview.time.monotonic',return_value=deadline+.001):
+            self.assertEqual(adapter.state()['queue']['occupied'],0)
+            self.assertEqual(adapter.media('target')[1]['client_revision'],3)
+            with self.assertRaisesRegex(PendingFrame,'expired'):adapter.media('target',4,**identity)
+        self.assertEqual([item['status'] for item in adapter.state()['failures']],['expired']*3)
+
+    def test_context_and_view_fence_inflight_pixels_and_old_ack(self):
+        for fence in ('context','view'):
+            with self.subTest(fence=fence):
+                remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
+                pending=None;sent=[];fenced=False
+                adapter=None
+                def identity():return dict(display_context=adapter.display_context,renderer_instance_id='preview',view_revision=adapter.revisions['view'])
+                def request(path,body=None,**kwargs):
+                    nonlocal pending,fenced
+                    if path=='/state':return deepcopy(remote)
+                    if path=='/display-view':return {}
+                    if path=='/overview-view':remote['overview_revision']=body['revision'];return {}
+                    if path=='/preview':pending=deepcopy(body);sent.append(body['q'][0]);return {}
+                    if not fenced:
+                        if fence=='context':adapter.bind_context('next')
+                        else:adapter.overview(.3,.4,1.)
+                        adapter.target_pose([.2]*12,[80.,80.],**identity());fenced=True
+                    return b'jpeg',dict(schema='target_preview_frame.v1',frame_id='frame-'+str(pending['revision']),
+                        renderer_instance_id='preview',view='preview',source='kinematic_target',overview_revision=remote['overview_revision'],
+                        target_revision=pending['revision'],source_timestamp_ns=time.time_ns())
+                adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('first')
+                old=identity();adapter.target_pose([.1]*12,[80.,80.],**old)
+                def next_iteration(delay):
+                    if adapter.highest_completed_revision:
+                        adapter.closed.set();return
+                    self.assertNotIn('target',adapter.frames)
+                    with self.assertRaises(ValueError):adapter.target_pose([.9]*12,[80.,80.],**old,presented_through_revision=1)
+                    with self.assertRaisesRegex(ValueError,'watermark'):adapter.target_pose([.9]*12,[80.,80.],**identity(),presented_through_revision=1)
+                    self.assertEqual([slot['revision'] for slot in adapter.slots],[2])
+                adapter.changed.wait=next_iteration;adapter._preview_loop();adapter.closed.clear()
+                self.assertEqual(sent,[.1,.2]);self.assertEqual(adapter.media('target',2,**identity())[1]['client_revision'],2)
+                self.assertEqual(adapter.state()['failures'][0]['status'],'cancelled')
+                for index in range(40):
+                    adapter.bind_context('context-'+str(index));adapter.target_pose([0.]*12,[80.,80.])
+                self.assertEqual(len(adapter.state()['failures']),32)
+
+    def test_exact_wait_releases_lock_and_context_change_wakes_reader(self):
+        adapter=TargetPreview(SimpleNamespace(),'preview');adapter.bind_context('first')
+        identity=dict(display_context='first',renderer_instance_id='preview',view_revision=0)
+        adapter.target_pose([.1]*12,[80.,80.],**identity)
+        with self.assertRaises(ValueError):adapter.media('target',1)
+        with self.assertRaises(ValueError):adapter.media('target',1,**identity,wait_ms=101)
+        with self.assertRaises(ValueError):adapter.media('target',None,wait_ms=10)
+        waiting=threading.Event();original=adapter.ready.wait;result=[]
+        def wait(timeout):
+            self.assertLessEqual(timeout,.1);waiting.set();return original(timeout)
+        adapter.ready.wait=wait
+        def read():
+            try:result.append(adapter.media('target',1,**identity,wait_ms=100))
+            except ValueError as error:result.append(str(error))
+        worker=threading.Thread(target=read);worker.start()
+        try:
+            self.assertTrue(waiting.wait(1));started=time.monotonic()
+            adapter.state();adapter.target_pose([.2]*12,[80.,80.],**identity)
+            self.assertLess(time.monotonic()-started,.05)
+            adapter.bind_context('next');worker.join(.2)
+            self.assertFalse(worker.is_alive());self.assertIn('generation changed',result[0])
+        finally:adapter.close();worker.join(1)
+
+    def test_completed_rendering_and_accepted_slots_expire_without_losing_latest(self):
+        pending=None
+        def request(path,body=None,**kwargs):
+            nonlocal pending
+            if path=='/state':return dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
+            if path=='/preview':pending=body;return {}
+            if pending['revision']>1:raise PendingFrame('second target is still rendering')
+            return b'first',dict(schema='target_preview_frame.v1',frame_id='first',renderer_instance_id='preview',
+                view='preview',source='kinematic_target',overview_revision=0,target_revision=1,source_timestamp_ns=time.time_ns())
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('context')
+        identity=dict(display_context='context',renderer_instance_id='preview',view_revision=0)
+        for index in range(3):adapter.target_pose([index/100]*12,[80.,80.],**identity)
+        adapter.changed.wait=lambda delay:adapter.closed.set()
+        adapter._preview_loop();adapter.closed.clear()
+        self.assertEqual([slot['status'] for slot in adapter.slots],['completed','rendering','accepted'])
+        self.assertTrue(all(2400<slot['remaining_ms']<=2500 for slot in adapter.state()['queue']['slots']))
+        with patch('robot_workbench.target_preview.time.monotonic',return_value=max(slot['deadline'] for slot in adapter.slots)+.001):
+            self.assertEqual(adapter.state()['queue']['occupied'],0)
+            self.assertEqual(adapter.media('target')[0],b'first')
+            for revision in (1,2,3):
+                with self.assertRaisesRegex(PendingFrame,'expired'):adapter.media('target',revision,**identity)
+        self.assertEqual([failure['client_revision'] for failure in adapter.state()['failures']],[1,2,3])
+
+    def test_exact_wait_wakes_with_its_completed_frame(self):
+        pending=None;publish=threading.Event();waiting=threading.Event();result=[]
+        def request(path,body=None,**kwargs):
+            nonlocal pending
+            if path=='/state':return dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
+            if path=='/preview':pending=body;return {}
+            if not publish.is_set():raise PendingFrame('renderer not complete')
+            return b'exact',dict(schema='target_preview_frame.v1',frame_id='exact',renderer_instance_id='preview',
+                view='preview',source='kinematic_target',overview_revision=0,target_revision=pending['revision'],source_timestamp_ns=time.time_ns())
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('context')
+        identity=dict(display_context='context',renderer_instance_id='preview',view_revision=0)
+        adapter.target_pose([.1]*12,[80.,80.],**identity)
+        original=adapter.ready.wait
+        def wait(timeout):waiting.set();return original(timeout)
+        adapter.ready.wait=wait
+        reader=threading.Thread(target=lambda:result.append(adapter.media('target',1,**identity,wait_ms=100)))
+        reader.start()
+        try:
+            self.assertTrue(waiting.wait(1));publish.set();adapter.start();reader.join(.2)
+            self.assertFalse(reader.is_alive());self.assertEqual(result[0][0],b'exact')
+            self.assertEqual(result[0][1]['client_revision'],1)
+            self.assertEqual(adapter.state()['queue']['occupied'],1)
+        finally:adapter.close();reader.join(1)
+
+    def test_renderer_metadata_and_timestamp_regression_remain_rejected(self):
+        rounds=0;pending=None;wrong='view'
+        remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0)
+        def request(path,body=None,**kwargs):
+            nonlocal pending
+            if path=='/state':return deepcopy(remote)
+            if path=='/preview':pending=deepcopy(body);return {}
             meta=dict(schema='target_preview_frame.v1',frame_id='frame-'+str(pending['revision']),
                 renderer_instance_id='wrong' if wrong=='renderer' else 'preview',view='preview',source='kinematic_target',
-                overview_revision=0 if wrong=='view' else remote['overview_revision'],target_revision=pending['revision'],
+                overview_revision=1 if wrong=='view' else 0,target_revision=pending['revision'],
                 source_timestamp_ns=1 if wrong=='timestamp' else time.time_ns())
-            returned.append(deepcopy(meta));return b'jpeg',meta
-        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.target_pose([.1]*12,[80.,80.])
+            return b'jpeg',meta
+        adapter=TargetPreview(SimpleNamespace(request=request),'preview');adapter.bind_context('context')
+        identity=dict(display_context='context',renderer_instance_id='preview',view_revision=0)
+        adapter.target_pose([.1]*12,[80.,80.],**identity)
         def next_iteration(delay):
             nonlocal rounds,wrong
             rounds+=1
-            if rounds==1:adapter.overview(.3,.4,1.)
-            elif rounds in (2,3):
+            if rounds in (1,2):
                 self.assertNotIn('target',adapter.frames)
                 self.assertIn('matching atomic display metadata',adapter.error)
-                wrong='renderer' if rounds==2 else None
-            elif rounds==4:
-                self.assertIsNone(adapter.error);self.assertEqual(adapter.media('target')[1]['client_view_revision'],1)
+                wrong='renderer' if rounds==1 else None
+            elif rounds==3:
+                self.assertIsNone(adapter.error)
                 self.assertEqual(adapter.media('target')[1]['client_revision'],1)
-                wrong='timestamp'
-            elif rounds==5:
+                wrong='timestamp';adapter.target_pose([.2]*12,[80.,80.],**identity)
+            elif rounds==4:
                 self.assertIn('timestamp moved backwards',adapter.error)
-                self.assertEqual(adapter.media('target')[1],dict(returned[-2],client_revision=1,client_view_revision=1,
-                    client_requested_wall_ns=adapter.requested_wall_ns['view'],
-                    display_latency_ms=(returned[-2]['source_timestamp_ns']-adapter.requested_wall_ns['view'])/1e6))
+                self.assertEqual(adapter.media('target')[1]['client_revision'],1)
                 remote['renderer_instance_id']='replacement'
             else:
                 self.assertNotIn('target',adapter.frames)
+                self.assertEqual(adapter.state()['queue']['occupied'],0)
+                with self.assertRaisesRegex(ValueError,'rebind'):adapter.target_pose([.3]*12,[80.,80.],**identity,presented_through_revision=1)
                 self.assertIn('explicit rebind required',adapter.error);adapter.closed.set()
         adapter.changed.wait=next_iteration;adapter._preview_loop()
-        self.assertEqual(sent,[(1,0),(2,1)],'new view resends latest pose without waiting on old-view completion')
 
 
 if __name__=='__main__':unittest.main()

@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request,build_opener,ProxyHandler
 from unittest.mock import Mock
 
@@ -37,8 +38,15 @@ class PreviewHTTPTests(unittest.TestCase):
     def state(self):return json.loads(self.http.open(self.url+'/api/state?environment=fake&business=collection',timeout=1).read())
 
     def frame(self,view,metadata):
-        self.preview.frames[view]=(b'cpu-jpeg',dict(renderer_instance_id='r'*32,frame_id='one',source_timestamp_ns=123,
-            client_revision=self.preview.revisions['target'],client_view_revision=self.preview.revisions['view'],**metadata),time.monotonic())
+        packet=(b'cpu-jpeg',{'renderer_instance_id':'r'*32,'frame_id':'one','source_timestamp_ns':123,
+            'client_revision':self.preview.revisions['target'],'client_view_revision':self.preview.revisions['view'],**metadata},time.monotonic())
+        with self.preview.ready:
+            self.preview.frames[view]=packet
+            if view=='target':
+                slot=next((slot for slot in self.preview.slots if slot['revision']==packet[1]['client_revision']),None)
+                if slot:slot.update(status='completed',frame=packet)
+                self.preview.highest_completed_revision=max(self.preview.highest_completed_revision,packet[1]['client_revision'])
+            self.preview.ready.notify_all()
 
     def test_display_request_skips_motion_permission_and_busy_business_queue(self):
         self.app.jobs[('fake','collection')]={'status':'running'}
@@ -112,6 +120,77 @@ class PreviewHTTPTests(unittest.TestCase):
             self.assertLess(time.monotonic()-start,.3)
             self.assertFalse(self.state()['runtime']['allowed_operations']['preview_recover']['allowed'])
         finally:gate.set();provider.thread.join(1)
+
+    def test_exact_fifo_frames_and_bound_ack_over_real_http(self):
+        value=self.state()['preview'];identity=dict(display_context=value['display_context'],renderer_id=value['renderer_id'],view_revision=value['revisions']['overview'])
+        for revision in (1,2,3):
+            self.assertEqual(self.post('preview_target',q12=[revision/10]*12,jaw_gap_mm=[80.,80.],**identity)['client_revision'],revision)
+            self.frame('target',{'frame_id':'frame-'+str(revision)})
+        url=self.url+'/api/preview-media?'+urlencode(dict(environment='fake',view='target',revision=2,wait_ms=100,**identity))
+        with self.http.open(url,timeout=1) as response:
+            meta=json.loads(response.headers['X-Frame-Metadata']);self.assertEqual(meta['revision'],2);self.assertEqual(meta['frame_id'],'frame-2')
+        self.assertEqual(self.preview.state()['queue']['occupied'],3,'exact GET never releases a frame before presentation')
+        for bad in ({'display_context':'old'},{'renderer_id':'old'},{'view_revision':99},{'presented_through_revision':999}):
+            fields=dict(identity,presented_through_revision=1);fields.update(bad)
+            with self.assertRaises(HTTPError):self.post('preview_target',q12=[.4]*12,jaw_gap_mm=[80.,80.],**fields)
+            self.assertEqual(self.preview.state()['queue']['occupied'],3)
+        with self.assertRaises(HTTPError):self.post('preview_target',q12=[.4]*12,jaw_gap_mm=[80.,80.],**identity)
+        self.assertEqual(self.preview.revisions['target'],3,'queue-full rejection does not allocate a revision')
+        accepted=self.post('preview_target',q12=[.4]*12,jaw_gap_mm=[80.,80.],presented_through_revision=1,**identity)
+        self.assertEqual(accepted['client_revision'],4);self.assertEqual(self.preview.state()['queue']['occupied'],3)
+        for slot in self.preview.slots:slot['deadline']=time.monotonic()-1
+        self.assertEqual(self.preview.state()['queue']['occupied'],0)
+        with self.assertRaises(HTTPError):self.http.open(url,timeout=1)
+        with self.http.open(self.url+'/api/preview-media?environment=fake&view=target',timeout=1) as response:
+            self.assertEqual(json.loads(response.headers['X-Frame-Metadata'])['revision'],3,'slot expiry preserves the last successful static image')
+
+    def test_exact_frame_wait_does_not_serialize_state_or_stop(self):
+        value=self.state()['preview'];identity=dict(display_context=value['display_context'],renderer_id=value['renderer_id'],view_revision=value['revisions']['overview'])
+        self.post('preview_target',q12=[.1]*12,jaw_gap_mm=[80.,80.],**identity)
+        entered=threading.Event();original=self.preview.ready.wait
+        def waiting(timeout):entered.set();return original(timeout)
+        self.preview.ready.wait=waiting
+        url=self.url+'/api/preview-media?'+urlencode(dict(environment='fake',view='target',revision=1,wait_ms=100,**identity));outcomes=[]
+        def read_frame():
+            try:
+                with build_opener(ProxyHandler({})).open(url,timeout=1) as response:outcomes.append(response.status)
+            except HTTPError as error:outcomes.append(error.code)
+        reader=threading.Thread(target=read_frame);reader.start()
+        try:
+            self.assertTrue(entered.wait(1));started=time.monotonic();self.state();self.post('stop')
+            self.assertLess(time.monotonic()-started,.08)
+        finally:reader.join(1)
+        self.assertEqual(outcomes,[409]);self.assertFalse(reader.is_alive())
+
+    def test_context_publication_and_binding_are_atomic_across_epoch_reads(self):
+        entered=threading.Event();release=threading.Event();new_reader=threading.Event();errors=[];locked=[]
+        original_bind=self.preview.bind_context;original_state=self.preview.state
+        def binding(context):
+            if threading.current_thread().name=='old-epoch':
+                locked.append(self.app.lock.locked());entered.set()
+                if not release.wait(1):raise TimeoutError('controlled old binding was not released')
+            original_bind(context)
+        def state():
+            if threading.current_thread().name=='new-epoch':new_reader.set()
+            return original_state()
+        self.preview.bind_context=binding;self.preview.state=state
+        def read(epoch):
+            try:self.app.preview_state(self.device,{'command_epoch':epoch})
+            except Exception as error:errors.append(error)
+        older=threading.Thread(target=read,args=(1,),name='old-epoch')
+        newer=threading.Thread(target=read,args=(2,),name='new-epoch')
+        older.start()
+        try:
+            self.assertTrue(entered.wait(1));newer.start();self.assertTrue(new_reader.wait(1))
+            self.assertEqual(locked,[True],'provider bind must remain in the same short publication critical section')
+        finally:
+            release.set();older.join(1)
+            if newer.ident is not None:newer.join(1)
+        self.assertFalse(older.is_alive());self.assertFalse(newer.is_alive());self.assertEqual(errors,[])
+        published=self.app.preview_contexts['fake'];self.assertEqual(published['binding'][2],2)
+        self.assertEqual(self.preview.display_context,published['id'])
+        result=self.preview.target_pose([.1]*12,[80.,80.],display_context=published['id'],renderer_instance_id='r'*32,view_revision=0)
+        self.assertEqual(result['client_revision'],1,'the latest published context must accept new targets without requiring a further epoch change')
 
 
 if __name__=='__main__':unittest.main()

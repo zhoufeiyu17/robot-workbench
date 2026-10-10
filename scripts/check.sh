@@ -21,6 +21,7 @@ python tests/test_detector_preflight.py
 python tests/test_target_preview.py
 python tests/test_preview_http.py
 python tests/test_preview_service.py
+python tests/test_preview_subscription.py
 if [ -n "${AC_ONE_ASSET_ROOT:-}" ]; then
     python tests/test_collection_setup.py --a1 "$AC_ONE_ASSET_ROOT" --roles 4
     python tests/test_collection_setup.py --a1 "$AC_ONE_ASSET_ROOT" --roles 5

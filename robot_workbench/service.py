@@ -123,13 +123,19 @@ class Application:
         raw=value.get('revisions') or {};revisions=dict(target=raw.get('target',0),overview=raw.get('view',0),mesh=raw.get('mesh',0))
         runtime=device.snapshot('calibration') if runtime is None else runtime
         binding=(value.get('renderer_instance_id'),*(runtime.get(key) for key in ('runtime_nonce','command_epoch','calibration_revision','calibration_snapshot_id','holder','execution_instance_id')))
+        changed=False
         with self.lock:
             previous=self.preview_contexts.get(device.environment)
             if previous is None or previous['binding']!=binding:
                 reset=previous is None or previous['binding'][0]!=binding[0]
                 previous=dict(binding=binding,id=secrets.token_hex(16),floors={view:0 if reset else revision+1 for view,revision in revisions.items()})
                 self.preview_contexts[device.environment]=previous
+                changed=True
+                # Publish and bind together; this only invalidates bounded in-memory preview slots.
+                if provider and hasattr(provider,'bind_context'):provider.bind_context(previous['id'])
             display_context,floors=previous['id'],previous['floors']
+        if changed and provider and hasattr(provider,'bind_context'):
+            value=provider.state()
         frames={}
         for view in ('target','overview','mesh'):
             meta=(value.get('frames') or {}).get(view) or {}
@@ -144,11 +150,19 @@ class Application:
             mesh=dict(requested=selection.get('enabled',False),applied=bool(selection.get('enabled') and frames['mesh']['ready']),
                       camera=selection.get('camera','head'),candidate_id=selection.get('candidate_id')))
 
-    def preview_media(self,environment,view):
+    def preview_media(self,environment,view,*,revision=None,display_context=None,renderer_id=None,view_revision=None,wait_ms=0):
         device=self.device(environment)
         if device.preview is None:raise ValueError('目标图像服务未配置')
-        raw,metadata=device.preview.media(view)
+        if revision is not None:
+            before=self.preview_state(device)
+            if (view!='target' or type(revision) is not int or revision<0 or display_context!=before['display_context']
+                    or renderer_id!=before['renderer_id'] or view_revision!=before['revisions']['overview']):
+                raise ValueError('exact target request belongs to another display context')
+            raw,metadata=device.preview.media(view,revision,display_context=display_context,renderer_instance_id=renderer_id,view_revision=view_revision,wait_ms=wait_ms)
+        else:raw,metadata=device.preview.media(view)
         state=self.preview_state(device)
+        if revision is not None and (display_context!=state['display_context'] or renderer_id!=state['renderer_id'] or view_revision!=state['revisions']['overview'] or metadata.get('client_revision')!=revision):
+            raise ValueError('exact target context changed while waiting')
         if metadata.get('renderer_instance_id')!=state.get('renderer_id'):raise ValueError('renderer instance changed while reading display frame')
         revision=metadata.get('client_revision') if view=='target' else metadata.get('client_view_revision') if view=='overview' else metadata.get('revision')
         current=type(revision) is int and state['revision_floors'][view]<=revision<=state['revisions'][view]
@@ -327,7 +341,7 @@ class Application:
         if action in ('preview_target','preview_overview','preview_mesh','preview_recover'):
             provider=device.preview
             if provider is None:raise ValueError('目标图像服务未配置')
-            fields={'preview_target':{'q12','jaw_gap_mm'},'preview_overview':{'yaw','pitch','zoom','pan_y'},
+            fields={'preview_target':{'q12','jaw_gap_mm','display_context','renderer_id','view_revision','presented_through_revision'},'preview_overview':{'yaw','pitch','zoom','pan_y'},
                     'preview_mesh':{'enabled','camera','candidate_id'},'preview_recover':set()}[action]
             if set(body)-{'environment','business','request_id'}-fields:raise ValueError('unknown display action field')
             # Serialize only these cache/queue writes. Owner stop/state never takes this lock.
@@ -339,8 +353,14 @@ class Application:
                         return previous['response']
                 if action=='preview_target':
                     context=self.preview_state(device)
-                    result=provider.target_pose(body['q12'],body['jaw_gap_mm'])
-                    result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'])
+                    if any(key in body for key in ('display_context','renderer_id','view_revision','presented_through_revision')) and (
+                            body.get('display_context')!=context['display_context'] or body.get('renderer_id')!=context['renderer_id']
+                            or body.get('view_revision')!=context['revisions']['overview']):
+                        raise ValueError('target input or presentation ACK belongs to another display context')
+                    result=provider.target_pose(body['q12'],body['jaw_gap_mm'],display_context=context['display_context'],
+                        renderer_instance_id=context['renderer_id'],view_revision=context['revisions']['overview'],
+                        presented_through_revision=body.get('presented_through_revision'))
+                    result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'],view_revision=context['revisions']['overview'])
                 elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.))
                 elif action=='preview_mesh':result=provider.mesh(body['enabled'],camera=body.get('camera','head'),candidate_id=body.get('candidate_id'))
                 else:
@@ -576,7 +596,11 @@ def handler(app):
                 if path.path=='/api/state':
                     return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0]))
                 if path.path=='/api/preview-media':
-                    raw,meta=app.preview_media(query.get('environment',['fake'])[0],query.get('view',['target'])[0])
+                    exact={}
+                    if 'revision' in query:
+                        exact=dict(revision=int(query['revision'][0]),display_context=query.get('display_context',[None])[0],
+                            renderer_id=query.get('renderer_id',[None])[0],view_revision=int(query.get('view_revision',['-1'])[0]),wait_ms=int(query.get('wait_ms',['0'])[0]))
+                    raw,meta=app.preview_media(query.get('environment',['fake'])[0],query.get('view',['target'])[0],**exact)
                     return self.send(200,raw,'image/jpeg',{'X-Frame-Metadata':json.dumps(meta,allow_nan=False,separators=(',',':'))})
                 if path.path=='/api/calibration-file':
                     workflow=app.device(query.get('environment',['fake'])[0]).workflows.get('calibration')
