@@ -131,8 +131,8 @@ def attach_cup(engine, q, cup_names):
     spheres = engine.generator.robot_cfg.kinematics.kinematics_config.get_link_spheres('attached_object').detach().cpu().tolist()
     if not any(sphere[3] > 0 for sphere in spheres):
         raise ValueError('MotionGen attached cup has no active proxy spheres')
-    prepared_path=certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path'])
-    prepared=json.loads(prepared_path.read_text()) if prepared_path.exists() else None
+    prepared=getattr(engine,'grasp_contact_certificate',None)
+    if prepared is None:raise ValueError('selected-pose contact certificate required before attachment')
     contact=engine.cup_contact.certify_held(engine,q,prepared)
     return dict(claw_cup_contact=contact,method='MotionGen.attach_objects_to_robot', fit='VOXEL_VOLUME_INSIDE/subdivide',
                 sphere_sha256=_digest(spheres), active_spheres=sum(s[3] > 0 for s in spheres),
@@ -384,7 +384,8 @@ def freeze(stages, source, data, grip, spec, *, run_id):
 def code_identity(urdf_path=None):
     names = ('playground_geometry','gpu_acceptance','cup_envelope','cup_contact','region_self_collision','conservative_spheres','motiongen_motion', 'motiongen_self_collision', 'motiongen_targets', 'curobo_robot_model', 'curobo_planning',
              'curobo_whole_geometry', 'curobo_relative_geometry', 'integration', 'gripper_distance_plan', 'isaac_lane',
-             'control_motion','physical_motiongen','real_contract','joint_space','robot_workbench.joint_bounds')
+             'control_motion','physical_motiongen','real_contract','joint_space','robot_workbench.joint_bounds',
+             'grasp_contact_geometry','grasp_contact_certificate')
     paths = [Path(__file__).resolve(),Path(__file__).with_name('a1_conservative_refinement.json'),Path(__file__).with_name('a1_self_domain_certificate.json'),Path(__file__).with_name('a1_grasp_contact.json'),Path(__file__).with_name('a1_cup_inset.json'), Path(__file__).with_name('a1_support_domain.json'), Path(__file__).with_name('a1_support_near.json'), Path(__file__).with_name('a1_fixed_domain.json'), *(Path(importlib.import_module(name).__file__).resolve() for name in names)]
     paths.append(Path(__file__).with_name('a1_asset_derivation.py'))
     if urdf_path is not None:
@@ -434,6 +435,7 @@ def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=No
         engine.warmup()
         if engine_cache is not None:engine_cache.update(key=cache_key,engine=engine)
     initialization_wall=0. if reused else time.perf_counter()-preparation_started
+    engine.grasp_contact_certificate=None  # No request may inherit a previous selected contact pose.
     # Keep fresh warmup state; reused requests must not inherit prior sampling.
     if reused: engine.generator.reset_seed()
     return dict(config=config,proxy=proxy,fixed_meshes=fixed_meshes,world=world,cup_names=cup_names,
@@ -470,7 +472,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     right, home_q = [start[name] for name in RIGHT], [start[name] for name in LEFT]
     initial_gap, right_gap = (start['left_joint7']+start['left_joint8'])*1000, (start['right_joint17']+start['right_joint18'])*1000
     action_cache = {}
-    targets = generate_targets(planner, observation, data,urdf_path=urdf_path)
+    targets = generate_targets(planner, observation, data,urdf_path=urdf_path,closed_jaw_m=closed/2000)
     diagnostic('targets.json', targets)
     if not targets['grasp_candidates'] or not targets['placement_candidates']:
         raise ValueError('no supported task-space targets')
@@ -569,24 +571,36 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     if initial_gap != opening:
         jaw_acceptance.append(jaw_sweep(engine,planner,home_q,initial_gap/2000,opening/2000))
         add('initial_open', jaw_rows(home_q, right, initial_gap, opening, right_gap))
-    grasp_candidates = targets['grasp_candidates']
-    path, receipt = move('plan_pose', home_q, [base_pose(row['world_from_pregrasp']) for row in grasp_candidates], 'approach_pre')
-    selected_index = receipt.get('goalset_index', [0])[0]
-    if not 0 <= selected_index < len(grasp_candidates):
-        raise ValueError('MotionGen goalset index is invalid')
-    grasp = grasp_candidates[selected_index]
-    add('approach_pre', [target(q, right, opening, right_gap) for q in path], receipt_index=len(engine.receipts)-1)
-    stages[-1]=continuous_stage(stages[-1:],'approach_pre','approach_pre',opening,duration_s=2.)
-    path, _ = move('plan_pose', path[-1], [base_pose(grasp['world_from_tool'])], 'approach', hold_orientation=True, linear_approach=True)
-    add('approach', [target(q, right, opening, right_gap) for q in path], receipt_index=len(engine.receipts)-1)
-    stages[-1]=continuous_stage(stages[-1:],'approach','approach',opening,tcp_speed=.08,frontloaded=True)
-    grasp_q = stages[-1]['rows'][-1]['left_arm_joints']
-    hold('preclose_settle', grasp_q, opening, .1)
-    grasp_state = {**opened, **dict(zip(LEFT, grasp_q))}
-    closing = closing_geometry(engine, planner, grasp_state, observation.sample.world_from_cup)
-    diagnostic('closing.json', closing)
-    if closing.get('passed') is not True:
-        raise ValueError('GPU contact-limited closing at MotionGen grasp failed: '+str(closing.get('error')))
+    remaining=list(targets['grasp_candidates']);grasp_failures=[];prefix_count=len(stages)
+    while remaining:
+        selected_index=None
+        try:
+            path,receipt=move('plan_pose',home_q,[base_pose(row['world_from_pregrasp']) for row in remaining],'approach_pre')
+            returned_index=receipt.get('goalset_index',[0])[0]
+            if type(returned_index) is not int or not 0<=returned_index<len(remaining):raise ValueError('MotionGen goalset index is invalid')
+            selected_index=returned_index
+            grasp=remaining.pop(selected_index)
+            add('approach_pre',[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)
+            stages[-1]=continuous_stage(stages[-1:],'approach_pre','approach_pre',opening,duration_s=2.)
+            path,_=move('plan_pose',stages[-1]['rows'][-1]['left_arm_joints'],[base_pose(grasp['world_from_tool'])],
+                'approach',hold_orientation=True,linear_approach=True)
+            add('approach',[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)
+            stages[-1]=continuous_stage(stages[-1:],'approach','approach',opening,tcp_speed=.08,frontloaded=True)
+            grasp_q=stages[-1]['rows'][-1]['left_arm_joints'];hold('preclose_settle',grasp_q,opening,.1)
+            grasp_state={**opened,**dict(zip(LEFT,grasp_q))}
+            closing=closing_geometry(engine,planner,grasp_state,observation.sample.world_from_cup,
+                data=data,source_digest=source_digest,candidate_id=grasp['candidate_id'],closed_jaw_m=closed/2000)
+            if closing.get('passed') is not True:raise ValueError('GPU closing failed: '+str(closing.get('error')))
+            break
+        except ValueError as error:
+            stages=stages[:prefix_count];engine.grasp_contact_certificate=None
+            grasp_failures.append(dict(candidate_id=grasp['candidate_id'] if selected_index is not None else None,error=str(error)))
+            if selected_index is None:raise  # The remaining goalset itself could not be planned.
+    else:raise ValueError('bounded discrete grasp candidates exhausted; no global infeasibility claim: '+str(grasp_failures))
+    diagnostic('closing.json',closing)
+    certificate=closing['contact_certificate']
+    grasp=dict(grasp,actual_original_cup_from_tool=deepcopy(certificate['original_cup_from_tool']),
+        contact_certificate_digest=certificate['certificate_digest'])
     contact = closing['terminal_state']
     if abs(contact['left_joint7']-contact['left_joint8']) > 1e-9:
         raise ValueError('contact geometry does not preserve mechanically linked jaws')
@@ -600,7 +614,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     add('close_ramp',jaw_rows(grasp_q,right,opening,closed,right_gap,max_step_mm=2.))
     hold('close_and_hold', grasp_q, closed, .6)
     failures, attachment = [], None
-    for candidate in targets['placement_candidates']:
+    for cup_goal in targets['placement_candidates']:
+        candidate=dict(cup_goal,world_from_tool=asdict(RigidTransform(**cup_goal['world_from_cup']).compose(relation.inverse())))
         engine.cup_contact.allow_claw_contact(True)
         trial = []
         trial_jaws=[]
@@ -609,7 +624,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             engine.update_world(world)
             engine.update_locked_joints({name: contact[name] for name in engine.config['kinematics']['lock_joints']})
             attachment = attach_prepared_cup(engine, grasp_q, envelope)
-            attachment['claw_cup_contact']=engine.cup_contact.certify_held(engine,grasp_q,json.loads(certificate_path('a1_grasp_contact.json',urdf_path).read_text()))
+            attachment['claw_cup_contact']=engine.cup_contact.certify_held(engine,grasp_q,certificate)
             route = carry_targets(planner, held_observation, actual_grasp, candidate, jaw_position_m=contact['left_joint7'])
             diagnostic('carry-route-'+candidate['candidate_id']+'.json',route)
             current = grasp_q
@@ -717,11 +732,12 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     support_acceptance=support_checker.check([row['left_arm_joints'] for stage in stages for row in stage['rows']])
     task_acceptance=task_check(engine,planner,stages,closing)
     acceptance=dict(passed=all(row['passed'] for row in [*jaw_acceptance,closing['gpu_sweep'],support_acceptance,task_acceptance]),
-        backend='curobo_gpu_and_bound_offline_domains',fixed=fixed_acceptance,jaw_sweeps=jaw_acceptance,
+        backend='curobo_gpu_with_selected_native_contact_source',fixed=fixed_acceptance,jaw_sweeps=jaw_acceptance,
         closing=closing['gpu_sweep'],support=support_acceptance,task_semantics=task_acceptance,
         receiving_goal=dict(passed=True,metric=targets['placement_goal']['metric'],
             distance_m=receiving_distance,tolerance_m=targets['placement_goal']['tolerance_m']),
-        online_cpu_mesh_audit=False,retimed_collision_audit=False)
+        online_cpu_mesh_audit=True,online_cpu_mesh_scope='selected-pose native linked-jaw closing source proof; not IK or path search',
+        contact_source_preparation_seconds=certificate.get('source_preparation_seconds'),retimed_collision_audit=False)
     diagnostic('gpu-final-acceptance.json',acceptance)
     if not acceptance['passed']:raise ValueError('GPU final acceptance failed')
     run_id = source['run_id']+'-motiongen-'+uuid4().hex[:10]
@@ -731,15 +747,20 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                    code_sha256=code_identity(urdf_path), robot_proxy_sha256=_digest(proxy),
                    initial_robot_config_sha256=_digest(config), native_robot_sha256=data['urdf_sha256'],
                    exported_geometry_sha256=_digest(data))
+    backend.update(source_parts_sha256=certificate['source_parts_sha256'],cup_profile_sha256=certificate['cup_profile_sha256'],
+        cup_geometry_sha256=certificate['cup_geometry_sha256'],contact_source_backend='new selected-pose native CPU source mesh closing')
     selection = dict(grasp=grasp, placement=selected_placement, placed_cup_geometry=asdict(placed_cup),
                      placement_goal=targets['placement_goal'],carry_route=route,
-                     attachment=attachment, failed_motiongen_candidates=failures)
+                     attachment=attachment,failed_grasp_candidates=grasp_failures,failed_motiongen_candidates=failures)
     for value in (base, plan):
         value['simulation_initial_command'] = deepcopy(initial['simulation_initial_command'])
         value['initial_state_validation'] = deepcopy(initial)
         value['planning_backend'] = deepcopy(backend)
         value['motiongen_receipts'] = deepcopy(engine.receipts)
         value['task_targets'] = selection
+        from grasp_contact_certificate import GRASP_CONTACT_POLICY
+        value['grasp_contact_policy']=deepcopy(GRASP_CONTACT_POLICY)
+        value['grasp_contact_certificate']=deepcopy(certificate)
         value['planning_validation'] = dict(schema_version='curobo_motiongen_path_validation.v1', passed=True,
             source_digest=source_digest, timeline_digest=value['timeline_digest'], robot_proxy_sha256=_digest(proxy),
             motiongen_receipts_sha256=_digest(engine.receipts), gpu_final_acceptance=acceptance,

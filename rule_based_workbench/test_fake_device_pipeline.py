@@ -49,6 +49,8 @@ def fake_inputs(source_clock_id=FAKE_CLOCK_ID, runtime_nonce=FAKE_RUNTIME_NONCE)
                    capture_owner=owner_identity(source['initial_state']['owner_samples'][0],pid_key='pid'))
     model['calibration_profile_digest']=_digest(profile)
     model['planning_validation']['source_digest']=_digest(source)
+    from test_physical_motiongen import bind_contact_fixture
+    bind_contact_fixture(model,source)
     return source,model,binding
 
 
@@ -79,6 +81,8 @@ class FakeDeviceContractTest(unittest.TestCase):
         model['timeline_digest']=_digest(model['ticks'])
         model['planning_validation']['timeline_digest']=model['timeline_digest']
         model['control_validation']=validate_control(model)
+        from test_physical_motiongen import bind_contact_fixture
+        bind_contact_fixture(model,source)
         base=freeze_physical(model,source,binding,environment='fake');before=deepcopy((base,source))
         # Real cached retiming and validators; only native action decoding is a
         # CPU fixture, not a new GPU/geometry qualification.

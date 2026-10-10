@@ -70,6 +70,54 @@ def validate_position_normalization(value,source):
             raise ValueError('material position normalization requires bound passed geometry validation')
 
 
+def validate_grasp_contact_evidence(plan,source):
+    """Require this scene's selected-pose proof on both model and device plans."""
+    from grasp_contact_certificate import GRASP_CONTACT_POLICY, validate_contact_certificate
+    backend=plan.get('planning_backend',{})
+    certificate=plan.get('grasp_contact_certificate')
+    grasp=plan.get('task_targets',{}).get('grasp',{})
+    closing=plan.get('planning_validation',{}).get('gpu_final_acceptance',{}).get('closing',{})
+    if (plan.get('grasp_contact_policy')!=GRASP_CONTACT_POLICY or not isinstance(certificate,dict)
+            or not grasp.get('actual_original_cup_from_tool') or not grasp.get('candidate_id')
+            or grasp.get('candidate_id')!=certificate.get('candidate_id')):
+        raise ValueError('selected grasp requires its current contact reserve policy and certificate')
+    digest=certificate.get('certificate_digest')
+    if (not isinstance(digest,str) or len(digest)!=64
+            or grasp.get('contact_certificate_digest')!=digest
+            or closing.get('contact_certificate_digest')!=digest):
+        raise ValueError('selected grasp and closing must bind the same contact certificate')
+    for key in ('source_parts_sha256','cup_profile_sha256','cup_geometry_sha256','exported_geometry_sha256'):
+        value=backend.get(key)
+        if not isinstance(value,str) or len(value)!=64 or certificate.get(key)!=value:
+            raise ValueError('grasp certificate differs from the checked planning geometry: '+key)
+    validate_contact_certificate(certificate,source_digest=_digest(source),
+        urdf_sha256=backend.get('native_robot_sha256'),expected_digest=digest,
+        cup_profile_sha256=backend['cup_profile_sha256'],source_parts_sha256=backend['source_parts_sha256'],
+        actual_cup_from_tool=grasp['actual_original_cup_from_tool'])
+    joints=certificate.get('grasp_q_model')
+    gap=certificate.get('grasp_contact_region',{}).get('commanded_closed_jaw_m')
+    if (not isinstance(joints,(list,tuple)) or len(joints)!=6
+            or any(type(v) not in (int,float) or not math.isfinite(v) for v in joints)
+            or type(gap) not in (int,float) or not math.isfinite(gap)):
+        raise ValueError('grasp certificate requires its actual model joints and commanded jaw')
+    stages=plan.get('stages',[]);ticks=plan.get('ticks',[]);closed=False
+    for index,stage in enumerate(stages):
+        if stage.get('name') not in ('preclose_settle','close_ramp','close_and_hold'):continue
+        begin=stage.get('start_tick');end=stages[index+1].get('start_tick') if index+1<len(stages) else len(ticks)
+        if type(begin) is not int or type(end) is not int or not 0<=begin<end<=len(ticks):
+            raise ValueError('grasp certificate requires nonempty bound closing stages')
+        for tick in ticks[begin:end]:
+            target=tick.get('target',{});actual=target.get('left_arm_joints',[])
+            if len(actual)!=6 or any(not math.isfinite(a) or abs(a-b)>1e-10 for a,b in zip(actual,joints)):
+                raise ValueError('closing commands differ from certified grasp model joints')
+            if stage['name']=='close_and_hold':
+                opening=target.get('left_gripper')
+                if type(opening) not in (int,float) or not math.isfinite(opening) or abs(opening/2000-gap)>1e-10:
+                    raise ValueError('closing command differs from certified contact sweep endpoint')
+                closed=True
+    if not closed:raise ValueError('grasp certificate requires a bound close_and_hold stage')
+
+
 def validate_model_evidence(plan,source):
     from control_motion import validate_receipt
     validate_receipt(plan)
@@ -96,6 +144,7 @@ def validate_model_evidence(plan,source):
     if (set(acceptance.get('fixed',{}))!={'world','self'} or not acceptance.get('jaw_sweeps')
             or not all(isinstance(row,dict) and row.get('passed') is True for row in checks)):
         raise ValueError('physical GPU plan requires every final geometry acceptance check')
+    validate_grasp_contact_evidence(plan,source)
     records=plan.get('motiongen_receipts',[]);selected=receipt.get('selected_motiongen_receipt_indices')
     if (not isinstance(selected,list) or not selected or receipt.get('motiongen_receipts_sha256')!=_digest(records)
             or any(type(i) is not int or not 0<=i<len(records) or records[i].get('success') is not True for i in selected)):

@@ -183,6 +183,18 @@ def main(native_code, urdf):
 
     legacy_trajectory = ModuleType('robot_sim.policies.continuous_motion')
     legacy_trajectory.continuous_trajectory = forbidden
+    def closing_fixture(engine,planner,state,cup,**options):
+        from test_grasp_contact_certificate import certificate_fixture
+        pose=cup.inverse().compose(planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(state)['left_link6'])))
+        proof=certificate_fixture(options['source_digest'],options['data']['urdf_sha256'],
+            exported_geometry_sha256=_digest(options['data']),candidate_id=options['candidate_id'],
+            actual_cup_from_tool=asdict(pose),grasp_q_model=[state[n] for n in LEFT])
+        proof['tool_from_held_cup']=asdict(pose.inverse())
+        proof['certificate_digest']=_digest({k:v for k,v in proof.items() if k!='certificate_digest'})
+        engine.grasp_contact_certificate=proof
+        return dict(passed=True,terminal_state=dict(state,left_joint7=.038,left_joint8=.038),
+            world_from_cup=asdict(cup),contact_certificate=proof,
+            gpu_sweep=dict(passed=True,contact_certificate_digest=proof['certificate_digest']))
     patches = [patch.object(EpisodePlanner, 'initial', forbidden),
         patch.dict(sys.modules, {'robot_sim.policies.continuous_motion': legacy_trajectory}),
         patch('curobo_robot_model.build_conservative_robot_model', side_effect=model),
@@ -200,8 +212,7 @@ def main(native_code, urdf):
         patch('gpu_acceptance.fixed_world_check',return_value=dict(passed=True)),
         patch('gpu_acceptance.fixed_self_check',return_value=dict(passed=True)),
         patch('gpu_acceptance.jaw_sweep',return_value=dict(passed=True)),
-        patch('gpu_acceptance.closing_geometry',side_effect=lambda e,p,state,cup:dict(passed=True,
-            terminal_state=dict(state,left_joint7=.037,left_joint8=.037),world_from_cup=asdict(cup),gpu_sweep=dict(passed=True))),
+        patch('gpu_acceptance.closing_geometry',side_effect=closing_fixture),
         patch('gpu_acceptance.task_check',side_effect=lambda e,p,stages,closing:dict(passed=not e.twist,
             checked_cross_samples=3,max_ee_orientation_error_rad=.01 if e.twist else 0.)), patch('motiongen_plan.code_identity', return_value={'fixture': 'code'})]
     from contextlib import ExitStack
@@ -221,8 +232,10 @@ def main(native_code, urdf):
         cache={};before=len(model_calls)
         motiongen_plan.prepare_model(planner,observation,cached_data,urdf,state,cache)
         assert cache['engine'].seed_resets == 0, 'fresh warmup sampling state was reset'
+        cache['engine'].grasp_contact_certificate={'stale':'previous request'}
         motiongen_plan.prepare_model(planner,observation,cached_data,urdf,state,cache)
         assert cache['engine'].seed_resets == 1, 'reused request retained the previous sampling sequence'
+        assert cache['engine'].grasp_contact_certificate is None
         assert len(model_calls)==before+1
         changed={**cached_data,'parts':[{'name':'changed geometry'}]}
         motiongen_plan.prepare_model(planner,observation,changed,urdf,state,cache)
@@ -259,6 +272,21 @@ def main(native_code, urdf):
                     assert all(0 <= b-a <= .20000001 for a, b in zip(gaps, gaps[1:]))
         assert evidence['gpu_final_acceptance']['task_semantics']['checked_cross_samples'] > 0
         assert evidence['gpu_final_acceptance']['task_semantics']['max_ee_orientation_error_rad'] == 0.
+        alternatives=deepcopy(targets)
+        alternatives['grasp_candidates']=[dict(grasp,candidate_id='rejected-contact'),
+            dict(grasp,candidate_id='next-contact',world_from_tool=asdict(Pose((.2,.201,.3))))]
+        def reject_first(engine,planner,state,cup,**options):
+            if options['candidate_id']=='rejected-contact':raise ValueError('fixture native closing rejects first candidate')
+            return closing_fixture(engine,planner,state,cup,**options)
+        with patch('motiongen_targets.generate_targets',return_value=alternatives),\
+                patch('gpu_acceptance.closing_geometry',side_effect=reject_first):
+            _,next_plan,_=plan_loaded(planner,observation,data,source,urdf,speed_scale=.3)
+        assert next_plan['task_targets']['grasp']['candidate_id']=='next-contact'
+        assert next_plan['grasp_contact_certificate']['candidate_id']=='next-contact'
+        assert next_plan['task_targets']['failed_grasp_candidates'][0]['candidate_id']=='rejected-contact'
+        relation=Pose(**next_plan['grasp_contact_certificate']['tool_from_held_cup'])
+        expected_tool=Pose(**next_plan['task_targets']['placement']['world_from_cup']).compose(relation.inverse())
+        assert next_plan['task_targets']['placement']['world_from_tool']==asdict(expected_tool)
         # Exercise a physical input through the same numerical producer. All
         # source/owner/GPU objects here are CPU fixtures, never live services.
         from test_physical_motiongen import fake_inputs

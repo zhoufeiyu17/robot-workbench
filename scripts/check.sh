@@ -37,6 +37,9 @@ python tests/test_atomic_evidence_save.py
 python tests/test_setup_resident_collection.py
 python tests/test_collection_physx_protocol.py
 python rule_based_workbench/test_fake_device_pipeline.py
+python rule_based_workbench/test_grasp_contact_geometry.py
+python rule_based_workbench/test_grasp_contact_certificate.py
+python rule_based_workbench/test_motiongen_pipeline.py
 python rule_based_workbench/test_sample_clock.py
 python rule_based_workbench/test_recording_wall_clock.py
 python rule_based_workbench/test_a1_asset_derivation.py

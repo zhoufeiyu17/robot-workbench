@@ -64,6 +64,8 @@ def protocol_fixture(directory, *, source_clock_id='cpu-fake-device-clock-v1', r
     model['planning_validation'].update(source_digest=_digest(source),timeline_digest=model['timeline_digest'])
     binding.update(environment='fake',simulation_only=True,evidence_source='fake_device_rgbd',
                    calibration_profile_digest=_digest(profile),source_digest=_digest(source),initial_state=initial)
+    from test_physical_motiongen import bind_contact_fixture
+    bind_contact_fixture(model,source)
     plan=freeze_physical(model,source,binding,environment='fake')
     for name,value in (('source',source),('plan',plan),('binding',binding)):
         (directory/(name+'.json')).write_text(json.dumps(value))

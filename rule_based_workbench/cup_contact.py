@@ -232,6 +232,14 @@ class CupContact:
     def certify_held(self,engine,q,prepared=None):
         import torch
         from curobo.rollout.cost.primitive_collision_cost import PrimitiveCollisionCost,PrimitiveCollisionCostConfig
+        selected=getattr(engine,'grasp_contact_certificate',None)
+        if selected is None or prepared!=selected:
+            raise ValueError('held contact requires this request selected-pose source certificate')
+        if (self.model_report is None or prepared.get('urdf_sha256')!=self.model_report['kinematics']['urdf_sha256']
+                or prepared.get('source_parts_sha256')!=self.model_report['source_parts_sha256']
+                or prepared.get('cup_geometry_sha256')!=self.geometry_digest
+                or prepared.get('claw_cup_allowance_m')!=ALLOWANCE_M or prepared.get('passed') is not True):
+            raise ValueError('selected fixed-contact geometry identity differs')
         if not self.active:raise ValueError('held-contact certification requires the current cup world pose')
         local=engine.generator.kinematics.kinematics_config.get_link_spheres('attached_object')
         if not (local[:,3]>0).any().item():raise ValueError('attach the cup before certifying its fixed relative contact')

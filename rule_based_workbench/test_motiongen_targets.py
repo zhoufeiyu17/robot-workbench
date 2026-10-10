@@ -2,9 +2,11 @@
 import argparse
 import math
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace as NS
+from unittest.mock import patch
 
 import numpy as np
 
@@ -18,6 +20,13 @@ def main(native_code):
         sys.modules[name] = module
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform as Pose
     from motiongen_targets import REFERENCE, generate_targets, carry_targets, retreat_target, straight_waypoints
+    # Placement/frame tests use a declared geometric candidate; the separate
+    # LP tests exercise actual source convex meshes and reserve failures.
+    def selected(planner,observation,data,ref,seed,**kwargs):
+        return [dict(cup_from_tool=asdict(seed),pitch_rad=ref['pitch_rad'],roll_rad=ref['roll_rad'],
+            minimum_contact_height_margin_m=.003,contact_region={'passed':True})],{'fixture':True}
+    selection_patch=patch('motiongen_targets.reserved_grasp_candidates',side_effect=selected)
+    selection_patch.start()
 
     begin=Pose((.00236,0.,0.));end=Pose((0.,.22,0.))
     sequence=straight_waypoints(begin,end)
@@ -62,6 +71,8 @@ def main(native_code):
     assert result['placement_goal']['tolerance_m']==.01
     assert abs(result['placement_goal']['target_tolerance_m']-.009)<1e-12
     assert result['placement_goal']['tracking_reserve_m']==.001
+    assert result['grasp_contact_policy']['required_region_m']==[.037,.098]
+    assert 'world_from_tool' not in placement
     assert all(p['outlet_distance_m']<=.009+1e-12 for p in result['placement_candidates'])
     assert abs(placement['planning_edge_margin_m']-.009)<1e-12
     near_edge=deepcopy(observation)
@@ -156,7 +167,8 @@ def main(native_code):
         pass
     else:
         raise AssertionError('wrong asset identity accepted')
-    assert 'torch' not in sys.modules and 'scipy.optimize' not in sys.modules
+    selection_patch.stop()
+    assert 'torch' not in sys.modules
     print('MotionGen task-space targets: relative-depth, fixed pitch/yaw, support, 17mm lane and identity checks passed')
 
 

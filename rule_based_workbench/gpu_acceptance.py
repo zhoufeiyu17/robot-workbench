@@ -1,4 +1,4 @@
-"""GPU acceptance of fixed-arm symmetric jaw sweeps; no mesh narrow phase."""
+"""GPU jaw acceptance with selected-pose native source proofs; no CPU IK/path search."""
 import math
 import time
 from a1_asset_derivation import certificate_path
@@ -69,7 +69,8 @@ def jaw_sweep(engine, planner, q, start, end, *, centering=None):
         from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
         from cup_contact import sweep_contact_bound
         from motiongen_motion import normalized_fk_quaternion
-        prepared=json.loads(certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path']).read_text())
+        prepared=getattr(engine,'grasp_contact_certificate',None)
+        if prepared is None:raise ValueError('selected-pose source contact certificate required for claw fallback')
         if (prepared['cup_geometry_sha256']!=engine.cup_contact.geometry_digest
                 or prepared['urdf_sha256']!=engine.cup_contact.model_report['kinematics']['urdf_sha256']
                 or prepared['source_parts_sha256']!=engine.cup_contact.model_report['source_parts_sha256']):
@@ -422,26 +423,26 @@ def task_check(engine, planner, stages, closing):
         backend='native GPU FK and original geometry projections',retimed_collision_audit=False)
 
 
-def closing_geometry(engine, planner, state, cup):
-    """Reuse the pinned nominal contact geometry at the current observed pose."""
-    import json
-    from pathlib import Path
+def closing_geometry(engine, planner, state, cup, *, data,source_digest,candidate_id,closed_jaw_m):
+    """Rebuild source contact geometry for this actual selected MotionGen pose."""
     from dataclasses import asdict
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
-    from motiongen_motion import task_pose_error
-    prepared=json.loads(certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path']).read_text())
-    tool=planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(state)['left_link6']))
-    actual=cup.inverse().compose(tool);expected=prepared['original_cup_from_tool']
-    _,_,valid=task_pose_error(actual.position,actual.orientation_wxyz,expected['position'],expected['orientation_wxyz'])
-    if not valid:raise ValueError('current grasp is outside the prepared nominal contact pose')
+    from grasp_contact_certificate import build_contact_certificate
+    engine.grasp_contact_certificate=None
+    closing,prepared=build_contact_certificate(planner,data,state,cup,source_digest=source_digest,
+        candidate_id=candidate_id,closed_jaw_m=closed_jaw_m)
+    engine.grasp_contact_certificate=prepared
     gap=prepared['terminal_jaw_position_m']
     shift=RigidTransform(**prepared['original_cup_from_held_cup'])
     held=cup.compose(shift)
     vector=planner.geo.mount.inverse().rotate(cup.rotate(shift.position))
     q=[state[f'left_joint{i}'] for i in range(1,7)]
-    sweep=jaw_sweep(engine,planner,q,state['left_joint7'],gap,centering=dict(
-        displacement_base_m=vector,contact_start_m=max(prepared['contact_geometry_stops_m'].values())))
+    centering=(dict(displacement_base_m=vector,contact_start_m=max(prepared['contact_geometry_stops_m'].values()))
+               if math.sqrt(sum(v*v for v in vector))>1e-12 else None)
+    sweep=jaw_sweep(engine,planner,q,state['left_joint7'],gap,centering=centering)
     if not sweep['passed']:raise ValueError('GPU closing/centering acceptance failed: '+str(sweep))
+    sweep['contact_certificate_digest']=prepared['certificate_digest']
     return dict(passed=True,terminal_state=dict(state,left_joint7=gap,left_joint8=gap),world_from_cup=asdict(held),
         initial_world_from_cup=asdict(cup),gpu_sweep=sweep,contact_geometry_stops_m=prepared['contact_geometry_stops_m'],
-        scope='pinned nominal contact geometry with bounded current grasp pose and GPU symmetric centering sweep; no physical force claim')
+        contact_certificate=prepared,native_closing_digest=prepared['native_closing_digest'],
+        scope='new actual-pose native source proof and GPU symmetric centering sweep; no physical force claim')

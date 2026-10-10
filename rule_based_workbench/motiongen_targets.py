@@ -13,7 +13,6 @@ REFERENCE = dict(
     grasp_offset_m=.010, pitch_rad=.6370061007603225, roll_rad=.000624422993328988,
     cup_from_tool_position_m=[-.127462024215198, 0., .13157404134421807])
 
-GRASP_HEIGHT_RAISE_M=0.
 PLACEMENT_INWARD_BIAS_M=.001  # User20261009: preserve 2mm tray-edge acceptance.
 
 
@@ -49,13 +48,10 @@ def checked_reference(planner,data,*,reference=None,urdf_path=None):
     return ref,expected
 
 
-def generate_targets(planner, observation, data, *, reference=None,urdf_path=None):
-    """Bind accepted cup-relative grasp and support-local placement to this scene."""
+def reference_grasp(planner,data,*,reference=None,urdf_path=None):
+    """Retain the reviewed depth seed; it is not a new pose/contact certificate."""
     ref,expected=checked_reference(planner,data,reference=reference,urdf_path=urdf_path)
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
-    from robot_sim.tasks.manager_based.coffee_make.relative_targets import (
-        placement_candidates, eroded_support_polygon, _nearest_polygon_point)
-    from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import OUTLET_TOLERANCE_M, outlet_distance
     numbers = [ref['grasp_offset_m'], ref['pitch_rad'], ref['roll_rad'],
                *ref['cup_from_tool_position_m'], planner.GRASP_CENTER_OFFSET_M]
     if not all(math.isfinite(v) for v in numbers):
@@ -64,21 +60,74 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
     # R_y(pitch) R_x(roll), equivalent to native Rotation.from_euler('xyz',[roll,pitch,0]).
     cp, sp, cr, sr = math.cos(pitch/2), math.sin(pitch/2), math.cos(roll/2), math.sin(roll/2)
     delta = planner.GRASP_CENTER_OFFSET_M-ref['grasp_offset_m']
-    position = tuple(v+(delta if index == 0 else GRASP_HEIGHT_RAISE_M if index==2 else 0.) for index, v in enumerate(ref['cup_from_tool_position_m']))
+    position = tuple(v+(delta if index == 0 else 0.) for index, v in enumerate(ref['cup_from_tool_position_m']))
     cup_from_tool = RigidTransform(position, (cp*cr, cp*sr, sp*cr, -sp*sr))
+    return ref,expected,cup_from_tool
+
+
+def reserved_grasp_candidates(planner,observation,data,ref,seed,*,closed_jaw_m):
+    """Screen a bounded native task-pose domain, keeping depth and yaw fixed."""
+    from grasp_contact_geometry import analyze_contact_pose
+    from grasp_contact_certificate import GRASP_CONTACT_POLICY
+    from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
+    if abs(planner.GRASP_CENTER_OFFSET_M-GRASP_CONTACT_POLICY['grasp_depth_m'])>1e-12:
+        raise ValueError('reserved grasp policy requires the reviewed 0.016 m depth')
+    lo,hi=planner.cup.candidate_grasp_band_m
+    height_bounds=(lo+.015,hi+.075)  # Existing native bounded terminal domain.
+    heights=sorted(set([seed.position[2],*(height_bounds[0]+i*(height_bounds[1]-height_bounds[0])/16 for i in range(17))]))
+    orientations=[(ref['pitch_rad'],ref['roll_rad']),(.35,0.),(.55,0.),(.1,0.),(.8,0.)]
+    cup=observation.sample.world_from_cup
+    normal=cup.inverse().rotate(planner.table.world_from_shape.rotate((0.,0.,1.)))
+    accepted=[];rejected=[];total_accepted=0
+    for pitch,roll in dict.fromkeys(orientations):
+        group=[]
+        if not .1<=pitch<=.8 or not -.3<=roll<=.3:raise ValueError('reference outside native terminal orientation domain')
+        cp,sp,cr,sr=math.cos(pitch/2),math.sin(pitch/2),math.cos(roll/2),math.sin(roll/2)
+        for height in heights:
+            if not height_bounds[0]<=height<=height_bounds[1]:continue
+            pose=RigidTransform((seed.position[0],seed.position[1],height),(cp*cr,cp*sr,sp*cr,-sp*sr))
+            evidence=analyze_contact_pose(planner,data,pose,closed_jaw_m=closed_jaw_m,table_normal_cup=normal)
+            if evidence.get('passed') is not True:
+                rejected.append(dict(pitch_rad=pitch,roll_rad=roll,height_m=height,reason=evidence.get('reason'),
+                    contact_height_interval_m=evidence.get('contact_height_interval_m')))
+                continue
+            lower,upper=evidence['contact_height_interval_m']
+            margin=min(lower-.035,.1-upper)
+            group.append(dict(cup_from_tool=asdict(pose),pitch_rad=pitch,roll_rad=roll,
+                minimum_contact_height_margin_m=margin,contact_region=evidence))
+        group.sort(key=lambda row:(-row['minimum_contact_height_margin_m'],abs(row['cup_from_tool']['position'][2]-seed.position[2])))
+        total_accepted+=len(group);accepted.extend(group[:4])
+    return accepted,dict(method='bounded native task-space height lattice; up to four heights per orientation',
+        depth_m=planner.GRASP_CENTER_OFFSET_M,yaw_change_rad=0.,pitch_bounds_rad=[.1,.8],roll_bounds_rad=[-.3,.3],
+        height_bounds_m=list(height_bounds),height_intervals=16,maximum_returned_candidates=20,
+        rejected=rejected,accepted_count=total_accepted,global_infeasibility_claim=False)
+
+
+def generate_targets(planner, observation, data, *, reference=None,urdf_path=None,closed_jaw_m=None):
+    """Bind reserve-screened cup-relative grasps and support-local cup goals."""
+    ref,expected,seed=reference_grasp(planner,data,reference=reference,urdf_path=urdf_path)
+    from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
+    from robot_sim.tasks.manager_based.coffee_make.relative_targets import (
+        placement_candidates, eroded_support_polygon, _nearest_polygon_point)
+    from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import OUTLET_TOLERANCE_M, outlet_distance
+    from grasp_contact_certificate import GRASP_CONTACT_POLICY
+    # The existing reviewed 83/65 mm A1 metal definitions differ by 18 mm.
+    closed_jaw_m=planner.open_position_m-.009 if closed_jaw_m is None else closed_jaw_m
+    candidates,selection=reserved_grasp_candidates(planner,observation,data,ref,seed,closed_jaw_m=closed_jaw_m)
     cup = observation.sample.world_from_cup
-    tool = cup.compose(cup_from_tool)
     hand = _hand_points_tool(planner, planner.open_position_m)
     if not hand:
         raise ValueError('complete active hand geometry required')
     extent = max(point[0] for _, points in hand for point in points)
-    pre = tool.compose(RigidTransform((-(extent+max(b.radius_m for b in planner.cup.bands)), 0., 0.)))
-    grasp = dict(candidate_id='accepted-cup-relative-reference', source=ref['source'],
-                 world_from_tool=asdict(tool), world_from_pregrasp=asdict(pre),
-                 cup_from_tool=asdict(cup_from_tool), tool_from_cup=asdict(cup_from_tool.inverse()),
-                 original_grasp_offset_m=ref['grasp_offset_m'], current_grasp_offset_m=planner.GRASP_CENTER_OFFSET_M,
-                 cup_x_delta_m=delta, cup_z_delta_m=GRASP_HEIGHT_RAISE_M,pitch_rad=pitch, roll_rad=roll, yaw_change_rad=0.,
-                 acceptance='new offset requires MotionGen feasibility and native final contact audit')
+    grasps=[]
+    for index,candidate in enumerate(candidates):
+        pose=RigidTransform(**candidate['cup_from_tool']);tool=cup.compose(pose)
+        pre=tool.compose(RigidTransform((-(extent+max(b.radius_m for b in planner.cup.bands)),0.,0.)))
+        grasps.append(dict(candidate,candidate_id=f'contact-reserve-{index:02d}',source=ref['source'],
+            world_from_tool=asdict(tool),world_from_pregrasp=asdict(pre),tool_from_cup=asdict(pose.inverse()),
+            original_grasp_offset_m=ref['grasp_offset_m'],current_grasp_offset_m=planner.GRASP_CENTER_OFFSET_M,
+            cup_x_delta_m=planner.GRASP_CENTER_OFFSET_M-ref['grasp_offset_m'],yaw_change_rad=0.,
+            acceptance='continuous potential contact reserve only; native closing and GPU path checks still required'))
     scene = observation.scene
     acceptance = data['native_identity']['acceptance']['edge_margin_m']
     margin = acceptance+max(planner.PLACEMENT_TRACKING_RESERVE_M,planner.MACHINE_PLACEMENT_RESERVE_M)
@@ -111,18 +160,19 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
             return
         placements.append(dict(candidate_id=f'placement-{len(placements):02d}', source=source, preferred=preferred,
                                support_xy_m=xy, world_from_cup=asdict(pose),
-                               world_from_tool=asdict(pose.compose(cup_from_tool)),
+                               tool_pose_binding='selected grasp and actual native closing relation',
                                planning_edge_margin_m=margin,outlet_distance_m=distance,accepted_trajectory=False,
                                nominal_support_xy_m=nominal_xy,nominal_outlet_distance_m=nominal_distance,
                                inward_bias_m=PLACEMENT_INWARD_BIAS_M))
 
-    for candidate in placement_candidates(scene, planner.cup, cup_from_tool.inverse(),
+    for candidate in placement_candidates(scene, planner.cup, seed.inverse(),
             edge_margin_m=margin,cup_yaw_rad=yaw,outlet_tolerance_m=target_tolerance):
         append(candidate.support_xy_m, 'native-outlet-aligned-support-geometry')
     placements.sort(key=lambda row:row['nominal_outlet_distance_m'])
     if placements:placements[0]['preferred']=True
     return dict(schema_version='motiongen_rule_targets.v1', task_space_only=True,
-                reference_identity=expected, grasp_candidates=[grasp], placement_candidates=placements,
+                reference_identity=expected,grasp_contact_policy=dict(GRASP_CONTACT_POLICY),
+                grasp_candidate_selection=selection,grasp_candidates=grasps,placement_candidates=placements,
                 **({'reference_derivation':ref['calibration_derivation']} if 'calibration_derivation' in ref else {}),
                 placement_goal=dict(schema_version='cup_outlet_goal.v1',metric='cup_mouth_world_xy_to_liquid_outlet',
                     tolerance_m=OUTLET_TOLERANCE_M,target_tolerance_m=target_tolerance,

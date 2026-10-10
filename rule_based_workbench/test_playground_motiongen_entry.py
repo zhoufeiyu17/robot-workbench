@@ -196,6 +196,8 @@ class PlaygroundMotionGenEntryTest(unittest.TestCase):
         model['planning_backend']['native_robot_sha256'] = source['calibration_profile']['model_binding']['urdf_sha256']
         model['planning_validation'].update(source_digest=_digest(source), timeline_digest=model['timeline_digest'])
         model['control_validation'] = validate_control(model)
+        from test_physical_motiongen import bind_contact_fixture
+        bind_contact_fixture(model,source)
         physical = freeze_physical(model, source, binding,environment=self.environment)
         self.write(self.remote/'playground-plan/plan.json', physical)
         self.write(self.remote/'playground-plan/result.json', dict(status='motiongen-plan-ready'))

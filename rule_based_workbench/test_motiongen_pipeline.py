@@ -49,6 +49,8 @@ def motiongen_fixture():
     plan['timeline_digest'] = _digest(plan['ticks'])
     plan['planning_validation'] = dict(schema_version='curobo_motiongen_path_validation.v1', passed=True,
         source_digest=_digest(source), timeline_digest=plan['timeline_digest'])
+    from test_physical_motiongen import bind_contact_fixture
+    bind_contact_fixture(plan,source)
     return source, plan
 
 
@@ -104,6 +106,9 @@ def main():
 
         source, plan = motiongen_fixture()
         bridge = DualGpuPipeline(); bridge.ingest_source(source); bridge.accept_plan(plan)
+        for key in ('grasp_contact_policy','grasp_contact_certificate'):
+            missing=deepcopy(plan);missing.pop(key)
+            rejects(lambda:bridge.accept_plan(missing))
         for change in (dict(offline_candidate=True), dict(planning_backend={'backend': 'curobo_world_broadphase_native_exact'}),
                       dict(simulation={'validated': True, 'outcome': 'success'}), dict(native_action_encoding='binary')):
             rejects(lambda change=change: bridge.accept_plan({**plan, **change}))

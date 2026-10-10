@@ -533,6 +533,8 @@ class DualGpuPipeline:
                     or payload.get('simulation') != {'validated': False, 'outcome': 'not_run'}):
                 raise ValueError('MotionGen requires bound GPU search evidence; task success awaits dual replay')
             validate_sim_distance_plan(payload, self.source)
+            from physical_motiongen import validate_grasp_contact_evidence
+            validate_grasp_contact_evidence(payload,self.source)
         if self.plan == payload:
             return self.summary()
         self.plan = deepcopy(payload)

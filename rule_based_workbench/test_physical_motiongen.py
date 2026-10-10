@@ -3,13 +3,31 @@ from copy import deepcopy
 
 from integration import CUROBO_PLANNER_ID, _digest
 from joint_space import gripper_offset_mm
-from physical_motiongen import freeze_physical, validate_evidence
+from physical_motiongen import freeze_physical, validate_evidence, validate_grasp_contact_evidence
 from real_contract import validate_real_plan
 from test_frozen_executor import fixture
 from test_initial_state import initial_fixture
 from test_joint_space import a1_profile
 from gripper_distance_plan import HOLDING_STAGES,NATIVE_DISTANCE_ENCODING
 from frozen_executor import FrozenExecutor
+
+
+def bind_contact_fixture(plan,source):
+    """Synthetic certificate wiring only; never a geometric qualification."""
+    from test_grasp_contact_certificate import certificate_fixture
+    backend=plan['planning_backend']
+    proof=certificate_fixture(_digest(source),backend.setdefault('native_robot_sha256','a'*64))
+    stage=next(row for row in plan['stages'] if row['name']=='close_and_hold')
+    proof['grasp_q_model']=deepcopy(plan['ticks'][stage['start_tick']]['target']['left_arm_joints'])
+    proof['certificate_digest']=_digest({k:v for k,v in proof.items() if k!='certificate_digest'})
+    for key in ('source_parts_sha256','cup_profile_sha256','cup_geometry_sha256','exported_geometry_sha256'):
+        backend[key]=proof[key]
+    plan.update(grasp_contact_policy=deepcopy(proof['policy']),grasp_contact_certificate=proof)
+    plan.setdefault('task_targets',{})['grasp']=dict(candidate_id=proof['candidate_id'],
+        actual_original_cup_from_tool=deepcopy(proof['original_cup_from_tool']),
+        contact_certificate_digest=proof['certificate_digest'])
+    acceptance=plan['planning_validation'].setdefault('gpu_final_acceptance',{})
+    acceptance.setdefault('closing',{})['contact_certificate_digest']=proof['certificate_digest']
 
 
 def fake_inputs():
@@ -47,6 +65,7 @@ def fake_inputs():
         cpu_search_fallback=False,source_digest=_digest(source),timeline_digest=plan['timeline_digest'],
         gpu_final_acceptance=acceptance,motiongen_receipts_sha256=_digest(plan['motiongen_receipts']),
         selected_motiongen_receipt_indices=[0])
+    bind_contact_fixture(plan,source)
     binding=dict(calibration_accepted=True,evidence_source='physical_rgbd',robot_id=source['robot_id'],
         camera_serials=source['camera_serials'],source_digest=_digest(source),
         calibration_profile_digest=_digest(profile),initial_state=initial)
@@ -81,6 +100,26 @@ def main():
     rejects(lambda:validate_evidence(bad,source))
     bad=deepcopy(source);bad['synthetic_fixture']=True
     rejects(lambda:freeze_physical(model,bad,binding))
+    # Missing markers cannot opt a current GPU plan out of contact validation.
+    for key in ('grasp_contact_policy','grasp_contact_certificate'):
+        bad=deepcopy(model);bad.pop(key)
+        rejects(lambda:freeze_physical(bad,source,binding))
+    for mutate in (
+        lambda p:p['task_targets']['grasp'].__setitem__('candidate_id','another-grasp'),
+        lambda p:p['task_targets']['grasp']['actual_original_cup_from_tool']['position'].__setitem__(2,.14),
+        lambda p:p['planning_validation']['gpu_final_acceptance']['closing'].__setitem__('contact_certificate_digest','0'*64),
+        lambda p:p['planning_backend'].__setitem__('cup_geometry_sha256','0'*64),
+        lambda p:p['grasp_contact_certificate']['grasp_q_model'].__setitem__(0,.1),
+        lambda p:p['grasp_contact_certificate'].__setitem__('source_digest','another-source')):
+        bad=deepcopy(model);mutate(bad)
+        rejects(lambda:freeze_physical(bad,source,binding))
+    bad=deepcopy(model);proof=bad['grasp_contact_certificate'];proof['grasp_q_model'][0]+=.001
+    proof['certificate_digest']=_digest({k:v for k,v in proof.items() if k!='certificate_digest'})
+    bad['task_targets']['grasp']['contact_certificate_digest']=proof['certificate_digest']
+    bad['planning_validation']['gpu_final_acceptance']['closing']['contact_certificate_digest']=proof['certificate_digest']
+    rejects(lambda:validate_grasp_contact_evidence(bad,source))
+    bad=deepcopy(model);bad['ticks'][1]['target']['left_gripper']+=.1
+    rejects(lambda:validate_grasp_contact_evidence(bad,source))
     print('physical GPU source/one-time conversion/complete evidence/tamper guards PASS; fake inputs only')
 
 
