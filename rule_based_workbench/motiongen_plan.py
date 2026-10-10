@@ -17,6 +17,7 @@ from uuid import uuid4
 from contract import demo_state
 from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING
 from integration import CUROBO_PLANNER_ID, DualGpuPipeline, PIPELINE_LANES, SIM_POLICY_ID, _digest
+from a1_asset_derivation import CERTIFICATES,PROOF,certificate_path
 
 LEFT = tuple(f'left_joint{i}' for i in range(1, 7))
 RIGHT = tuple(f'right_joint1{i}' for i in range(1, 7))
@@ -130,7 +131,7 @@ def attach_cup(engine, q, cup_names):
     spheres = engine.generator.robot_cfg.kinematics.kinematics_config.get_link_spheres('attached_object').detach().cpu().tolist()
     if not any(sphere[3] > 0 for sphere in spheres):
         raise ValueError('MotionGen attached cup has no active proxy spheres')
-    prepared_path=Path(__file__).with_name('a1_grasp_contact.json')
+    prepared_path=certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path'])
     prepared=json.loads(prepared_path.read_text()) if prepared_path.exists() else None
     contact=engine.cup_contact.certify_held(engine,q,prepared)
     return dict(claw_cup_contact=contact,method='MotionGen.attach_objects_to_robot', fit='VOXEL_VOLUME_INSIDE/subdivide',
@@ -344,11 +345,16 @@ def freeze(stages, source, data, grip, spec, *, run_id):
     return plan
 
 
-def code_identity():
+def code_identity(urdf_path=None):
     names = ('playground_geometry','gpu_acceptance','cup_envelope','cup_contact','region_self_collision','conservative_spheres','motiongen_motion', 'motiongen_self_collision', 'motiongen_targets', 'curobo_robot_model', 'curobo_planning',
              'curobo_whole_geometry', 'curobo_relative_geometry', 'integration', 'gripper_distance_plan', 'isaac_lane',
              'control_motion','physical_motiongen','real_contract','joint_space')
     paths = [Path(__file__).resolve(),Path(__file__).with_name('a1_conservative_refinement.json'),Path(__file__).with_name('a1_self_domain_certificate.json'),Path(__file__).with_name('a1_grasp_contact.json'),Path(__file__).with_name('a1_cup_inset.json'), Path(__file__).with_name('a1_support_domain.json'), Path(__file__).with_name('a1_support_near.json'), Path(__file__).with_name('a1_fixed_domain.json'), *(Path(importlib.import_module(name).__file__).resolve() for name in names)]
+    paths.append(Path(__file__).with_name('a1_asset_derivation.py'))
+    if urdf_path is not None:
+        paths.extend(certificate_path(name,urdf_path) for name in CERTIFICATES)
+        proof=Path(urdf_path).resolve().with_name(PROOF)
+        if proof.exists():paths.append(proof)
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
 
@@ -358,7 +364,7 @@ def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=No
     from motiongen_motion import MotionGenerator
     model_key=None if engine_cache is None else _digest(dict(parts=data['parts'],urdf=data['urdf_sha256'],opened=opened,
         planner_identity=planner.identity,ignores=sorted(sorted(pair) for pair in planner.geo.whole.ignores),
-        rules={name:hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+        rules={name:hashlib.sha256(certificate_path(name,urdf_path).read_bytes()).hexdigest()
                for name in ('a1_conservative_refinement.json','a1_self_domain_certificate.json')}))
     if engine_cache is not None and engine_cache.get('model_key')==model_key:
         config,proxy,fixed_meshes=deepcopy(engine_cache['model'])
@@ -385,7 +391,7 @@ def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=No
         engine.receipts=[]
     else:
         engine=MotionGenerator(config,world,model_report=proxy)
-        prepared_contact=json.loads(Path(__file__).with_name('a1_grasp_contact.json').read_text())
+        prepared_contact=json.loads(certificate_path('a1_grasp_contact.json',urdf_path).read_text())
         gap=prepared_contact['terminal_jaw_position_m']
         engine.update_locked_joints({**config['kinematics']['lock_joints'],'left_joint7':gap,'left_joint8':gap})
         engine.update_locked_joints(config['kinematics']['lock_joints'])
@@ -558,7 +564,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             engine.update_world(world)
             engine.update_locked_joints({name: contact[name] for name in engine.config['kinematics']['lock_joints']})
             attachment = attach_prepared_cup(engine, grasp_q, envelope)
-            attachment['claw_cup_contact']=engine.cup_contact.certify_held(engine,grasp_q,json.loads(Path(__file__).with_name('a1_grasp_contact.json').read_text()))
+            attachment['claw_cup_contact']=engine.cup_contact.certify_held(engine,grasp_q,json.loads(certificate_path('a1_grasp_contact.json',urdf_path).read_text()))
             route = carry_targets(planner, held_observation, actual_grasp, candidate, jaw_position_m=contact['left_joint7'])
             diagnostic('carry-route-'+candidate['candidate_id']+'.json',route)
             current = grasp_q
@@ -676,7 +682,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     base = freeze(stages, source, data, grip, spec, run_id=run_id+'-base')
     plan = freeze(derived_stages, source, data, grip, spec, run_id=run_id)
     backend = dict(backend='curobo_motiongen', curobo_version='0.7.8', gpu_ik=True, gpu_trajectory_search=True,
-                   code_sha256=code_identity(), robot_proxy_sha256=_digest(proxy),
+                   code_sha256=code_identity(urdf_path), robot_proxy_sha256=_digest(proxy),
                    initial_robot_config_sha256=_digest(config), native_robot_sha256=data['urdf_sha256'],
                    exported_geometry_sha256=_digest(data))
     selection = dict(grasp=grasp, placement=selected_placement, placed_cup_geometry=asdict(placed_cup),

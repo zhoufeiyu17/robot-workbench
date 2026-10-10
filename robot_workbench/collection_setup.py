@@ -134,7 +134,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
     pins.update(bridge_receipt['input_sha256'])
     conversion=dict(argv=['/isaac-sim/python.sh','-u','-B',str(wb/'a1_isaac_assets.py'),
         '--bundle',str(output/'calibration'/'model'),'--base-assets',base['assets'],
-        '--output',str(output/'native-assets'),'--gpu','1'],
+        '--output',str(output/'native-assets'),'--gpu','1','--native-code',base['native_code']],
         env={'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':execution['session_id']},
         gpu_execution_required=True,executed=False,
         purpose='new planning/model assets only; fixed observation plant is never replaced')
@@ -142,6 +142,8 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
     conversion['env']=isaac_environment({**base,'planning_backend':'native','remote_run_root':str(output/'conversion')},'dsw-scene')
     if execution['max_processes']==5:conversion['argv']+=['--execution-json',json.dumps(execution)]
     pins[str(wb/'a1_isaac_assets.py')]=sha(wb/'a1_isaac_assets.py')
+    from a1_asset_derivation import CERTIFICATES
+    for name in ('a1_asset_derivation.py',*CERTIFICATES):pins[str(wb/name)]=sha(wb/name)
     setup=dict(schema_version='resident_collection_setup.v1',status='awaiting_native_asset_conversion',
         root=str(output),resident_root=str(root),calibration=bridge,calibration_clock=c['clock'],
         installed=deepcopy(expected_install),input_sha256=pins,pipeline=base,
@@ -227,6 +229,11 @@ def finalize_collection_setup(setup_path):
     for path in sorted((target/'robots/arx_ac_one/v1/sim').rglob('*.usd')):
         if not path.resolve().is_relative_to(target):raise ValueError('planning USD dependency escapes isolated assets')
         pins[str(path)]=sha(path)
+    if binding.get('support_derivation'):
+        from a1_asset_derivation import CERTIFICATES,PROOF
+        parent=Path(binding['urdf']).parent
+        for path in (parent/'a1_support_contact.json',parent/PROOF,*[parent/'derived-certificates'/name for name in CERTIFICATES]):
+            pins[str(path)]=sha(path)
     from a1_asset_validation import validate_assets
     asset_validation=validate_assets(target,profile,pins)
     inputs=[pipeline[key] for key in (*PATH_KEYS,'curobo_root','prompt_file','detection_runtime_root') if pipeline.get(key)]

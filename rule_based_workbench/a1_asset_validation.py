@@ -57,4 +57,19 @@ def validate_assets(asset_root, profile, pins):
     rig = json.loads(paths['rig'].read_text())
     if rig.get('id') != profile['profile_id'] or rig.get('calibration_binding') != model:
         raise ValueError('camera rig differs from A1-cal profile')
+    from a1_asset_derivation import CERTIFICATES,PROOF,certificate_path,mechanical_identity
+    sidecar=paths['urdf'].with_name('a1_support_contact.json');proof_path=paths['urdf'].with_name(PROOF)
+    derivation=binding.get('support_derivation')
+    # Unmarked historical assets retain their original native sidecar checks.
+    # Every newly derived binding explicitly requires all of its proof files.
+    if proof_path.exists() or derivation is not None:
+        if not isinstance(derivation,dict):raise ValueError('derived A1 support binding required')
+        extras=[sidecar,proof_path,*[paths['urdf'].parent/'derived-certificates'/name for name in CERTIFICATES]]
+        for path in extras:
+            if sha256(path)!=pins.get(str(path)):raise ValueError('missing or mismatched derived A1 proof pin: '+str(path))
+        if (sha256(proof_path)!=derivation.get('proof_sha256') or sha256(sidecar)!=derivation.get('sidecar_sha256')
+                or mechanical_identity(paths['urdf'])!=derivation.get('mechanical_identity_sha256')):
+            raise ValueError('derived support mechanical/sidecar binding differs')
+        for name in CERTIFICATES:certificate_path(name,paths['urdf'])
+        hashes.update(support_sidecar=sha256(sidecar),support_derivation=sha256(proof_path))
     return dict(profile_id=profile['profile_id'], model_binding=model, asset_sha256=hashes)

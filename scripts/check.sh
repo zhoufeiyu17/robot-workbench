@@ -34,6 +34,7 @@ python tests/test_collection_physx_protocol.py
 python rule_based_workbench/test_fake_device_pipeline.py
 python rule_based_workbench/test_sample_clock.py
 python rule_based_workbench/test_recording_wall_clock.py
+python rule_based_workbench/test_a1_asset_derivation.py
 python rule_based_workbench/test_local_execution.py
 python rule_based_workbench/test_launch_environment.py
 python rule_based_workbench/test_owned_process.py

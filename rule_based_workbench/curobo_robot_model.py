@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 from curobo_planning import robot_config
+from a1_asset_derivation import certificate_path
 
 REQUIRED_LINKS = {'base_link', *(f'left_link{i}' for i in range(1, 9)), *(f'right_link1{i}' for i in range(1, 9))}
 SUPPORT_PAIRS = tuple((f'{side}_link{offset+2}', f'{side}_link{offset+i}')
@@ -257,11 +258,11 @@ def build_conservative_robot_model(exported, urdf_path, movable, positions, *, i
     """Task candidate: spend the approximately 1000 left spheres on known tight regions."""
     import numpy as np
     from conservative_spheres import cover
-    recipe=json.loads(Path(__file__).with_name('a1_conservative_refinement.json').read_text())
+    recipe=json.loads(certificate_path('a1_conservative_refinement.json',urdf_path).read_text())
     if (recipe['urdf_sha256']!=exported['urdf_sha256'] or recipe['source_parts_sha256']!=digest(exported['parts'])):
         raise ValueError('local conservative refinement recipe requires its frozen model geometry')
     if domain_certificate is None:
-        domain_certificate=json.loads(Path(__file__).with_name('a1_self_domain_certificate.json').read_text())
+        domain_certificate=json.loads(certificate_path('a1_self_domain_certificate.json',urdf_path).read_text())
     mounts={name for name,link in exported['planner_identity']['chassis_collision']['base_arm_exemptions'] if link=='left_link1'}
     if domain_certificate:
         links={p['name']:p['link'] for p in exported['parts']}

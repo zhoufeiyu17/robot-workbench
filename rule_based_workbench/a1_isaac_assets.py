@@ -57,7 +57,7 @@ def writable(root, relative):
     return target
 
 
-def prepare(bundle, base, output):
+def prepare(bundle, base, output, *, native_code=None):
     bundle, base, output = (Path(p).resolve() for p in (bundle,base,output))
     verify(bundle)
     profile = json.loads((bundle/'profile.json').read_text())
@@ -65,12 +65,26 @@ def prepare(bundle, base, output):
         raise ValueError('A1-cal URDF/profile mismatch')
     if output.is_relative_to(base) or output.is_relative_to(bundle):
         raise ValueError('output must stay outside base assets and calibration bundle')
+    from a1_asset_derivation import derive,PROOF,GEOMETRY_ID
+    source_urdf=base/(ROBOT+'source/acone/urdf/acone_no_handle_d405.urdf')
+    target_urdf=output/(ROBOT+'source/acone/urdf/a1-cal.urdf')
+    support=None
+    if source_urdf.with_name('a1_support_contact.json').exists():
+        if profile['model_binding'].get('geometry_id')!=GEOMETRY_ID:raise ValueError('calibrated profile differs from reviewed A1 support geometry')
+        if native_code is None:raise ValueError('native code identity required for reviewed support-certificate derivation')
+        support=derive(source_urdf,bundle/'robot.urdf',target_urdf,native_code)
     # Native asset resolution confines paths to this root; external symlinks are forbidden.
     shutil.copytree(base, output, symlinks=False)
     model = writable(output, ROBOT+'source/acone/urdf/a1-cal.urdf')
     shutil.copyfile(bundle/'robot.urdf',model)
     meshdir = writable(output, ROBOT+'source/acone/urdf/meshes')
     shutil.copytree(bundle/'meshes',meshdir)
+    if support:
+        sidecar,certificates,proof=support
+        writable(output,ROBOT+'source/acone/urdf/a1_support_contact.json').write_bytes(sidecar)
+        directory=model.parent/'derived-certificates';directory.mkdir(exist_ok=False)
+        for name,data in certificates.items():(directory/name).write_bytes(data)
+        (model.parent/PROOF).write_text(json.dumps(proof,indent=2,allow_nan=False)+'\n')
     for name in ('acone.urdf','acone_no_handle.urdf','acone_no_handle_d405.urdf'):
         writable(output,ROBOT+'source/acone/urdf/'+name).symlink_to(model.name)
     rig = calibrated_rig(json.loads((base/(ROBOT+'d405_rig.json')).read_text()),profile)
@@ -82,6 +96,10 @@ def prepare(bundle, base, output):
                    profile_id=profile['profile_id'],model_binding=profile['model_binding'],
                    base_assets=str(base),urdf=str(model),usd=str(usd),conversion_complete=False,
                    physics_validated=False,runtime_allowed=False)
+    if support:
+        binding['support_derivation']=dict(proof_sha256=digest(model.parent/PROOF),
+            sidecar_sha256=digest(model.with_name('a1_support_contact.json')),
+            mechanical_identity_sha256=proof['mechanical_identity_sha256'])
     (output/'a1-binding.json').write_text(json.dumps(binding,indent=2)+'\n')
     return binding
 
@@ -92,10 +110,11 @@ def main():
     p.add_argument('--prepare-only',action='store_true')
     p.add_argument('--gpu',type=int,choices=(0,1),default=0,help='physical CUDA mask and Vulkan adapter; logical CUDA device stays 0')
     p.add_argument('--execution-json')
+    p.add_argument('--native-code',type=Path,help='read-only native support algorithm identity for calibrated asset derivation')
     args=p.parse_args()
     from local_execution import register_auxiliary
     register_auxiliary(args,__file__)
-    binding=prepare(args.bundle,args.base_assets,args.output)
+    binding=prepare(args.bundle,args.base_assets,args.output,native_code=args.native_code)
     if args.prepare_only:
         print(json.dumps(binding,indent=2));return
     os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)

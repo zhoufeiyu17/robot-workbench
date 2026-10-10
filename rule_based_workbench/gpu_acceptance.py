@@ -1,6 +1,7 @@
 """GPU acceptance of fixed-arm symmetric jaw sweeps; no mesh narrow phase."""
 import math
 import time
+from a1_asset_derivation import certificate_path
 
 
 def jaw_sweep(engine, planner, q, start, end, *, centering=None):
@@ -68,7 +69,7 @@ def jaw_sweep(engine, planner, q, start, end, *, centering=None):
         from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
         from cup_contact import sweep_contact_bound
         from motiongen_motion import normalized_fk_quaternion
-        prepared=json.loads(Path(__file__).with_name('a1_grasp_contact.json').read_text())
+        prepared=json.loads(certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path']).read_text())
         if (prepared['cup_geometry_sha256']!=engine.cup_contact.geometry_digest
                 or prepared['urdf_sha256']!=engine.cup_contact.model_report['kinematics']['urdf_sha256']
                 or prepared['source_parts_sha256']!=engine.cup_contact.model_report['source_parts_sha256']):
@@ -163,7 +164,7 @@ class SupportBounds:
         from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
         self.torch=engine.torch;self.args=engine.tensor_args
         self.support=planner.support_contact
-        self.certificate=json.loads(Path(__file__).with_name('a1_support_domain.json').read_text())
+        self.certificate=json.loads(certificate_path('a1_support_domain.json',urdf).read_text())
         if not same_support_source(self.certificate['support_identity'],self.support.identity):
             raise ValueError('support domain source identity differs')
         state={**planner.home_state,**engine.config['kinematics']['lock_joints']}
@@ -202,7 +203,7 @@ class SupportBounds:
         if any(n not in self.selected for pair in self.support.pairs if pair[1].endswith('5') for n in pair):
             raise ValueError('support component identity missing')
         self.near_domains={}
-        path=Path(__file__).with_name('a1_support_near.json')
+        path=certificate_path('a1_support_near.json',urdf)
         if path.exists():
             asset=json.loads(path.read_text())
             if not same_support_source(asset['support_identity'],self.support.identity) or asset['urdf_sha256']!=identity['urdf_sha256']:
@@ -326,10 +327,10 @@ def fixed_self_check(engine, planner, exported):
     clear=boxes_separated(relative,translation,h[a],h[b])
     import json
     from pathlib import Path
-    certificate_path=Path(__file__).with_name('a1_fixed_domain.json')
+    certificate_file=certificate_path('a1_fixed_domain.json',engine.config['kinematics']['urdf_path'])
     certified=[]
-    if certificate_path.exists():
-        certificate=json.loads(certificate_path.read_text())
+    if certificate_file.exists():
+        certificate=json.loads(certificate_file.read_text())
         report=engine.cup_contact.model_report
         if (certificate.get('urdf_sha256')!=exported['urdf_sha256']
                 or certificate.get('source_parts_sha256')!=report['source_parts_sha256']
@@ -428,7 +429,7 @@ def closing_geometry(engine, planner, state, cup):
     from dataclasses import asdict
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from motiongen_motion import task_pose_error
-    prepared=json.loads(Path(__file__).with_name('a1_grasp_contact.json').read_text())
+    prepared=json.loads(certificate_path('a1_grasp_contact.json',engine.config['kinematics']['urdf_path']).read_text())
     tool=planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(state)['left_link6']))
     actual=cup.inverse().compose(tool);expected=prepared['original_cup_from_tool']
     _,_,valid=task_pose_error(actual.position,actual.orientation_wxyz,expected['position'],expected['orientation_wxyz'])
