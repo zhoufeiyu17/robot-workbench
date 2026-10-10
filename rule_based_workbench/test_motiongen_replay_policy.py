@@ -61,6 +61,7 @@ def main(native_code):
         def fail(self, reason, **kwargs):
             self.event = StepEvent(reason)
             return self.event
+        def _window(self,key,condition,dt,required):return False
         def observe(self, sample, *args, **kwargs):
             self.observed_contacts = args[1] if len(args)>1 else kwargs.get('contacts', ())
             if self.event is not None:
@@ -169,7 +170,7 @@ def main(native_code):
     # Past success is not sufficient when the final native observation no longer succeeds.
     runtime, plan, _ = fixture({42: 'success'}, final_gap=20.)
     policy = install_motiongen_replay_policy(runtime, plan)
-    assert policy['configuration']['restored_nonopen_jaw_may_prevent_success']
+    assert 'continue all current native guards' in policy['configuration']['release_confirmation_policy']
     for _ in plan['ticks']:
         result = execute(runtime)
         assert result.actual_substeps == 8 and result.event is None
@@ -311,7 +312,102 @@ def main(native_code):
     assert runtime.evaluator.observe(NS(physics_step=42)).reason=='robot_forbidden_contact'
     runtime.loop.physics_steps=42;context['final_sample']=True
     rejected(lambda:finish_motiongen_replay_policy(runtime))
-    print('MotionGen replay policy: ramp-only budget, failure preservation, actual Owner stage, current final success: PASS')
+    # Real frozen native evaluator, not scripted StepEvents: restore the run's
+    # 71.226634 mm empty jaw after a genuinely earned native release/success.
+    from dataclasses import replace
+    from robot_sim.asset_cfg.objects.cup import CupBand, CupInteractionProfile
+    from robot_sim.tasks.manager_based.coffee_make.interaction_evaluation import (
+        EpisodeAcceptanceSpec, InteractionEvaluator, PhysicalSample)
+    def native_restore_case(*,owner=True,retain=True,fault=None):
+        runtime,plan,_=fixture()
+        base=replace(EpisodeAcceptanceSpec.development(),open_position_m=.041496)
+        stages=[('initial_hold',[82.992]),('close_and_hold',[64.992]),
+            ('open',[64.992+18*i/300 for i in range(301)]),('release_hold',[82.992]*6),
+            ('home',[82.992]*521),
+            ('home_gripper_restore',[82.992+(71.22663408517838-82.992)*i/197 for i in range(198)]),
+            ('home_hold',[71.22663408517838]*9)]
+        ticks=[];plan['stages']=[];stage_names=[]
+        for name,gaps in stages:
+            plan['stages'].append(dict(name=name,start_tick=len(ticks)))
+            for gap in gaps:
+                ticks.append(dict(tick=len(ticks),time_s=len(ticks)/30,target=dict(
+                    left_arm_joints=[0.]*6,right_arm_joints=[0.]*6,left_gripper=gap,right_gripper=82.992)))
+                stage_names.append(name)
+        plan.update(ticks=ticks,native_substeps=[8]*len(ticks),timeline_digest=_digest(ticks),
+            native_identity=dict(acceptance=asdict(base)),task_targets={'placement_goal':dict(
+                schema_version='cup_outlet_goal.v1',metric='cup_mouth_world_xy_to_liquid_outlet',tolerance_m=.01)})
+        cup=CupInteractionProfile('fixture','c'*64,(CupBand('/Cup/Collisions/MiddleBody',0.,.13,.0347),),
+            .0347,.13,(.04,.065),())
+        initial=PhysicalSample('fixture',40,Pose(),Pose((.2,0,.04)),(0.,)*3,(0.,)*3,
+            (.041496,)*2,(0.,)*2,(0.,)*12,(0.,)*12,.174876,.0011288)
+        evaluator=InteractionEvaluator(base,cup,cup_root=root+'/Cup',robot_root=root+'/Robot',
+            table_shape='table',machine_profile_sha256='m'*64)
+        evaluator.reset(initial)
+        # Upstream grasp/separation are fixture prerequisites. Release, clear,
+        # home and all following failure decisions use actual native windows.
+        evaluator.history.update(grasp_confirmed=True,table_separated=True)
+        runtime.evaluator=evaluator;runtime.spec=NS(acceptance=base);runtime.root=root
+        context=dict(execution_id='native-owner',source_tick=0,stage='initial_hold',final_sample=False)
+        native_window=evaluator._window
+        receipt=install_motiongen_replay_policy(runtime,plan,
+            **({'applied_context':lambda sample:dict(context)} if owner else {}))
+        if not retain:evaluator._window=native_window  # Reproduce the old contract conflict.
+        contact=NS(actors=(root+'/Cup','machine'),shapes=(root+'/Cup/Collisions/LowerBody','tray'),
+            position=(0,0,.04),normal=(0,0,1),impulse=(0,0,.196074/240),separation_m=0.)
+        event=None;sample=initial
+        for index,tick in enumerate(ticks):
+            context.update(source_tick=index,stage=stage_names[index])
+            for substep in range(8):
+                step=sample.physics_step+1
+                scene=NS(instance=NS(episode_id='fixture'),observation_id=str(step),profile_sha256='m'*64,
+                    world_from_support=Pose((0,0,.04)),support_shape_path='tray',shapes=(NS(shape_path='tray'),),
+                    support_polygon_world_m=[(-.2,-.2,.04),(.2,-.2,.04),(.2,.2,.04),(-.2,.2,.04)],
+                    sites=(NS(site_id='liquid_outlet',position_world_m=(0,0,.17)),),digest=lambda:'scene')
+                gap=71.22663408517838 if fault=='never_released' else tick['target']['left_gripper']
+                sample=replace(initial,physics_step=step,world_from_cup=Pose((0,0,.04)),jaw_positions=(gap/2000,)*2)
+                contacts=(contact,);complete=True
+                if index==len(ticks)-1 and substep==7:
+                    if fault=='collision':contacts+=(NS(actors=(root+'/Robot/link2','machine'),
+                        shapes=('robot','machine'),position=(0,0,0),normal=(1,0,0),impulse=(.001,0,0),separation_m=0.),)
+                    elif fault=='recontact':contacts+=(NS(actors=(root+'/Cup',root+'/Robot/left_link7'),
+                        shapes=(root+'/Cup/Collisions/MiddleBody',root+'/Robot/left_link7/RealFingerRubberPad'),
+                        position=(.0347,0,.10),normal=(1,0,0),impulse=(0,0,0),separation_m=0.),)
+                    elif fault=='force':contacts=(NS(**{**contact.__dict__,'impulse':(0,0,6/240)}),)
+                    elif fault=='unstable':sample=replace(sample,cup_velocity=(.02,0,0))
+                    elif fault=='home':sample=replace(sample,arm_positions=(.1,)+(0.,)*11)
+                    elif fault=='clearance':sample=replace(sample,hand_clearance_m=.005)
+                    elif fault=='outlet':scene.sites=(NS(site_id='liquid_outlet',position_world_m=(.03,0,.17)),)
+                    elif fault=='incomplete':complete=False
+                before=asdict(sample)
+                event=evaluator.observe(sample,scene,contacts,dt=1/240,complete=complete,commanded_gripper_open=True)
+                assert asdict(sample)==before, 'release adapter fabricated measured jaws/poses'
+                runtime.loop.physics_steps=step
+                if event is not None:break
+            if event is not None:break
+        context['final_sample']=True
+        passed=True
+        try:finish_motiongen_replay_policy(runtime)
+        except (ValueError,RuntimeError):passed=False
+        assert runtime.spec.acceptance is base and evaluator.spec==replace(base,release_timeout_s=1.+301/30)
+        return passed,evaluator,receipt,context
+
+    passed,evaluator,receipt,context=native_restore_case(retain=False)
+    assert not passed and evaluator.first_failure_reason=='release_timeout'
+    assert context['stage']=='home_gripper_restore' and receipt['progress']['deferred_success_count']>0
+    for owner in (False,True):
+        passed,evaluator,receipt,_=native_restore_case(owner=owner)
+        assert passed and evaluator.first_failure_reason is None
+        assert receipt['progress']['release_confirmed_physics_step'] is not None
+        assert evaluator.previous.jaw_positions==(71.22663408517838/2000,)*2
+        assert evaluator.windows['release']==0. and evaluator.facts['release_confirmed']
+    for fault,reason in [('collision','robot_forbidden_contact'),('recontact','finger_cup_forbidden_contact'),
+            ('force','contact_force_limit'),('unstable','released_cup_unstable'),('outlet','outlet_misaligned'),
+            ('incomplete','contact_report_incomplete'),('never_released','release_timeout'),('home',None),('clearance',None)]:
+        passed,evaluator,receipt,_=native_restore_case(fault=fault)
+        assert not passed and evaluator.first_failure_reason==reason,(fault,evaluator.first_failure_reason)
+        if fault=='never_released':assert receipt['progress']['release_confirmed_physics_step'] is None
+        else:assert receipt['progress']['deferred_success_count']>0, 'negative case must follow real native success'
+    print('MotionGen replay policy: real native 71.226634 mm restore, earned release, late contact/force/stability/home/outlet failures, unchanged samples and final success: PASS')
 
 
 if __name__ == '__main__':

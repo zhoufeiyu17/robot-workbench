@@ -520,7 +520,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
         physical_configuration_unchanged=True,
         final_native_success_required=True,
         final_gripper_travel_mm=ticks[-1]['target']['left_gripper'],
-        restored_nonopen_jaw_may_prevent_success=abs(ticks[-1]['target']['left_gripper']/2000-base.open_position_m) > base.open_tolerance_m)
+        release_confirmation_policy='retain the actual native release window; continue all current native guards and final success checks')
     if applied_context is not None:
         configuration.update(execution_source='owner_applied_command', final_physics_step=None,
             success_policy='current native success at the actual Owner completion feedback step',
@@ -534,7 +534,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     grasp_policy=install_grasp_contact_adapter(runtime)
     configuration['rubber_pad_body_contact']={k:v for k,v in grasp_policy.items() if k!='incidental_contacts'}
     receipt = dict(configuration=configuration, configuration_sha256=_digest(configuration),
-                   progress=dict(deferred_success_count=0, first_deferred_success_step=None,
+                   progress=dict(deferred_success_count=0, first_deferred_success_step=None,release_confirmed_physics_step=None,
                                  last_observed_step=start, final_native_success=False))
     receipt['incidental_contacts']=grasp_policy['incidental_contacts']
     receiving_goal=plan.get('task_targets',{}).get('placement_goal')
@@ -547,6 +547,17 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
         configuration['placement_goal']=deepcopy(receiving_goal)
         receipt['configuration_sha256']=_digest(configuration)
     original_observe = evaluator.observe
+    original_window = evaluator._window
+    def window(key,condition,dt,required):
+        passed=original_window(key,condition,dt,required)
+        if key=='release':
+            # Native success is terminal; the full D timeline then restores empty
+            # jaws. Retain the earned release fact, never a fabricated open sample.
+            if passed and receipt['progress']['release_confirmed_physics_step'] is None:
+                receipt['progress']['release_confirmed_physics_step']=evaluator._current_physics_step
+            return receipt['progress']['release_confirmed_physics_step'] is not None
+        return passed
+    evaluator._window=window
     original_fail=evaluator.fail
     placement_transition=[False]
     observed_transition_failure=[False]

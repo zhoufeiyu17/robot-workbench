@@ -64,6 +64,7 @@ class Evaluator:
         self.history=dict(grasp_confirmed=False);self.last_audit={}
     def fail(self,reason,status='completed'):
         self.first_failure_reason=reason;self.event=StepEvent(reason,status);return self.event
+    def _window(self,key,condition,dt,required):return False
     def observe(self,sample,scene,contacts,*,dt,complete,commanded_gripper_open=None):
         assert self.event is None
         assert sample.physics_step==self.previous.physics_step+1
