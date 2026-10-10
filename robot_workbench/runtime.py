@@ -95,14 +95,12 @@ class Runtime:
                             accepted_monotonic_s=time.monotonic())
                         return True
 
-                def cache_state(self, feedback, limits):
-                    result = super().cache_state(feedback, limits)
-                    # The shared owner accepts both strategies. The standalone
-                    # collection service still advertises its narrower interface.
-                    with self.lock:
-                        self.cache['capabilities'] = list(dict.fromkeys(self.cache.get('capabilities', []) + [
-                            'workbench_trajectory_v1', 'calibration_capture_ack_v1',
-                            'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous']))
+                def cached_snapshot_fields(self, result):
+                    result = super().cached_snapshot_fields(result)
+                    # Shared capabilities are invariant, including during the base cache refresh.
+                    result['capabilities'] = ['collection_execution_v2',
+                        'workbench_trajectory_v1', 'calibration_capture_ack_v1',
+                        'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous']
                     return result
 
                 def start_motion(self, plan, feedback, *, reviewed_deadline=None):

@@ -1,4 +1,5 @@
 """Thin adapters around existing business workflows; no substitute solvers/planners."""
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import json
@@ -64,6 +65,7 @@ class CalibrationWorkflow:
         self.tool_catalog={}
         self.deletion=None
         self.preview_key=None
+        self.preview_context=None;self.preview_failure=None;self.preview_pending=None;self.generation=0
         self.installed_id=None
         self.app.on_calibration_installed=self.calibration_installed
         self.catalog=[]
@@ -94,12 +96,12 @@ class CalibrationWorkflow:
             state={**state,'pipeline':report,'status':'PIPELINE','reason':None}
         run_id=live_run or report.get('run_id')
         review=report.get('review')
-        key=(run_id,str(review))
-        if self.active and review and key!=self.preview_key:
-            self.preview_key=key
-            preview=self.app.preview_calibration()
-            summary=f"{review.get('label','本批')}：{preview.get('samples',0)} 次采样，纯运动 {preview.get('total_motion_duration_s',0):.1f} 秒；请审阅全部姿态"
-            self.service.add_review(self.device,'calibration',preview,'execute',summary)
+        key=(run_id,json.dumps(review,sort_keys=True))
+        with self.lock:
+            if getattr(self,'preview_context',None)!=key:
+                self.generation=getattr(self,'generation',0)+1;self.preview_context=key
+                self.preview_key=None;self.preview_failure=None;self.preview_pending=None
+        if self.active and review:self.publish_workflow_review(key,review)
         sub=report.get('subprogress') or {}
         running=bool(report.get('running'))
         busy=running or state.get('status') in ('PLANNING','CAPTURING','FITTING','RUNNING')
@@ -219,15 +221,53 @@ class CalibrationWorkflow:
             preview_message='下方按执行顺序列出冻结的采样点与过渡点；查看图像只预览，不执行动作。',
             **deepcopy(getattr(self,'tool_catalog',{})))
         with self.lock:
+            if self.preview_context!=key:return
             value.update(replay=deepcopy(self.replay),replay_context=deepcopy(self.replay_context))
             value['arrival_statistics']=deepcopy(getattr(self,'arrival_statistics',{'error':'标定到位统计尚未读取'}))
             self.value=value
 
     def snapshot(self):
-        with self.lock:value=deepcopy(self.value)
+        with self.lock:
+            value=deepcopy(self.value)
+            failure=deepcopy(getattr(self,'preview_failure',None)) if getattr(self,'active',False) else None
+        if failure:
+            value.update(status='failed',failed_stage=failure['stage_id'],view_error=failure['error'],review_error=failure,
+                message='本批执行预览生成失败：'+failure['error']+'；请点击“重新生成本批执行预览”。',
+                primary_action=dict(id='generate_plan',label='重新生成本批执行预览',allowed=True,reason=None),
+                diagnostics=[dict(label='审阅预览发布失败',value=f"运行 {failure['run_id']} · {failure['stage_id']} · {failure['error']}")])
         value['deletion_preview']=self.deletion_preview()
         value['deletion_result']=deepcopy(getattr(self,'deletion_result',None))
         return value
+
+    def publish_workflow_review(self,key,review,*,explicit=False):
+        with self.lock:
+            if not self.active or self.preview_context!=key:return
+            if self.preview_pending is not None:
+                if explicit:raise ValueError('本批执行预览仍在生成，请等待当前请求结束')
+                return
+            if not explicit and (self.preview_key==key or self.preview_failure):return
+            self.generation+=1;attempt=(key,self.generation);self.preview_pending=attempt;self.preview_key=None
+            revision=self.manual_revision()
+        try:
+            preview=self.app.preview_calibration()
+            summary=f"{review.get('label','本批')}：{preview.get('samples',0)} 次采样，纯运动 {preview.get('total_motion_duration_s',0):.1f} 秒；请审阅全部姿态"
+            with getattr(self.app,'review_lock',nullcontext()),self.lock:
+                current=(getattr(self.app,'pipeline_run_id',None),json.dumps(getattr(self.app,'pipeline_review',None),sort_keys=True))
+                if (not self.active or self.preview_context!=key or self.preview_pending!=attempt
+                        or current!=key or self.manual_revision()!=revision):
+                    raise ValueError('本批审阅已撤销或运行已变化，请重新生成预览')
+                self.service.add_review(self.device,'calibration',dict(preview,workflow_generation=attempt[1]),'execute',summary)
+                self.preview_key=key;self.preview_failure=None;self.preview_pending=None
+            return dict(message=summary,review_published=True)
+        except Exception as error:
+            with self.lock:
+                if self.active and self.preview_context==key and self.preview_pending==attempt:
+                    self.preview_pending=None
+                    current=(getattr(self.app,'pipeline_run_id',None),json.dumps(getattr(self.app,'pipeline_review',None),sort_keys=True))
+                    if current==key:
+                        self.preview_failure=dict(run_id=key[0],stage_id=review.get('kind','calibration')+'.review',
+                            error=type(error).__name__+': '+str(error),wall_ns=time.time_ns())
+            if explicit:raise
 
     def deletion_preview(self):
         with self.lock:pending=deepcopy(getattr(self,'deletion',None))
@@ -432,11 +472,17 @@ class CalibrationWorkflow:
             self.active=True
             self.operation=None
             if getattr(self.app,'pipeline_review',None):
-                preview=self.app.preview_calibration()
-                return dict(preview=preview,summary=f"本批 {preview.get('samples',0)} 次采样，纯运动 {preview['total_motion_duration_s']:.1f} 秒")
+                review=deepcopy(self.app.pipeline_review)
+                key=(getattr(self.app,'pipeline_run_id',None),json.dumps(review,sort_keys=True))
+                with self.lock:
+                    if getattr(self,'preview_context',None)!=key:
+                        self.generation=getattr(self,'generation',0)+1;self.preview_context=key
+                        self.preview_key=None;self.preview_failure=None;self.preview_pending=None
+                return self.publish_workflow_review(key,review,explicit=True)
             mode=body.get('mode','full')
             if mode not in ('full','wrist'):raise ValueError('请选择完整标定或仅重做双腕')
             if mode=='wrist' and not body.get('head_result_id'):raise ValueError('仅重做双腕需要明确指定已通过的头标定')
+            self.invalidate();self.active=True
             return self.app.action('/api/calibration-pipeline',dict(mode=mode,**({'head_result_id':body['head_result_id']} if mode=='wrist' else {})))
         if action=='execute':
             pipeline=bool(getattr(self.app,'pipeline_running',False))
@@ -482,8 +528,9 @@ class CalibrationWorkflow:
         raise ValueError('未知标定操作')
 
     def invalidate(self):
-        self.active=False
-        self.operation=None
+        with self.lock:
+            self.active=False;self.operation=None;self.generation=getattr(self,'generation',0)+1
+            self.preview_context=None;self.preview_key=None;self.preview_failure=None;self.preview_pending=None
         self.app.invalidate_reviews()
 
     def cancel(self):

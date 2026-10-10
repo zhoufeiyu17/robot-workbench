@@ -22,8 +22,9 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow=CalibrationWorkflow.__new__(CalibrationWorkflow)
         workflow.lock=threading.Lock();workflow.install_lock=threading.Lock();workflow.value={'busy':False};workflow.active=False
         workflow.preview_key=None;workflow.installed_id=None;workflow.last_catalog=-1e10
+        workflow.preview_context=None;workflow.preview_failure=None;workflow.preview_pending=None;workflow.generation=0
         workflow.catalog=[];workflow.replay=[];workflow.replay_context=None;workflow.media_files={}
-        self.batch=self.root/'batch/capture';self.batch.mkdir(parents=True)
+        self.batch=self.root/'batch/capture';self.batch.mkdir(parents=True,exist_ok=True)
         for name in ('head.png','left.png','overlay.png'):(self.batch/name).write_bytes(b'CPU fixture only')
         heads=[dict(id='head-poor',batch='batch/capture',kind='head',status='quality_failed')]
         wrists=[dict(id='wrist-poor',file='batch/capture/wrist.json',kind='wrist',pair_status='quality_failed')]
@@ -137,20 +138,86 @@ class WorkflowAdapterTest(unittest.TestCase):
         with self.assertRaises(ValueError):flow.action('delete_confirm',{'delete_preview_id':preview['id'],'confirmed':True})
 
     def test_expired_batch_review_can_refresh_without_restarting_pipeline(self):
-        workflow=CalibrationWorkflow.__new__(CalibrationWorkflow)
-        workflow.lock=threading.Lock()
+        workflow=self.calibration()
         workflow.value={'busy':True}
-        workflow.app=SimpleNamespace(pipeline_review={'kind':'wrist'},
-            preview_calibration=Mock(return_value={'token':'new-token','samples':32,'total_motion_duration_s':90.}),
-            action=Mock(side_effect=AssertionError('must not restart full pipeline')))
+        workflow.app.pipeline_review={'kind':'wrist'}
+        workflow.app.preview_calibration=Mock(return_value={'token':'new-token','samples':32,'total_motion_duration_s':90.})
+        workflow.app.action.side_effect=AssertionError('must not restart full pipeline')
         self.assertTrue(workflow.allowed('generate_plan')['allowed'])
         result=workflow.action('generate_plan',{})
-        self.assertEqual(result['preview']['token'],'new-token')
+        self.assertTrue(result['review_published'])
+        self.assertEqual(workflow.service.add_review.call_args.args[2]['token'],'new-token')
         workflow.app.preview_calibration.assert_called_once_with()
         workflow.app.action.assert_not_called()
         workflow.app.pipeline_review=None
         self.assertFalse(workflow.allowed('generate_plan')['allowed'])
         with self.assertRaises(ValueError):workflow.action('generate_plan',{})
+
+    def awaiting_calibration_review(self):
+        workflow=self.calibration();workflow.active=True
+        workflow.app.pipeline_review={'kind':'wrist','label':'腕半场'}
+        workflow.app.runtime_state.side_effect=lambda:dict(status='PIPELINE',workflow={'kind':'wrist'},
+            pipeline=dict(run_id=workflow.app.pipeline_run_id,running=True,review=workflow.app.pipeline_review))
+        workflow.app.preview_calibration=Mock(return_value={'token':'new-token','samples':29,'expires_in_s':30,'total_motion_duration_s':90.})
+        return workflow
+
+    def test_calibration_publication_failure_persists_until_explicit_success(self):
+        for failing in ('preview','publication'):
+            with self.subTest(failing=failing):
+                workflow=self.awaiting_calibration_review()
+                failed=(workflow.app.preview_calibration if failing=='preview' else workflow.service.add_review)
+                failed.side_effect=ValueError('specific '+failing+' failure')
+                workflow.refresh();workflow.refresh()
+                state=workflow.snapshot();failure=state['review_error']
+                self.assertEqual((state['status'],state['stage_id']),('failed','wrist.review'))
+                self.assertEqual((failure['run_id'],failure['stage_id']),('run','wrist.review'))
+                self.assertIn('specific '+failing+' failure',state['message'])
+                self.assertIn('重新生成',state['message']);self.assertTrue(state['primary_action']['allowed'])
+                self.assertIn('run',state['diagnostics'][0]['value'])
+                self.assertIsNone(workflow.preview_key)
+                workflow.app.preview_calibration.assert_called_once()
+                with self.assertRaises(ValueError):workflow.action('generate_plan',{})
+                self.assertEqual(workflow.snapshot()['status'],'failed')
+                attempts=workflow.app.preview_calibration.call_count
+                workflow.refresh();self.assertEqual(workflow.app.preview_calibration.call_count,attempts)
+                failed.side_effect=None
+                result=workflow.action('generate_plan',{})
+                self.assertTrue(result['review_published'])
+                self.assertIsNone(workflow.preview_failure);self.assertIsNotNone(workflow.preview_key)
+                self.assertNotIn('review_error',workflow.snapshot())
+                self.assertEqual(workflow.service.add_review.call_args.args[2]['workflow_generation'],workflow.generation)
+                workflow.app.action.assert_not_called()  # No pipeline restart or confirmation/motion.
+                workflow.refresh();self.assertEqual(workflow.app.preview_calibration.call_count,attempts+1)
+
+    def test_cancel_and_new_run_fence_late_calibration_publication(self):
+        for change in ('cancel','new_run'):
+            with self.subTest(change=change):
+                workflow=self.awaiting_calibration_review();entered=threading.Event();release=threading.Event();errors=[]
+                def preview():
+                    if threading.current_thread() is worker:
+                        entered.set();self.assertTrue(release.wait(2.))
+                        return {'token':'old-token','samples':29,'total_motion_duration_s':90.}
+                    return {'token':'new-token','samples':29,'total_motion_duration_s':90.}
+                workflow.app.preview_calibration.side_effect=preview
+                def refresh():
+                    try:workflow.refresh()
+                    except Exception as error:errors.append(error)
+                worker=threading.Thread(target=refresh);worker.start()
+                try:
+                    self.assertTrue(entered.wait(1.))
+                    if change=='cancel':workflow.cancel()
+                    else:
+                        workflow.app.pipeline_run_id='new-run';workflow.refresh()
+                finally:release.set();worker.join(2.)
+                self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+                self.assertIsNone(workflow.preview_failure)
+                if change=='cancel':
+                    self.assertIsNone(workflow.preview_key);workflow.service.add_review.assert_not_called()
+                    self.assertNotIn('review_error',workflow.snapshot())
+                else:
+                    workflow.service.add_review.assert_called_once()
+                    self.assertEqual(workflow.service.add_review.call_args.args[2]['token'],'new-token')
+                    self.assertEqual(workflow.snapshot()['id'],'new-run')
 
     def test_running_calibration_description_tracks_phase_not_initial_guidance(self):
         workflow=self.calibration()

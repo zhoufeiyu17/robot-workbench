@@ -136,6 +136,31 @@ class UnifiedRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.owner.native_task_status['task_outcome'],'unverifiable')
         self.assertEqual(runtime.owner.control.state,runtime.owner.states.READY)
 
+    def test_shared_capabilities_survive_collection_cache_publication_window(self):
+        from robot_workbench.bridges import calibration_gateway
+        runtime,creds=self.create()
+        device=SimpleNamespace(runtime=runtime,snapshot=lambda business:runtime.snapshot(creds[business]))
+        gateway=calibration_gateway(device)
+        entered,release=threading.Event(),threading.Event()
+        original=runtime.collection._cache_state
+        def pause(owner,*args):
+            result=original(owner,*args)
+            entered.set();self.assertTrue(release.wait(2.))
+            return result
+        with patch.object(runtime.collection,'_cache_state',pause):
+            worker=threading.Thread(target=lambda:self.advance(runtime));worker.start()
+            try:
+                self.assertTrue(entered.wait(1.))
+                self.assertEqual(runtime.owner.cache['capabilities'],['collection_execution_v2'])
+                status=gateway.status()
+                self.assertTrue(status['motion_enabled'])
+                for state in (status['owner'],runtime.owner.snapshot()):
+                    self.assertIn('collection_execution_v2',state['capabilities'])
+                    self.assertIn('workbench_trajectory_v1',state['capabilities'])
+                    self.assertIn('calibration_capture_ack_v1',state['capabilities'])
+            finally:release.set();worker.join(2.)
+        self.assertFalse(worker.is_alive())
+
     def test_identity_lock_namespace_and_stale_runtime_credential(self):
         runtime, creds = self.create()
         factory = lambda: (_ for _ in ()).throw(AssertionError('backend constructed without lock'))
