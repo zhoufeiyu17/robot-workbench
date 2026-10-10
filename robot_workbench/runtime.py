@@ -373,7 +373,7 @@ class Runtime:
             native=getattr(owner,'native_task_status',None)
             state['native_task']=({key:deepcopy(native[key]) for key in (
                 'execution_instance_id','execution_timeline_digest','source_clock_id','task_outcome','task_qualified',
-                'receipt_path','receipt_sha256','runtime_nonce','physics_step','message') if key in native}
+                'receipt_path','receipt_sha256','runtime_nonce','physics_step','message','first_failure') if key in native}
                 if isinstance(native,dict) else None)
             recording=owner.recording
             if recording is None:

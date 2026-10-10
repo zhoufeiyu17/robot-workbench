@@ -121,7 +121,9 @@ class NativeTaskObserver:
         if physics_advanced and monitor is not None:
             monitor.observe_current()
             item['status'].update(task_outcome=monitor.outcome,physics_step=self.backend.physics_step,
-                message=(monitor.first_failure or {}).get('reason') or '原生任务观测进行中')
+                message=(monitor.first_failure or {}).get('reason') or '原生任务观测进行中',
+                first_failure={key:monitor.first_failure.get(key) for key in ('reason','detail','physics_step')}
+                    if monitor.first_failure else None)
             publish_task_status(item['owner'],item['status'])
         state=runner.status
         completed=state=='READY' and runner.frozen.status=='completed' and runner.frozen.final_feedback_qualified

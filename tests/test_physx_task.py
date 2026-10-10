@@ -21,6 +21,12 @@ from robot_workbench.physx_task import CoffeeTaskMonitor,prepare_task
 
 
 @dataclass(frozen=True)
+class StepEvent:
+    reason: str
+    run_status: str = 'completed'
+
+
+@dataclass(frozen=True)
 class Acceptance:
     release_timeout_s:float=1.
     open_position_m:float=.041496
@@ -57,7 +63,7 @@ class Evaluator:
         self.previous=sample;self.event=None;self.first_failure_reason=None
         self.history=dict(grasp_confirmed=False);self.last_audit={}
     def fail(self,reason,status='completed'):
-        self.first_failure_reason=reason;self.event=NS(reason=reason,status=status);return self.event
+        self.first_failure_reason=reason;self.event=StepEvent(reason,status);return self.event
     def observe(self,sample,scene,contacts,*,dt,complete,commanded_gripper_open=None):
         assert self.event is None
         assert sample.physics_step==self.previous.physics_step+1
@@ -65,7 +71,7 @@ class Evaluator:
         self.calls.append((sample.physics_step,commanded_gripper_open))
         self.previous=sample
         event=self.events.get(sample.physics_step)
-        if event=='success':self.event=NS(reason=event,status='completed')
+        if event=='success':self.event=StepEvent(event)
         elif event:self.fail(event)
         return self.event
 

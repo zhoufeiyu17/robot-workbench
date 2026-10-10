@@ -188,7 +188,8 @@ class CoffeeTaskMonitor:
                     complete=True,commanded_gripper_open=commanded_open)
             self.last_evidence['native_audit']=deepcopy(evaluator.last_audit)
             if event is not None and event.reason!='success':
-                self._latch(event.reason,outcome='unverifiable' if event.status=='unverifiable' else 'failed')
+                self._latch(event.reason,outcome='unverifiable' if event.run_status=='unverifiable' else 'failed',
+                    detail='native StepEvent.run_status='+event.run_status)
         except Exception as error:
             self._latch('task_observation_unverifiable',detail=f'{type(error).__name__}: {error}')
         return self.outcome
