@@ -18,7 +18,7 @@ from model_adapt import seal,verify
 from test_fake_calibration_profile import fixture,write
 from test_harness import PROFILE
 from robot_workbench.calibration_profile import (build_fake_profile,validate_diagnostic_source,
-    diagnostic_snapshot,diagnostic_metadata,diagnostic_mesh_view)
+    diagnostic_snapshot,diagnostic_metadata,diagnostic_mesh_view,diagnostic_wrist_cameras)
 from robot_workbench.resident_collection import CollectionPreparation
 
 
@@ -48,6 +48,22 @@ class WarmDiagnosticTest(unittest.TestCase):
         self.temp=TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name).resolve()
         self.origin=self.root/'origin';self.origin.mkdir();self.current=self.root/'current';self.current.mkdir()
         self.capture,self.active,self.config,self.expected,self.registration=fixture(self.origin,nominal(self.root/'a1'))
+        # Match the actual C path: device files are raw, stored wrist contract is
+        # its same-K rectified image domain. The old fixture had conflated them.
+        wrist=json.loads((self.active/'wrist.json').read_text())
+        self.config['hardware_wrist_camera_files']={}
+        for side in ('left','right'):
+            raw={**wrist['payload']['contract']['cameras'][side],'rectified':False,
+                 'distortion_model':'distortion.inverse_brown_conrady'}
+            path=self.origin/('camera-'+side+'.json');write(path,raw)
+            self.config['hardware_wrist_camera_files'][side]=str(path)
+            wrist['payload']['contract']['cameras'][side]={**raw,'rectified':True,'coefficients':[0.]*5}
+        wrist.pop('sha256');wrist['sha256']=hashlib.sha256(canonical(wrist)).hexdigest()
+        write(self.active/'wrist.json',wrist);write(self.active.parent/(wrist['version']+'.json'),wrist)
+        manifest=json.loads((self.active/'manifest.json').read_text());manifest['wrist']['sha256']=wrist['sha256'];write(self.active/'manifest.json',manifest)
+        self.expected['manifest_sha256']=sha(self.active/'manifest.json')
+        data=json.loads((self.capture/'batch-wrist/capture/dataset.json').read_text());data['wrist_contract']=wrist['payload']['contract']
+        write(self.capture/'batch-wrist/capture/dataset.json',data);write(self.origin/'calibration-config.json',self.config)
         self.base=dict(pipeline_config=dict(assets='/fixed/assets',native_code='/fixed/native'),initial_suite={'episodes':[{'seed':0}]},
             native_identity={'physical_configuration':{'fixture':'fixed-physical-identity'}},
             lanes={'source':{'raw_provenance':{'source_files':{'source/fixture.py':'a'*64}},'configuration':{'cameras':{'rig':'fixed'}}}})
@@ -67,7 +83,8 @@ class WarmDiagnosticTest(unittest.TestCase):
         wrist=json.loads((self.active/'wrist.json').read_text())['payload']['contract']
         self.new['hardware_wrist_camera_files']={}
         for side in ('left','right'):
-            path=self.current/('camera-'+side+'.json');write(path,wrist['cameras'][side]);self.new['hardware_wrist_camera_files'][side]=str(path)
+            path=self.current/('camera-'+side+'.json');write(path,json.loads(Path(self.config['hardware_wrist_camera_files'][side]).read_text()))
+            self.new['hardware_wrist_camera_files'][side]=str(path)
         write(self.current/'calibration-config.json',self.new)
         (self.current/'calibration-workbench').mkdir()
 
@@ -100,6 +117,10 @@ class WarmDiagnosticTest(unittest.TestCase):
         self.assertEqual(profile['joints']['zero_offsets_rad'],[.01]*6+[-.02]*6)
         self.assertFalse(result['fresh_C_completed']);self.assertFalse(binding['fresh_C_completed'])
         self.assertFalse(model['joint_zero_offsets_baked_into_urdf']);self.assertEqual(model['urdf'],str(output/'model/robot.urdf'))
+        for side in ('left','right'):
+            self.assertFalse(json.loads(Path(self.new['hardware_wrist_camera_files'][side]).read_text())['rectified'])
+            self.assertTrue(profile['physical_calibration']['intrinsics'][side]['rectified'])
+            self.assertIn(self.config['hardware_wrist_camera_files'][side],bridge['input_sha256'])
         self.assertFalse((self.current/'calibrations/hardware/active').exists())
         graph='\n'.join(path.read_text() for path in output.rglob('*.json'))
         for forbidden in ('truth-fixture.json','plant-fixture.json','plant_joint_offsets_rad',str(self.source_base)):
@@ -136,6 +157,34 @@ class WarmDiagnosticTest(unittest.TestCase):
         self.spec['input_sha256'][str(path)]=sha(path)
         with self.assertRaisesRegex(ValueError,'frozen model digest mismatch'):self.validate()
         self.assertFalse((self.current/'derived').exists())
+
+    def test_source_raw_wrist_files_are_pinned_and_bound_to_normalized_contract(self):
+        path=Path(self.config['hardware_wrist_camera_files']['left'])
+        spec=deepcopy(self.spec);spec['input_sha256'].pop(str(path))
+        with self.assertRaisesRegex(ValueError,'omits'):self.validate(spec=spec)
+        camera=json.loads(path.read_text());camera['fx']+=1;write(path,camera)
+        with self.assertRaisesRegex(ValueError,'pin changed'):self.validate()
+        self.spec['input_sha256'][str(path)]=sha(path)
+        with self.assertRaisesRegex(ValueError,'normalized raw intrinsics'):self.validate()
+
+    def test_actual_raw_intrinsics_remain_strict_across_all_fields(self):
+        source=self.validate();path=Path(self.new['hardware_wrist_camera_files']['left']);original=json.loads(path.read_text())
+        variants={'serial':'another-camera','width':641,'height':481,'fx':401.,'fy':402.,'cx':321.,'cy':241.,
+                  'coefficients':[.001,0.,0.,0.,0.],'distortion_model':'brown_conrady','rectified':True}
+        for key,value in variants.items():
+            with self.subTest(field=key):
+                write(path,{**original,key:value})
+                with self.assertRaisesRegex(ValueError,'raw wrist intrinsics'):self.build(source=source)
+                self.assertFalse((self.current/'derived').exists())
+        write(path,original)
+
+    def test_rectified_contract_drift_is_rejected_in_its_own_domain(self):
+        source=self.validate();records=deepcopy(source['records'])
+        for key,value in [('rectified',False),('fx',401.),('coefficients',[.001]*5),('distortion_model','brown_conrady')]:
+            with self.subTest(field=key):
+                invalid=deepcopy(records);invalid['wrist']['payload']['contract']['cameras']['left'][key]=value
+                with self.assertRaisesRegex(ValueError,'normalized raw intrinsics'):
+                    diagnostic_wrist_cameras(self.config,invalid,self.origin)
 
     def test_different_fixture_group_source_identity_and_head_dependency_rejected(self):
         for key,value in [('plant_joint_offsets_rad',[.003]+[0.]*11),('initial_suite',{'episodes':[{'seed':1}]})]:

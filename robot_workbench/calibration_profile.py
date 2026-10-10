@@ -205,6 +205,21 @@ def diagnostic_metadata(source):
         expected_install=deepcopy(source['expected_install']),qualification='reused fake calibration diagnostic; not an empty-store case')
 
 
+def diagnostic_wrist_cameras(config,records,root):
+    """Raw device configs and rectified C contracts have distinct image domains."""
+    paths=config.get('hardware_wrist_camera_files')
+    if not isinstance(paths,dict) or set(paths)!={'left','right'}:
+        raise ValueError('diagnostic source requires both raw wrist camera configuration files')
+    cameras={side:_json(_inside(path,root)) for side,path in paths.items()}
+    for side,raw in cameras.items():
+        # Workbench.plan_wrist and capture_sample retain K/size/serial while
+        # rectifying into the same virtual pinhole image domain (capture.py:214).
+        rectified={**raw,'rectified':True,'coefficients':[0.]*5,'distortion_model':'distortion.inverse_brown_conrady'}
+        if rectified!=records['wrist']['payload']['contract']['cameras'][side]:
+            raise ValueError('diagnostic source wrist capture contract differs from normalized raw intrinsics')
+    return cameras
+
+
 def validate_diagnostic_source(spec,base,nominal,markers,output):
     """Explicit fake-only diagnostic import; immutable origin is never relabelled."""
     from a1_cal import read_active
@@ -257,8 +272,10 @@ def validate_diagnostic_source(spec,base,nominal,markers,output):
     if spec['expected_install']!=expected or records['manifest']['robot_id']!=config['robot_id']:
         raise ValueError('diagnostic source group differs from the declared group')
     _capture_evidence(config,root/'calibration-workbench',records,expected)
+    diagnostic_wrist_cameras(config,records,root)
     required=[config_path,base_path,source_nominal_path,seal_path,root/'run.json',root/'plant-fixture.json',root/'truth-fixture.json',
               root/'registration.json',*paths.values(),Path(config['camera'])]
+    required.extend(_inside(path,root) for path in config['hardware_wrist_camera_files'].values())
     for key in ('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','head_motion_seed'):
         if config.get(key):required.append(Path(config[key]))
     if config.get('chassis_mesh'):required.append(Path(config['mesh_manifest']).parent/config['chassis_mesh'])
@@ -303,10 +320,11 @@ def _build_diagnostic_profile(config_path,template,registration,output,expected_
         raise ValueError('new diagnostic sensors or base registration differ from the source fixture')
     for key in ('urdf','jaw_mapping_file','asset_geometry_id','asset_seal_sha256'):
         if current[key]!=old[key]:raise ValueError('new diagnostic nominal geometry differs')
+    origin_cameras=diagnostic_wrist_cameras(old,records,origin)
     for side in ('left','right'):
         camera=_json(current['hardware_wrist_camera_files'][side])
-        if camera!=source['records']['wrist']['payload']['contract']['cameras'][side]:
-            raise ValueError('new diagnostic wrist intrinsics differ')
+        if camera!=origin_cameras[side]:
+            raise ValueError('new diagnostic raw wrist intrinsics differ from the pinned source device')
     if output.exists():raise FileExistsError(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.warm-diagnostic-',dir=output.parent) as temporary:
@@ -331,6 +349,8 @@ def _build_diagnostic_profile(config_path,template,registration,output,expected_
         bridge['input_sha256'][str(output/'diagnostic-admission.json')]=bridge['diagnostic_admission_sha256']
         bridge['input_sha256'][str(Path(config_path).resolve())]=_sha(config_path)
         for path in (current['camera'],*current['hardware_wrist_camera_files'].values()):
+            bridge['input_sha256'][str(Path(path).resolve())]=_sha(path)
+        for path in old['hardware_wrist_camera_files'].values():
             bridge['input_sha256'][str(Path(path).resolve())]=_sha(path)
         planner=_json(stage/'planning-model.json')
         planner.update(urdf=str(output/'model/robot.urdf'),bundle=str(output/'model'),fresh_C_completed=False)
