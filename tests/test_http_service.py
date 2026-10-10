@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from robot_workbench.service import Application,Device,protocol_fake,serve
+from robot_workbench.service import Application,Device,protocol_fake,serve,loopback_browser_hosts
 
 
 class HTTPTest(unittest.TestCase):
@@ -59,6 +59,45 @@ class HTTPTest(unittest.TestCase):
     def connect(self):
         code,_=self.action('connect');self.assertEqual(code,202)
         return self.wait(lambda s:s['runtime'].get('stationary'))
+
+    def test_declared_browser_port_preserves_Host_Origin_and_CSRF_checks(self):
+        self.assertEqual(self.server.allowed_hosts,{f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'})
+        self.server.shutdown();self.server.server_close();self.thread.join(1)
+        self.server=serve(self.app,port=0,browser_ports=[18867])
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+        self.url='http://127.0.0.1:'+str(self.server.server_port)
+        for host in ('127.0.0.1:18867','localhost:18867',f'127.0.0.1:{self.server.server_port}'):
+            with self.http.open(Request(self.url+'/api/state',headers={'Host':host}),timeout=2) as response:
+                state=json.loads(response.read());self.assertEqual(response.status,200)
+            body=json.dumps(dict(environment='fake',business='calibration',request_id=host)).encode()
+            request=Request(self.url+'/api/actions/stop',body,headers={'Content-Type':'application/json',
+                'Host':host,'Origin':'http://'+host,'X-CSRF-Token':state['csrf']})
+            with self.http.open(request,timeout=2) as response:self.assertEqual(response.status,200)
+        undeclared_port=18868 if self.server.server_port!=18868 else 18869
+        for host,origin,token in [
+                ('evil.example:18867','http://evil.example:18867',self.app.csrf),
+                ('0.0.0.0:18867','http://0.0.0.0:18867',self.app.csrf),
+                (f'127.0.0.1:{undeclared_port}',f'http://127.0.0.1:{undeclared_port}',self.app.csrf),
+                ('127.0.0.1:18867','http://localhost:18867',self.app.csrf),
+                ('127.0.0.1:18867','http://127.0.0.1:'+str(self.server.server_port),self.app.csrf),
+                ('127.0.0.1:18867','https://127.0.0.1:18867',self.app.csrf),
+                ('127.0.0.1:18867','http://127.0.0.1:18867','wrong-token')]:
+            request=Request(self.url+'/api/actions/stop',body,headers={'Content-Type':'application/json',
+                'Host':host,'Origin':origin,'X-CSRF-Token':token})
+            with self.subTest(host=host,origin=origin),self.assertRaises(HTTPError) as rejected:self.http.open(request,timeout=2)
+            self.assertEqual(rejected.exception.code,403)
+        with self.assertRaises(HTTPError) as rejected:
+            self.http.open(Request(self.url+'/api/state',headers={'Host':'evil.example:18867'}),timeout=2)
+        self.assertEqual(rejected.exception.code,403);self.assertIsNone(self.device.runtime)
+
+    def test_browser_ports_are_explicit_loopback_only_and_validated_before_binding(self):
+        self.assertEqual(loopback_browser_hosts([18867]),{'127.0.0.1:18867','localhost:18867'})
+        invalid=(None,{},'18867',[0],[-1],[65536],[True],[18867.0],['18867'],['*'],['evil.example:18867'],['127.0.0.1:18867'])
+        with patch('robot_workbench.service.ThreadingHTTPServer') as bind:
+            for value in invalid:
+                with self.subTest(value=value),self.assertRaisesRegex(ValueError,'browser_ports'):
+                    serve(self.app,port=0,browser_ports=value)
+            bind.assert_not_called()
 
     def test_two_Application_instances_reuse_port_with_new_identity_revision_and_CSRF(self):
         first=self.state()

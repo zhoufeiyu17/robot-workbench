@@ -271,11 +271,12 @@ def run(args, base, nominal):
                 if not value['status'].get('ready'):raise ValueError('PhysX相机尚未就绪或已过期')
                 return value['jpeg'],value['status']
             device.media[role]=CameraMedia(role,role,frame,environment='fake')
-        ui=serve(application,port=args.port)
+        ui=serve(application,port=args.port,browser_ports=args.browser_ports)
         threading.Thread(target=ui.serve_forever,daemon=True,name='resident-workbench-http').start()
         save(args.output/'service.json',dict(pid=os.getpid(),environment='fake',clock=source_clock,
             resident_deadline_wall_ns=resident_deadline_wall_ns,
             source_clock_id=backend.source_clock_id,ui_port=ui.server_port,gateway_port=gateway.server_port,
+            browser_ports=args.browser_ports,allowed_hosts=sorted(ui.allowed_hosts),
             camera_ports=ports,camera_directories=producer.directories,gateway_token_files=token_files,
             calibration_config=str(args.output/'calibration-config.json'),
             calibration_output=str(args.output/'calibration-workbench'),
@@ -423,6 +424,9 @@ def main():
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
         args.collection_spec=load_collection_contract(args.collection_contract,args.output,args.gpu,args.duration_wall_s)
+    from robot_workbench.service import loopback_browser_hosts
+    args.browser_ports=list((args.collection_spec or {}).get('browser_ports',[]))
+    browser_hosts=loopback_browser_hosts(args.browser_ports)
     base=json.loads(args.base.read_text())
     args.plant_joint_offsets_rad=plant_joint_offsets(base)
     nominal=nominal_inputs(args.nominal_config)
@@ -432,6 +436,7 @@ def main():
         raise ValueError('nominal estimator assets differ from this frozen plant A1 identity')
     checked=preflight(base)
     checked['plant_joint_offsets_rad']=list(args.plant_joint_offsets_rad)
+    checked.update(browser_ports=args.browser_ports,browser_hosts=sorted(browser_hosts))
     if args.collection_spec:
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],

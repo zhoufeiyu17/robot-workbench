@@ -149,6 +149,8 @@ def load_collection_contract(path,output,gpu,duration):
     """Validate the explicit enablement document before importing Isaac."""
     from local_execution import TARGET
     value=json.loads(Path(path).read_bytes());resources=value['resources'];details=value['collection_setup']
+    from robot_workbench.service import loopback_browser_hosts
+    loopback_browser_hosts(value.get('browser_ports',[]))
     if (value.get('schema_version')!='anyverse.dsw-codex-experiment.v1'
             or not value.get('identity',{}).get('session_id') or gpu!=1
             or resources.get('gpu_uuid')!=TARGET['gpu_uuid'] or resources.get('cuda_visible_devices')!=[1]

@@ -601,12 +601,20 @@ def handler(app):
     return Handler
 
 
-def serve(app, host='127.0.0.1', port=8120):
+def loopback_browser_hosts(browser_ports):
+    if (not isinstance(browser_ports,(list,tuple)) or
+            any(type(port) is not int or not 1<=port<=65535 for port in browser_ports)):
+        raise ValueError('browser_ports must contain explicit integer loopback ports in 1..65535')
+    return {f'{host}:{port}' for port in browser_ports for host in ('127.0.0.1','localhost')}
+
+
+def serve(app, host='127.0.0.1', port=8120, *, browser_ports=()):
     if host not in ('127.0.0.1','localhost'):
         raise ValueError('external binding requires a separate reviewed deployment entry')
+    browser_hosts=loopback_browser_hosts(browser_ports)
     server=ThreadingHTTPServer((host,port),handler(app))
     server.daemon_threads=True
-    server.allowed_hosts={f'127.0.0.1:{server.server_port}',f'localhost:{server.server_port}'}
+    server.allowed_hosts={f'127.0.0.1:{server.server_port}',f'localhost:{server.server_port}'}|browser_hosts
     return server
 
 

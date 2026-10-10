@@ -1,11 +1,13 @@
 """Startup input/configuration checks only; importing the CLI must not load Isaac."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -17,6 +19,39 @@ from robot_workbench.sample_clock import clock_spec
 
 
 class ResidentConfigurationTest(unittest.TestCase):
+    def test_frozen_browser_ports_reach_dry_run_and_runtime_args_without_gpu(self):
+        from local_execution import TARGET
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);base=root/'base.json';nominal_path=root/'nominal.json';template=root/'template.json';runtime=root/'runtime';runtime.mkdir()
+            nominal_path.write_text('{}');template.write_text('{}')
+            base.write_text(json.dumps(dict(pipeline_config={},lanes={'source':{'configuration':{'cameras':{
+                'calibration_binding':{'a1_sha256':'seal','geometry_id':'geometry'}}}}})))
+            nominal={'asset_seal_sha256':'seal','asset_geometry_id':'geometry'}
+            contract=dict(schema_version='anyverse.dsw-codex-experiment.v1',identity={'session_id':'browser-fixture'},
+                filesystem={'writable_roots':[str(root)]},resources=dict(gpu_uuid=TARGET['gpu_uuid'],cuda_visible_devices=[1],
+                    max_workers=4,max_cpu_threads=4,service_lifetime_seconds=600,max_wall_time_minutes=11),
+                collection_setup=dict(profile_template=str(template),detection_runtime_root=str(runtime),plant_max_memory_mib=12288,min_free_memory_mib=16384),
+                browser_ports=[18867])
+            contract_path=root/'contract.json';contract_path.write_text(json.dumps(contract))
+            for configured in (False,True):
+                output=root/('forwarded' if configured else 'default')
+                argv=['serve','--base',str(base),'--nominal-config',str(nominal_path),'--output',str(output),'--gpu','1','--duration-wall-s','300']
+                if configured:argv+=['--collection-contract',str(contract_path)]
+                with patch.object(serve_physx_device,'nominal_inputs',return_value=nominal), \
+                        patch.object(serve_physx_device,'preflight',return_value={}), \
+                        patch('detector_adapter.preflight_release.preflight_release',return_value={'fixture':True}), \
+                        patch.object(serve_physx_device,'run') as run:
+                    stdout=io.StringIO()
+                    with patch.object(sys,'argv',argv+['--dry-run']),redirect_stdout(stdout):serve_physx_device.main()
+                    report=json.loads(stdout.getvalue())
+                    self.assertEqual(report['browser_ports'],[18867] if configured else [])
+                    self.assertEqual(report['browser_hosts'],['127.0.0.1:18867','localhost:18867'] if configured else [])
+                    run.assert_not_called();self.assertFalse(output.exists())
+                    with patch.object(sys,'argv',argv):serve_physx_device.main()
+                    self.assertEqual(run.call_args.args[0].browser_ports,report['browser_ports'])
+                    self.assertEqual(json.loads((output/'run.json').read_text())['browser_ports'],report['browser_ports'])
+            self.assertNotIn('isaaclab.app',sys.modules)
+
     def test_invalid_plant_offsets_fail_before_inputs_output_or_gpu(self):
         invalid=(None,{},'0',[],[0.]*11,[0.]*13,[True]+[0.]*11,['0']+[0.]*11,
                  [float('nan')]+[0.]*11,[float('inf')]+[0.]*11,[-float('inf')]+[0.]*11,[10**400]+[0.]*11)

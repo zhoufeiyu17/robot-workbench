@@ -48,6 +48,12 @@ class ResidentCollectionTest(unittest.TestCase):
                     plant_max_memory_mib=12288,min_free_memory_mib=16384))
             path=root/'contract.json';path.write_text(json.dumps(value))
             self.assertEqual(load_collection_contract(path,root/'new-run',1,2700),value)
+            value['browser_ports']=[18867];path.write_text(json.dumps(value))
+            self.assertEqual(load_collection_contract(path,root/'new-run',1,2700),value)
+            for ports in ([0],[65536],[True],['127.0.0.1:18867'],['*'],None):
+                invalid=deepcopy(value);invalid['browser_ports']=ports;path.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError,'browser_ports'):load_collection_contract(path,root/'new-run',1,2700)
+            value.pop('browser_ports');path.write_text(json.dumps(value))
             with self.assertRaises(ValueError):load_collection_contract(path,root/'new-run',0,2700)
             with self.assertRaises(ValueError):load_collection_contract(path,root/'new-run',1,2990)
             value['resources']['max_workers']=5;path.write_text(json.dumps(value))
