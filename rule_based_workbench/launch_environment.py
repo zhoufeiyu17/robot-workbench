@@ -29,6 +29,10 @@ def clean_command(argv,overrides=None):
             'PATH='+HOST_PATH,*[key+'='+str(value) for key,value in (overrides or {}).items()],*map(str,argv)]
 
 
-def owned_command(workbench,command,timeout):
+def owned_command(workbench,command,timeout,*,failure_result=None):
+    extra=[]
+    if failure_result is not None:
+        if not Path(failure_result).is_absolute():raise ValueError('absolute native failure result required')
+        extra=['--failure-result',str(failure_result)]
     return clean_command([HOST_PYTHON,'-I','-B',str(Path(workbench)/'owned_process.py'),
-                          '--timeout',str(timeout),'--',*command])
+                          '--timeout',str(timeout),*extra,'--',*command])

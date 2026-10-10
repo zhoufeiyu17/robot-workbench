@@ -36,6 +36,9 @@ python rule_based_workbench/test_sample_clock.py
 python rule_based_workbench/test_recording_wall_clock.py
 python rule_based_workbench/test_local_execution.py
 python rule_based_workbench/test_launch_environment.py
+python rule_based_workbench/test_owned_process.py
+python rule_based_workbench/test_native_failure.py
+python rule_based_workbench/test_playground_interrupt.py
 python rule_based_workbench/test_resident_task_receipt.py
 for name in test_playground_motiongen_entry test_real_pipeline test_playground_pipeline test_real_acquisition test_physical_motiongen test_initial_state test_real_preparation_app test_frozen_executor; do
     python "rule_based_workbench/$name.py"

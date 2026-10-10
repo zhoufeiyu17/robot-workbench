@@ -252,14 +252,17 @@ def lane(config, side):
     return dict(instance_id=execution['instance_id'],gpu=execution['gpu_index']) if execution else PIPELINE_LANES[side]
 
 
-def transport(config, side, command, *, timeout=None):
+def transport(config, side, command, *, timeout=None,failure_result=None):
     """One stage API; a declared local deployment never falls back to SSH."""
     from local_execution import validate
     if side not in PIPELINE_LANES:raise ValueError('unknown execution role')
-    if validate(config) is None:return ssh(side,command)
+    if validate(config) is None:
+        if failure_result is not None:raise ValueError('failure-result monitoring requires declared local owned execution')
+        return ssh(side,command)
     argv=['bash','-c',command]
     if timeout is not None:
-        return owned_command(config['workbench_code'],argv,timeout)
+        return owned_command(config['workbench_code'],argv,timeout,failure_result=failure_result)
+    if failure_result is not None:raise ValueError('failure-result monitoring requires a bounded owned command')
     return clean_command(argv)
 
 

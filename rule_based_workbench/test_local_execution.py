@@ -92,12 +92,18 @@ class LocalExecutionTest(unittest.TestCase):
             self.assertEqual(transport(cfg,'dsw-scene','command'),clean_command(['bash','-c','command']))
             with self.assertRaises(ValueError):transport({**cfg,'execution':{**cfg['execution'],'gpu_index':0}},'dsw-scene','command')
         native=native_stage(cfg,'geometry-inputs',cfg['remote_run_root']+'/scene')
+        self.assertEqual(native['failure_result'],native['result_path'])
+        self.assertEqual(native['argv'][native['argv'].index('--failure-result')+1],native['result_path'])
+        self.assertEqual(native['terminate_grace_s'],25)
+        with self.assertRaises(ValueError):transport(legacy,'dsw-scene','command',timeout=5,failure_result='/current/result.json')
+        with self.assertRaises(ValueError):transport(cfg,'dsw-scene','command',failure_result='/current/result.json')
         self.assertIn('--gpu 1',native['argv'][-1]);self.assertIn(TARGET['instance_id'],native['argv'][-1])
         self.assertIn('--execution-json',native['argv'][-1])
         plan=geometry_stage(cfg,cfg['remote_run_root']+'/plan')
         self.assertIn('CUDA_VISIBLE_DEVICES=1',plan['argv'][-1])
         bounded,seconds=bounded_command(native,100)
         self.assertEqual(bounded[bounded.index('--timeout')+1],str(seconds))
+        self.assertEqual(bounded[bounded.index('--failure-result')+1],native['result_path'])
 
     def test_local_fetch_uses_local_transport(self):
         source=self.root/'source';source.write_bytes(b'owned output')

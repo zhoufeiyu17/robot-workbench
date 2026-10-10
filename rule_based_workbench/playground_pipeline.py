@@ -83,8 +83,10 @@ def native_stage(cfg, mode, output, *, speed=.3, plan_path=None, execution_timel
     command=gpu_check_command(cfg,'dsw-scene')+' && '+shlex.join(clean_command([HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,*args],environment))
     return dict(name='playground-'+mode,side='dsw-scene',timeout_s=seconds,
                 result_path=output+'/result.json',
-                **({'execution_config':{'execution':cfg['execution'],'workbench_code':cfg['workbench_code']}} if cfg.get('execution') else {}),
-                argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30',str(seconds),'bash','-c',command]),timeout=seconds))
+                **({'execution_config':{'execution':cfg['execution'],'workbench_code':cfg['workbench_code']},
+                    'terminate_grace_s':25,'failure_result':output+'/result.json'} if cfg.get('execution') else {}),
+                argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30',str(seconds),'bash','-c',command]),timeout=seconds,
+                    **({'failure_result':output+'/result.json'} if cfg.get('execution') else {})))
 
 
 def geometry_stage(cfg,output,*,speed=.3,initial=None):
@@ -163,14 +165,28 @@ def run_stages(stages,output,contract,progress=None,cancel=None):
                               stages=rows+[dict(label=label,status='running',elapsed_s=0)])
         started=time.monotonic(); argv,seconds=bounded_command(stage,deadline-time.monotonic())
         receipt=dict(stage=stage['name'],label=label,status='running')
+        failure_announced=False
+        def poll_failure():
+            nonlocal failure_announced
+            if failure_announced:return
+            from owned_process import read_failure_result
+            failure=read_failure_result(stage['failure_result'])
+            if failure is not None:
+                failure_announced=True
+                detail=failure.get('error') or '原生阶段报告失败'
+                progress('阶段失败，正在清理本轮计算进程：'+str(detail),stage_status='failed',
+                    next_label='等待本轮计算进程退出',error=str(detail),
+                    stages=rows+[dict(label=label,status='failed',elapsed_s=time.monotonic()-started,error=str(detail))])
         try:
             destination=output/stage['output'] if stage.get('output') else output/'logs'/(stage['name']+'.log')
             destination.parent.mkdir(parents=True,exist_ok=True)
             with destination.open('wb') as stream:
                 from cancellable_process import run
                 result=run(argv,stdout=stream,stderr=subprocess.STDOUT if not stage.get('output') else subprocess.PIPE,
-                           timeout=seconds+40,cancel=cancel)
-            if result.returncode: raise RuntimeError(f'{stage["name"]} failed ({result.returncode}); see {destination}')
+                           timeout=seconds+40,cancel=cancel,
+                           **({'terminate_grace_s':stage['terminate_grace_s']} if 'terminate_grace_s' in stage else {}),
+                           **({'on_poll':poll_failure} if progress and stage.get('failure_result') else {}))
+            receipt['exit_code']=result.returncode
             if stage['name'] in NATIVE_STAGE_STATUS:
                 remote_result=stage.get('result_path')
                 if not remote_result:
@@ -179,13 +195,17 @@ def run_stages(stages,output,contract,progress=None,cancel=None):
                 try:
                     fetch(remote_result,local_result,limit=4*1024*1024,cancel=cancel,execution_config=stage.get('execution_config'))
                     outcome=json.loads(local_result.read_text())
+                except InterruptedError:raise
                 except Exception as error:
-                    raise RuntimeError(f'{stage["name"]} exited 0 but native result is missing or unreadable: {remote_result}') from error
+                    raise RuntimeError(f'{stage["name"]} exited {result.returncode} but native result is missing or unreadable: {remote_result}') from error
+                receipt.update(native_status=outcome.get('status') if isinstance(outcome,dict) else None,
+                               native_result_path=str(local_result))
+                if isinstance(outcome,dict) and outcome.get('error'):receipt['native_error']=outcome['error']
                 expected=stage.get('expected_native_status',NATIVE_STAGE_STATUS[stage['name']])
                 if not isinstance(outcome,dict) or outcome.get('status')!=expected:
                     detail=outcome.get('error',outcome.get('status')) if isinstance(outcome,dict) else 'not an object'
                     raise RuntimeError(f'{stage["name"]} native result did not complete: {detail}; see {local_result}')
-                receipt.update(native_status=outcome['status'],native_result_path=str(local_result))
+            if result.returncode: raise RuntimeError(f'{stage["name"]} failed ({result.returncode}); see {destination}')
             receipt['status']='completed'
         except Exception as error:
             receipt.update(status='failed',error=str(error)); raise
