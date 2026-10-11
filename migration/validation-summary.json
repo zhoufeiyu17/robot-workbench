@@ -1,38 +1,38 @@
 {
-  "status": "suitev6_scene_xy_qualified_1_of_3_device_j1_head_capture",
-  "updated_at": "2026-10-11T10:09:46.883922+08:00",
+  "status": "757b290_suitev7_current0_of_3_device_j1_head24_of_34",
+  "updated_at": "2026-10-11T11:11:40.655161+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
-  "qualification_scope": "96d3c7a/suitev6 scene-xy083941 original cold workflow completed without failure/restart and independent9checks qualified;current suite1/3(scene-xy only). FreshC34+29,newD3537commands/11792feedback/3x3548RGB-D,native task success,raw/source-replay/L3 independently passed.14owned processes exited and10:06:07released with5artifact hashes unchanged. v5nominal historical1/3 is retained separately,not added. New device-j1100608 passed empty-store/head preview/confirm and entered head.capture0/34;no complete C/D/task qualification. L4 unqualified.",
+  "candidate_commit_before_summary": "757b290c12dde26732474cb58cf99b5a62cbc914",
+  "qualification_scope": "757b290 shared host-age readiness and complete read diagnostics committed/pushed,CPU791(790pass1skip)/L1 27/27 passed. Current suitev7 resets0/3;v6scene-xy1/3 andv5nominal1/3 remain distinct complete historical records. Old device-j1100608 confirm rejected host_sample_stale_or_clock_skew before wrist/D;failed sample_wall/now not retained,positive-stale versus negative-age cause unknown,20later healthy reads do not prove original age. No threshold/time-stamp change or product action wait/retry. New device-j1110144 head capture24/34 without error at11:10:08 CST;complete C/D/case qualification pending. L4 unqualified.",
   "cpu": {
-    "source_equivalent_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
-    "evidence": ".evidence/s2/fresh-control-full-cpu-20261011-v2/receipt.json",
+    "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+    "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
     "full_check_exit_code": 0,
-    "unittest_executions_in_full_log": 785,
-    "unittest_passed_in_full_log": 784,
+    "unittest_executions_in_full_log": 791,
+    "unittest_passed_in_full_log": 790,
     "unittest_skipped_in_full_log": 1,
     "source_files": 374,
     "source_unchanged": true,
     "native_unchanged": true,
     "detector_unchanged": true,
     "current_source_matches_tested_hashes": true,
-    "finished_at": "2026-10-11T08:39:11.112502+08:00",
-    "git_head_at_test_start": "c8bc4db76dd9d55974417615085c4e8c71d307f6",
-    "qualification_binding": "96d3c7a source-equivalent completed CPU/L1;new suitev6 cold0/3",
+    "finished_at": "2026-10-11T10:59:17.641439+08:00",
+    "git_head_at_test_start": "972e3fa001b5c867e3ce355138505d094bc9dde7",
+    "qualification_binding": "757b290 source-equivalent full CPU/L1;current suitev7 cold0/3",
     "skip_detail": "explicit old local mesh fixture only",
-    "count_note": "execution counts, not unique tests;do not add L1/debug C counts"
+    "count_note": "execution counts,not unique tests;L1 separate"
   },
   "l1": {
-    "evidence": ".evidence/s2/fresh-control-full-cpu-20261011-v2/l1/l1-fault-matrix.json",
+    "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/l1/l1-fault-matrix.json",
     "cases_passed": 27,
     "cases_total": 27,
     "exit_code": 0,
     "source_unchanged": true,
     "python_source_files": 327,
     "stop_barrier_samples": 30,
-    "stop_barrier_p95_ms": 4.228916950523853,
-    "stop_barrier_max_ms": 4.263709299266338,
+    "stop_barrier_p95_ms": 4.127915948629379,
+    "stop_barrier_max_ms": 4.659875296056271,
     "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
     "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
     "physical_stop": "unverified",
@@ -52,16 +52,16 @@
     "gpu_released": true
   },
   "l2_complete": {
-    "status": "current_final_suite_partially_qualified",
-    "normal_cases_passed": 1,
+    "status": "current_final_suite_not_yet_qualified",
+    "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "latest_cold_attempt": "full-device-j1-20261011-100608",
+    "latest_cold_attempt": "full-device-j1-20261011-110144",
     "latest_diagnostic": "warm-20261011-050624",
-    "meaning": "current96d3c7a/suitev6 cold1/3(scene-xy only);v5nominal historical1/3 and warm excluded",
-    "latest_cold_attempt_status": "head_capture_started_0_of_34",
-    "latest_qualified_cold_case": "full-scene-xy-20261011-083941",
+    "meaning": "current757b290/suitev7 cold0/3;historicalv6scene-xy1/3 andv5nominal1/3 remain separate and excluded",
+    "latest_cold_attempt_status": "head_capture_running_24_of_34",
+    "latest_qualified_cold_case": null,
     "full_suite_qualified": false,
-    "qualification_suite": "cold-suite-normal-v31-20261011-v6"
+    "qualification_suite": "cold-suite-normal-v31-20261011-v7"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
@@ -132,10 +132,10 @@
     "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json"
   },
   "remaining": [
-    "完成运行中device-j1新空库C→安装→新D/native/raw/源录像/L3与独立审计；plant truth仅backend/evaluator，非solver输入，当前head.capture0/34不计通过。",
-    "随后以相同96d3c7a/suite-v6完成nominal新空库全链；当前仅scene-xy通过1/3，不混加旧v5 nominal。",
-    "完成最终文档/实际轨迹回放证据、资源核账及授权交付；UI26项与封存导出性能已完成。",
-    "L4实体SDK、止动、时延、载荷和正式单writer切换独立验收。"
+    "完成当前suite-v7 device-j1新空库全链与独立审计；11:10:08 head24/34无错误，当前0/3；已发动作失败立即终止。",
+    "随后以相同757b290/suite-v7新跑nominal、scene-xy；当前0/3，不混加历史v6/v5各1/3。",
+    "完成最终文档/实际轨迹回放证据和授权交付；UI26项/封存导出性能已完成，治理sticky unknown按规范和真实证据处理，不伪造settle。",
+    "L4实体SDK、止动、时延、载荷及正式单writer切换独立验收。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -466,8 +466,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": "full-device-j1-20261011-100608",
-  "last_gpu_run": "full-scene-xy-20261011-083941",
+  "current_gpu_run": "full-device-j1-20261011-110144",
+  "last_gpu_run": "full-device-j1-20261011-100608",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -1498,6 +1498,40 @@
         "firmware_ack": "unsupported"
       },
       "superseded_at": "2026-10-11T08:44:00.302861+08:00"
+    },
+    {
+      "source_equivalent_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+      "evidence": ".evidence/s2/fresh-control-full-cpu-20261011-v2/receipt.json",
+      "full_check_exit_code": 0,
+      "unittest_executions_in_full_log": 785,
+      "unittest_passed_in_full_log": 784,
+      "unittest_skipped_in_full_log": 1,
+      "source_files": 374,
+      "source_unchanged": true,
+      "native_unchanged": true,
+      "detector_unchanged": true,
+      "current_source_matches_tested_hashes": true,
+      "finished_at": "2026-10-11T08:39:11.112502+08:00",
+      "git_head_at_test_start": "c8bc4db76dd9d55974417615085c4e8c71d307f6",
+      "qualification_binding": "96d3c7a source-equivalent completed CPU/L1;new suitev6 cold0/3",
+      "skip_detail": "explicit old local mesh fixture only",
+      "count_note": "execution counts, not unique tests;do not add L1/debug C counts",
+      "l1": {
+        "evidence": ".evidence/s2/fresh-control-full-cpu-20261011-v2/l1/l1-fault-matrix.json",
+        "cases_passed": 27,
+        "cases_total": 27,
+        "exit_code": 0,
+        "source_unchanged": true,
+        "python_source_files": 327,
+        "stop_barrier_samples": 30,
+        "stop_barrier_p95_ms": 4.228916950523853,
+        "stop_barrier_max_ms": 4.263709299266338,
+        "scope": "this host only; CPU wall-clock protocol fake; not ARX, PhysX, dynamics or real hardware",
+        "measurement": "local HTTP client request start to post-revocation software barrier receipt; inclusive local HTTP overhead",
+        "physical_stop": "unverified",
+        "firmware_ack": "unsupported"
+      },
+      "superseded_at": "2026-10-11T11:07:43.263595+08:00"
     }
   ],
   "grasp_contact_reserve": {
@@ -1548,7 +1582,7 @@
     "blocking": false,
     "runtime": "M2.2 shadow / M3 active-limited",
     "settlement_declared": true,
-    "validation_status": "invalid",
+    "validation_status": "unknown",
     "context_codes": [
       "CONFLICTING_SETTLEMENT",
       "UNRECONCILED_STATUS_DELTA"
@@ -1557,7 +1591,11 @@
       "AMBIGUOUS_DOCUMENT_KIND",
       "UNRECONCILED_STATUS_DELTA"
     ],
-    "scope": "governance accounting diagnostics; not a product test or runtime blocker"
+    "scope": "sticky unknown overall governance accounting;valid target admission or product qualification cannot make it green",
+    "historical_validation_status": "invalid",
+    "sticky_unknown": true,
+    "green": false,
+    "current_document_update_settlement_declared": false
   },
   "parity": {
     "status": "approved_implementation_gaps_addressed_scoped_evidence_complete",
@@ -1641,42 +1679,42 @@
     "scope": "CPU-only postprocessing of one complete archived three-camera raw input on the measured host/load/storage; not GPU/live collection throughput, new cold-case success or universal storage performance."
   },
   "latest_cold_attempt": {
-    "run": "full-device-j1-20261011-100608",
+    "run": "full-device-j1-20261011-110144",
     "case": "device-j1",
     "case_id": "l2-case3-j1-zero-offset-v2",
-    "suite": "cold-suite-normal-v31-20261011-v6",
-    "status": "head_capture_started_0_of_34",
-    "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+    "suite": "cold-suite-normal-v31-20261011-v7",
+    "status": "head_capture_running_24_of_34",
+    "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "fresh_C_completed": false,
     "group_installed": false,
     "D_motion_started": false,
     "full_pipeline_qualified": false,
     "startup_confirmed_by_launch_metadata": true,
-    "empty_store_driver_preflight_passed": true,
-    "head_preview_passed": true,
-    "head_confirm_passed": true,
-    "head_frames": 0,
-    "expected_head_frames": 34,
     "launch_metadata": ".evidence/s2/current-full.json",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-100608-contract.json",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-110144-contract.json",
     "source_files": 375,
-    "gpu_record": "unified-full-device-j1-20261011-100608",
+    "gpu_record": "unified-full-device-j1-20261011-110144",
     "supervisor": {
-      "pid": 1271577,
-      "start_ticks": "33204152"
+      "pid": 1376581,
+      "start_ticks": "33537888"
     },
-    "source_pid": 1271583,
+    "source_pid": 1376587,
     "released": false,
-    "resource_evidence": ".evidence/s2/full-device-j1-20261011-100608-resources-100718.json",
+    "resource_evidence": ".evidence/s2/full-device-j1-20261011-110144-resources-110312.json",
     "resource_window": {
-      "expected_start": "2026-10-11T10:06:54.985940+08:00",
-      "expected_end": "2026-10-11T12:01:54.985940+08:00",
-      "actual_start_registered_at": "2026-10-11T10:07:34+08:00",
-      "service_deadline": "2026-10-11T11:57:01+08:00",
-      "next_actual_check_by": "2026-10-11T10:55:00+08:00"
+      "expected_start": "2026-10-11T11:02:32.171231+08:00",
+      "expected_end": "2026-10-11T12:57:32.171231+08:00",
+      "actual_start_registered_at": "2026-10-11T11:03:33+08:00",
+      "service_deadline": "2026-10-11T12:52:38.719274+08:00",
+      "next_actual_check_by": "2026-10-11T11:50:00+08:00"
     },
-    "declared_plant_truth_boundary": "backend/evaluator only;excluded solver inputs;new case still awaits audit",
-    "scope": "new empty-store head capture snapshot;complete C/install/D/task qualification pending"
+    "declared_plant_truth_boundary": "backend/evaluator only;not solver inputs",
+    "scope": "startup snapshot only;new C/install/D/task qualification pending",
+    "head_frames": 24,
+    "expected_head_frames": 34,
+    "progress_observed_at": "2026-10-11T11:10:08+08:00",
+    "progress_error": null,
+    "original_driver_running": true
   },
   "base_alignment": {
     "status": "owner_reply_read_back_dynamic_recipe_implemented",
@@ -1723,10 +1761,11 @@
     "workbench_nominal_full_chain_qualified": false,
     "qualified_nominal_run": null,
     "three_case_suite_qualified": false,
-    "full_pipeline_scope": "current96d3c7a/suitev6 scene-xy1/3 only;v5nominal remains historical and currentnominal not yet qualified",
+    "full_pipeline_scope": "current757b290/suitev7 cold0/3;v6scene-xy andv5nominal passes historical only",
     "historical_qualified_nominal_run": "full-20261011-064034",
-    "workbench_current_scene_xy_full_chain_qualified": true,
-    "qualified_current_scene_xy_run": "full-scene-xy-20261011-083941"
+    "workbench_current_scene_xy_full_chain_qualified": false,
+    "qualified_current_scene_xy_run": null,
+    "historical_qualified_scene_xy_run": "full-scene-xy-20261011-083941"
   },
   "latest_planning_probe": {
     "run": "contact-plan-20261011-044857",
@@ -1740,28 +1779,27 @@
     "released": true
   },
   "current_cold_suite": {
-    "id": "cold-suite-normal-v31-20261011-v6",
-    "evidence": ".evidence/s2/cold-suite-freeze-20261011-v6.json",
-    "sha256": "1e1d3f8ba0c3fc665ff9af1bb406fa3512b48e1fb81d5cefcbc5b4c505be6b44",
-    "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+    "id": "cold-suite-normal-v31-20261011-v7",
+    "evidence": ".evidence/s2/cold-suite-freeze-20261011-v7.json",
+    "sha256": "7fb022630a865522c9d37415c2cddab1dcfd2cc117bc4d33f9283e9e08a29ed8",
+    "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "source_files": 375,
     "motion_recipe": "normal-v31-dynamic-targets",
     "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
-    "normal_cases_passed": 1,
+    "normal_cases_passed": 0,
     "required_normal_cases": 3,
-    "current_run": "full-device-j1-20261011-100608",
-    "status": "device_j1_head_capture_started",
+    "current_run": "full-device-j1-20261011-110144",
+    "status": "device_j1_head_capture_running",
     "predeclared_cases_unchanged": [
       "nominal",
       "scene-xy",
       "device-j1"
     ],
-    "qualified_cases": [
-      "scene-xy"
-    ],
+    "qualified_cases": [],
     "remaining_cases": [
       "device-j1",
-      "nominal"
+      "nominal",
+      "scene-xy"
     ]
   },
   "historical_cold_attempts": {
@@ -1988,6 +2026,73 @@
       "owned_processes_exited": 9,
       "both_gpu_process_lists_empty": true,
       "teardown": ".evidence/s2/full-scene-xy-20261011-080456-teardown.json"
+    },
+    "full-device-j1-20261011-100608": {
+      "run": "full-device-j1-20261011-100608",
+      "case": "device-j1",
+      "case_id": "l2-case3-j1-zero-offset-v2",
+      "suite": "cold-suite-normal-v31-20261011-v6",
+      "status": "failed_confirm_host_sample_stale_or_clock_skew_before_wrist_motion",
+      "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+      "fresh_C_completed": false,
+      "group_installed": false,
+      "D_motion_started": false,
+      "full_pipeline_qualified": false,
+      "startup_confirmed_by_launch_metadata": true,
+      "empty_store_driver_preflight_passed": true,
+      "head_preview_passed": true,
+      "head_confirm_passed": true,
+      "head_frames": 34,
+      "expected_head_frames": 34,
+      "launch_metadata": ".evidence/s2/current-full.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-100608-contract.json",
+      "source_files": 375,
+      "gpu_record": "unified-full-device-j1-20261011-100608",
+      "supervisor": {
+        "pid": 1271577,
+        "start_ticks": "33204152"
+      },
+      "source_pid": 1271583,
+      "released": true,
+      "resource_evidence": ".evidence/s2/full-device-j1-20261011-100608-resources-100718.json",
+      "resource_window": {
+        "expected_start": "2026-10-11T10:06:54.985940+08:00",
+        "expected_end": "2026-10-11T12:01:54.985940+08:00",
+        "actual_start_registered_at": "2026-10-11T10:07:34+08:00",
+        "service_deadline": "2026-10-11T11:57:01+08:00",
+        "next_actual_check_by": "2026-10-11T10:55:00+08:00"
+      },
+      "declared_plant_truth_boundary": "backend/evaluator only;excluded solver inputs;new case still awaits audit",
+      "scope": "new empty-store head capture snapshot;complete C/install/D/task qualification pending",
+      "head_fit_completed": true,
+      "wrist_preview_published": true,
+      "confirm_request_wall_ms": 15.65,
+      "confirm_error": "host_sample_stale_or_clock_skew",
+      "driver_failed": true,
+      "wrist_motion_started": false,
+      "original_terminal": ".evidence/s2/full-device-j1-20261011-100608-terminal.json",
+      "failed_calibration_state": ".evidence/s2/full-device-j1-20261011-100608-failed-calibration-state.json",
+      "driver_log": ".evidence/s2/suite-v6-device-j1-driver.log",
+      "original_failed_sample_wall_ns": null,
+      "original_failed_now_ns": null,
+      "original_failed_age_s": null,
+      "failure_age_sign_proven": false,
+      "render_stall_cause_proven": false,
+      "post_failure_readonly_samples": 20,
+      "post_failure_reader_age_range_s": [
+        0.003728138,
+        0.064646947
+      ],
+      "post_failure_sample_scope": "subsequent health only;does not reconstruct original failing age",
+      "readonly_samples": ".evidence/s2/host-age-j1100608-readonly-samples.jsonl",
+      "CPU_probe": ".evidence/s2/host-age-j1100608-cpu-probe.json",
+      "driver_window": ".evidence/s2/host-age-j1100608-driver-window.json",
+      "events": ".evidence/s2/host-age-j1100608-events.json",
+      "owned_processes_exited": 9,
+      "both_gpu_process_lists_empty": true,
+      "resource_verified_at": "2026-10-11T10:28:19+08:00",
+      "released_at": "2026-10-11T10:28:35+08:00",
+      "teardown": ".evidence/s2/full-device-j1-20261011-100608-teardown.json"
     }
   },
   "preview_compilation_budget_fix": {
@@ -2067,110 +2172,19 @@
     "L1_total": 27
   },
   "latest_resource_release": {
-    "run": "full-scene-xy-20261011-083941",
-    "record": "unified-full-scene-xy-20261011-083941",
-    "teardown": ".evidence/s2/full-scene-xy-20261011-083941-teardown.json",
-    "verified_at": "2026-10-11T10:05:52+08:00",
-    "released_at": "2026-10-11T10:06:07+08:00",
+    "run": "full-device-j1-20261011-100608",
+    "record": "unified-full-device-j1-20261011-100608",
+    "teardown": ".evidence/s2/full-device-j1-20261011-100608-teardown.json",
+    "verified_at": "2026-10-11T10:28:19+08:00",
+    "released_at": "2026-10-11T10:28:35+08:00",
     "all_owned_exited": true,
-    "owned_process_count": 14,
+    "owned_process_count": 9,
     "both_gpu_process_lists_empty": true,
-    "artifacts_after_teardown": ".evidence/s2/full-scene-xy-20261011-083941-artifacts-after-teardown.json",
-    "verified_artifact_count": 5,
-    "artifact_hashes_unchanged": true,
     "dynamic_authority": "/Users/wujie/Developer/work/anyverse/_context/projects/gpu-usage.md"
   },
   "preparing_gpu_run": null,
-  "qualified_cold_cases": {
-    "scene-xy": {
-      "run": "full-scene-xy-20261011-083941",
-      "case": "scene-xy",
-      "case_id": "l2-case2-scene-xy-10mm-v1",
-      "suite": "cold-suite-normal-v31-20261011-v6",
-      "status": "complete_cold_case_qualified",
-      "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
-      "fresh_C_completed": true,
-      "group_installed": true,
-      "D_motion_started": true,
-      "full_pipeline_qualified": true,
-      "startup_confirmed_by_launch_metadata": true,
-      "empty_store_driver_preflight_passed": true,
-      "head_preview_passed": true,
-      "head_confirm_passed": true,
-      "head_frames": 34,
-      "expected_head_frames": 34,
-      "launch_metadata": ".evidence/s2/current-full.json",
-      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-scene-xy-20261011-083941-contract.json",
-      "source_files": 375,
-      "gpu_record": "unified-full-scene-xy-20261011-083941",
-      "supervisor": {
-        "pid": 810346,
-        "start_ticks": "32685524"
-      },
-      "source_pid": 810352,
-      "released": true,
-      "resource_evidence": ".evidence/s2/full-scene-xy-20261011-083941-resources-084044.json",
-      "resource_window": {
-        "expected_start": "2026-10-11T08:40:28.710948+08:00",
-        "expected_end": "2026-10-11T10:35:28.710948+08:00",
-        "actual_start_registered_at": "2026-10-11T08:41:00+08:00",
-        "service_deadline": "2026-10-11T10:30:34+08:00",
-        "next_actual_check_by": "2026-10-11T09:29:00+08:00"
-      },
-      "scope": "fresh v6 startup/head capture snapshot only;complete C/install/D/task qualification pending",
-      "wrist_frames": 29,
-      "original_driver_completed": true,
-      "original_workflow": "completed",
-      "motion_outcome": "completed",
-      "native_task_outcome": "success",
-      "hardware_qualified": false,
-      "qualification_scope": "this one frozen fake run only; not three-case suite or physical robot",
-      "audit_complete": true,
-      "audit_checks_passed": 9,
-      "audit_checks_total": 9,
-      "artifact_audit": ".evidence/s2/full-scene-xy-20261011-083941-audit.json",
-      "original_terminal": ".evidence/s2/full-scene-xy-20261011-083941-terminal.json",
-      "command_count": 3537,
-      "feedback_count": 11792,
-      "camera_frames": {
-        "base_0": 3548,
-        "left_wrist_0": 3548,
-        "right_wrist_0": 3548
-      },
-      "raw_complete": true,
-      "raw_manifest_sha256": "a87448b7b367292a4b539bb1d214484795f102831016f8a16c7a2b1d5998df26",
-      "sealed_files_verified": 10655,
-      "sealed_bytes": 3889404054,
-      "source_replay": "passed",
-      "auxiliary_replay": "passed",
-      "task_success_evidence": "same-plant native receipt;not L3",
-      "source_video_duration_s": {
-        "base_0": 118.266,
-        "left_wrist_0": 118.266,
-        "right_wrist_0": 118.266
-      },
-      "source_video_max_frame_pts_error_s": 0.00033333400000401525,
-      "auxiliary_replay_duration_s": {
-        "base_0": 117.9,
-        "left_wrist_0": 117.9,
-        "right_wrist_0": 117.9
-      },
-      "auxiliary_replay_max_frame_pts_error_s": 3.333333467026023e-07,
-      "source_video_pts_tolerance_s": 0.002,
-      "local_source_head": ".evidence/s2/full-scene-xy-20261011-083941-source-head.mp4",
-      "local_final_cameras": ".evidence/s2/full-scene-xy-20261011-083941-final-cameras/receipt.json",
-      "local_native_receipt": ".evidence/s2/full-scene-xy-20261011-083941-native-task-receipt.json",
-      "teardown": ".evidence/s2/full-scene-xy-20261011-083941-teardown.json",
-      "owned_processes_exited": 14,
-      "both_gpu_process_lists_empty": true,
-      "released_at": "2026-10-11T10:06:07+08:00",
-      "artifacts_before_teardown": ".evidence/s2/full-scene-xy-20261011-083941-artifacts-before-teardown.json",
-      "artifacts_after_teardown": ".evidence/s2/full-scene-xy-20261011-083941-artifacts-after-teardown.json",
-      "artifact_hashes_unchanged_after_final_teardown": true,
-      "verified_artifact_count": 5
-    }
-  },
-  "last_completed_cold_run": "full-scene-xy-20261011-083941",
+  "qualified_cold_cases": {},
+  "last_completed_cold_run": null,
   "historical_cold_suites": {
     "cold-suite-normal-v31-20261011-v5": {
       "suite": {
@@ -2329,12 +2343,200 @@
       "superseded_at": "2026-10-11T08:44:00.302861+08:00",
       "superseded_by": "cold-suite-normal-v31-20261011-v6",
       "qualification_scope": "v5 nominal remains historically qualified1/3;no credit toward final product suitev6"
+    },
+    "cold-suite-normal-v31-20261011-v6": {
+      "suite": {
+        "id": "cold-suite-normal-v31-20261011-v6",
+        "evidence": ".evidence/s2/cold-suite-freeze-20261011-v6.json",
+        "sha256": "1e1d3f8ba0c3fc665ff9af1bb406fa3512b48e1fb81d5cefcbc5b4c505be6b44",
+        "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+        "source_files": 375,
+        "motion_recipe": "normal-v31-dynamic-targets",
+        "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
+        "normal_cases_passed": 1,
+        "required_normal_cases": 3,
+        "current_run": null,
+        "status": "historical_superseded_after_device_j1_host_age_failure",
+        "predeclared_cases_unchanged": [
+          "nominal",
+          "scene-xy",
+          "device-j1"
+        ],
+        "qualified_cases": [
+          "scene-xy"
+        ],
+        "remaining_cases": [
+          "device-j1",
+          "nominal"
+        ]
+      },
+      "qualified_cold_cases": {
+        "scene-xy": {
+          "run": "full-scene-xy-20261011-083941",
+          "case": "scene-xy",
+          "case_id": "l2-case2-scene-xy-10mm-v1",
+          "suite": "cold-suite-normal-v31-20261011-v6",
+          "status": "complete_cold_case_qualified",
+          "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+          "fresh_C_completed": true,
+          "group_installed": true,
+          "D_motion_started": true,
+          "full_pipeline_qualified": true,
+          "startup_confirmed_by_launch_metadata": true,
+          "empty_store_driver_preflight_passed": true,
+          "head_preview_passed": true,
+          "head_confirm_passed": true,
+          "head_frames": 34,
+          "expected_head_frames": 34,
+          "launch_metadata": ".evidence/s2/current-full.json",
+          "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-scene-xy-20261011-083941-contract.json",
+          "source_files": 375,
+          "gpu_record": "unified-full-scene-xy-20261011-083941",
+          "supervisor": {
+            "pid": 810346,
+            "start_ticks": "32685524"
+          },
+          "source_pid": 810352,
+          "released": true,
+          "resource_evidence": ".evidence/s2/full-scene-xy-20261011-083941-resources-084044.json",
+          "resource_window": {
+            "expected_start": "2026-10-11T08:40:28.710948+08:00",
+            "expected_end": "2026-10-11T10:35:28.710948+08:00",
+            "actual_start_registered_at": "2026-10-11T08:41:00+08:00",
+            "service_deadline": "2026-10-11T10:30:34+08:00",
+            "next_actual_check_by": "2026-10-11T09:29:00+08:00"
+          },
+          "scope": "fresh v6 startup/head capture snapshot only;complete C/install/D/task qualification pending",
+          "wrist_frames": 29,
+          "original_driver_completed": true,
+          "original_workflow": "completed",
+          "motion_outcome": "completed",
+          "native_task_outcome": "success",
+          "hardware_qualified": false,
+          "qualification_scope": "this one frozen fake run only; not three-case suite or physical robot",
+          "audit_complete": true,
+          "audit_checks_passed": 9,
+          "audit_checks_total": 9,
+          "artifact_audit": ".evidence/s2/full-scene-xy-20261011-083941-audit.json",
+          "original_terminal": ".evidence/s2/full-scene-xy-20261011-083941-terminal.json",
+          "command_count": 3537,
+          "feedback_count": 11792,
+          "camera_frames": {
+            "base_0": 3548,
+            "left_wrist_0": 3548,
+            "right_wrist_0": 3548
+          },
+          "raw_complete": true,
+          "raw_manifest_sha256": "a87448b7b367292a4b539bb1d214484795f102831016f8a16c7a2b1d5998df26",
+          "sealed_files_verified": 10655,
+          "sealed_bytes": 3889404054,
+          "source_replay": "passed",
+          "auxiliary_replay": "passed",
+          "task_success_evidence": "same-plant native receipt;not L3",
+          "source_video_duration_s": {
+            "base_0": 118.266,
+            "left_wrist_0": 118.266,
+            "right_wrist_0": 118.266
+          },
+          "source_video_max_frame_pts_error_s": 0.00033333400000401525,
+          "auxiliary_replay_duration_s": {
+            "base_0": 117.9,
+            "left_wrist_0": 117.9,
+            "right_wrist_0": 117.9
+          },
+          "auxiliary_replay_max_frame_pts_error_s": 3.333333467026023e-07,
+          "source_video_pts_tolerance_s": 0.002,
+          "local_source_head": ".evidence/s2/full-scene-xy-20261011-083941-source-head.mp4",
+          "local_final_cameras": ".evidence/s2/full-scene-xy-20261011-083941-final-cameras/receipt.json",
+          "local_native_receipt": ".evidence/s2/full-scene-xy-20261011-083941-native-task-receipt.json",
+          "teardown": ".evidence/s2/full-scene-xy-20261011-083941-teardown.json",
+          "owned_processes_exited": 14,
+          "both_gpu_process_lists_empty": true,
+          "released_at": "2026-10-11T10:06:07+08:00",
+          "artifacts_before_teardown": ".evidence/s2/full-scene-xy-20261011-083941-artifacts-before-teardown.json",
+          "artifacts_after_teardown": ".evidence/s2/full-scene-xy-20261011-083941-artifacts-after-teardown.json",
+          "artifact_hashes_unchanged_after_final_teardown": true,
+          "verified_artifact_count": 5
+        }
+      },
+      "failed_cold_cases": {
+        "device-j1": {
+          "run": "full-device-j1-20261011-100608",
+          "case": "device-j1",
+          "case_id": "l2-case3-j1-zero-offset-v2",
+          "suite": "cold-suite-normal-v31-20261011-v6",
+          "status": "failed_confirm_host_sample_stale_or_clock_skew_before_wrist_motion",
+          "product_commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
+          "fresh_C_completed": false,
+          "group_installed": false,
+          "D_motion_started": false,
+          "full_pipeline_qualified": false,
+          "startup_confirmed_by_launch_metadata": true,
+          "empty_store_driver_preflight_passed": true,
+          "head_preview_passed": true,
+          "head_confirm_passed": true,
+          "head_frames": 34,
+          "expected_head_frames": 34,
+          "launch_metadata": ".evidence/s2/current-full.json",
+          "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-100608-contract.json",
+          "source_files": 375,
+          "gpu_record": "unified-full-device-j1-20261011-100608",
+          "supervisor": {
+            "pid": 1271577,
+            "start_ticks": "33204152"
+          },
+          "source_pid": 1271583,
+          "released": true,
+          "resource_evidence": ".evidence/s2/full-device-j1-20261011-100608-resources-100718.json",
+          "resource_window": {
+            "expected_start": "2026-10-11T10:06:54.985940+08:00",
+            "expected_end": "2026-10-11T12:01:54.985940+08:00",
+            "actual_start_registered_at": "2026-10-11T10:07:34+08:00",
+            "service_deadline": "2026-10-11T11:57:01+08:00",
+            "next_actual_check_by": "2026-10-11T10:55:00+08:00"
+          },
+          "declared_plant_truth_boundary": "backend/evaluator only;excluded solver inputs;new case still awaits audit",
+          "scope": "new empty-store head capture snapshot;complete C/install/D/task qualification pending",
+          "head_fit_completed": true,
+          "wrist_preview_published": true,
+          "confirm_request_wall_ms": 15.65,
+          "confirm_error": "host_sample_stale_or_clock_skew",
+          "driver_failed": true,
+          "wrist_motion_started": false,
+          "original_terminal": ".evidence/s2/full-device-j1-20261011-100608-terminal.json",
+          "failed_calibration_state": ".evidence/s2/full-device-j1-20261011-100608-failed-calibration-state.json",
+          "driver_log": ".evidence/s2/suite-v6-device-j1-driver.log",
+          "original_failed_sample_wall_ns": null,
+          "original_failed_now_ns": null,
+          "original_failed_age_s": null,
+          "failure_age_sign_proven": false,
+          "render_stall_cause_proven": false,
+          "post_failure_readonly_samples": 20,
+          "post_failure_reader_age_range_s": [
+            0.003728138,
+            0.064646947
+          ],
+          "post_failure_sample_scope": "subsequent health only;does not reconstruct original failing age",
+          "readonly_samples": ".evidence/s2/host-age-j1100608-readonly-samples.jsonl",
+          "CPU_probe": ".evidence/s2/host-age-j1100608-cpu-probe.json",
+          "driver_window": ".evidence/s2/host-age-j1100608-driver-window.json",
+          "events": ".evidence/s2/host-age-j1100608-events.json",
+          "owned_processes_exited": 9,
+          "both_gpu_process_lists_empty": true,
+          "resource_verified_at": "2026-10-11T10:28:19+08:00",
+          "released_at": "2026-10-11T10:28:35+08:00",
+          "teardown": ".evidence/s2/full-device-j1-20261011-100608-teardown.json"
+        }
+      },
+      "superseded_at": "2026-10-11T11:07:43.263595+08:00",
+      "superseded_by": "cold-suite-normal-v31-20261011-v7",
+      "qualification_scope": "v6 scene-xy remains historical1/3;not credit toward current product suitev7"
     }
   },
   "latest_historical_qualified_cold_case": {
-    "suite": "cold-suite-normal-v31-20261011-v5",
-    "run": "full-20261011-064034",
-    "artifact_audit": ".evidence/s2/full-20261011-064034-audit.json"
+    "suite": "cold-suite-normal-v31-20261011-v6",
+    "run": "full-scene-xy-20261011-083941",
+    "artifact_audit": ".evidence/s2/full-scene-xy-20261011-083941-audit.json"
   },
   "calibration_fresh_control_fix": {
     "commit": "96d3c7ab988cf5212e95f0f0cdd6add216bed77c",
@@ -2350,7 +2552,7 @@
     "CPU_receipt": ".evidence/s2/fresh-control-full-cpu-20261011-v2/receipt.json",
     "CPU_qualified": true,
     "L1_qualified": true,
-    "new_cold_qualified": true,
+    "new_cold_qualified": false,
     "retained_full_v1_failure": ".evidence/s2/fresh-control-full-cpu-20261011-v1/receipt.json",
     "full_v1_failure_cause": "manual __new__fixtures missed hardware_poll_lock initialization",
     "retained_C_v2_environment_failure": ".evidence/s2/fresh-control-080456-full-calibration-v2.log",
@@ -2358,7 +2560,61 @@
     "C_v3_executions": 481,
     "C_v3_passed": 480,
     "C_v3_skipped": 1,
-    "new_cold_qualification_run": "full-scene-xy-20261011-083941",
-    "new_cold_qualification_scope": "one suite-v6 scene-xy frozen fake run;current suite1/3,not hardware"
+    "new_cold_qualification_run": null,
+    "new_cold_qualification_scope": "old96d3c7a/v6scene-xy pass retained historical;not currentv7",
+    "historical_qualification_run": "full-scene-xy-20261011-083941"
+  },
+  "host_age_readiness_diagnostics_fix": {
+    "commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+    "original_failed_run": "full-device-j1-20261011-100608",
+    "shared_cheap_host_age_criterion": true,
+    "C_UI_disables_stale_future_primary_runtime_execute_confirm": true,
+    "reader_preflight_complete_read_diagnostics": true,
+    "diagnostics_fields": [
+      "sample_wall",
+      "now",
+      "age",
+      "PID",
+      "epoch",
+      "source",
+      "step"
+    ],
+    "diagnostics_exposed_for_current_run": true,
+    "thresholds_unchanged": true,
+    "timestamps_unchanged": true,
+    "automatic_product_wait": false,
+    "automatic_action_retry": false,
+    "original_failure_age_retained": false,
+    "original_failure_age_sign_proven": false,
+    "render_stall_cause_proven": false,
+    "reader_path": "raw_owner not wrapper",
+    "virtual_clock_contamination_found": false,
+    "old_UI_gate": "source-clock freshness",
+    "reader_gate": "wall-clock0.5s",
+    "CPU_receipt": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
+    "CPU_qualified": true,
+    "L1_qualified": true,
+    "new_cold_qualified": false
+  },
+  "harness_UI_readiness": {
+    "scope": "validation harness only;does not change product action behavior",
+    "before_first_confirm_requires": [
+      "primary.allowed",
+      "runtime.allowed"
+    ],
+    "false_condition": "wait without issuing a command",
+    "confirm_per_step": "one request only",
+    "issued_action_failure": "terminate immediately;no retry/no supplementary capture/no failure continuation",
+    "original_driver_snapshot": ".evidence/s2/drive-cold-suite-before-ui-readiness-20261011.py",
+    "original_driver_sha256": "d95bfbf7f5bf37527af5e2977c090a5aeb2558ed55db667d93ba816e73ac15df",
+    "new_driver_snapshot": ".evidence/s2/drive-cold-suite-ui-ready-20261011-v1.py",
+    "new_driver_sha256": "f1bff03e73095a431f554e0c1d06aa495ced365340a0153c8f1c41f2a5bc969a",
+    "active_local_driver": ".evidence/s2/drive_cold_suite.py",
+    "active_local_driver_version": "new UI-ready sha;old reconstructed version retained separately",
+    "run_archive": "validation/drive_cold_suite.py + validation/verify_cold_suite.py",
+    "auditor_sha256": "6615123bc30e795c41f48ec6dc7f8596786a687945a9ceca010692d3f19e2b2a",
+    "archive_sha_bound_in_contract_preflight_audit": true,
+    "local_package_source_hashes_verified": true,
+    "product_source_file_count_unchanged": 375
   }
 }
