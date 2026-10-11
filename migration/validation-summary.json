@@ -1,10 +1,10 @@
 {
   "status": "bounded_fake_self_service_and_restart_verified_overall_NOT_CLOSED",
-  "updated_at": "2026-10-11T23:59:06.990618+08:00",
+  "updated_at": "2026-10-12T01:31:23.281130+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "b80cdb384c20c11f123a1bb297c10267451ec864",
-  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. f7e0ae9 lifecycle/restart/render-recovery evidence remains historical. Current b80cdb3 manual execution dialog, 0mm fake jaw endpoint and phase diagnostics:196 targeted CPU checks plus Node passed; fullfake232236 single-pose/zero-jaw/two-waypoint execution and cancel-no-motion verified. Final234651 adds only input-cache reconnect fix; actual browser reconnect verified, runtime sources match b80cdb3. No new calibration, collection, solve or install. Manual path latency, review-TTL boundary recovery, long-lived entry and L4 remain open.",
+  "candidate_commit_before_summary": "ef7a7767b2c71fccc58c8cee6edb2b17dd6b324b",
+  "qualification_scope": "Historical cold3/3 remains bound to757b290/suite-v7. Current expiry/path/endpoint delivery:832 CPU executions825pass7skip plus Node;18 actual A1 support-only differential paths fully equal; unchanged30sTTL queued rejection avoids SDK/fault; browser expiry/no-motion and retry passed; final011619 real fake roundtrip with83mm jaw passed. Existing head/wrist/geometry IDs and71 arrival samples preserved. No repeated calibration/collection. Failed003955 source-fingerprint variant and005333 interpolation fault retained; generic geometry optimization withdrawn. Long-lived entry and L4 remain open.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -536,29 +536,29 @@
   "current_gpu_run": {
     "mode": "managed_fake",
     "fresh_C_completed": false,
-    "tag": "dev-20261011-234651",
-    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-234651",
-    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-234651",
-    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-preview-20261011/dev-20261011-234651/source.tar.gz",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-preview-20261011/dev-20261011-234651/contract.json",
-    "gpu_record": "unified-dev-20261011-234651",
-    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-234651-camera-spool",
+    "tag": "dev-20261012-011619",
+    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261012-011619",
+    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261012-011619",
+    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-optim-20261012/dev-20261012-011619/source.tar.gz",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-optim-20261012/dev-20261012-011619/contract.json",
+    "gpu_record": "unified-dev-20261012-011619",
+    "camera_spool_root": "/tmp/robot-workbench-dev-20261012-011619-camera-spool",
     "source_files": 387,
     "started": true,
     "dry_run_exit": 0,
     "reserved_until": "2026-10-12T01:52:00+08:00",
     "manager_deadline_wall_ns": 1791741120000000000,
     "resident_deadline_wall_ns": 1791740818000000000,
-    "current_source_commit": "10fef1df5a4ab5e530337fed270a999b6667e98f",
+    "current_source_commit": "2bfc1d3f382f989e7c77fa3627d13b36f6efe0d9",
     "live_service_available": true,
     "full_backends_ready": true,
     "browser_entry": "http://127.0.0.1:18866/",
     "management_entry": "http://127.0.0.1:18866/session",
     "motion_requested": false,
-    "active_child": "session-1-3111ae19812f",
-    "validated_runtime_source_commit": "b80cdb384c20c11f123a1bb297c10267451ec864"
+    "active_child": "session-1-055e0318a5d7",
+    "validated_runtime_source_commit": "ef7a7767b2c71fccc58c8cee6edb2b17dd6b324b"
   },
-  "last_gpu_run": "dev-20261011-232236",
+  "last_gpu_run": "dev-20261012-005333",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -3758,5 +3758,231 @@
     "last_verified_at": "2026-10-11T23:59:06.990618+08:00",
     "code_commit": "b80cdb384c20c11f123a1bb297c10267451ec864",
     "deployed_runtime_sources_match_local_commit": true
+  },
+  "manual_optimization_delivery": {
+    "checked_at": "2026-10-12T01:31:23.281130+08:00",
+    "run": "dev-20261012-011619",
+    "child": "session-1-055e0318a5d7",
+    "runtime": {
+      "state": "READY",
+      "connected": true,
+      "holder": "calibration",
+      "automatic_enabled": false
+    },
+    "collection": {
+      "stage_id": "collection.idle",
+      "status": "idle"
+    },
+    "installed": {
+      "head_id": "c5ab77545382af41239848e0ef2471c550c56da161e4143d8b62e8bf4a049580",
+      "wrist_id": "e98f04c0c2ac94f27b67a2f819e6d97ede95019fa02397373111e2c13e6b447d",
+      "geometry_id": "2eb1a7481f2572ea58ae2f9bf9b63ce01dfe739d0f8afe3002f09e5dba391e1e",
+      "verified": true
+    },
+    "arrival_count": 71,
+    "ttl_s": 30,
+    "geometry_identity_preserved": true,
+    "collision_policy_changed": false,
+    "physical_hardware": false,
+    "evidence": ".evidence/manual-optim-20261012",
+    "http_comparison": "http-comparison.json",
+    "geometry_comparison": "geometry-support-only-receipt.json",
+    "cpu": {
+      "total": 832,
+      "passed": 825,
+      "skipped": 7,
+      "command": "sh scripts/check.sh",
+      "exit_code": 0,
+      "node_passed": true,
+      "log": ".evidence/manual-optim-20261012/delivery-cpu.log",
+      "sha256": "be69ab314c568ea1d4e650ca0b5220f1d710fa2c408e3060b0e7254856434016"
+    },
+    "expired_UI": "expiry-after.json",
+    "positive_retry": "retry-execution.json",
+    "final_roundtrip": [
+      "final-outbound.json",
+      "final-return.json"
+    ],
+    "code_commit": "ef7a7767b2c71fccc58c8cee6edb2b17dd6b324b",
+    "deployed_runtime_sources_match": true,
+    "geometry": {
+      "status": "passed",
+      "scope": "support-only geometry optimization; no GPU/SimulationApp/motion/running-source mutation",
+      "candidate_changes": [
+        "BVH leaf SAT batches",
+        "fixed-topology levelwise bounds"
+      ],
+      "geometry_source_unchanged_from_HEAD": true,
+      "baseline_frozen_source": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-234651",
+      "test_executions": 26,
+      "passed": 22,
+      "skipped_missing_local_assets": 4,
+      "actual_A1_differential_cases": [
+        {
+          "case": "stationary",
+          "before_s": 1.801828463037964,
+          "after_s": 1.357207894034218,
+          "reduction_pct": 24.676076448148432,
+          "exact_result_match": true
+        },
+        {
+          "case": "single_pose_closed_jaws",
+          "before_s": 1.1477131809806451,
+          "after_s": 0.8208364800084382,
+          "reduction_pct": 28.480695908093722,
+          "exact_result_match": true
+        },
+        {
+          "case": "return_zero",
+          "before_s": 9.743497455026954,
+          "after_s": 5.685177446983289,
+          "reduction_pct": 41.651573542002204,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_0_-0.003",
+          "before_s": 1.859856103954371,
+          "after_s": 1.016085834999103,
+          "reduction_pct": 45.36750274181258,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_0_-0.008",
+          "before_s": 0.44299474998842925,
+          "after_s": 0.25787530199158937,
+          "reduction_pct": 41.78818101155264,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_0_0.005",
+          "before_s": 1.1113648330210708,
+          "after_s": 0.6447113460162655,
+          "reduction_pct": 41.98922560256663,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_6_-0.003",
+          "before_s": 1.8443924069870263,
+          "after_s": 1.0110388210159726,
+          "reduction_pct": 45.18309568040396,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_6_-0.008",
+          "before_s": 0.6612690129550174,
+          "after_s": 0.35843423602636904,
+          "reduction_pct": 45.79600298755396,
+          "exact_result_match": true
+        },
+        {
+          "case": "support_6_0.005",
+          "before_s": 1.1248404509969987,
+          "after_s": 0.6710047860397026,
+          "reduction_pct": 40.346670014848804,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_0",
+          "before_s": 7.198057337955106,
+          "after_s": 4.469710404984653,
+          "reduction_pct": 37.90393442108295,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_1",
+          "before_s": 2.938715345982928,
+          "after_s": 1.9488557020085864,
+          "reduction_pct": 33.68341358163283,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_2",
+          "before_s": 4.766840280033648,
+          "after_s": 3.113925190002192,
+          "reduction_pct": 34.67527739401809,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_3",
+          "before_s": 3.8467597019625828,
+          "after_s": 2.4739409630419686,
+          "reduction_pct": 35.687665601264726,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_4",
+          "before_s": 3.485637554025743,
+          "after_s": 2.2712305649765767,
+          "reduction_pct": 34.84031171418225,
+          "exact_result_match": true
+        },
+        {
+          "case": "random_5",
+          "before_s": 3.8055213050101884,
+          "after_s": 2.15066296904115,
+          "reduction_pct": 43.48571991412376,
+          "exact_result_match": true
+        }
+      ],
+      "actual_entry_open_jaws_83mm_check": [
+        {
+          "case": "stationary",
+          "before_s": 1.9949635619996116,
+          "after_s": 1.218309256946668,
+          "reduction_pct": 38.93075141054104,
+          "exact_result_match": true
+        },
+        {
+          "case": "single_pose",
+          "before_s": 1.8105671939556487,
+          "after_s": 1.2209467310458422,
+          "reduction_pct": 32.56551123195982,
+          "exact_result_match": true
+        },
+        {
+          "case": "return_zero",
+          "before_s": 9.934098598954733,
+          "after_s": 5.2614689110196196,
+          "reduction_pct": 47.036272505154805,
+          "exact_result_match": true
+        }
+      ],
+      "candidate_sha256": {
+        "calibration/infra/arx_env/joint_head_support_contact.py": "1b1ee93f70638a0f8bf8590bf0b647cb6bdcdd477ad275cd236acdfd2e47fa83",
+        "calibration/tests/test_joint_head_support_contact.py": "39088fe25b6fcfe8d621e22881991d9577a8faf354dff62ad29d0da4ea10c99a",
+        "calibration/infra/arx_env/joint_head_workbench_geometry.py": "3ea25d30877abc22eaf043204203952d064268411592909ccc6bbbee11b98e7b"
+      },
+      "unchanged": [
+        "SAT axes",
+        "ROI filtering",
+        "1.2 mm support limit",
+        "support displacement sampling bounds",
+        "collision rejection",
+        "path sample counts",
+        "geometry ID source",
+        "calibration/install schema"
+      ],
+      "measurement_limit": "Single before/after comparisons in read-only CPU processes; wall times vary with host load. Not HTTP/UI latency or continuous-collision certification.",
+      "supersedes": "geometry-receipt.json",
+      "retracted_optimization": "surface_intersection_pairs batching was reverted because its source fingerprint invalidated existing geometry IDs; no compatibility exception was added"
+    },
+    "http": {
+      "same_requested_target": true,
+      "before_s": [
+        5.637333875,
+        3.1101128340000006,
+        3.3852252089999997
+      ],
+      "after_s": [
+        3.694538333,
+        2.7675935830000005,
+        2.9287199170000005
+      ],
+      "median_before_s": 3.3852252089999997,
+      "median_after_s": 2.9287199170000005,
+      "warm_median_before_s": 3.2476690215,
+      "warm_median_after_s": 2.8481567500000002,
+      "limit": "includes HTTP polling; same target, initial pose restored within controller precision; load varies; not a P95 qualification"
+    }
   }
 }
