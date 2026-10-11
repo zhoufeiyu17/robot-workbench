@@ -49,11 +49,12 @@
       </section>
 
       <details id="manual-tools" class="panel manual" open><summary>人工规划工具 <span class="muted">单姿态 / 标定动作队列 / 回零目标</span></summary><div class="manual-body">
-        <p class="hint">角度以 ° 显示和调整；发送时使用 rad，速度为 rad/s。拖动会更新只读姿态预览，执行仍需单独审阅。实测数值持续更新，不覆盖目标草稿。</p>
+        <p class="hint">角度以 ° 显示和调整；发送时使用 rad，速度为 rad/s。拖动会更新只读姿态预览；点击执行后，检查通过会弹出一次动作确认。实测数值持续更新，不覆盖目标草稿。</p>
         <div class="manual-actions"><label>统一关节速度 · rad/s<input id="manual-speed" type="number" min="0.001" step="0.01" value="0.2"></label><button id="apply-manual-speed" disabled>应用到12关节</button></div>
         <div id="joint-inputs" class="joint-grid"></div><p id="manual-feedback" class="live-feedback"></p><div class="jaw-grid"><label>左夹爪 · mm<input id="jaw-left" type="number" min="0" max="83" step="0.5" disabled></label><label>右夹爪 · mm<input id="jaw-right" type="number" min="0" max="83" step="0.5" disabled></label><label>夹爪速度 · mm/s<input id="jaw-speed" type="number" min="0.001" step="0.5" value="10" disabled></label></div>
-        <div class="manual-actions"><button id="use-feedback" disabled>填入当前实测姿态</button><button id="zero-preview" disabled>填入回零目标 · 夹爪83mm</button><button id="show-target" aria-describedby="show-target-reason" disabled>查看目标姿态图像 · 不执行</button><button id="manual-preview" aria-describedby="manual-preview-reason" disabled>生成单姿态执行预览</button><button id="queue-add" aria-describedby="queue-add-reason" disabled>加入标定动作队列</button></div><p id="show-target-reason" class="action-reason"></p><p id="manual-preview-reason" class="action-reason">等待可用关节定义与后端权限</p><p id="queue-add-reason" class="action-reason"></p><p id="manual-error" role="alert" hidden></p>
-        <h3>标定动作队列</h3><p id="queue-status" class="muted">尚未读取标定动作队列</p><ol id="manual-queue-list"></ol><div class="manual-actions"><button id="queue-preview" aria-describedby="queue-preview-reason" disabled>整队生成执行预览</button><button id="queue-clear" aria-describedby="queue-clear-reason" disabled>清空队列</button></div><p id="queue-preview-reason" class="action-reason"></p><p id="queue-clear-reason" class="action-reason"></p><p class="hint">队列编辑、停止或取消后须重新预览；恢复不续跑旧队列。路径点按当前冻结速度整体提交，不逐点跳过审阅。</p>
+        <div class="manual-actions"><button id="use-feedback" disabled>填入当前实测姿态</button><button id="zero-preview" disabled>填入回零目标 · 夹爪83mm</button><button id="show-target" aria-describedby="show-target-reason" disabled>查看目标姿态图像 · 不执行</button><button id="manual-preview" aria-describedby="manual-preview-reason" disabled>执行到目标姿态</button><button id="queue-add" aria-describedby="queue-add-reason" disabled>加入标定动作队列</button></div><p id="show-target-reason" class="action-reason"></p><p id="manual-preview-reason" class="action-reason">等待可用关节定义与后端权限</p><p id="queue-add-reason" class="action-reason"></p><p id="manual-error" role="alert" hidden></p>
+        <p id="manual-request-status" class="hint" role="status" aria-live="polite">拖动只更新目标画面。点击执行后检查动作，并在弹窗中确认一次。</p>
+        <h3>标定动作队列</h3><p id="queue-status" class="muted">尚未读取标定动作队列</p><ol id="manual-queue-list"></ol><div class="manual-actions"><button id="queue-preview" aria-describedby="queue-preview-reason" disabled>执行整队</button><button id="queue-clear" aria-describedby="queue-clear-reason" disabled>清空队列</button></div><p id="queue-preview-reason" class="action-reason"></p><p id="queue-clear-reason" class="action-reason"></p><p class="hint">队列编辑、停止或取消后须重新点击执行并确认；恢复不续跑旧队列。路径点按当前冻结速度整体提交，不逐点跳过审阅。</p>
       </div></details>
       <section id="task-panel" class="panel task-card" aria-labelledby="task-title">
         <div class="panel-heading"><h2 id="task-title">当前任务 · 标定</h2><span id="task-status" class="badge">尚未核验</span></div>
@@ -96,6 +97,14 @@
     <section id="image-recovery" class="panel image-recovery" hidden><div class="panel-heading"><h2>图像连接与恢复</h2><span class="muted">设备诊断</span></div><dl id="image-recovery-details" class="detail-list"></dl><div class="manual-actions"><button id="reconnect-images">重新连接画面</button><button id="preview-recover" disabled>恢复渲染服务</button></div><p id="preview-recover-reason" class="action-reason"></p><p class="hint">重新连接画面只重建浏览器订阅。恢复渲染服务仅针对当前会话的私有渲染器；两者均不连接、释放或停止机器人，也不会自动继续采集。连续失败时按下方后端指引检查，不反复重启。</p><pre id="image-recovery-commands" hidden></pre></section>
     <footer>实际 / 目标 / 回放分别标注；未知状态不代表通过。<span id="footer-context">Fake · 标定</span></footer>
   </main>
+  <dialog id="manual-execution-dialog" class="manual-execution-dialog" aria-labelledby="manual-confirm-title" aria-describedby="manual-confirm-summary">
+    <h2 id="manual-confirm-title">确认人工动作</h2>
+    <p class="hint">检查已完成，设备尚未执行。请核对本次冻结动作，确认后开始运动。</p>
+    <p id="manual-confirm-summary"></p><p id="manual-confirm-duration"></p><p id="manual-confirm-jaws"></p>
+    <label id="manual-clearance-label" class="check-label" hidden><input id="manual-clearance" type="checkbox">我已审阅本条轨迹和现场净空，确认可以执行</label>
+    <p id="manual-confirm-reason" class="action-reason" role="status"></p>
+    <div class="manual-actions"><button id="manual-dismiss" autofocus>取消 · 不执行</button><button id="manual-confirm" class="primary" disabled>确认并开始执行</button></div>
+  </dialog>
   <script type="module" src="/web/app.js"></script>
 </body>
 </html>

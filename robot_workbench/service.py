@@ -300,6 +300,8 @@ class Application:
                     self.manual_tasks.pop((environment,business),None)
         if review:
             value['review'] = {key:review[key] for key in ('id','summary','physical_clearance_required')}
+            for name in ('request_job_id','total_motion_duration_s','waypoint_jaw_gap_mm'):
+                if name in review:value['review'][name]=review[name]
             if review.get('speed_scale') is not None:value['review']['speed_scale']=review['speed_scale']
             execution_gate=runtime['allowed_operations']['confirm' if review['owner_preview'] else 'preview']
             value['primary_action'] = dict(id=review['action'],label='审阅并执行本批',
@@ -570,7 +572,7 @@ class Application:
                     if generation != self.generations[environment]:
                         job.update(status='cancelled',finished_wall_ns=time.time_ns())
                         return
-                result=self.perform(device,business,action,body)
+                result=self.perform(device,business,action,body,request_job_id=job['id'])
                 with self.lock:
                     job.update(status='completed' if generation==self.generations[environment] else 'cancelled',
                                result=result,finished_wall_ns=time.time_ns())
@@ -622,7 +624,7 @@ class Application:
         workflow=device.workflows.get('collection')
         if workflow is not None:workflow.invalidate()
 
-    def perform(self, device, business, action, body):
+    def perform(self, device, business, action, body, *, request_job_id=None):
         if action=='connect':return device.connect(body)
         if action=='prepare_collection':return device.collection_preparation.retry()
         runtime=device.runtime
@@ -647,8 +649,9 @@ class Application:
                     speeds12=body.get('speeds12',[DEFAULT_VELOCITY]*12),jaw_gap_mm=body.get('jaw_gap_mm'),jaw_speed_mm_s=body.get('jaw_speed_mm_s',10.))])
                 preview=device.submit(business,command)
             self.add_review(device,business,preview,'manual_execute',
-                f"人工{'队列' if action=='manual_queue_preview' else '姿态'}预览：{len(preview.get('plans',[]))} 个路径点，{preview['total_motion_duration_s']:.2f} 秒；按冻结的关节/夹爪速度整体执行")
-            return {'message':'人工姿态已预览，等待明确审阅执行'}
+                f"人工{'队列' if action=='manual_queue_preview' else '姿态'}：{len(preview.get('plans',[]))} 个路径点，预计运动 {preview['total_motion_duration_s']:.2f} 秒；按冻结的关节/夹爪速度整体执行",
+                request_job_id=request_job_id)
+            return {'message':'轨迹已准备，等待确认执行'}
         if action=='recover':
             state=device.snapshot(business)
             return device.submit(business,dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',
@@ -664,7 +667,7 @@ class Application:
         if action=='install':self.invalidate(device.environment)
         return result
 
-    def add_review(self, device, business, preview, action, summary):
+    def add_review(self, device, business, preview, action, summary, *, request_job_id=None):
         state=device.snapshot(business)
         workflow=device.workflows.get(business)
         manual_revision=(preview.get('review_generation',workflow.manual_revision())
@@ -686,6 +689,10 @@ class Application:
                 calibration_revision=state.get('calibration_revision'))
             self.reviews[(device.environment,business)]=review
             if action=='manual_execute':
+                from arx_env.joint_head_jaw_mapping import command_gap_mm
+                review.update(request_job_id=request_job_id,total_motion_duration_s=preview['total_motion_duration_s'],
+                    waypoint_jaw_gap_mm=[[command_gap_mm(side,plan['q_target'][i]) for side,i in (('left',6),('right',13))]
+                                        for plan in preview.get('plans',[])])
                 self.manual_tasks[(device.environment,business)]=dict(review,
                     plan_sha256=[plan['sha256'] for plan in preview.get('plans',[])])
 

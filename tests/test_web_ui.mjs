@@ -7,7 +7,9 @@ const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
 const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
-  constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
+  constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.open=false;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
+  showModal(){this.open=true;this.showCount=(this.showCount||0)+1;}
+  close(){this.open=false;this.events.close?.();}
   play(){this.paused=false;return Promise.resolve();}
   pause(){this.paused=true;}
   append(...children){this.children.push(...children);}
@@ -119,6 +121,101 @@ for(const [status,message,label] of [['running','本轮准备仍在运行','进�
   h.reply(0,value);await settle();assert.equal(h.get('motion').textContent,'动作：无自动任务');assert.match(h.get('motion').title,/不代表物理静止/);
   assert.equal(h.get('stage-title').textContent,'人工轨迹待审阅');assert.equal(h.get('stage-id').textContent,'manual.review');assert.equal(h.get('primary').disabled,false);
   h.app.destroy();
+}
+
+for(const [action,label] of [['manual_preview','单姿态'],['manual_queue_preview','整队']]){
+  const h=harness();h.app.start();const value=manualSnapshot();
+  value.workflow={...value.workflow,status:'idle',stage_id:'calibration.idle',title:'准备标定',message:'',
+    primary_action:{id:'generate_plan',label:'生成完整标定计划',allowed:false,reason:'当前请求仍在处理'},
+    request:{action,status:'running',started_wall_ns:8e9},outcomes:{motion:'not_started',task:'not_started'}};
+  h.reply(0,value);await settle();
+  assert.equal(h.get('stage-title').textContent,`正在检查${label}动作`);assert.equal(h.get('task-status').textContent,'执行前检查');
+  assert.match(h.get('manual-request-status').textContent,/已耗时 2.0 秒.*尚未执行.*弹出本次动作确认/);
+  assert.equal(h.get('manual-execution-dialog').open,false);assert.equal(h.get('primary').disabled,true);
+  value.revision++;value.server_wall_ns=11e9;h.app.poll();h.reply(1,value);await settle();
+  assert.match(h.get('manual-request-status').textContent,/已耗时 3.0 秒/,'elapsed time uses each fresh server receipt');
+  value.revision++;value.workflow.request={...value.workflow.request,status:'failed',finished_wall_ns:150e9,error:'真机：q_target[6] outside SDK limit'};
+  h.app.poll();h.reply(2,value);await settle();
+  assert.equal(h.get('stage-title').textContent,`${label}执行前检查失败`);assert.equal(h.get('task-status').textContent,'检查失败');
+  assert.match(h.get('manual-request-status').textContent,/已耗时 142.0 秒.*开发设备：q_target\[6\] outside SDK limit.*未下发本次运动/);
+  assert.equal(h.get('manual-request-status').className,'tone-bad');assert.equal(h.get('outcome-task').textContent,'尚未开始','request failure does not rewrite business outcomes');
+  value.revision++;value.workflow.stage_id='head.capture';value.workflow.status='running';
+  h.app.poll();h.reply(3,value);await settle();assert.equal(h.get('stage-title').textContent,'头部采集');assert.equal(h.get('task-status').textContent,'进行中','request error cannot mask an active business stage');
+  value.revision++;value.workflow={...value.workflow,status:'awaiting_review',stage_id:'manual.review',request:undefined,
+    primary_action:{id:'manual_execute',label:'审阅并执行本批',allowed:true},review:{id:'new-manual-review',summary:'本次人工轨迹'}};
+  h.app.poll();h.reply(4,value);await settle();
+  assert.match(h.get('manual-request-status').textContent,/本页没有待确认动作/);assert.equal(h.get('manual-execution-dialog').open,false);assert.equal(h.get('primary-action').hidden,true);
+  assert.equal(h.get('primary').disabled,false);assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'status rendering never confirms motion');
+  h.get('manual-speed').value=.1;h.get('apply-manual-speed').events.click();
+  assert.equal(h.get('manual-execution-dialog').open,false);h.app.destroy();
+}
+
+async function pendingManualExecution({queue=false,physical=false}={}){
+  const h=harness();h.app.start();const value=manualSnapshot();
+  value.workflow={...value.workflow,status:'idle',stage_id:'calibration.idle'};
+  value.manual.queue.waypoints=[{q:Array(12).fill(.1),speeds:Array(12).fill(.2),jaw_gap_mm:[80,81]}];
+  h.reply(0,value);await settle();
+  if(physical){h.app.switchContext({environment:'physical',business:'calibration'});value.device={...value.device,environment:'physical'};h.reply(h.requests.length-1,value);await settle();}
+  h.get(queue?'queue-preview':'manual-preview').events.click();
+  const post=h.requests.length-1;assert.equal(h.requests[post].url,'/api/actions/'+(queue?'manual_queue_preview':'manual_preview'));
+  const ready=()=>{value.revision++;value.workflow={...value.workflow,status:'awaiting_review',stage_id:'manual.review',request:undefined,
+    primary_action:{id:'manual_execute',label:'审阅并执行本批',allowed:true},review:{id:'intent-review',request_job_id:'intent-job',summary:'冻结动作：2个路径点，预计4.25秒',total_motion_duration_s:4.25,waypoint_jaw_gap_mm:[[80,81]],physical_clearance_required:physical}};return value;};
+  return {h,value,post,ready};
+}
+{
+  const {h,value,post,ready}=await pendingManualExecution();h.reply(post,{job_id:'intent-job'});await settle();
+  ready().workflow.request={id:'intent-job',action:'manual_preview',status:'running'};
+  value.workflow.primary_action={id:'manual_execute',allowed:false,reason:'当前请求仍在处理'};
+  h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('manual-execution-dialog').open,false,'a published review must wait until its job has completed');
+  h.app.poll();h.reply(h.requests.length-1,ready());await settle();
+  assert.equal(h.get('manual-execution-dialog').open,true,'the pending intent survives review publication before job completion');
+  assert.equal(h.get('manual-execution-dialog').showCount,1);assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0);h.app.destroy();
+}
+for(const physical of [false,true]){
+  const {h,value,post,ready}=await pendingManualExecution({physical,queue:physical});
+  h.app.poll();h.reply(post+1,ready());await settle();assert.equal(h.get('manual-execution-dialog').open,false,'review arriving before its accepted job cannot open a confirmation');
+  h.reply(post,{job_id:'intent-job',message:'accepted'});await settle();
+  assert.equal(h.get('manual-execution-dialog').open,true);assert.equal(h.get('manual-execution-dialog').showCount,1);
+  assert.match(h.get('manual-confirm-summary').textContent,/冻结动作/);assert.match(h.get('manual-confirm-duration').textContent,/4.3 秒/);assert.match(h.get('manual-confirm-jaws').textContent,/冻结夹爪目标 · 左 80 \/ 右 81 mm/);
+  assert.equal(h.get('primary-action').hidden,true);assert.equal(h.get('review-panel').hidden,true,'manual confirmation is not duplicated in the business task card');
+  assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0,'checks and opening the dialog cannot execute');
+  assert.equal(h.get('manual-confirm').disabled,physical);
+  if(physical){h.get('manual-confirm').events.click();assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0);h.get('manual-clearance').checked=true;h.get('manual-clearance').events.change();}
+  assert.equal(h.get('manual-confirm').disabled,false);h.get('manual-confirm').events.click();
+  const execution=h.requests.at(-1);assert.equal(execution.url,'/api/actions/manual_execute');assert.equal(JSON.parse(execution.options.body).review_id,'intent-review');assert.equal(JSON.parse(execution.options.body).physical_clearance,true);
+  assert.equal(h.get('manual-execution-dialog').open,false);h.get('manual-confirm').events.click();assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,1,'a confirmation is submitted at most once');
+  h.app.destroy();
+}
+for(const invalidate of ['dismiss','escape','input','queue','stop','cancel','tab','environment','instance','permission','expiry','stale']){
+  const {h,value,post,ready}=await pendingManualExecution({queue:true});h.reply(post,{job_id:'intent-job'});await settle();h.reply(h.requests.length-1,ready());await settle();
+  assert.equal(h.get('manual-execution-dialog').open,true);
+  if(invalidate==='dismiss')h.get('manual-dismiss').events.click();
+  else if(invalidate==='escape')h.get('manual-execution-dialog').events.cancel({preventDefault(){}});
+  else if(invalidate==='input'){h.get('jaw-left').value=70;h.get('jaw-left').events.input();}
+  else if(invalidate==='queue')h.get('queue-clear').events.click();
+  else if(['stop','cancel'].includes(invalidate))void h.app.send(invalidate);
+  else if(invalidate==='tab')h.app.selectTab('results');
+  else if(invalidate==='environment')h.app.switchContext({environment:'physical',business:'calibration'});
+  else if(invalidate==='stale'){h.advance(3100);h.intervals[1]();}
+  else{
+    value.revision++;if(invalidate==='instance')value.server_instance_id='replacement-instance';
+    if(invalidate==='permission')value.workflow.primary_action.allowed=false;
+    if(invalidate==='expiry')value.workflow.review=null;
+    h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  }
+  assert.equal(h.get('manual-execution-dialog').open,false,invalidate+' must dismiss confirmation');
+  h.get('manual-confirm').events.click();assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0,invalidate+' cannot execute');
+  if(['dismiss','escape'].includes(invalidate)){
+    value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('manual-execution-dialog').open,false,'polling cannot reopen a dismissed review');
+  }
+  h.app.destroy();
+}
+{
+  const {h,value,post,ready}=await pendingManualExecution();h.reply(post,{job_id:'intent-job'});await settle();
+  ready().workflow.review.request_job_id='another-job';h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('manual-execution-dialog').open,false,'an unrelated request cannot open confirmation');
+  h.get('jaw-left').value=72;h.get('jaw-left').events.input();value.revision++;value.workflow.review.request_job_id='intent-job';
+  h.app.poll();h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('manual-execution-dialog').open,false,'an edited pending intent cannot be resurrected by a late matching review');h.app.destroy();
 }
 
 {
@@ -687,6 +784,20 @@ function deletionSnapshot(){
   assert.match(h.get('manual-error').textContent,/超出限位/);assert.equal(h.requests.length,1,'invalid drafts cannot reach the renderer');
   position.value=10;position.events.input();h.app.selectTab('results');h.fireTimer(ms=>ms===33);
   assert.equal(h.requests.length,1,'leaving the work pane cancels pending automatic display');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=manualSnapshot();h.reply(0,value);await settle();
+  const inputs=role=>h.get('joint-inputs').querySelectorAll('input').filter(node=>node.dataset.role===role);
+  inputs('position')[0].value=12;inputs('position')[0].events.input();
+  inputs('speed')[0].value=.12;inputs('speed')[0].events.input();h.get('jaw-left').value=72;h.get('jaw-left').events.input();
+  h.app.poll();h.reply(1,{...value,revision:2,manual:null,runtime:{...value.runtime,connected:false}});await settle();
+  assert.equal(inputs('position').length,0);assert.equal(h.get('manual-preview').disabled,true);
+  value.revision=3;value.manual.positions[0]=.2;h.app.poll();h.reply(2,value);await settle();
+  assert.equal(inputs('position').length,12,'reconnecting with the same joint definitions rebuilds cleared controls');
+  assert.equal(Number(inputs('position')[0].value),12,'reconnection preserves the editable target draft');
+  assert.equal(Number(inputs('speed')[0].value),.12);assert.equal(Number(h.get('jaw-left').value),72);
+  assert.match(h.get('joint-inputs').querySelectorAll('small').find(node=>node.dataset.role==='actual').textContent,/11\.46/);
+  assert.equal(h.get('manual-preview').disabled,false);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'rebuilding controls never issues motion');h.app.destroy();
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();

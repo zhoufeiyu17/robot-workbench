@@ -241,8 +241,11 @@ class HTTPTest(unittest.TestCase):
         self.assertIn('calibration_capture_ack_v1',state['runtime']['capabilities'])
         self.assertFalse(self.state('collection')['runtime']['allowed_operations']['preview']['allowed'])
         q=state['manual']['positions'][:];q[0]+=.01
-        self.action('manual_preview',q12=q,jaw_gap_mm=[80.,80.])
+        _,accepted=self.action('manual_preview',q12=q,jaw_gap_mm=[80.,80.])
         ready=self.wait(lambda s:s['workflow'].get('review'))
+        self.assertEqual(ready['workflow']['review']['request_job_id'],accepted['job_id'])
+        self.assertGreater(ready['workflow']['review']['total_motion_duration_s'],0.)
+        self.assertEqual(ready['workflow']['review']['waypoint_jaw_gap_mm'],[[80.,80.]])
         self.assertEqual(ready['workflow']['primary_action']['id'],'manual_execute')
         self.assertEqual(ready['workflow']['stage_id'],'manual.review')
         self.assertEqual(ready['workflow']['status'],'awaiting_review')

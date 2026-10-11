@@ -99,6 +99,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   let waitingForStateNotice=true;
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
   let resultActions=[],queueActions=[],replayControlsKey='',manualQueueKey='';
+  let manualIntent=null;
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
   let speedKey='',trajectoryKey='',trajectory=null,trajectoryRequest=null;
   let replayVideos=[],pairedCamera='',pairedPosition=0,pairedStarted=0,pairedPlaying=false,pairedRate=1,pairVersion=0;
@@ -153,7 +154,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
   }
   function syncJointSliders(){jointInputs('slider').forEach((input,index)=>input.value=jointInputs('position')[index].value);}
-  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked,releaseSupported:el('release-supported').checked,deleteClearance:el('delete-clearance').checked});
+  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('manual-execution-dialog').open?el('manual-clearance').checked:el('clearance').checked, supported:el('supported').checked,releaseSupported:el('release-supported').checked,deleteClearance:el('delete-clearance').checked});
   const permission = action => ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
     ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
     ? {allowed:false,reason:'本次删除确认已提交，请查看删除回执；旧预览不能重复确认'} : actionPermission(state, action, {...options(),...(DISPLAY_ACTIONS.includes(action)?{pending:false}:{})});
@@ -355,6 +356,52 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const paired=pair().length===2;for(const row of replayVideos){row.figure.hidden=!!row.camera&&row.camera!==pairedCamera;row.node.controls=!paired||row.camera!==pairedCamera;}
     seekPair(0);
   }
+  function manualPreviewNotice(){
+    const request=state?.workflow?.request;
+    if(!['manual_preview','manual_queue_preview'].includes(request?.action)||!['running','failed'].includes(request.status))return null;
+    const name=request.action==='manual_preview'?'单姿态':'整队',running=request.status==='running';
+    const end=running?state.server_wall_ns:request.finished_wall_ns;
+    const elapsed=Number.isFinite(end)&&Number.isFinite(request.started_wall_ns)?` · 已耗时 ${Math.max(0,(end-request.started_wall_ns)/1e9).toFixed(1)} 秒`:'';
+    const stage=state.workflow.manual_preflight?.stage;
+    const title=running?`正在检查${name}动作${stage?' · '+stage:''}`:`${name}执行前检查失败`;
+    return {status:request.status,title,message:running?`${title}${elapsed}。尚未执行；检查通过后将弹出本次动作确认。`:`${title}${elapsed}：${operatorText(request.error)}。未下发本次运动；请根据原因处理后重新点击执行。`};
+  }
+  const manualBinding=()=>JSON.stringify([key(),serverInstance,state?.device?.id,state?.runtime?.runtime_nonce,state?.runtime?.command_epoch,state?.runtime?.calibration_revision,state?.runtime?.holder]);
+  function dismissManualExecution(){
+    if(manualIntent?.reviewId)invalidatedReviews.add(manualIntent.context+'/'+manualIntent.reviewId);
+    manualIntent=null;el('manual-clearance').checked=false;
+    if(el('manual-execution-dialog').open)el('manual-execution-dialog').close();
+  }
+  function renderManualExecution(){
+    const intent=manualIntent,w=state?.workflow,review=w?.review;
+    if(!intent)return;
+    if(intent.binding!==manualBinding()||!options().fresh||
+        intent.queueRevision!==undefined&&intent.queueRevision!==state?.manual?.queue?.revision||
+        w?.request?.id===intent.jobId&&w.request.status==='failed'){
+      dismissManualExecution();return;
+    }
+    if(!intent.jobId)return;
+    if(w?.request?.id===intent.jobId&&w.request.status==='running'){
+      el('manual-confirm').disabled=true;return;
+    }
+    const matching=review?.request_job_id===intent.jobId&&w.primary_action?.id==='manual_execute';
+    if(intent.reviewId&&(!matching||review.id!==intent.reviewId)){dismissManualExecution();return;}
+    if(!matching)return;
+    const gate=actionPermission(state,'manual_execute',{...options(),pending:false,clearance:true});
+    if(!gate.allowed||invalidatedReviews.has(key()+'/'+review.id)){dismissManualExecution();return;}
+    if(!intent.reviewId){
+      intent.reviewId=review.id;
+      setText('manual-confirm-title',intent.action==='manual_preview'?'执行到目标姿态':'执行整队');
+      setText('manual-confirm-summary',operatorText(review.summary));
+      setText('manual-confirm-duration',Number.isFinite(review.total_motion_duration_s)?'预计运动用时：'+seconds(review.total_motion_duration_s)+(context.environment==='fake'?'（仿真时间，实际等待可能更长）':''):'预计运动用时：见本次执行摘要');
+      const jaws=review.waypoint_jaw_gap_mm||intent.jaws;
+      setText('manual-confirm-jaws',(review.waypoint_jaw_gap_mm?'冻结夹爪目标':'本次请求夹爪目标')+' · '+jaws.map((row,i)=>`${jaws.length>1?'点 '+(i+1)+'：':''}左 ${textValue(row?.[0])} / 右 ${textValue(row?.[1])} mm`).join('；'));
+      el('manual-clearance').checked=false;
+      el('manual-clearance-label').hidden=!(context.environment==='physical'||review.physical_clearance_required);
+      el('manual-execution-dialog').showModal();
+    }
+    const allowed=permission('manual_execute');el('manual-confirm').disabled=!allowed.allowed;setText('manual-confirm-reason',allowed.reason);
+  }
   function renderGates() {
     const primary = state?.workflow?.primary_action;
     setText('primary',primary?.label || '等待可用操作');
@@ -370,6 +417,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const preview=state?.preview,displayBusy=view=>displayRequests.has(view)||displayRequests.has('recovery');
     gate('mesh',preview?'preview_mesh':'mesh',preview&&displayBusy('mesh')?'叠加设置正在更新':preview&&permission('preview_mesh').allowed&&!meshCandidate&&!preview.mesh?.requested?'请选择与相机匹配的标定候选':'');
     gate('manual-preview','manual_preview',manualReady() ? '' : '尚无完整关节定义、限位与实测反馈');
+    renderManualExecution();
+    const manualNotice=manualPreviewNotice(),manualReview=primary?.id==='manual_execute'&&state?.workflow?.review;
+    setText('manual-request-status',manualNotice?.message||(manualIntent?.reviewId?'请在弹窗中核对本次动作并确认；关闭不会执行。':manualIntent?'正在提交执行前检查，尚未执行。':manualReview?'本页没有待确认动作。点击执行入口将重新检查；不会自动执行已有审阅。':'拖动只更新目标画面。点击执行后检查动作，并在弹窗中确认一次。'));
+    el('manual-request-status').className=manualNotice?.status==='failed'?'tone-bad':'hint';
     gate('show-target','preview_target',displayRequests.has('recovery')?'渲染服务正在恢复':manualReady()?'':'尚无完整关节定义、限位与实测反馈');
     const manualDisabled = el('manual-preview').disabled&&el('show-target').disabled;
     for(const input of el('joint-inputs').querySelectorAll('input')) input.disabled=manualDisabled;
@@ -439,7 +490,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     for(const [index,node]of [...el('joint-inputs').querySelectorAll('small')].filter(node=>node.dataset.role==='actual').entries())
       node.textContent=Number.isFinite(m?.positions?.[index])?'实测 '+degrees(m.positions[index]).toFixed(2)+'°':'实测未知';
     if(signature===manualKey)return;
-    el('joint-inputs').replaceChildren();
+    el('joint-inputs').replaceChildren();manualKey='';
     if(!manualReady())return;
     manualKey=signature;
     const speedDetails=make('details',undefined,'joint-speeds');speedDetails.append(make('summary','逐关节速度 · rad/s'));
@@ -462,6 +513,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   function editManual(){
     finishAudit('人工姿态草稿改变');
+    dismissManualExecution();
     if(state?.workflow?.primary_action?.id==='manual_execute'&&state.workflow.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     saveDraft();clearReview();renderGates();
     clearTimeout(autoPreviewTimer);const binding=targetBinding();
@@ -629,7 +681,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const s=state, r=s?.runtime||{}, w=s?.workflow||{};
     el('work-pane').dataset.business=context.business;
     setText('observation-title',context.business==='calibration'?'调姿预览与相机':'实际观测与规划场景');
-    el('primary-action').hidden=context.business==='collection'&&!!w.collection?.actions&&w.primary_action?.id!=='prepare_collection';
+    el('primary-action').hidden=w.primary_action?.id==='manual_execute'||context.business==='collection'&&!!w.collection?.actions&&w.primary_action?.id!=='prepare_collection';
     el('results-business').value=context.business;
     setText('device-name',s?.device?.label||s?.device?.id||'机器人工作台');
     setText('holder',BUSINESS[r.holder] || (r.holder ? String(r.holder) : '未分配 / 未知'));
@@ -647,11 +699,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('motion').title=r.motion_status==='no_automatic_task'?'当前没有自动动作任务；此状态不代表物理静止，仍需核对设备反馈。':'';
     setText('stop-state',r.stop_receipt?(r.stop_receipt.stop_hold_return_confirmed===true?'停止：保持调用已确认':'停止：已受理，尚未确认'):'');
     setText('release-state',r.release_receipt?({requested:'释放：已受理，等待设备断开',released:'释放：设备连接已断开',unconfirmed:'释放：尚未确认'}[r.release_receipt.status]||'释放：状态待核验')+(r.release_receipt.message?' · '+r.release_receipt.message:''):'');
-    setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',statusText(w.status));
-    setText('run-identity','Run：'+textValue(w.id));setText('stage-title',STAGE_LABELS[w.stage_id]||operatorText(w.title&&/[\u3400-\u9fff]/.test(w.title)?w.title:'等待任务状态'));setText('stage-id',w.stage_id||'—');
+    const manualNotice=manualPreviewNotice(),idleManualNotice=['calibration.idle','collection.idle'].includes(w.stage_id)&&manualNotice;
+    setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',idleManualNotice?(manualNotice.status==='running'?'执行前检查':'检查失败'):statusText(w.status));
+    setText('run-identity','Run：'+textValue(w.id));setText('stage-title',idleManualNotice?manualNotice.title:STAGE_LABELS[w.stage_id]||operatorText(w.title&&/[\u3400-\u9fff]/.test(w.title)?w.title:'等待任务状态'));setText('stage-id',w.stage_id||'—');
     const actionName={generate_plan:'生成计划',collection_prepare:'准备数采环境',collection_plan:'观测与规划',execute:'执行已审阅轨迹',manual_preview:'检查人工轨迹',fit_batch:'求解当前批次',plan_batch:'规划当前批次',preview_batch:'审阅当前批次'};
     const taskMessage=w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理：'+(actionName[w.request.action]||'当前操作')+'。'+(w.message||''):w.message||'尚未取得当前任务回执。';
-    setText('task-message',operatorText(taskMessage));
+    setText('task-message',idleManualNotice?manualNotice.message:operatorText(taskMessage));
     const p=countedProgress(w.progress);el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
     if(p){el('task-progress').max=p.total;el('task-progress').value=p.current;}
     else el('task-progress').removeAttribute('value');
@@ -664,7 +717,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     renderTrajectory();
     const nextReviewKey=JSON.stringify([key(),w.id,w.revision,w.review?.id]);
     if(nextReviewKey!==reviewKey){reviewKey=nextReviewKey;clearReview();}
-    el('review-panel').hidden=!w.review;
+    el('review-panel').hidden=!w.review||w.primary_action?.id==='manual_execute';
     setText('review-summary',w.review?.summary||'尚无执行摘要');setText('review-id','审阅身份：'+textValue(w.review?.id));
     el('clearance-label').hidden=!w.review || !(context.environment==='physical'||w.review.physical_clearance_required);
     const outcomes=w.outcomes||{};
@@ -942,6 +995,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(instance===serverInstance)return true;
     // Legacy snapshots may be read before upgrading, but cannot replace a known instance.
     if(instance===null||retiredServerInstances.has(instance))return false;
+    dismissManualExecution();
     finishAudit('服务实例变化');
     cancelTarget('服务实例变化');
     if(serverInstance!==null)retiredServerInstances.add(serverInstance);
@@ -957,6 +1011,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return true;
   }
   function barrier() {
+    dismissManualExecution();
     clearTimeout(autoPreviewTimer);autoPreviewTimer=null;
     cancelTarget('页面控制或上下文已改变');
     generation++;polling?.abort();polling=null;clearReview();
@@ -1062,7 +1117,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(action==='preview_batch'&&body.queue_revision===undefined)body.queue_revision=state?.workflow?.calibration_tools?.queue_revision;
     if(action==='fit_batch'&&body.batch_id===undefined)body.batch_id=state?.workflow?.calibration_tools?.fit_source_id;
     if(action==='delete_confirm'){body.delete_preview_id=state.workflow.deletion_preview.id;body.confirmed=el('delete-clearance').checked;confirmedDeletions.add(key()+'/'+body.delete_preview_id);}
-    if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?el('clearance').checked:true;}
+    if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?options().clearance:true;}
     if(action==='connect'&&context.environment==='physical')body.arms_supported=el('supported').checked;
     if(action==='release')body.arms_supported=el('release-supported').checked;
     if(context.business==='collection'&&['generate_plan','collection_plan','execute'].includes(action))body.speed_scale=Number(el('collection-speed').value)/100;
@@ -1070,12 +1125,16 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(state.workflow?.review?.id&&['stop','cancel','handoff','release','generate_plan','collection_prepare','collection_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     barrier();const at=generation;displayedRequest=sequence;pending.set(sequence,{action,context:requestContext,controller});
+    if(['manual_preview','manual_queue_preview'].includes(action))manualIntent={action,requestId,jobId:null,reviewId:null,context:requestContext,binding:manualBinding(),
+      queueRevision:action==='manual_queue_preview'?body.queue_revision:undefined,
+      jaws:JSON.parse(JSON.stringify(action==='manual_preview'?[body.jaw_gap_mm]:state.manual.queue.waypoints.map(row=>row.jaw_gap_mm)))};
     notice(action==='stop'?'正在请求停止；等待后端停止回执。':'请求已发送，等待后端受理；尚未确认完成。',true);renderGates();
     try {
       const response=await request('/api/actions/'+encodeURIComponent(action),{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body),signal:controller.signal});
       const result=await response.json();if(!response.ok)throw Error(result.message||result.error||result.reason||'请求被拒绝');
+      if(manualIntent?.requestId===requestId){if(typeof result.job_id==='string')manualIntent.jobId=result.job_id;else dismissManualExecution();}
       if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice(result.message||(action==='stop'?'停止请求已受理；以停止回执为准。':'请求已受理；以任务回执为准。'));
-    } catch(error) {if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice('请求结果未确认：'+error.message+'；不会自动重试，请核对状态。');}
+    } catch(error) {if(manualIntent?.requestId===requestId)dismissManualExecution();if(requestContext===key()&&requestInstance===serverInstance&&sequence===displayedRequest&&!controller.signal.aborted)notice('请求结果未确认：'+error.message+'；不会自动重试，请核对状态。');}
     finally {pending.delete(sequence);if(requestContext===key()&&requestInstance===serverInstance){el('supported').checked=false;el('release-supported').checked=false;renderGates();if(at===generation)void poll();}}
   }
   function switchContext(next) {
@@ -1090,6 +1149,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     notice('正在核验'+ENVIRONMENT[context.environment]+' / '+BUSINESS[context.business]+'；浏览不会交接控制权。',false,true);render();void poll();
   }
   function selectTab(next) {
+    if(next!==tab)dismissManualExecution();
     if(next!=='results')pausePair();
     if(next!==context.business)finishAudit('目标图像离开当前可见工作区');
     tab=next;for(const button of doc.querySelectorAll('[data-tab]')){if(button.dataset.tab===next)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');}
@@ -1115,7 +1175,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('results-business').addEventListener('change',()=>{const business=el('results-business').value;if(BUSINESS[business])switchContext({...context,business});});
     el('calibration-compare-link').addEventListener('click',()=>{if(context.business!=='calibration')switchContext({...context,business:'calibration'});selectTab('results');});
     el('observation-camera').addEventListener('change',()=>{const value=el('observation-camera').value;if(['all','head','left','right'].includes(value)){observationCamera=value;el('camera-grid').dataset.camera=value;saveDraft();}});
-    el('primary').addEventListener('click',()=>{if(state?.workflow?.primary_action)void send(state.workflow.primary_action.id);});
+    el('primary').addEventListener('click',()=>{if(state?.workflow?.primary_action&&state.workflow.primary_action.id!=='manual_execute')void send(state.workflow.primary_action.id);});
+    el('manual-confirm').addEventListener('click',()=>{renderManualExecution();if(el('manual-execution-dialog').open&&manualIntent?.reviewId===state?.workflow?.review?.id&&permission('manual_execute').allowed)void send('manual_execute');});
+    el('manual-dismiss').addEventListener('click',()=>{dismissManualExecution();renderGates();});
+    el('manual-execution-dialog').addEventListener('cancel',event=>{event.preventDefault();dismissManualExecution();renderGates();});
+    el('manual-execution-dialog').addEventListener('close',()=>{if(!el('manual-execution-dialog').open){dismissManualExecution();renderGates();}});
+    el('manual-clearance').addEventListener('change',renderGates);
     el('replan').addEventListener('click',()=>send('generate_plan',{replan:true}));
     el('collection-prepare').addEventListener('click',()=>send('collection_prepare'));
     el('collection-plan').addEventListener('click',()=>send('collection_plan'));
