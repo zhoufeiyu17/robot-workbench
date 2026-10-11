@@ -305,6 +305,33 @@ class HTTPTest(unittest.TestCase):
         self.assertNotIn('joints',state['arrival_statistics'])
         self.assertFalse(state['runtime']['allowed_operations']['manual_queue_preview']['allowed'])
 
+    def test_calibration_execute_ui_shares_host_age_gate_without_polling_devices(self):
+        self.connect();c,flow=self.calibration_adapter();c.pipeline_review={'kind':'head'}
+        c.hardware_reader=SimpleNamespace(max_age_s=.5,read_state=Mock(side_effect=AssertionError('state polled a device')))
+        c.control_request=Mock(side_effect=AssertionError('state made a control HTTP request'))
+        baseline=self.device.snapshot('calibration')
+        baseline['allowed_operations']['confirm']=dict(allowed=True,reason=None)
+        self.app.add_review(self.device,'calibration',dict(token='UI-gate-fixture',owner_pid=baseline['pid'],
+            command_epoch=baseline['command_epoch']),'execute','CPU UI readiness fixture')
+        from copy import deepcopy
+        age=[.501]
+        def snapshot(business):
+            value=deepcopy(baseline)
+            value['calibration_feedback']['sample_wall_ns']=time.time_ns()-round(age[0]*1e9)
+            return value
+        with patch.object(self.device,'snapshot',side_effect=snapshot):
+            for age[0],ready in ((.501,False),(-1.,False),(.02,True)):
+                state=self.state();workflow=state['workflow'];allowed=state['runtime']['allowed_operations']
+                self.assertEqual(workflow['control_readiness']['host_sample_recent'],ready)
+                self.assertEqual(workflow['primary_action']['allowed'],ready)
+                self.assertEqual(allowed['execute']['allowed'],ready)
+                self.assertEqual(allowed['confirm']['allowed'],ready)
+            self.device.workflows.pop('calibration');self.app.reviews.clear();age[0]=1.
+            state=self.state()
+            self.assertNotIn('control_readiness',state['workflow'])
+            self.assertTrue(state['runtime']['allowed_operations']['confirm']['allowed'])
+        c.hardware_reader.read_state.assert_not_called();c.control_request.assert_not_called()
+
     def test_independent_capture_calls_real_C_and_persists_before_shared_Owner_ACK(self):
         self.connect();c,flow=self.calibration_adapter()
         c.frames=[];c.selected_batch=None;c.evaluation=None;c.batch=None;c.calibration_previews={}

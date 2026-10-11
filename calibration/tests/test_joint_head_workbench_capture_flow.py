@@ -144,6 +144,39 @@ class CaptureFlowTests(unittest.TestCase):
                 self.assertEqual(a.calibration_previews,{})
                 a.collect_hardware.assert_not_called()
 
+    def test_preflight_failure_preserves_exact_read_diagnostics_without_command_retry(self):
+        _,view=self.fresh_control();a=self.app;a.pipeline_run_id='diagnostic-run'
+        stamp=time.time_ns()
+        view['feedback'].update(valid=False,reasons=['host_sample_stale_or_clock_skew'])
+        first=None
+        for age,message in ((.501,'已过期'),(-.001,'超前')):
+            detail=dict(request_start_wall_ns=stamp-1,request_start_monotonic_s=1.,
+                response_end_wall_ns=stamp,response_end_monotonic_s=1.01,
+                raw_sample_wall_ns=stamp,raw_sample_wall_ns_type='int',normalize_now_ns=stamp+round(age*1e9),
+                normalized_age_s=age,max_age_s=.5,branch='raw_owner',pid=123,command_epoch=4,
+                clock_domain='host_wall',source_clock_id=None,source_time_ns=None,physics_step=None,
+                reasons=['host_sample_stale_or_clock_skew'])
+            view['read_diagnostics']=detail
+            with self.assertRaisesRegex(ValueError,message) as rejected:a.require_real_control()
+            self.assertNotIn('request_start_wall_ns',str(rejected.exception))
+            failure=a.control_preflight_failure;path=Path(failure['path'])
+            self.assertTrue(path.is_relative_to(a.output/'diagnostics'))
+            self.assertEqual(json.loads(path.read_text())['read_diagnostics'],detail)
+            self.assertEqual((failure['run_id'],failure['stage_id']),('diagnostic-run','head.preflight'))
+            if first:self.assertEqual(first[0].read_bytes(),first[1])
+            else:first=(path,path.read_bytes())
+        self.assertEqual(len(list((a.output/'diagnostics').glob('control-preflight-*.json'))),2)
+        self.assertEqual([action for action,_ in self.calls],['state','state'])
+        a.collect_hardware.assert_not_called()
+
+    def test_diagnostic_write_failure_keeps_original_rejection_in_memory(self):
+        _,view=self.fresh_control();view['feedback'].update(valid=False,reasons=['owner_feedback_unhealthy'])
+        with patch('robot_workbench.collection_setup.write',side_effect=OSError('read-only output')):
+            with self.assertRaisesRegex(ValueError,'诊断文件保存失败'):self.app.require_real_control()
+        self.assertIn('owner_feedback_unhealthy',self.app.control_preflight_failure['error'])
+        self.assertIn('read-only output',self.app.control_preflight_failure['save_error'])
+        self.assertEqual(self.calls,[('state',None)])
+
     def test_fake_capture_passes_source_readiness_and_keeps_wall_ack_nonce(self):
         a=self.app;a.config.update(environment='fake',simulation_only=True,robot_source='simulated')
         a.hardware_feedback={'owner':dict(mode='simulation',environment='fake',simulation_only=True)}
@@ -472,7 +505,8 @@ class CaptureFlowTests(unittest.TestCase):
 
     def test_hardware_disconnection_refuses_preview_without_simulation_fallback(self):
         _,view=self.fresh_control();view.update(reachable=False,error='current reader disconnected')
-        with self.assertRaisesRegex(ValueError,'disconnected'):self.app.preview_calibration()
+        with self.assertRaisesRegex(ValueError,'查看诊断'):self.app.preview_calibration()
+        self.assertIn('disconnected',self.app.control_preflight_failure['error'])
         self.assertEqual(self.calls,[('state',None)]);self.app.remote_request.assert_not_called()
 
     def test_stop_before_collection_never_samples_or_acknowledges(self):

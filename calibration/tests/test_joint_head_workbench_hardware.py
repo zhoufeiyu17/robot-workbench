@@ -83,13 +83,58 @@ class HardwareReadTest(unittest.TestCase):
         adapter=HardwareReadAdapter(8120);adapter.http=Mock()
         payload=dict(source='read-only-status-gateway',owner=self.owner,source_age_s=.02)
         adapter.http.open.return_value=io.BytesIO(json.dumps(payload).encode())
-        with patch('time.time_ns',return_value=self.now+99_000_000_000), patch('time.monotonic',side_effect=[10.,10.03]):
+        with patch('time.time_ns',return_value=self.now+99_000_000_000), patch('time.monotonic',side_effect=[10.,10.03,10.03]):
             result=adapter.read_state()
         self.assertTrue(result['feedback']['valid'])
         self.assertAlmostEqual(result['feedback']['host_sample_age_s'],.05,places=6)
+        diagnostic=result['read_diagnostics']
+        self.assertEqual(diagnostic['branch'],'status_gateway')
+        self.assertEqual(diagnostic['raw_sample_wall_ns'],self.now)
+        self.assertEqual(diagnostic['raw_sample_wall_ns_type'],'int')
+        self.assertEqual(diagnostic['normalize_now_ns'],self.now+int((.02+diagnostic['gateway_elapsed_s'])*1e9))
+        self.assertAlmostEqual(diagnostic['gateway_elapsed_s'],.03)
+        self.assertEqual(diagnostic['response_end_wall_ns'],self.now+99_000_000_000)
         payload['source_age_s']=1
         adapter.http.open.return_value=io.BytesIO(json.dumps(payload).encode())
         self.assertFalse(adapter.read_state()['feedback']['valid'])
+
+    def test_read_diagnostics_preserve_raw_timestamp_and_all_age_boundaries(self):
+        adapter=HardwareReadAdapter(8120);adapter.http=Mock()
+        for age_ns in (49_000_000,501_000_000,-1):
+            with self.subTest(age_ns=age_ns):
+                adapter.http.open.return_value=io.BytesIO(json.dumps(self.owner).encode())
+                end=self.now+age_ns
+                with patch('time.time_ns',side_effect=[end-10_000_000,end-1,end]), \
+                     patch('time.monotonic',side_effect=[100.,100.01]):
+                    result=adapter.read_state()
+                diagnostic=result['read_diagnostics']
+                self.assertEqual(diagnostic['request_start_wall_ns'],end-10_000_000)
+                self.assertEqual(diagnostic['response_end_wall_ns'],end-1)
+                self.assertEqual(diagnostic['request_start_monotonic_s'],100.)
+                self.assertEqual(diagnostic['response_end_monotonic_s'],100.01)
+                self.assertEqual(diagnostic['raw_sample_wall_ns'],self.now)
+                self.assertEqual(result['raw_owner']['calibration_feedback']['sample_wall_ns'],self.now)
+                self.assertEqual(diagnostic['raw_sample_wall_ns_type'],'int')
+                self.assertEqual(diagnostic['normalize_now_ns'],end)
+                self.assertEqual(diagnostic['normalized_age_s'],age_ns/1e9)
+                self.assertEqual(diagnostic['max_age_s'],.5)
+                self.assertEqual(diagnostic['branch'],'raw_owner')
+                self.assertEqual((diagnostic['pid'],diagnostic['command_epoch']),(123,2))
+                self.assertEqual(diagnostic['valid'],age_ns==49_000_000)
+
+    def test_malformed_wall_values_remain_visible_in_json_safe_diagnostics(self):
+        for wall in (None,float(self.now),float('nan')):
+            with self.subTest(wall=wall):
+                adapter=HardwareReadAdapter(8120);adapter.http=Mock()
+                owner=copy.deepcopy(self.owner);owner['calibration_feedback']['sample_wall_ns']=wall
+                adapter.http.open.return_value=io.BytesIO(json.dumps(owner).encode())
+                with patch('time.time_ns',return_value=self.now):result=adapter.read_state()
+                self.assertFalse(result['feedback']['valid'])
+                diagnostic=result['read_diagnostics']
+                self.assertEqual(diagnostic['raw_sample_wall_ns_type'],type(wall).__name__)
+                self.assertIsNone(diagnostic['normalized_age_s'])
+                json.dumps(diagnostic,allow_nan=False)
+                adapter.http.open.assert_called_once()
 
     def test_only_fixed_get_no_redirect_no_stale_fallback(self):
         adapter = HardwareReadAdapter(8098)

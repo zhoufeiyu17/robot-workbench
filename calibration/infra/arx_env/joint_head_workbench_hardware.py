@@ -5,7 +5,7 @@ from pathlib import Path
 import threading
 import time
 from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
-from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp
+from robot_workbench.sample_clock import assert_progress, clock_spec, sample_stamp, host_sample_status
 
 
 def camera_process_inventory(serials, *, proc_root='/proc'):
@@ -111,8 +111,8 @@ def normalize_owner_state(owner, *, now_ns, previous=None, max_age_s=.5, environ
     if not sdk_valid:
         reasons.append('sdk_timestamps_invalid')
     wall = feedback.get('sample_wall_ns')
-    age = (now_ns-wall)/1e9 if type(wall) is int else None
-    recent = age is not None and 0 <= age <= max_age_s
+    host = host_sample_status(wall,now_ns,max_age_s=max_age_s)
+    age,recent = host['host_sample_age_s'],host['host_sample_recent']
     if not recent:
         reasons.append('host_sample_stale_or_clock_skew')
     sdk = dict(zip(('left', 'right'), stamps)) if sdk_valid else {'left': None, 'right': None}
@@ -180,19 +180,42 @@ class HardwareReadAdapter:
 
     def read_state(self):
         with self.lock:
+            diagnostic=dict(request_start_wall_ns=time.time_ns(),request_start_monotonic_s=time.monotonic(),
+                response_end_wall_ns=None,response_end_monotonic_s=None,branch='no_response',max_age_s=self.max_age_s,
+                raw_sample_wall_ns=None,raw_sample_wall_ns_type='unavailable',normalize_now_ns=None,normalized_age_s=None)
+            started=diagnostic['request_start_monotonic_s']
             try:
-                started=time.monotonic()
                 with self.http.open(self.url, timeout=self.timeout_s) as response:
                     payload = response.read(4*1024*1024+1)
+                diagnostic.update(response_end_wall_ns=time.time_ns(),response_end_monotonic_s=time.monotonic(),branch='unparsed_response')
                 if len(payload) > 4*1024*1024:
                     raise ValueError('owner state reply too large')
                 value=json.loads(payload)
                 now=time.time_ns()
+                if not isinstance(value,dict):raise ValueError('owner state must be an object')
+                wrapped=value.get('source')=='read-only-status-gateway'
+                raw_owner=value.get('owner',{}) if wrapped else value
+                if not isinstance(raw_owner,dict):raise ValueError('owner state must be an object')
+                raw=raw_owner.get('calibration_feedback')
+                raw=raw if isinstance(raw,dict) else {};wall=raw.get('sample_wall_ns')
+                # repr preserves malformed/nonfinite raw values without invalid JSON diagnostics.
+                scalar=lambda v:v if v is None or type(v) in (bool,int,str) or type(v) is float and math.isfinite(v) else repr(v)
+                diagnostic.update(branch='status_gateway' if wrapped else 'raw_owner',
+                    raw_sample_wall_ns=scalar(wall),raw_sample_wall_ns_type=type(wall).__name__,
+                    pid=scalar(raw_owner.get('pid')),command_epoch=scalar(raw_owner.get('command_epoch')),
+                    runtime_nonce=scalar(raw_owner.get('runtime_nonce')),
+                    clock_domain=scalar(raw.get('clock_domain')),source_clock_id=scalar(raw.get('source_clock_id')),
+                    source_time_ns=scalar(raw.get('source_time_ns')),physics_step=scalar(raw.get('physics_step')),
+                    sdk_timestamps=[scalar(v) for v in raw['sdk_timestamps']] if isinstance(raw.get('sdk_timestamps'),list) else scalar(raw.get('sdk_timestamps')))
                 if value.get("source") == "read-only-status-gateway":
-                    age=value["source_age_s"]
+                    age=value.get("source_age_s")
+                    diagnostic['gateway_source_age_s']=scalar(age)
                     if not _number(age) or age<0:raise ValueError("invalid source age")
                     value=value["owner"]
-                    now=value["calibration_feedback"]["sample_wall_ns"]+int((age+time.monotonic()-started)*1e9)
+                    elapsed=time.monotonic()-started
+                    diagnostic['gateway_elapsed_s']=elapsed
+                    now=value["calibration_feedback"]["sample_wall_ns"]+int((age+elapsed)*1e9)
+                diagnostic['normalize_now_ns']=now
                 result = normalize_owner_state(value, now_ns=now,
                                                previous=self.previous, max_age_s=self.max_age_s,
                                                environment=self.environment,source_clock_id=self.source_clock_id)
@@ -204,6 +227,9 @@ class HardwareReadAdapter:
                         result['feedback']['reasons'].append('source_clock_invalid: '+str(exc))
                         result.update(q_actual_rad=None,jaw_positions_m=None)
                     else:self.source_clock_id,self.source_stamp=result['feedback']['source_clock_id'],point
+                diagnostic.update(normalized_age_s=result['feedback']['host_sample_age_s'],
+                    valid=result['feedback']['valid'],reasons=list(result['feedback']['reasons']))
+                result['read_diagnostics']=diagnostic
                 self.previous = result
                 return result
             except (OSError, ValueError) as exc:
@@ -211,6 +237,8 @@ class HardwareReadAdapter:
                 result = normalize_owner_state({}, now_ns=time.time_ns(), max_age_s=self.max_age_s,
                                                environment=self.environment,source_clock_id=self.source_clock_id)
                 result.update(reachable=False, error=f'{type(exc).__name__}: {exc}')
+                diagnostic.update(failure_wall_ns=time.time_ns(),failure_monotonic_s=time.monotonic(),error=result['error'])
+                result['read_diagnostics']=diagnostic
                 return result
 
 

@@ -11,8 +11,9 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit,urlencode
-from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS
+from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS,CalibrationWorkflow
 from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
+from robot_workbench.sample_clock import host_sample_status
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection')
@@ -251,6 +252,14 @@ class Application:
         device = self.device(environment)
         runtime = device.snapshot(business)
         workflow = device.workflows.get(business)
+        readiness=None
+        if business=='calibration' and isinstance(workflow,CalibrationWorkflow):
+            reader=getattr(workflow.app,'hardware_reader',None)
+            readiness=host_sample_status((runtime.get('calibration_feedback') or {}).get('sample_wall_ns'),
+                time.time_ns(),max_age_s=min(.5,getattr(reader,'max_age_s',.5)))
+            gate=runtime['allowed_operations'].get('confirm',{})
+            if not readiness['host_sample_recent'] and gate.get('allowed'):
+                runtime['allowed_operations']['confirm']=dict(allowed=False,reason=readiness['reason'])
         with self.lock:
             self.revision += 1
             revision = self.revision
@@ -260,6 +269,7 @@ class Application:
         value = workflow.snapshot() if workflow else dict(status='unconfigured',busy=False,
             stage_id='configuration',title='配置业务后端',message='设备控制可独立验证；当前业务的采集、求解与数据路径尚未配置。',
             primary_action=None,progress=None,outcomes={})
+        if readiness is not None:value['control_readiness']=readiness
         preparation=device.collection_preparation.snapshot() if business=='collection' and device.collection_preparation else None
         preparing=bool(preparation and (workflow is None or preparation['busy'] or preparation['status']=='failed' and not value.get('busy')))
         if preparing:
@@ -342,6 +352,9 @@ class Application:
                     allowed[action]=workflow.allowed(action)
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
                     allowed[action]=dict(allowed=False,reason=allowed['preview']['reason'])
+        if readiness is not None and not readiness['host_sample_recent']:
+            for action in ('execute','manual_execute'):
+                if allowed[action]['allowed']:allowed[action]=dict(allowed=False,reason=readiness['reason'])
         if preparation:
             allowed['prepare_collection']=dict(allowed=preparation['can_retry'],reason=preparation['retry_reason'])
             if preparing:
@@ -351,6 +364,8 @@ class Application:
             for action in WARM_C_ACTIONS:allowed[action]=dict(allowed=False,reason=WARM_C_REASON)
         primary = value.get('primary_action')
         if primary and primary['id'] in (*CALIBRATION_TOOLS,'generate_plan') and not allowed[primary['id']]['allowed']:
+            primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
+        if readiness is not None and primary and primary['id'] in ('execute','manual_execute') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
         if primary and primary['id']!='prepare_collection' and (not runtime['connected'] or holder != business):
             primary.update(allowed=False,reason='请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有')

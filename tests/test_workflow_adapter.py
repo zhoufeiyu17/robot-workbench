@@ -229,6 +229,19 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.app.runtime_state.return_value['pipeline']['aborted']='本次真实失败原因'
         workflow.refresh();self.assertEqual(workflow.snapshot()['message'],'本次真实失败原因')
 
+    def test_calibration_preflight_details_stay_in_diagnostics_for_the_matching_run(self):
+        workflow=self.calibration()
+        failure=dict(run_id='run',stage_id='wrist.preflight',message='设备反馈样本已过期',
+            path='/task/diagnostics/failure.json',read_diagnostics={'normalized_age_s':.7})
+        workflow.app.control_preflight_failure=failure
+        value=workflow.snapshot()
+        self.assertEqual(value['diagnostics'][0]['value'],failure)
+        self.assertNotIn('normalized_age_s',value.get('message',''))
+        value['diagnostics'][0]['value']['read_diagnostics']['normalized_age_s']=99
+        self.assertEqual(failure['read_diagnostics']['normalized_age_s'],.7)
+        workflow.app.pipeline_run_id='new-run'
+        self.assertNotIn('diagnostics',workflow.snapshot())
+
     def test_head_and_wrist_route_separately_and_quality_does_not_block_replay(self):
         workflow=self.calibration();workflow.refresh()
         self.assertEqual([row['kind'] for row in workflow.results()],['head','wrist','capture'])

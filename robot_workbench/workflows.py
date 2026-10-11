@@ -230,11 +230,14 @@ class CalibrationWorkflow:
         with self.lock:
             value=deepcopy(self.value)
             failure=deepcopy(getattr(self,'preview_failure',None)) if getattr(self,'active',False) else None
+        preflight=getattr(self.app,'control_preflight_failure',None)
+        if preflight and preflight.get('run_id')==getattr(self.app,'pipeline_run_id',None):
+            value.setdefault('diagnostics',[]).append(dict(label='最近一次控制准备拒绝',value=deepcopy(preflight)))
         if failure:
             value.update(status='failed',failed_stage=failure['stage_id'],view_error=failure['error'],review_error=failure,
                 message='本批执行预览生成失败：'+failure['error']+'；请点击“重新生成本批执行预览”。',
                 primary_action=dict(id='generate_plan',label='重新生成本批执行预览',allowed=True,reason=None),
-                diagnostics=[dict(label='审阅预览发布失败',value=f"运行 {failure['run_id']} · {failure['stage_id']} · {failure['error']}")])
+                diagnostics=[*value.get('diagnostics',[]),dict(label='审阅预览发布失败',value=f"运行 {failure['run_id']} · {failure['stage_id']} · {failure['error']}")])
         value['deletion_preview']=self.deletion_preview()
         value['deletion_result']=deepcopy(getattr(self,'deletion_result',None))
         return value

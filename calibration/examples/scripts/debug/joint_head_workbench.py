@@ -366,23 +366,51 @@ class Workbench:
 
     def require_real_control(self):
         """One read-only calibration preflight, independent of UI monitor caches."""
-        if self.control_mode!='hardware_sync':raise ValueError('真机控制或反馈不可用：未处于真机同步模式')
-        status=self.control_request('state');received=time.monotonic()
-        value,feedback_received=self.poll_hardware()
-        owner=status.get('owner',{});measured=value['owner']
-        if (not status.get('motion_enabled') or time.monotonic()-received>=2
-                or time.monotonic()-feedback_received>=.5):
-            raise ValueError('真机控制或反馈不可用：当前控制权限或反馈新鲜度未通过')
-        if (owner.get('pid')!=measured.get('pid') or owner.get('command_epoch')!=measured.get('command_epoch')
-                or (owner.get('calibration_feedback') or {}).get('source_clock_id')
-                    !=(measured.get('calibration_feedback') or {}).get('source_clock_id')):
-            raise ValueError('真机控制或反馈不可用：当前控制与反馈的 owner/epoch/source 不一致')
-        return status
+        started=time.time_ns();monotonic=time.monotonic();phase='control_state';status=value=None
+        try:
+            if self.control_mode!='hardware_sync':raise ValueError('未处于真机同步模式')
+            status=self.control_request('state');received=time.monotonic();phase='feedback'
+            value,feedback_received=self.poll_hardware();phase='readiness'
+            owner=status.get('owner',{});measured=value['owner']
+            if (not status.get('motion_enabled') or time.monotonic()-received>=2
+                    or time.monotonic()-feedback_received>=.5):
+                raise ValueError('当前控制权限或反馈新鲜度未通过')
+            if (owner.get('pid')!=measured.get('pid') or owner.get('command_epoch')!=measured.get('command_epoch')
+                    or (owner.get('calibration_feedback') or {}).get('source_clock_id')
+                        !=(measured.get('calibration_feedback') or {}).get('source_clock_id')):
+                raise ValueError('当前控制与反馈的 owner/epoch/source 不一致')
+            return status
+        except Exception as error:
+            from robot_workbench.collection_setup import write
+            from robot_workbench.sample_clock import host_sample_status
+            detail=getattr(error,'read_diagnostics',None) or (value or {}).get('state_view',{}).get('read_diagnostics')
+            message='设备控制或反馈校验未通过，请查看诊断'
+            if detail and detail.get('reasons')==['host_sample_stale_or_clock_skew']:
+                message=host_sample_status(detail.get('raw_sample_wall_ns'),detail['normalize_now_ns'],
+                    max_age_s=detail['max_age_s'])['reason'] or message
+            ended=time.time_ns()
+            control_owner=status.get('owner',{}) if isinstance(status,dict) else {}
+            control_owner=control_owner if isinstance(control_owner,dict) else {}
+            failure=dict(schema='control-preflight-failure.v1',run_id=getattr(self,'pipeline_run_id',None),
+                stage_id=getattr(self,'workflow',{}).get('kind','calibration')+'.preflight',phase=phase,
+                request_start_wall_ns=started,request_end_wall_ns=ended,
+                request_start_monotonic_s=monotonic,request_end_monotonic_s=time.monotonic(),
+                error=type(error).__name__+': '+str(error),message=message,read_diagnostics=detail,
+                control_owner={key:control_owner.get(key) for key in ('pid','command_epoch','runtime_nonce')})
+            path=self.output/'diagnostics'/f'control-preflight-{ended}-{secrets.token_hex(4)}.json'
+            failure['path']=str(path)
+            try:write(path,failure)
+            except Exception as save_error:
+                failure['save_error']=type(save_error).__name__+': '+str(save_error)
+                message+='；诊断文件保存失败'
+            self.control_preflight_failure=failure
+            raise ValueError(message) from error
 
     def poll_hardware(self):
         """Share the monitor's source and two-arm SDK progression checks with action preflight."""
         with self.hardware_poll_lock:
             began=time.monotonic()
+            view=None
             try:
                 if self.hardware_reader is not None:
                     view=self.hardware_reader.read_state()
@@ -408,6 +436,7 @@ class Workbench:
                 with self.hardware_history_lock:self.hardware_history.append(value)
                 return value,self.hardware_received
             except Exception as exc:
+                exc.read_diagnostics=(view or {}).get('read_diagnostics')
                 reason=str(exc)
                 if reason!=self.hardware_error:self.hardware_last_disconnect={'reason':reason,'at_s':time.time()}
                 self.hardware_error=reason
@@ -2515,6 +2544,7 @@ class Workbench:
 
     def diagnostics(self):
         return {'live':bool(self.live),'capabilities':{'preview':True,'execute':True,'capture':True,'hardware':False},
+          'control_preflight_failure':getattr(self,'control_preflight_failure',None),
           'hardware_camera_configured':self.hardware_camera is not None,'hardware_adapter':{'read_adapter':'arx_env.joint_head_workbench_hardware.HardwareReadAdapter','read_configured':self.hardware_reader is not None,'verified':False,'owner':'joint_head_real_owner.py','joint_order':'left joint1..6, right joint1..6; jaws separate','required':['per-side/per-motor feedback age and validity','image exposure and joint bracketing timestamps','owner PID and command epoch','pedal and damping-stop acknowledgement','verified SDK speed and jaw limits','explicit takeover; no automatic reconnect/resume']},
           'backend':'DSW persistent Isaac RTX' if self.live else 'X5 kinematics; configured Isaac RTX image capture','robot_connected':False,
           'hardware_velocity_limit_verified':False,'velocity_source':'simulation cap 1 rad/s intersected with URDF; not hardware limit',
@@ -2548,6 +2578,7 @@ class Workbench:
                 'hardware_connected':hardware,'hardware_feedback':summary,'hardware_sync_active':synced,
                 'hardware_control_connected':self.control_available(),'hardware_error':self.hardware_error,
                 'hardware_last_disconnect':getattr(self,'hardware_last_disconnect',None),
+                'control_preflight_failure':getattr(self,'control_preflight_failure',None),
                 'control_error':getattr(self,'control_error',None),'control_last_disconnect':getattr(self,'control_last_disconnect',None),
                 'mirror_error':self.mirror_error,'render_connection_error':self.remote_error,
                 'render_last_disconnect':getattr(self,'remote_last_error',None),

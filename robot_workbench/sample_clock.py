@@ -3,6 +3,15 @@ from bisect import bisect_left
 from math import isfinite
 
 
+def host_sample_status(sample_wall_ns, now_ns, *, max_age_s=.5):
+    """The existing wall-age gate, shared by readers and cached UI readiness."""
+    age=(now_ns-sample_wall_ns)/1e9 if type(sample_wall_ns) is int else None
+    recent=age is not None and 0<=age<=max_age_s
+    reason=(None if recent else '设备反馈时间戳不可用，请查看诊断' if age is None else
+            '设备反馈时间戳超前，请检查时钟' if age<0 else '设备反馈样本已过期，请等待新鲜反馈')
+    return dict(host_sample_age_s=age,host_sample_recent=recent,max_age_s=max_age_s,reason=reason)
+
+
 def clock_spec(environment='physical', *, clock_domain=None, source_clock_id=None):
     if environment not in ('physical', 'fake'):
         raise ValueError('explicit physical/fake clock environment required')
