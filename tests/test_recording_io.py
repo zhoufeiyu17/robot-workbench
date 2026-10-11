@@ -7,12 +7,14 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'rule_based_workbench')]
-from real_recording import RecordingSession,RealRecorder,CAMERAS,verify_raw
+from real_recording import RecordingSession,RealRecorder,CAMERAS,SIDES,verify_raw
+from real_rgbd import pair_metadata,snapshot_bundle
 import test_recording_wall_clock as clock_fixture
-from test_fake_device_pipeline import FAKE_CLOCK_ID,FAKE_RUNTIME_NONCE
+from test_fake_device_pipeline import FAKE_RUNTIME_NONCE
 
 
 class ObservedSession(RecordingSession):
@@ -39,62 +41,71 @@ class RecordingIOTest(unittest.TestCase):
         return helper
 
     def test_twenty_ms_policy_overflows_but_count_policy_preserves_every_event(self):
+        # Compare scheduling policy, not this host's ability to meet a wall-clock
+        # producer rate. Real sleep + catch-up bursts made both policies overflow
+        # under load. Drive identical camera turns and virtual IO costs instead;
+        # submit, event validation/writes, RGB-D archives and sealing remain real.
         for session_factory,expected_error in ((OldWallCappedSession,True),(ObservedSession,False)):
             with self.subTest(policy=session_factory.__name__),TemporaryDirectory() as temp:
-                h=self.helper();entered=threading.Event();release=threading.Event();count=30;prelude=12
-                class SlowIO(RealRecorder):
+                h=clock_fixture.RecordingWallClockTest();count=30;mono=[0.]
+                h.wall=[1_000_000_000_000];h.start=h.wall[0]
+                h.source,h.plan,h.binding,h.timeline=clock_fixture.plan_fixture(count,'fake')
+                owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
+                class VirtualIO(RealRecorder):
                     def append(self,name,row):
-                        time.sleep(.006 if name in ('commands.jsonl','feedback.jsonl') else .020)
-                        return super().append(name,row)
-                    def record_rgbd(self,camera,blob):
-                        if not entered.is_set():
-                            entered.set()
-                            if not release.wait(5):raise TimeoutError('slow IO fixture not released')
-                        return super().record_rgbd(camera,blob)
-                h.setup_session(Path(temp),count=count,recorder_factory=SlowIO,session_factory=session_factory,capacity=16)
-                identity=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
-                    owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
-                # Same-lease startup frames legitimately precede the commands;
-                # use a monotonic source/wall history, not a future frame backlog.
-                for frame in range(prelude+1):
-                    h.wall[0]=h.start+round(frame*2.6/30*1e9);h.publish(frame)
-                base_ns=100_000_000_000+prelude*1_000_000_000//30;base_step=24000+prelude*8
-                previous=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
-                    source_time_ns=base_ns,physics_step=base_step,sample_wall_ns=h.wall[0])
-                h.session.submit('feedback',tick=0,state=h.plan['ticks'][0]['target'],sample_monotonic_s=base_ns/1e9,
-                    sample_wall_ns=h.wall[0],raw=dict(previous,**{k:identity[k] for k in ('owner_pid','command_epoch','runtime_nonce')}))
-                self.assertTrue(entered.wait(2),h.session.error)
-                anchor=h.wall[0];started=time.monotonic();attempted_commands=0;max_queue=0;release.set()
-                for grid in range(count*10+1):
-                    time.sleep(max(0.,started+grid*2.6/300-time.monotonic()))
-                    h.wall[0]=anchor+round((time.monotonic()-started)*1e9)
-                    tick=min(grid//10,count-1)
-                    if grid and grid%3==0:
-                        step=base_step+grid*240//300;ns=step*1_000_000_000//240
-                        previous=dict(clock_domain='simulation',source_clock_id=FAKE_CLOCK_ID,
-                            source_time_ns=ns,physics_step=step,sample_wall_ns=h.wall[0])
-                        try:h.session.submit('feedback',tick=tick,state=h.plan['ticks'][tick]['target'],sample_monotonic_s=ns/1e9,
-                            sample_wall_ns=h.wall[0],raw=dict(previous,**{k:identity[k] for k in ('owner_pid','command_epoch','runtime_nonce')}))
-                        except ValueError:pass  # The declared source/command sequence still advances after a data fault.
-                    if grid%10==0:
-                        frame=grid//10
-                        if grid:h.publish(prelude+frame)
-                        if frame<count:
-                            attempted_commands+=1;ns=base_ns+grid*1_000_000_000//300
-                            try:h.session.submit('command',tick=frame,target=h.plan['ticks'][frame]['target'],
-                                send_monotonic_s=ns/1e9,send_wall_ns=h.wall[0],send_source_time_ns=ns,
-                                physics_step=None,feedback_at_send=previous,**identity)
-                            except ValueError:pass
-                    max_queue=max(max_queue,h.session.events.qsize())
-                h.session.finish('completed');self.assertTrue(h.session.done.wait(10),h.session.snapshot())
+                        result=super().append(name,row)
+                        mono[0]+=.006 if name in ('commands.jsonl','feedback.jsonl') else .020
+                        return result
+                kwargs=dict(environment='fake',execution_timeline=h.timeline,execution_owner=owner,
+                            clock_ns=lambda:h.wall[0])
+                # Use the real session setup, but this test owns each worker turn.
+                with patch('threading.Thread.start'):
+                    h.session=session_factory(Path(temp)/'raw',h.source,h.plan,h.binding,capacity=16,**kwargs)
+                h.session.recorder=VirtualIO(h.session.root,h.source,h.plan,h.binding,**kwargs)
+                attempted_commands=0;max_queue=0;drained=[]
+                with patch('real_recording.time.monotonic',side_effect=lambda:mono[0]):
+                    for first in range(0,count+1,4):
+                        frames=[]
+                        for index in range(first,min(first+4,count+1)):
+                            h.wall[0]=h.start+index*100_000_000
+                            try:h.submit_feedback(index)
+                            except ValueError:pass  # Data failure never halts the declared source sequence.
+                            if index<count:
+                                attempted_commands+=1
+                                try:h.submit_command(index)
+                                except ValueError:pass
+                            max_queue=max(max_queue,h.session.events.qsize())
+                            source_ns=100_000_000_000+index*1_000_000_000//30
+                            for camera in CAMERAS:
+                                side=SIDES[camera]
+                                meta=pair_metadata(serial=h.source['camera_serials'][side],camera_name=side,
+                                    color_number=index,depth_number=index,color_ms=source_ns/1e6,depth_ms=source_ns/1e6,
+                                    color_domain='simulation',depth_domain='simulation',host_receive_ns=h.wall[0],
+                                    depth_scale_m=.001,intrinsics={'fx':600})
+                                clock_fixture.fake_metadata(meta,source_ns,step=24000+index*8)
+                                meta['host_receive_ns']=h.wall[0]
+                                frames.append((camera,snapshot_bundle(meta,clock_fixture.png(),clock_fixture.png(True))))
+                        before=h.session.events.qsize();h.session._drain_events()
+                        drained.append(before-h.session.events.qsize())
+                        # Same four frames per camera between event batches as _run.
+                        for camera,blob in frames:h.session.recorder.record_rgbd(camera,blob)
+                    h.session.finish('completed')
+                    while not h.session.events.empty():h.session._drain_events()
+                    h.session.manifest=h.session.recorder.seal('recording_failed' if h.session.error else 'completed')
                 self.assertEqual(attempted_commands,count)
-                if expected_error:self.assertIn('bounded recording queue overflow',h.session.error)
+                self.assertEqual(h.session.controller_result['status'],'completed')
+                if expected_error:
+                    self.assertEqual(drained[:2],[4,4])
+                    self.assertEqual(max_queue,16)
+                    self.assertEqual(h.session.error,'bounded recording queue overflow')
+                    self.assertEqual(h.session.manifest['capture_status'],'incomplete')
                 else:
+                    self.assertEqual(drained,[8]*7+[5])
                     self.assertIsNone(h.session.error,h.session.snapshot())
                     self.assertEqual(h.session.manifest['capture_status'],'complete',h.session.manifest)
                     self.assertEqual(len(h.session.recorder.commands),count)
-                    self.assertEqual(len(h.session.recorder.feedback),101)
-                    self.assertTrue(all(len(rows)==count+prelude+1 for rows in h.session.recorder.frames.values()))
+                    self.assertEqual(len(h.session.recorder.feedback),count+1)
+                    self.assertTrue(all(len(rows)==count+1 for rows in h.session.recorder.frames.values()))
                     self.assertLessEqual(max_queue,16)
                     self.assertTrue(all(row['count']<=64 for row in h.session.batches))
                     self.assertGreater(max(row['duration_wall_s'] for row in h.session.batches),.02)
