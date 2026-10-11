@@ -1,10 +1,10 @@
 {
-  "status": "757b290_suitev7_current0_of_3_device_j1_head24_of_34",
-  "updated_at": "2026-10-11T11:11:40.655161+08:00",
+  "status": "suitev7_device_j1_qualified1_of_3_release_correction_preserved_nominal_head_capture",
+  "updated_at": "2026-10-11T12:29:40.186457+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
   "candidate_commit_before_summary": "757b290c12dde26732474cb58cf99b5a62cbc914",
-  "qualification_scope": "757b290 shared host-age readiness and complete read diagnostics committed/pushed,CPU791(790pass1skip)/L1 27/27 passed. Current suitev7 resets0/3;v6scene-xy1/3 andv5nominal1/3 remain distinct complete historical records. Old device-j1100608 confirm rejected host_sample_stale_or_clock_skew before wrist/D;failed sample_wall/now not retained,positive-stale versus negative-age cause unknown,20later healthy reads do not prove original age. No threshold/time-stamp change or product action wait/retry. New device-j1110144 head capture24/34 without error at11:10:08 CST;complete C/D/case qualification pending. L4 unqualified.",
+  "qualification_scope": "757b290/suitev7 device-j1110144 original cold workflow and independent9checks qualified,current1/3(device-j1 only);newC34+29,newD3215commands/10718feedback/3x3227RGB-D,native/raw/source+L3 passed. Resource table was prematurely released12:23:04 while preceding12:23:03.968check still saw6owned processes;actual14PID/GPU empty verification12:23:15.448,then5artifact preservation check,next run only afterward. Correction retained without rewriting immutable registry;case qualification unaffected. Newnominal122428 head0/34 SETTLING at12:26:23,pending fullC/D. v6/v5 historical passes separate;L4 unqualified.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -52,14 +52,14 @@
     "gpu_released": true
   },
   "l2_complete": {
-    "status": "current_final_suite_not_yet_qualified",
-    "normal_cases_passed": 0,
+    "status": "current_final_suite_partially_qualified",
+    "normal_cases_passed": 1,
     "required_normal_cases": 3,
-    "latest_cold_attempt": "full-device-j1-20261011-110144",
+    "latest_cold_attempt": "full-20261011-122428",
     "latest_diagnostic": "warm-20261011-050624",
-    "meaning": "current757b290/suitev7 cold0/3;historicalv6scene-xy1/3 andv5nominal1/3 remain separate and excluded",
-    "latest_cold_attempt_status": "head_capture_running_24_of_34",
-    "latest_qualified_cold_case": null,
+    "meaning": "current757b290/suitev7 cold1/3(device-j1 only);historicalv6scene-xy1/3 andv5nominal1/3 remain excluded",
+    "latest_cold_attempt_status": "head_capture_started_0_of_34_settling",
+    "latest_qualified_cold_case": "full-device-j1-20261011-110144",
     "full_suite_qualified": false,
     "qualification_suite": "cold-suite-normal-v31-20261011-v7"
   },
@@ -132,10 +132,10 @@
     "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json"
   },
   "remaining": [
-    "完成当前suite-v7 device-j1新空库全链与独立审计；11:10:08 head24/34无错误，当前0/3；已发动作失败立即终止。",
-    "随后以相同757b290/suite-v7新跑nominal、scene-xy；当前0/3，不混加历史v6/v5各1/3。",
-    "完成最终文档/实际轨迹回放证据和授权交付；UI26项/封存导出性能已完成，治理sticky unknown按规范和真实证据处理，不伪造settle。",
-    "L4实体SDK、止动、时延、载荷及正式单writer切换独立验收。"
+    "完成运行中suite-v7 nominal新空库全链及独立审计；12:26:23 head0/34 SETTLING，不计第二次通过。",
+    "随后新跑scene-xy；当前只device-j1合格1/3，不混加历史v6/v5通过。",
+    "完成文档/实际轨迹回放证据与授权交付；保留提前release登记纠错，后续先确认全清空再release，不绕过immutable记录；治理stickyunknown不伪造settle。",
+    "UI26项/封存导出性能已完成；L4实体SDK、止动、时延、载荷及单writer切换独立验收。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -466,8 +466,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": "full-device-j1-20261011-110144",
-  "last_gpu_run": "full-device-j1-20261011-100608",
+  "current_gpu_run": "full-20261011-122428",
+  "last_gpu_run": "full-device-j1-20261011-110144",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -1679,42 +1679,42 @@
     "scope": "CPU-only postprocessing of one complete archived three-camera raw input on the measured host/load/storage; not GPU/live collection throughput, new cold-case success or universal storage performance."
   },
   "latest_cold_attempt": {
-    "run": "full-device-j1-20261011-110144",
-    "case": "device-j1",
-    "case_id": "l2-case3-j1-zero-offset-v2",
+    "run": "full-20261011-122428",
+    "case": "nominal",
+    "case_id": "coffee-soft15-right-open-v2-20261009",
     "suite": "cold-suite-normal-v31-20261011-v7",
-    "status": "head_capture_running_24_of_34",
+    "status": "head_capture_started_0_of_34_settling",
     "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "fresh_C_completed": false,
     "group_installed": false,
     "D_motion_started": false,
     "full_pipeline_qualified": false,
     "startup_confirmed_by_launch_metadata": true,
-    "launch_metadata": ".evidence/s2/current-full.json",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-110144-contract.json",
-    "source_files": 375,
-    "gpu_record": "unified-full-device-j1-20261011-110144",
-    "supervisor": {
-      "pid": 1376581,
-      "start_ticks": "33537888"
-    },
-    "source_pid": 1376587,
-    "released": false,
-    "resource_evidence": ".evidence/s2/full-device-j1-20261011-110144-resources-110312.json",
-    "resource_window": {
-      "expected_start": "2026-10-11T11:02:32.171231+08:00",
-      "expected_end": "2026-10-11T12:57:32.171231+08:00",
-      "actual_start_registered_at": "2026-10-11T11:03:33+08:00",
-      "service_deadline": "2026-10-11T12:52:38.719274+08:00",
-      "next_actual_check_by": "2026-10-11T11:50:00+08:00"
-    },
-    "declared_plant_truth_boundary": "backend/evaluator only;not solver inputs",
-    "scope": "startup snapshot only;new C/install/D/task qualification pending",
-    "head_frames": 24,
+    "head_frames": 0,
     "expected_head_frames": 34,
-    "progress_observed_at": "2026-10-11T11:10:08+08:00",
-    "progress_error": null,
-    "original_driver_running": true
+    "head_capture_state": "SETTLING",
+    "progress_observed_at": "2026-10-11T12:26:23+08:00",
+    "original_driver_running": true,
+    "launch_metadata": ".evidence/s2/current-full.json",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-122428-contract.json",
+    "source_files": 375,
+    "gpu_record": "unified-full-20261011-122428",
+    "supervisor": {
+      "pid": 1812376,
+      "start_ticks": "34034020"
+    },
+    "source_pid": 1812382,
+    "released": false,
+    "resource_evidence": ".evidence/s2/full-20261011-122428-resources-122555.json",
+    "resource_window": {
+      "expected_start": "2026-10-11T12:25:13.422899+08:00",
+      "expected_end": "2026-10-11T14:20:13.422899+08:00",
+      "actual_start_registered_at": "2026-10-11T12:26:09+08:00",
+      "service_deadline": "2026-10-11T14:15:19.964877+08:00",
+      "service_deadline_wall_ns": 1791699319964877002,
+      "next_actual_check_by": "2026-10-11T13:10:00+08:00"
+    },
+    "scope": "new nominal head0/34 snapshot only;complete C/install/D/task pending;not started before prior actualcleanup"
   },
   "base_alignment": {
     "status": "owner_reply_read_back_dynamic_recipe_implemented",
@@ -1761,11 +1761,13 @@
     "workbench_nominal_full_chain_qualified": false,
     "qualified_nominal_run": null,
     "three_case_suite_qualified": false,
-    "full_pipeline_scope": "current757b290/suitev7 cold0/3;v6scene-xy andv5nominal passes historical only",
+    "full_pipeline_scope": "current757b290/suitev7 device-j1 qualified1/3;current nominal/scene-xy pending;olderv6/v5passes historical",
     "historical_qualified_nominal_run": "full-20261011-064034",
     "workbench_current_scene_xy_full_chain_qualified": false,
     "qualified_current_scene_xy_run": null,
-    "historical_qualified_scene_xy_run": "full-scene-xy-20261011-083941"
+    "historical_qualified_scene_xy_run": "full-scene-xy-20261011-083941",
+    "workbench_current_device_j1_full_chain_qualified": true,
+    "qualified_current_device_j1_run": "full-device-j1-20261011-110144"
   },
   "latest_planning_probe": {
     "run": "contact-plan-20261011-044857",
@@ -1786,18 +1788,19 @@
     "source_files": 375,
     "motion_recipe": "normal-v31-dynamic-targets",
     "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
-    "normal_cases_passed": 0,
+    "normal_cases_passed": 1,
     "required_normal_cases": 3,
-    "current_run": "full-device-j1-20261011-110144",
-    "status": "device_j1_head_capture_running",
+    "current_run": "full-20261011-122428",
+    "status": "nominal_head_capture_started",
     "predeclared_cases_unchanged": [
       "nominal",
       "scene-xy",
       "device-j1"
     ],
-    "qualified_cases": [],
+    "qualified_cases": [
+      "device-j1"
+    ],
     "remaining_cases": [
-      "device-j1",
       "nominal",
       "scene-xy"
     ]
@@ -2172,19 +2175,135 @@
     "L1_total": 27
   },
   "latest_resource_release": {
-    "run": "full-device-j1-20261011-100608",
-    "record": "unified-full-device-j1-20261011-100608",
-    "teardown": ".evidence/s2/full-device-j1-20261011-100608-teardown.json",
-    "verified_at": "2026-10-11T10:28:19+08:00",
-    "released_at": "2026-10-11T10:28:35+08:00",
+    "run": "full-device-j1-20261011-110144",
+    "record": "unified-full-device-j1-20261011-110144",
+    "teardown": ".evidence/s2/full-device-j1-20261011-110144-teardown.json",
+    "verified_at": "2026-10-11T12:23:15.448176+08:00",
+    "actual_cleanup_verified_wall_ns": 1791692595448176383,
+    "registry_released_at": "2026-10-11T12:23:04+08:00",
+    "premature_registry_release": true,
+    "verification_scope": "all_owned_exited only true at12:23:15.448;not at registry release12:23:04",
     "all_owned_exited": true,
-    "owned_process_count": 9,
+    "owned_process_count": 14,
     "both_gpu_process_lists_empty": true,
+    "artifacts_after_teardown": ".evidence/s2/full-device-j1-20261011-110144-artifacts-after-teardown.json",
+    "verified_artifact_count": 5,
+    "artifact_hashes_unchanged": true,
+    "correction_evidence": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json",
+    "registry_terminal_immutable": true,
+    "no_registry_bypass": true,
+    "qualification_affected": false,
+    "next_run_after_actual_cleanup": true,
     "dynamic_authority": "/Users/wujie/Developer/work/anyverse/_context/projects/gpu-usage.md"
   },
   "preparing_gpu_run": null,
-  "qualified_cold_cases": {},
-  "last_completed_cold_run": null,
+  "qualified_cold_cases": {
+    "device-j1": {
+      "run": "full-device-j1-20261011-110144",
+      "case": "device-j1",
+      "case_id": "l2-case3-j1-zero-offset-v2",
+      "suite": "cold-suite-normal-v31-20261011-v7",
+      "status": "complete_cold_case_qualified_with_resource_registration_correction",
+      "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": true,
+      "full_pipeline_qualified": true,
+      "startup_confirmed_by_launch_metadata": true,
+      "launch_metadata": ".evidence/s2/current-full.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-device-j1-20261011-110144-contract.json",
+      "source_files": 375,
+      "gpu_record": "unified-full-device-j1-20261011-110144",
+      "supervisor": {
+        "pid": 1376581,
+        "start_ticks": "33537888"
+      },
+      "source_pid": 1376587,
+      "released": true,
+      "resource_evidence": ".evidence/s2/full-device-j1-20261011-110144-resources-110312.json",
+      "resource_window": {
+        "expected_start": "2026-10-11T11:02:32.171231+08:00",
+        "expected_end": "2026-10-11T12:57:32.171231+08:00",
+        "actual_start_registered_at": "2026-10-11T11:03:33+08:00",
+        "service_deadline": "2026-10-11T12:52:38.719274+08:00",
+        "next_actual_check_by": "2026-10-11T11:50:00+08:00"
+      },
+      "declared_plant_truth_boundary": "backend/evaluator only;not solver inputs",
+      "scope": "startup snapshot only;new C/install/D/task qualification pending",
+      "head_frames": 34,
+      "expected_head_frames": 34,
+      "progress_observed_at": "2026-10-11T11:10:08+08:00",
+      "progress_error": null,
+      "original_driver_running": true,
+      "wrist_frames": 29,
+      "original_driver_completed": true,
+      "original_workflow": "completed",
+      "original_terminal_busy": false,
+      "motion_outcome": "completed",
+      "native_task_outcome": "success",
+      "hardware_qualified": false,
+      "qualification_scope": "this one frozen fake run only; not three-case suite or physical robot",
+      "audit_complete": true,
+      "audit_checks_passed": 9,
+      "audit_checks_total": 9,
+      "artifact_audit": ".evidence/s2/full-device-j1-20261011-110144-audit.json",
+      "original_terminal": ".evidence/s2/full-device-j1-20261011-110144-terminal.json",
+      "command_count": 3215,
+      "feedback_count": 10718,
+      "camera_frames": {
+        "base_0": 3227,
+        "left_wrist_0": 3227,
+        "right_wrist_0": 3227
+      },
+      "raw_complete": true,
+      "raw_manifest_sha256": "9500dda881bbcec67e1efe6d997d819c0edf74d0cb34a421b7a0b7ab63b5f90e",
+      "sealed_files_verified": 9692,
+      "sealed_bytes": 3580412398,
+      "source_replay": "passed",
+      "auxiliary_replay": "passed",
+      "task_success_evidence": "same-plant native receipt;not L3",
+      "source_video_duration_s": {
+        "base_0": 107.566,
+        "left_wrist_0": 107.566,
+        "right_wrist_0": 107.566
+      },
+      "source_video_max_frame_pts_error_s": 0.00033333400000401525,
+      "auxiliary_replay_duration_s": {
+        "base_0": 107.166667,
+        "left_wrist_0": 107.166667,
+        "right_wrist_0": 107.166667
+      },
+      "auxiliary_replay_max_frame_pts_error_s": 3.333333467026023e-07,
+      "source_video_pts_tolerance_s": 0.002,
+      "local_source_head": ".evidence/s2/full-device-j1-20261011-110144-source-head.mp4",
+      "local_final_cameras": ".evidence/s2/full-device-j1-20261011-110144-final-cameras/receipt.json",
+      "local_native_receipt": ".evidence/s2/full-device-j1-20261011-110144-native-task-receipt.json",
+      "teardown": ".evidence/s2/full-device-j1-20261011-110144-teardown.json",
+      "owned_processes_exited": 14,
+      "both_gpu_process_lists_empty": true,
+      "actual_cleanup_verified_at": "2026-10-11T12:23:15.448176+08:00",
+      "resource_release_accounting": {
+        "registry_released_at": "2026-10-11T12:23:04+08:00",
+        "registry_release_preceded_verified_empty": true,
+        "first_observation_wall_ns": 1791692583968747618,
+        "first_observation_all_owned_exited": false,
+        "first_observation_remaining_owned_pids": 6,
+        "actual_cleanup_verified_wall_ns": 1791692595448176383,
+        "actual_cleanup_verified_at": "2026-10-11T12:23:15.448176+08:00",
+        "cause": "root issued release without branching on the preceding failed cleanup check; reporting and preserving correction",
+        "registry_terminal_immutable": true,
+        "registry_not_manually_changed_or_bypassed": true,
+        "qualification_affected": false,
+        "next_run_started_only_after_actual_cleanup_and_artifact_verification": true,
+        "evidence": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json"
+      },
+      "artifacts_before_teardown": ".evidence/s2/full-device-j1-20261011-110144-artifacts-before-teardown.json",
+      "artifacts_after_teardown": ".evidence/s2/full-device-j1-20261011-110144-artifacts-after-teardown.json",
+      "artifact_hashes_unchanged_after_final_teardown": true,
+      "verified_artifact_count": 5
+    }
+  },
+  "last_completed_cold_run": "full-device-j1-20261011-110144",
   "historical_cold_suites": {
     "cold-suite-normal-v31-20261011-v5": {
       "suite": {
@@ -2594,7 +2713,9 @@
     "CPU_receipt": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
     "CPU_qualified": true,
     "L1_qualified": true,
-    "new_cold_qualified": false
+    "new_cold_qualified": true,
+    "new_cold_qualification_run": "full-device-j1-20261011-110144",
+    "new_cold_qualification_scope": "one device-j1 frozen fake case only;suitev7current1/3;does not reconstruct old failed age"
   },
   "harness_UI_readiness": {
     "scope": "validation harness only;does not change product action behavior",
@@ -2616,5 +2737,22 @@
     "archive_sha_bound_in_contract_preflight_audit": true,
     "local_package_source_hashes_verified": true,
     "product_source_file_count_unchanged": 375
+  },
+  "resource_release_corrections": {
+    "full-device-j1-20261011-110144": {
+      "registry_released_at": "2026-10-11T12:23:04+08:00",
+      "registry_release_preceded_verified_empty": true,
+      "first_observation_wall_ns": 1791692583968747618,
+      "first_observation_all_owned_exited": false,
+      "first_observation_remaining_owned_pids": 6,
+      "actual_cleanup_verified_wall_ns": 1791692595448176383,
+      "actual_cleanup_verified_at": "2026-10-11T12:23:15.448176+08:00",
+      "cause": "root issued release without branching on the preceding failed cleanup check; reporting and preserving correction",
+      "registry_terminal_immutable": true,
+      "registry_not_manually_changed_or_bypassed": true,
+      "qualification_affected": false,
+      "next_run_started_only_after_actual_cleanup_and_artifact_verification": true,
+      "evidence": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json"
+    }
   }
 }
