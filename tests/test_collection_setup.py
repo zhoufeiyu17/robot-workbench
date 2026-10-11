@@ -86,6 +86,7 @@ def main(a1,roles=4):
     with tempfile.TemporaryDirectory() as temp,tempfile.TemporaryDirectory() as spool_temp:
         root=Path(temp).resolve();capture,active,cconfig,installed,registration=fixture(root,Path(a1).resolve())
         base,contract,runtime_root,external=inputs(root)
+        if roles==5:contract['resources'].update(max_wall_time_minutes=245,service_lifetime_seconds=14400)
         # These startup-only pins deliberately sit inside an otherwise accepted
         # dependency root, so the generic path allowlist alone cannot exclude them.
         admission_root=Path(base['deps'])/'diagnostic-origin';admission_root.mkdir()
@@ -211,6 +212,11 @@ def main(a1,roles=4):
             assert frozen['code']['root']==str(ROOT) and frozen['code']['root']!=contract['code']['root']
             assert cfg['execution']==execution and cfg['resident_deadline_wall_ns']==options['resident_deadline_wall_ns']
             assert frozen['resources']['resident_deadline_wall_ns']==cfg['resident_deadline_wall_ns']
+            assert frozen['resources']['max_wall_time_minutes']==min(original_contract['resources']['max_wall_time_minutes'],120)
+            assert frozen['resources']['service_lifetime_seconds']==original_contract['resources']['service_lifetime_seconds']
+            assert cfg['detector_service']['max_lifetime_seconds']==original_contract['resources']['service_lifetime_seconds']
+            assert cfg['planner_service']['max_lifetime_seconds']==original_contract['resources']['service_lifetime_seconds']
+            assert contract==original_contract,'D budget derivation must not mutate the resident startup contract'
             assert not configured['task_or_gpu_qualification']
             assert validate_assets(assets,read(output/'calibration/profile.json'),pins)['profile_id']==binding['profile_id']
             spec=cfg['planner_service'];private=Path(configured['pipeline_config']).parent/'planner-spec.json'

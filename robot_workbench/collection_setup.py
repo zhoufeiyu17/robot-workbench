@@ -7,6 +7,7 @@ objects are constructed stopped; the caller owns GPU admission and lifecycle.
 from copy import deepcopy
 import hashlib
 import json
+import math
 from pathlib import Path
 import secrets
 from types import SimpleNamespace
@@ -227,6 +228,9 @@ def finalize_collection_setup(setup_path):
         source_identity='actual file SHA pins; selected immutable dependencies retained separately',
         repository_expected=False,preserve_existing_changes=True)
     resources=contract['resources']
+    # Worker lifetime is independent; each D job retains the existing two-hour cap.
+    budget=resources.get('max_wall_time_minutes')
+    if type(budget) in (int,float) and math.isfinite(budget):resources['max_wall_time_minutes']=min(budget,120)
     resources['resident_deadline_wall_ns']=pipeline['resident_deadline_wall_ns']
     if type(resources.get('service_lifetime_seconds')) is not int or resources['service_lifetime_seconds']<=0:
         raise ValueError('explicit bounded worker service_lifetime_seconds required')
