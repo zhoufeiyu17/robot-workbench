@@ -835,11 +835,21 @@ class Workbench:
                 checked_waypoints.append(dict(waypoint,q=bounded.tolist()))
             checked=self.queue_is_plan_checked(rows);start,start_boundary=self.bounded_joint_pose(self.current_pose())
         progress=self.begin_preflight('正在检查路径')
+        trace=dict(schema='manual-motion-preview.v1',request_id=progress['request_id'],
+                   started_at_s=progress['started_at_s'],environment=transport_environment(self.config),
+                   start=start_boundary,waypoints=waypoints,path_check_skipped=checked,phase='path_check')
+        progress['phase_timings']=trace['phase_timings']={}
+        phase_started=time.monotonic()
         try:
             if not checked:self.require_checked_path(checked_waypoints,start)
+            trace['path_check_s']=time.monotonic()-phase_started
+            progress['phase_timings']['path_check_s']=trace['path_check_s']
             self.require_review(review)
             self.preflight_progress(progress,'正在生成执行预览并核验冻结路径')
+            trace['phase']='owner_preview';phase_started=time.monotonic()
             result=self.control_request('trajectory-preview',{'waypoints':waypoints},review=review)
+            trace['owner_preview_s']=time.monotonic()-phase_started
+            progress['phase_timings']['owner_preview_s']=trace['owner_preview_s']
             if start_boundary['corrections'] or any(row['corrections'] for row in boundary_rows):
                 plans=result.get('plans') or []
                 if len(plans)!=len(boundary_rows) or any(not np.allclose(
@@ -850,10 +860,24 @@ class Workbench:
                 result=dict(result,position_boundary=dict(environment=transport_environment(self.config),
                     start=start_boundary,waypoints=boundary_rows))
             self.preflight_progress(progress,'执行预览已就绪，等待审阅',done=True)
+            trace['status']='ready'
             return result
         except Exception as exc:
+            trace.update(status='failed',error=str(exc),failed_phase_s=time.monotonic()-phase_started)
+            progress['phase_timings'][trace['phase']+'_s']=trace['failed_phase_s']
             self.preflight_progress(progress,'执行预览未通过',error=exc)
             raise
+        finally:
+            from robot_workbench.collection_setup import write
+            trace['finished_at_s']=time.time()
+            trace['elapsed_s']=max(0.,trace['finished_at_s']-trace['started_at_s'])
+            try:write(self.output/'diagnostics'/('manual-preview-'+progress['request_id']+'.json'),trace)
+            except OSError as exc:
+                # Diagnostic storage must not hide the original preview rejection.
+                trace['diagnostics_error']=str(exc)
+            with self.review_lock:
+                if (getattr(self,'motion_preflight',{}) or {}).get('request_id')==progress['request_id']:
+                    self.motion_preflight={**self.motion_preflight,'diagnostics':trace}
 
     def queue_pose(self,body,*,review=None):
         with self.mode_lock,self.lock:

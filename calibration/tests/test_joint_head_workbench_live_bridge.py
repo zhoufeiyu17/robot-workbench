@@ -142,6 +142,14 @@ class BridgeTests(unittest.TestCase):
         a.hardware_trajectory_preview({'waypoints':rows})
         self.assertEqual([call[0] for call in seen],['trajectory-preview'])
         self.assertEqual(len(checks),2)
+        traces=[json.loads(p.read_text()) for p in (a.output/'diagnostics').glob('manual-preview-*.json')]
+        self.assertEqual({row['status'] for row in traces},{'failed','ready'})
+        failed=next(row for row in traces if row['status']=='failed')
+        self.assertEqual(failed['phase'],'path_check')
+        self.assertEqual(failed['waypoints'][0]['q'],rows[0]['q'])
+        ready=next(row for row in traces if row['status']=='ready')
+        self.assertGreaterEqual(ready['path_check_s'],0.)
+        self.assertGreaterEqual(ready['owner_preview_s'],0.)
 
     def test_boundary_preview_checks_legal_path_but_owner_receives_original_request(self):
         a=self.app;a.geometry_id='geometry';a.plan=None;a.queue=[];a.hardware_connected=lambda:True

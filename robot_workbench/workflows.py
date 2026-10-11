@@ -279,6 +279,12 @@ class CalibrationWorkflow:
         with self.lock:
             value=deepcopy(self.value)
             failure=deepcopy(getattr(self,'preview_failure',None)) if getattr(self,'active',False) else None
+        motion_preflight=getattr(self.app,'motion_preflight',None)
+        if motion_preflight:
+            value['manual_preflight']={name:deepcopy(motion_preflight[name]) for name in
+                ('request_id','stage','status','started_at_s','elapsed_s','phase_timings','error') if name in motion_preflight}
+            if motion_preflight.get('status')=='checking':
+                value['manual_preflight']['elapsed_s']=max(0.,time.time()-motion_preflight['started_at_s'])
         preflight=getattr(self.app,'control_preflight_failure',None)
         if preflight and preflight.get('run_id')==getattr(self.app,'pipeline_run_id',None):
             value.setdefault('diagnostics',[]).append(dict(label='最近一次控制准备拒绝',value=deepcopy(preflight)))
