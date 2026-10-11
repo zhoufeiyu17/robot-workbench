@@ -39,7 +39,7 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ## 当前资格与运行
 
-已推送产品 **96e7f71**，仍是隔离开发候选；**完整冷启动0/3，真机未接入**。本节记录2026-10-11 06:41 CST事实节点；后续阶段、终态和资源以[续接检查点](.evidence/s2/active-task-checkpoint.json)、[机器验证摘要](migration/validation-summary.json)及所引原始证据核对。
+已推送产品 **96e7f71**，仍是隔离开发候选；**完整冷启动1/3，真机未接入**。本节记录2026-10-11 08:09 CST事实节点；后续阶段、终态和资源以[续接检查点](.evidence/s2/active-task-checkpoint.json)、[机器验证摘要](migration/validation-summary.json)及所引原始证据核对。
 
 | 范围 | 已完成 | 当前边界 |
 | --- | --- | --- |
@@ -48,6 +48,7 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 | 动态动作配方 | 与仿真任务对齐normal-v31，按当前模型/观测重算目标；固定原输入GPU规划、warm实际执行通过 | 不复制S0旧q/标定；不能外推新场景 |
 | 标定/安装 | full-040630新采头34＋腕29并成组安装，head image_passed=true，左右腕留出1.266434/1.070071px | 该run的D规划失败保留，不计完整冷案例 |
 | warm全链 | warm-050624原workflow完成，独立8/8审计通过；3425命令、11418反馈、每相机3436 RGB-D；native task成功、源录像及辅助回放通过 | 只读复用040630标定，不能计空库通过 |
+| nominal空库全链 | full-064034原始工作流与独立9/9审计通过；头34＋腕29新采安装、3207命令/10692反馈、各3218 RGB-D、源任务成功与源录像/L3核验通过 | 仅suite-v5 nominal资格；另外两个案例尚未通过 |
 | 最终CPU/L1 | 96e7f71回归783次执行，782通过/1旧fixture跳过；L1 27/27；源码及native/detector前后不变 | 软件stop P95 4.122ms/max4.550ms，不代表实体止动 |
 
 normal-v31动态阶段为合并抬撤、连续移杯降高、插入、实际落杯；固定名义预算129/170/90/29条30Hz命令，超预算拒绝。开爪v3固定45条/1.5s，release hold为6条/0.2s，UI改速保留开爪时长；原2mm/0.5°及物理验收门不变；12轴目标速度2rad/s、目标加速度5rad/s²是规划/控制协议上限，不代表各关节真机实测极限，L4尚未验收。
@@ -56,13 +57,15 @@ normal-v31动态阶段为合并抬撤、连续移杯降高、插入、实际落�
 
 full-060418已采头34/34并求解，腕预览发布失败且页面清掉错误；诊断重生成捕获“updated owner required”，CPU复现能力缓存窗口可触发同错，但不能证明现场调用一定落在该窗口。原driver已终止，没有成功终态，没有腕/D运动；9个PID退出、双GPU清空并释放。本失败不计通过。warm-050624也已清退14个PID并释放资源，原始产物校验保留。
 
-新suite-v5冻结375项源和原三案例定义，full-064034已通过preflight/dry-run并启动新的nominal空库验证；未产生通过资格。734双GPU窗口06:41–08:36 CST，110分钟驻留加5分钟清退，不延长；以检查点核验实际进度与资源。18867临时loopback转发仍在，18866 L1未动。浏览器自动化连续两次失败后已停止重试；[warm实际头相机图像](.evidence/s2/warm-20261011-050624-final-cameras/head.jpg)与[源录像](.evidence/s2/warm-20261011-050624-source-head.mp4)是画面内容证据，不是新run浏览器验收。
+suite-v5冻结375项源和原三案例定义。full-064034是首个完整空库通过案例；清退后14个PID/start ticks已全部退出、双GPU无计算/图形进程，08:04:56释放。原生任务回执、raw manifest及三源视频在清退前后SHA一致。[独立审计](.evidence/s2/full-20261011-064034-audit.json)、[实际头相机终帧](.evidence/s2/full-20261011-064034-final-cameras/head.jpg)和[源录像](.evidence/s2/full-20261011-064034-source-head.mp4)已保留；每路视频3218帧/107.266s，最大PTS误差0.333334ms，沿用2ms门槛。
+
+第二例full-scene-xy-20261011-080456已通过preflight/dry-run、原空库检查及头部审阅，正在采集；尚无全链资格。只改杯子/机器预声明XY位置，相同产品与seed，未复用首例标定。734双GPU预留08:05:41–10:00:41，08:06:15登记启动；驻留截止09:55:48，随后清退，不延长。下一资源核验08:55。18867临时loopback转发仍在，18866 L1未动。浏览器自动化连续两次失败后已停止重试；实际相机/录像只作画面内容证据。
 
 [最终CPU/L1回执](.evidence/s2/capability-review-full-cpu-20261011-v1/receipt.json)、[warm独立审计](.evidence/s2/warm-20261011-050624-audit.json)和[三案例冻结](.evidence/s2/cold-suite-freeze-20261011-v5.json)分别保留资格范围。旧失败不改写为通过。GPU使用表更新成功，自动shadow核账仍有已记录的非阻断问题，不宣称治理全绿。
 
 ## 剩余验收
 
-1. 以suite-v5新跑nominal、scene-xy、device-j1三个空库全链案例，逐例核验原始终态、安装、实际任务、raw、源录像与辅助回放。
+1. 完成suite-v5剩余scene-xy（运行中）和device-j1空库全链，逐例核验原始终态、安装、实际任务、raw、源录像与辅助回放；nominal已通过。
 2. 完成运行终态文档及自有资源清退；中断或诊断续跑不能计冷启动通过。
 3. 独立完成L4真机SDK、现场止动、时延、载荷与单writer正式切换。
 
