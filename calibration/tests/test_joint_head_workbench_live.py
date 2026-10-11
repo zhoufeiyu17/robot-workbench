@@ -179,6 +179,19 @@ class LiveProtocol(unittest.TestCase):
         np.testing.assert_array_equal(s.actual_q, [0.]*12)
         self.assertEqual(s.status, 'MIRRORING')
 
+    def test_mirror_accepts_feedback_endpoint_noise_without_relaxing_targets(self):
+        s=self.session()
+        body=dict(source_id='owner',sequence=1,source_age_s=0.,q=[0.]*12,
+                  jaw_gap_mm=[-.001,83.00000236797332])
+        s.command('/mirror',body)
+        np.testing.assert_array_equal(s.jaw_mm,[0.,83.])
+        self.assertEqual(s.mirror['measured_jaw_gap_mm'],body['jaw_gap_mm'])
+        self.assertEqual(s.mirror['display_jaw_gap_mm'],[0.,83.])
+        with self.assertRaises(ValueError):
+            s.command('/mirror',{**body,'sequence':2,'jaw_gap_mm':[0.,85.001]})
+        with self.assertRaises(ValueError):
+            s.command('/preview',{'q':[0.]*12,'jaw_gap_mm':[0.,83.001]})
+
     def test_actual_and_target_preview_use_one_batch_without_state_cross_talk(self):
         s = self.session()
         class Renderer(FakeRenderer):

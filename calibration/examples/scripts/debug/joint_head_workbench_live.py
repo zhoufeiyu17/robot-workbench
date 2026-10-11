@@ -23,6 +23,7 @@ import uuid
 
 import numpy as np
 from arx_env.joint_head_workbench_geometry import jaw_gaps
+from arx_env.joint_head_jaw_mapping import measured_jaw_gaps
 
 
 class Session:
@@ -141,7 +142,9 @@ class Session:
                     self.status, self.reason = 'READY', None
                 return self.state()
             q = self.vector(body.get('q'))
-            gaps = jaw_gaps(body.get('jaw_gap_mm', self.jaw_mm))
+            measured_gaps = measured_jaw_gaps(body.get('jaw_gap_mm', self.jaw_mm))
+            # The display model uses command bounds; keep the original feedback in its receipt.
+            gaps = np.clip(measured_gaps, 0., 83.)
             source, sequence, age = body.get('source_id'), body.get('sequence'), body.get('source_age_s')
             if not isinstance(source, str) or not 1 <= len(source) <= 128:
                 raise ValueError('mirror source_id required (1..128 characters)')
@@ -165,7 +168,10 @@ class Session:
             if len(self.mirror_sequences) > 32:
                 del self.mirror_sequences[next(iter(self.mirror_sequences))]
             self.mirror = {'source_id': source, 'sequence': sequence, 'source_age_s': age,
-                           'received_at': time.monotonic()}
+                           'received_at': time.monotonic(),
+                           'measured_jaw_gap_mm': measured_gaps.tolist(),
+                           'display_jaw_gap_mm': gaps.tolist(),
+                           'jaw_display_adjustment_mm': (gaps-measured_gaps).tolist()}
             self.q, self.jaw_mm = q, gaps
             self.status, self.reason = 'MIRRORING', None
             return self.state()
