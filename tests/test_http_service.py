@@ -309,6 +309,14 @@ class HTTPTest(unittest.TestCase):
         self.connect();c,flow=self.calibration_adapter()
         c.frames=[];c.selected_batch=None;c.evaluation=None;c.batch=None;c.calibration_previews={}
         c.store=SimpleNamespace(robot_id='fake-http-fixture');c.hardware_history=[]
+        from arx_env.joint_head_workbench_hardware import HardwareReadAdapter
+        c.hardware_reader=HardwareReadAdapter(c.control['port'],environment='fake')
+        c.hardware_poll_lock=threading.Lock();c.hardware_history_lock=threading.Lock();c.hardware_error=None
+        c.hardware_progress=dict(source=None,sdk=None,advanced=[0.,0.])
+        with self.assertRaisesRegex(ValueError,'等待两臂 SDK'):c.poll_hardware()
+        self.wait(lambda state:all(new>old for new,old in zip(
+            state['runtime']['calibration_feedback']['sdk_timestamps'],c.hardware_progress['sdk'])))
+        c.poll_hardware()
         c.control_available=lambda:True
         c.control_status={'owner':self.device.snapshot('calibration')}
         intrinsics={'head':{'serial':'head-fixture','rectified':True,'coefficients':[0.]*5}}

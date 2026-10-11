@@ -93,6 +93,8 @@ class Workbench:
             if not self.live_token:raise ValueError('empty backend token')
             self.http=build_opener(ProxyHandler({}),NoRedirect())
         self.hardware_history=deque(maxlen=180);self.hardware_history_lock=threading.Lock()
+        self.hardware_poll_lock=threading.Lock()
+        self.hardware_progress={'source':None,'sdk':None,'advanced':[0.,0.]}
         self.hardware_camera=None
         self.hardware_feedback=None;self.hardware_received=0.;self.hardware_error=None;self.mirror_error=None
         self.control_status=None;self.control_received=0.;self.control_error=None;self.control_last_disconnect=None;self.hardware_last_disconnect=None;self.calibration_previews={}
@@ -362,9 +364,24 @@ class Workbench:
     def control_available(self):
         return bool(self.control_status and time.monotonic()-self.control_received<2 and self.control_status.get('motion_enabled') and self.hardware_connected() and self.control_status.get('owner',{}).get('pid')==self.hardware_feedback['owner'].get('pid'))
 
-    def monitor_hardware(self):
-        last_source=None;last_sdk=None;advanced=[0.,0.]
-        while True:
+    def require_real_control(self):
+        """One read-only calibration preflight, independent of UI monitor caches."""
+        if self.control_mode!='hardware_sync':raise ValueError('真机控制或反馈不可用：未处于真机同步模式')
+        status=self.control_request('state');received=time.monotonic()
+        value,feedback_received=self.poll_hardware()
+        owner=status.get('owner',{});measured=value['owner']
+        if (not status.get('motion_enabled') or time.monotonic()-received>=2
+                or time.monotonic()-feedback_received>=.5):
+            raise ValueError('真机控制或反馈不可用：当前控制权限或反馈新鲜度未通过')
+        if (owner.get('pid')!=measured.get('pid') or owner.get('command_epoch')!=measured.get('command_epoch')
+                or (owner.get('calibration_feedback') or {}).get('source_clock_id')
+                    !=(measured.get('calibration_feedback') or {}).get('source_clock_id')):
+            raise ValueError('真机控制或反馈不可用：当前控制与反馈的 owner/epoch/source 不一致')
+        return status
+
+    def poll_hardware(self):
+        """Share the monitor's source and two-arm SDK progression checks with action preflight."""
+        with self.hardware_poll_lock:
             began=time.monotonic()
             try:
                 if self.hardware_reader is not None:
@@ -376,6 +393,8 @@ class Workbench:
                 else:raise ValueError('独立状态网关未配置')
                 q=np.asarray(feedback['qpos'],float);sdk=feedback['sdk_timestamps'];source=(owner['pid'],feedback.get('source_clock_id'))
                 if q.shape!=(14,) or not np.isfinite(q).all() or not owner.get('feedback_healthy') or not 0<=value['source_age_s']<=.5:raise ValueError('真机反馈无效或过期')
+                progress=self.hardware_progress
+                last_source,last_sdk,advanced=progress['source'],progress['sdk'],progress['advanced']
                 if source!=last_source:last_sdk=None;advanced=[0.,0.];last_source=source
                 if len(sdk)!=2 or not all(type(v) in (int,float) and np.isfinite(v) for v in sdk):raise ValueError('SDK clocks invalid')
                 if last_sdk:
@@ -383,13 +402,22 @@ class Workbench:
                         if sdk[i]>last_sdk[i]:advanced[i]=began
                         elif sdk[i]<last_sdk[i]:advanced[i]=0.
                 last_sdk=sdk
+                self.hardware_progress=dict(source=last_source,sdk=last_sdk,advanced=advanced)
                 if any(began-t>.5 for t in advanced):raise ValueError('等待两臂 SDK 反馈推进')
                 self.hardware_feedback=value;self.hardware_received=time.monotonic();self.hardware_error=None
                 with self.hardware_history_lock:self.hardware_history.append(value)
+                return value,self.hardware_received
             except Exception as exc:
                 reason=str(exc)
                 if reason!=self.hardware_error:self.hardware_last_disconnect={'reason':reason,'at_s':time.time()}
                 self.hardware_error=reason
+                raise
+
+    def monitor_hardware(self):
+        while True:
+            began=time.monotonic()
+            try:self.poll_hardware()
+            except Exception:pass  # poll_hardware retains the original failure and disconnect evidence.
             time.sleep(max(.001,1/30-(time.monotonic()-began)))
 
     def feedback_history_snapshot(self):
@@ -858,8 +886,7 @@ class Workbench:
             self.require_review(review)
             workflow=dict(self.workflow)
             self.idle()
-            if self.control_mode!='hardware_sync' or not self.hardware_connected() or not self.control_available():raise ValueError('真机标定需要有效反馈与控制权；不会回退到仿真')
-            owner=self.control_status['owner']
+            owner=self.require_real_control()['owner']
             if 'calibration_capture_ack_v1' not in owner.get('capabilities',[]):raise ValueError('当前控制器尚未支持到位采样确认；请在设备可用时更新控制器')
             if not self.queue:raise ValueError('请先生成标定计划')
             # The frozen standard seed was already reviewed once.  Do not rerun
@@ -920,7 +947,7 @@ class Workbench:
         pending=self.calibration_previews.pop(body['token'],None)
         if not pending or pending['expires']<time.monotonic() or pending['workflow']!=self.workflow or pending.get('pipeline_run_id')!=getattr(self,'pipeline_run_id',None):raise ValueError('标定预览已过期或依赖变化')
         self.resident_capture_budget()  # Reject an exhausted fake contract before confirming any motion.
-        if self.control_mode!='hardware_sync' or not self.control_available():raise ValueError('真机控制或反馈不可用')
+        self.require_real_control()
         root=self.output/('batch-hardware-'+secrets.token_hex(5));dataset=root/'capture';dataset.mkdir(parents=True)
         manifest={'environment':'hardware','runtime_environment':transport_environment(self.config),'robot_source':self.robot_source(),'simulation_only':self.robot_source()!='physical','robot_id':self.store.robot_id,'frames':[],'planned_frames':pending['queue'],'camera':pending['intrinsics']['head']}
         manifest.update(geometry_id=self.geometry_id,asset_geometry_id=self.config.get('asset_geometry_id'),

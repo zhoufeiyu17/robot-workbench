@@ -11,6 +11,8 @@ class FeedbackLockTest(unittest.TestCase):
     def test_monitor_and_capture_snapshot_advance_while_page_lock_is_held(self):
         app=Workbench.__new__(Workbench)
         app.lock=threading.RLock();app.hardware_history_lock=threading.Lock()
+        app.hardware_poll_lock=threading.Lock()
+        app.hardware_progress=dict(source=None,sdk=None,advanced=[0.,0.])
         app.hardware_history=deque(maxlen=180);app.hardware_error=None
         stop=threading.Event()
         def read():

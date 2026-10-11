@@ -64,6 +64,16 @@ class PreflightRaceTests(unittest.TestCase):
         a.hardware_feedback = {'owner': {'pid': 123, 'calibration_feedback': {'qpos': [0.] * 14}},
                                'source_age_s': 0.}
         a.control_status = {'owner': {'pid': 123, 'command_epoch': 4}}
+        a.control_status['motion_enabled'] = True
+        a.hardware_poll_lock = threading.Lock();a.hardware_history_lock = threading.Lock()
+        a.hardware_history = []
+        a.hardware_progress = dict(source=(123,None),sdk=[0.,0.],advanced=[time.monotonic()]*2)
+        def read_hardware():
+            now=time.monotonic()
+            owner=dict(a.control_status['owner'],feedback_healthy=True,
+                calibration_feedback=dict(qpos=[0.]*14,sdk_timestamps=[now,now],sample_wall_ns=time.time_ns()))
+            return dict(reachable=True,feedback=dict(valid=True,host_sample_age_s=0.),raw_owner=owner)
+        a.hardware_reader = SimpleNamespace(read_state=Mock(side_effect=read_hardware))
         a.hardware_connected = lambda: True
         a.control_available = lambda: True
         a.hardware_camera = None
@@ -78,6 +88,7 @@ class PreflightRaceTests(unittest.TestCase):
         a.execution_blocker = lambda: {'code': 'ready'}
         a.remote_request = Mock(return_value={'status': 'READY', 'revision': 1})
         a._control_request = Mock(side_effect=lambda action, body=None:
+            a.control_status if action == 'state' else
             {'token': 'late-owner-token', 'expires_in_s': 30,
              'plans': [{'q_start': [0.] * 14, 'q_target': [0.] * 14}]}
             if action.endswith('preview') else {'ok': True})
@@ -291,7 +302,7 @@ class PreflightRaceTests(unittest.TestCase):
         a = self.app()
         self.calibration_queue(a)
         entered, release, wait = self.block({'token': 'late-owner-token', 'expires_in_s': 30})
-        a._control_request.side_effect = lambda action, body=None: wait() if action.endswith('preview') else {'ok': True}
+        a._control_request.side_effect = lambda action, body=None: a.control_status if action=='state' else wait() if action.endswith('preview') else {'ok': True}
         planning = self.start(lambda: a.action('/api/calibration-preview', {}))
         stopped = None
         try:
@@ -387,7 +398,7 @@ class PreflightRaceTests(unittest.TestCase):
         a = self.app()
         self.calibration_queue(a)
         entered, release, wait = self.block({'token': 'late-owner-token', 'expires_in_s': 30})
-        a._control_request.side_effect = lambda action, body=None: wait()
+        a._control_request.side_effect = lambda action, body=None: a.control_status if action=='state' else wait()
         preview = self.start(lambda: a.action('/api/calibration-preview', {}))
         try:
             self.assertTrue(entered.wait(1), preview.errors)

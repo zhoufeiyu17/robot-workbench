@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import itertools
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -37,6 +38,7 @@ class CaptureFlowTests(unittest.TestCase):
         a.queue=a.calibration_waypoints(a.queue)
         a.hardware_history=[];a.hardware_connected=lambda:True;a.control_available=lambda:True
         a.control_status={'owner':{'capabilities':['calibration_capture_ack_v1']}}
+        a.require_real_control=lambda:a.control_status
         a.persist=Mock();a.load_batch=Mock();a.background=lambda status,fn:fn()
         class ImmediateThread:
             def __init__(self,target,**kwargs):self.target=target
@@ -88,6 +90,59 @@ class CaptureFlowTests(unittest.TestCase):
         self.app.queue[0]['jaw_gap_mm']=[54.,83.]
         with self.assertRaisesRegex(ValueError,'80 mm'):self.app.preview_calibration()
         self.assertEqual(self.calls,[])
+
+    def fresh_control(self):
+        a=self.app;now=time.monotonic()
+        a.require_real_control=Workbench.require_real_control.__get__(a)
+        a.control_available=Workbench.control_available.__get__(a)
+        a.hardware_connected=Workbench.hardware_connected.__get__(a)
+        a.hardware_poll_lock=threading.Lock();a.hardware_history_lock=threading.Lock()
+        a.hardware_progress=dict(source=(123,None),sdk=[10.,20.],advanced=[now,now])
+        owner=dict(pid=123,command_epoch=4,state='READY',feedback_healthy=True,
+            capabilities=['calibration_capture_ack_v1'],
+            calibration_feedback=dict(qpos=[0.]*14,sdk_timestamps=[10.01,20.01]))
+        status=dict(motion_enabled=True,owner=copy.deepcopy(owner))
+        view=dict(reachable=True,raw_owner=owner,feedback=dict(valid=True,host_sample_age_s=.01))
+        a.hardware_reader=SimpleNamespace(read_state=Mock(return_value=view))
+        a.control_status=dict(motion_enabled=False,owner=copy.deepcopy(owner));a.control_received=now
+        a.hardware_feedback=dict(owner=owner);a.hardware_received=now-3.;a.hardware_error='old monitor failure'
+        gateway=self.gateway
+        def live(action,body=None,**kwargs):
+            if action=='state':
+                self.calls.append((action,None));return status
+            return gateway(action,body,**kwargs)
+        a.control_request=live;a.collect_hardware=Mock()
+        return status,view
+
+    def test_fresh_preflight_allows_preview_and_confirm_despite_stale_ui_cache(self):
+        status,view=self.fresh_control();a=self.app
+        self.assertFalse(a.control_available())  # The former preview/confirm veto.
+        preview=a.preview_calibration()
+        a.confirm_calibration(dict(token=preview['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+        self.assertEqual([action for action,_ in self.calls],['state','trajectory-preview','state','motion-confirm'])
+        self.assertEqual(a.hardware_reader.read_state.call_count,2)
+        a.collect_hardware.assert_called_once()
+
+    def test_fresh_preflight_rejects_live_faults_before_confirmation(self):
+        for fault in ('permission','stale','frozen','bad_feedback','pid','epoch','source','read_error'):
+            with self.subTest(fault=fault):
+                status,view=self.fresh_control();a=self.app
+                a.status='READY';preview=a.preview_calibration();self.calls.clear()
+                before=set(a.output.glob('batch-hardware-*'))
+                if fault=='permission':status['motion_enabled']=False
+                elif fault=='stale':view['feedback']['host_sample_age_s']=.501
+                elif fault=='frozen':a.hardware_progress.update(sdk=[10.01,20.01],advanced=[time.monotonic()-.501]*2)
+                elif fault=='bad_feedback':view['feedback'].update(valid=False,reasons=['owner_feedback_unhealthy'])
+                elif fault=='pid':status['owner']['pid']=999
+                elif fault=='epoch':status['owner']['command_epoch']=5
+                elif fault=='source':status['owner']['calibration_feedback']['source_clock_id']='another-plant'
+                else:a.hardware_reader.read_state.side_effect=OSError('current feedback transport failed')
+                with self.assertRaises((ValueError,OSError)):
+                    a.confirm_calibration(dict(token=preview['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+                self.assertEqual([action for action,_ in self.calls],['state'])
+                self.assertEqual(set(a.output.glob('batch-hardware-*')),before)
+                self.assertEqual(a.calibration_previews,{})
+                a.collect_hardware.assert_not_called()
 
     def test_fake_capture_passes_source_readiness_and_keeps_wall_ack_nonce(self):
         a=self.app;a.config.update(environment='fake',simulation_only=True,robot_source='simulated')
@@ -416,9 +471,9 @@ class CaptureFlowTests(unittest.TestCase):
         self.assertNotIn('capture-ack',[action for action,_ in self.calls])
 
     def test_hardware_disconnection_refuses_preview_without_simulation_fallback(self):
-        self.app.hardware_connected=lambda:False
-        with self.assertRaisesRegex(ValueError,'不会回退'):self.app.preview_calibration()
-        self.assertEqual(self.calls,[]);self.app.remote_request.assert_not_called()
+        _,view=self.fresh_control();view.update(reachable=False,error='current reader disconnected')
+        with self.assertRaisesRegex(ValueError,'disconnected'):self.app.preview_calibration()
+        self.assertEqual(self.calls,[('state',None)]);self.app.remote_request.assert_not_called()
 
     def test_stop_before_collection_never_samples_or_acknowledges(self):
         gateway=self.app.control_request
