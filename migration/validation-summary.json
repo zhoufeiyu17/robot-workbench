@@ -1,10 +1,10 @@
 {
-  "status": "frozen_v7_cold3_of_3_complete_stopped_overall_NOT_CLOSED",
-  "updated_at": "2026-10-11T15:30:46.508143+08:00",
+  "status": "bounded_dev_resume_full_fake_entry_live_overall_NOT_CLOSED",
+  "updated_at": "2026-10-11T18:05:34.686693+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "757b290c12dde26732474cb58cf99b5a62cbc914",
-  "qualification_scope": "Frozen757b290/suite-v7: three declared original empty-C full-fake cases each completed and passed9/9;3/3 finite cold acceptance complete and stopped. CPU791 executions(790pass1skip)/L127 preserved. C12 original evidence gap closed by scoped reuse;D06 standalone CPU resume and one healthy renderer explicit recovery passed within their stated scopes. Remaining matrix/browser/fault branches,D7 stable complete-fake daily entry and independentL4 unqualified. All task-owned DSW/GPU processes exited;18867 closed;18866 CPU protocol-fake restored and retained. OverallNOT_CLOSED;no new cold runs or product changes.",
+  "candidate_commit_before_summary": "69c531c",
+  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Current69c531c adds editable same-device calibration resume, independent D job budget, measured jaw display boundary;76 targeted CPU tests and two full CPU setup cases passed. Actual dev175603 READY and three camera/target/mesh JPEG verified;approved18866 loopback entry switched;D ready collection.idle, explicit handoff needed before D motion. No new motion or cold suite. Physical/L4 and scoped UI/fault cases remain unqualified.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -16,10 +16,10 @@
     "source_unchanged": true,
     "native_unchanged": true,
     "detector_unchanged": true,
-    "current_source_matches_tested_hashes": true,
+    "current_source_matches_tested_hashes": false,
     "finished_at": "2026-10-11T10:59:17.641439+08:00",
     "git_head_at_test_start": "972e3fa001b5c867e3ce355138505d094bc9dde7",
-    "qualification_binding": "757b290 source-equivalent full CPU/L1;current suite-v7 cold3/3 is separately qualified",
+    "qualification_binding": "historical757b290 full CPU/L1;changed resume/display/setup paths have separate targeted evidence",
     "skip_detail": "explicit old local mesh fixture only",
     "count_note": "execution counts,not unique tests;L1 separate"
   },
@@ -195,7 +195,7 @@
     ]
   },
   "remaining": [
-    "优先完成D7稳定完整fake日常入口、生命周期与自助恢复运行交付；18866已恢复但仅L1协议，不以3/3或单次健康renderer恢复替代D7。",
+    "完善D7自助启停/到期续用/重启交互及实际故障恢复；18866完整fake已上线且C/D就绪，有限驻留不冒充无限常驻。",
     "定点补齐C02/C04/C05/C06、C07余项、D06/D07浏览器与实际故障恢复、D02多速度实际执行、renderer故障/浏览器及其他matrix明确边界；C12原缺证据已关闭，不重开cold套件。",
     "L4真实SDK/支撑/止动/时延载荷/正式singlewriter部署独立验收，fake结论不替代。"
   ],
@@ -528,7 +528,21 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": null,
+  "current_gpu_run": {
+    "mode": "dev_resume",
+    "fresh_C_completed": false,
+    "tag": "dev-20261011-175603",
+    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-175603",
+    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-175603",
+    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-175603-source.tar.gz",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-175603-contract.json",
+    "gpu_record": "unified-dev-20261011-175603",
+    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-175603-camera-spool",
+    "source_files": 378,
+    "started": true,
+    "dry_run_exit": 0,
+    "reserved_until": "2026-10-11T22:02:10.659438+08:00"
+  },
   "last_gpu_run": "full-scene-xy-20261011-134701",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
@@ -3626,10 +3640,25 @@
   ],
   "stable_fake_operational_delivery": {
     "authority": "D7",
-    "status": "not_qualified",
-    "current": "time-limited full PhysX fake run ended and temporary18867 closed;only localCPU L1 protocol18866 remains",
-    "next_action": "qualify stable complete-fake daily entry,lifecycle/self-service recovery using existing launcher and explicit bounded operating plan;no new long-livedGPU cost inferred",
-    "new_long_lived_GPU_or_cost_expansion_during_this_review": false
+    "status": "bounded_full_fake_entry_live",
+    "current": "18866 full fake connected READY; C and D backends ready, three cameras/target/mesh actual JPEG verified;control held by calibration",
+    "next_action": "self-service startup/expiry/restart UX and fault-specific qualification remain",
+    "service_deadline": "2026-10-11T21:57:25+08:00",
+    "resource_monitor": "fake heartbeat every45minutes; actual checks required",
+    "source_resume": "independent same-device copy, old installation/capture clocks preserved; no old runtime tokens restored"
   },
-  "delivery_verification_source": "Git history, .evidence/s2/active-task-checkpoint.json and actual final owner settlement receipts; delivery is not an additional feature backlog item"
+  "delivery_verification_source": "Git history, .evidence/s2/active-task-checkpoint.json and actual final owner settlement receipts; delivery is not an additional feature backlog item",
+  "dev_resume": {
+    "source_commit": "69c531c",
+    "source_run": "full-20261011-122428",
+    "run": "dev-20261011-175603",
+    "cpu_evidence": ".evidence/s2/dev-resume-targeted-cpu-20261011.json",
+    "availability": ".evidence/s2/dev-20261011-175603-availability/receipt.json",
+    "browser_entry": ".evidence/s2/full-fake-entry-18866-20261011.json",
+    "actual_browser_visual_QA": false,
+    "motion_requested": false,
+    "imported_arrival_samples": 71,
+    "failed_startup_preserved": "dev-20261011-174752",
+    "failed_startup_released": true
+  }
 }

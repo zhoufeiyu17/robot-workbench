@@ -71,10 +71,20 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ## 当前入口、资源与重验口径
 
-- **18866**：本机协议fake入口已恢复并核验HTTP与设备身份，明确无PhysX图像、真机未配置。当前CPU服务保留供开发；[恢复回执](.evidence/s2/local-protocol-entry-restored-20261011-1432.json)。14:09曾离线，原退出原因未知，不把“未操作”写成“当时在线”。
-- **18867**：原临时验收转发已在验收后关闭，SSH PID已退出、端口无监听；[关闭回执](.evidence/s2/temporary-forward-18867-close-20261011.json)。当前没有常驻完整fake服务，不把临时运行冒充D7交付。
-- **734 GPU**：本Session各run已实际核验清退并释放。最后一例15:23:43确认14个自有PID及双GPU全空，校验制品保持后15:24:03登记释放。没有连接或切换真机。
-- **历史与纠错**：v5/v6通过不混加到本轮；原失败、显示检查v1参数错误以及device-j1提前约11秒登记释放的[纠错](.evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json)均保留，详见[07行为记录](/Users/wujie/Developer/work/anyverse/_context/notes/unified-workbench-refactor-20261009/07-behavior-parity.md)。治理shadow核账仍有非阻断一致性警告，不宣称全绿。
+2026-10-11 18:00：已恢复完整fake后端 `dev-20261011-175603`，控制READY/已连接、三实际相机、姿态预览、已安装头解mesh均通过API与实际JPEG核验；D正在初始化，尚未把这一阶段写成D就绪。[恢复回执](.evidence/s2/dev-20261011-175603-availability/receipt.json)。本轮无新标定或数采轨迹。
+
+- **18866**：暂仍是已连接的本机协议fake。完整fake位于734本机43759；申请将18866切换为仅本机SSH转发，尚待用户批准。最新路由状态查[检查点](.evidence/s2/active-task-checkpoint.json)，不把后端健康冒充浏览器已切换。
+- **18867**：原临时验收转发已关闭，未复开。
+- **734 GPU**：当前run独占双卡；计算GPU1，GPU0为Isaac图形上下文。服务截止约21:57 CST，资源登记至22:02用于清退。`fake` heartbeat每45分钟真实核验；不自动延长或重启。CPU协议入口数据保留，未接真机。
+- **来源**：复用qualified nominal `full-20261011-122428`，保留头v000001/腕v000002、34+29张历史采样和71个到位样本，原source只读，当前独立复制。新Owner/clock/凭据，旧审批和动作不恢复。
+- **修复**：驻留寿命与D单任务预算分开，D仍最多120分钟；显示镜像接受既有−2～85mm反馈容差、记录原值与显示修正，显示模型限制在0～83mm，用户目标范围不变。最初174752启动尝试保留为失败诊断，9个自有PID与双GPU核空后已释放。
+- **历史与纠错**：3/3冷验收仍绑定757b290/suite-v7，不重新运行，也不当作本次新增恢复功能资格。device-j1提前登记release的纠错及治理非阻断一致性警告继续保留。
+
+### 完整fake复用启动
+
+在持有原run的主机，用 `scripts/calibration_resume_source.py --source-run <原run绝对路径> --source-base <原base-manifest.json绝对路径>` 生成只读SHA规格；将该JSON作为 `serve_physx_device.py --calibration-resume-source <规格JSON>` 的独立参数，配合正常base/nominal/新output和有界collection合同启动。它不是warm诊断模式，正常C/D操作保留；`--dry-run`会验证同虚拟设备、模型、相机、完整文件和成组依赖。不得把来源规格中的plant/truth核验材料传给求解与规划。
+
+导入图像、结果和统计各自独立复制；原版本ID、原采样时钟和原事件身份不改。新采样使用新时钟；精确批次散列支持旧头＋新腕及重新求解。恢复不计空库验收。启动代码与76项定向CPU检查及两组完整CPU配置链见[定向回执](.evidence/s2/dev-resume-targeted-cpu-20261011.json)；实际浏览器切换、D就绪和之后生命周期以检查点的实测时间为准。
 
 反复执行来自三case空库要求，以及此前共享Owner能力、缓存和wall/source就绪差异修复后的产品换版。当前3/3已达到有限退出条件，不再继续追加正常case。文档更新不影响运行源码；后续变更先判断受影响的证据和最小重验范围，不盲目把整套结果归零，也不降低已批准覆盖。
 
@@ -82,7 +92,7 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ## 剩余工作（按优先级）
 
-1. **稳定完整fake日常入口与运行生命周期**：复用已有launcher和有效标定，明确入口、启动/停止/恢复、持久数据与资源期限；18866协议fake恢复不等于这项已完成。具体部署不自动扩大网络或GPU常驻成本。
+1. **完整fake入口与生命周期交付**：恢复代码与后端图像核验已完成，优先完成D初始化、已申请的18866本机转发及现场页面确认；之后补用户自助启停/重启交互和实际故障恢复。当前有界服务不等于无限常驻或D7全部完成。
 2. **定点补验已有功能**：完整人工队列、仅腕/分步操作、清空/单批重解、逐相机/逐帧/低质量候选/下载、不同速度实际执行、故障后的显式恢复和重新审阅。C12与预动作恢复CPU已补，不重列待办；实际历史head mesh、50%审阅和30%执行只覆盖各自子范围。浏览器自动化此前连续失败，需按已有工具边界补可执行的人工/浏览器证据，不伪造视觉通过。
 3. **正式真机部署与L4验收**：SDK/支撑与停止、时延/载荷、真实相机及单writer切换独立完成；fake结果不替代现场资格。当前没有待用户裁决的新算法或UI行为决定。
 
