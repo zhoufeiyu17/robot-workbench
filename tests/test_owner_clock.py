@@ -110,10 +110,31 @@ class OwnerClockTest(unittest.TestCase):
         owner = self.ready()
         review = self.preview(owner)
         self.confirm(owner, review)
+        before=list(owner.backend.events)
         self.wall += 31.
         owner.tick()
-        self.assertEqual(owner.runner.status, 'FAULT')
-        self.assertIn('expired', owner.runner.reason)
+        self.assertIsNone(owner.runner)
+        self.assertEqual(owner.snapshot()['state'],'READY')
+        self.assertEqual(owner.snapshot()['last_confirm_rejection']['reason'],'review_expired')
+        self.assertFalse(owner.snapshot()['automatic_enabled'])
+        self.assertEqual(owner.backend.events,before)
+        with self.assertRaises(ValueError):self.confirm(owner,review)
+        self.sim+=.01;owner.tick()
+        fresh=self.preview(owner);self.confirm(owner,fresh);owner.tick()
+        self.assertEqual(owner.runner.status,'VERIFYING')
+
+    def test_owner_acceptance_before_ttl_survives_runner_construction_delay(self):
+        owner=self.ready();review=self.preview(owner);self.wall+=29.9
+        self.confirm(owner,review)
+        start=owner.start_motion
+        def slow_start(*args,**kwargs):
+            self.wall+=.2
+            return start(*args,**kwargs)
+        owner.start_motion=slow_start
+        owner.tick()
+        self.assertEqual(owner.runner.status,'VERIFYING')
+        self.assertIsNone(owner.last_confirm_rejection)
+        self.assertIsNone(owner.accepted_review_age_s)
 
     def test_capture_window_and_recovery_use_control_time(self):
         owner = self.ready()

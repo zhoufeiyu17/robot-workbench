@@ -246,6 +246,7 @@ class HTTPTest(unittest.TestCase):
         self.assertEqual(ready['workflow']['review']['request_job_id'],accepted['job_id'])
         self.assertGreater(ready['workflow']['review']['total_motion_duration_s'],0.)
         self.assertEqual(ready['workflow']['review']['waypoint_jaw_gap_mm'],[[80.,80.]])
+        self.assertTrue(0 < ready['workflow']['review']['expires_at_wall_ns']-ready['server_wall_ns'] <= 31e9)
         self.assertEqual(ready['workflow']['primary_action']['id'],'manual_execute')
         self.assertEqual(ready['workflow']['stage_id'],'manual.review')
         self.assertEqual(ready['workflow']['status'],'awaiting_review')
@@ -428,6 +429,13 @@ class HTTPTest(unittest.TestCase):
                 accepted_monotonic_s=task['submitted_monotonic_s']-1))
         value=self.app.manual_state(task,runtime,None,False)
         self.assertEqual(value['stage_id'],'manual.confirmation','old READY cannot complete a fresh request')
+        runtime['last_confirm_rejection']=dict(plan_sha256=task['plan_sha256'],command_epoch=task['epoch'],
+            motion_started=False,monotonic_s=task['submitted_monotonic_s']+.1,reason='review_expired')
+        rejected=self.app.manual_state(task,runtime,None,False)
+        self.assertEqual(rejected['stage_id'],'manual.rejected');self.assertEqual(rejected['status'],'expired')
+        self.assertFalse(rejected['busy']);self.assertIn('动作未执行',rejected['message'])
+        runtime['last_confirm_rejection']['monotonic_s']=task['submitted_monotonic_s']-1
+        self.assertEqual(self.app.manual_state(task,runtime,None,False)['stage_id'],'manual.confirmation')
         runtime['execution_calibration']['accepted_monotonic_s']=task['submitted_monotonic_s']+1
         self.assertEqual(self.app.manual_state(task,runtime,None,False)['stage_id'],'manual.complete')
         runtime['runtime_nonce']='restarted-runtime'

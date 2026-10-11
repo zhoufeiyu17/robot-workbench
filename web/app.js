@@ -2,11 +2,11 @@ const BUSINESS = {calibration: '标定', collection: '数采'};
 const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理设备'};
 const CALIBRATION_TOOLS=['configure_calibration','plan_batch','preview_batch','fit_source','fit_batch'];
 const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','preview_recover'];
-const STAGE_LABELS={'head.plan':'头部规划','head.review':'头部轨迹审阅','head.capture':'头部采集','head.solve':'头部求解与验收','head.fit':'头部重新求解','wrist.plan':'双腕规划','wrist.review':'双腕轨迹审阅','wrist.capture':'双腕采集','wrist.solve':'双腕求解与验收','wrist.fit':'双腕重新求解','install':'安装标定','calibration.idle':'准备标定','calibration.complete':'标定完成','collection.prepare':'准备数采环境','collection.plan':'观测与规划','collection.execute':'执行与录制','collection.idle':'准备数采','manual.review':'人工轨迹待审阅','connecting':'正在连接'};
+const STAGE_LABELS={'head.plan':'头部规划','head.review':'头部轨迹审阅','head.capture':'头部采集','head.solve':'头部求解与验收','head.fit':'头部重新求解','wrist.plan':'双腕规划','wrist.review':'双腕轨迹审阅','wrist.capture':'双腕采集','wrist.solve':'双腕求解与验收','wrist.fit':'双腕重新求解','install':'安装标定','calibration.idle':'准备标定','calibration.complete':'标定完成','collection.prepare':'准备数采环境','collection.plan':'观测与规划','collection.execute':'执行与录制','collection.idle':'准备数采','manual.review':'人工轨迹待审阅','manual.rejected':'人工动作未执行','connecting':'正在连接'};
 const degrees=value=>value*180/Math.PI;
 const radians=value=>Number((Number(value)*Math.PI/180).toPrecision(15));
 const seconds=value=>Number.isFinite(value)?value.toFixed(1)+' 秒':'尚无记录';
-const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
+const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',rejected:'未执行',expired:'确认已过期',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
 const reasonText=value=>({'motion or capture is still active':'当前动作或采集尚未结束','holding/control state is not confirmed':'保持/控制状态尚未确认，请查看设备诊断'}[value]||value);
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',diagnostic_readonly:'只读诊断',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
@@ -99,7 +99,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   let waitingForStateNotice=true;
   const pending = new Map(), mediaSlots = new Map(), timers = [], invalidatedReviews = new Set();
   let resultActions=[],queueActions=[],replayControlsKey='',manualQueueKey='';
-  let manualIntent=null;
+  let manualIntent=null,manualExpiryMessage='';
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
   let speedKey='',trajectoryKey='',trajectory=null,trajectoryRequest=null;
   let replayVideos=[],pairedCamera='',pairedPosition=0,pairedStarted=0,pairedPlaying=false,pairedRate=1,pairVersion=0;
@@ -385,6 +385,12 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       el('manual-confirm').disabled=true;return;
     }
     const matching=review?.request_job_id===intent.jobId&&w.primary_action?.id==='manual_execute';
+    if(matching&&intent.expiresAt===undefined&&Number.isFinite(review.expires_at_wall_ns))intent.expiresAt=review.expires_at_wall_ns;
+    const remaining=Number.isFinite(intent.expiresAt)&&Number.isFinite(state.server_wall_ns)?(intent.expiresAt-state.server_wall_ns)/1e6-(clock.now()-receivedAt):null;
+    if(remaining!==null&&remaining<=0){
+      manualExpiryMessage='本次确认已过期，动作未执行；重新点击执行重新检查。';
+      dismissManualExecution();notice(manualExpiryMessage);return;
+    }
     if(intent.reviewId&&(!matching||review.id!==intent.reviewId)){dismissManualExecution();return;}
     if(!matching)return;
     const gate=actionPermission(state,'manual_execute',{...options(),pending:false,clearance:true});
@@ -400,6 +406,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       el('manual-clearance-label').hidden=!(context.environment==='physical'||review.physical_clearance_required);
       el('manual-execution-dialog').showModal();
     }
+    setText('manual-confirm-expiry',remaining===null?'有效期以控制器审阅为准；不会自动续签。':`本次确认剩余 ${Math.ceil(remaining/1000)} 秒 · 到期后需重新点击执行，不会自动续签。`);
     const allowed=permission('manual_execute');el('manual-confirm').disabled=!allowed.allowed;setText('manual-confirm-reason',allowed.reason);
   }
   function renderGates() {
@@ -419,8 +426,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     gate('manual-preview','manual_preview',manualReady() ? '' : '尚无完整关节定义、限位与实测反馈');
     renderManualExecution();
     const manualNotice=manualPreviewNotice(),manualReview=primary?.id==='manual_execute'&&state?.workflow?.review;
-    setText('manual-request-status',manualNotice?.message||(manualIntent?.reviewId?'请在弹窗中核对本次动作并确认；关闭不会执行。':manualIntent?'正在提交执行前检查，尚未执行。':manualReview?'本页没有待确认动作。点击执行入口将重新检查；不会自动执行已有审阅。':'拖动只更新目标画面。点击执行后检查动作，并在弹窗中确认一次。'));
-    el('manual-request-status').className=manualNotice?.status==='failed'?'tone-bad':'hint';
+    const manualRejection=!manualIntent&&state?.workflow?.stage_id==='manual.rejected'?operatorText(state.workflow.message):'';
+    setText('manual-request-status',manualRejection||manualExpiryMessage||manualNotice?.message||(manualIntent?.reviewId?'请在弹窗中核对本次动作并确认；关闭不会执行。':manualIntent?'正在提交执行前检查，尚未执行。':manualReview?'本页没有待确认动作。点击执行入口将重新检查；不会自动执行已有审阅。':'拖动只更新目标画面。点击执行后检查动作，并在弹窗中确认一次。'));
+    el('manual-request-status').className=manualRejection||manualExpiryMessage||manualNotice?.status==='failed'?'tone-bad':'hint';
     gate('show-target','preview_target',displayRequests.has('recovery')?'渲染服务正在恢复':manualReady()?'':'尚无完整关节定义、限位与实测反馈');
     const manualDisabled = el('manual-preview').disabled&&el('show-target').disabled;
     for(const input of el('joint-inputs').querySelectorAll('input')) input.disabled=manualDisabled;
@@ -995,6 +1003,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(instance===serverInstance)return true;
     // Legacy snapshots may be read before upgrading, but cannot replace a known instance.
     if(instance===null||retiredServerInstances.has(instance))return false;
+    manualExpiryMessage='';
     dismissManualExecution();
     finishAudit('服务实例变化');
     cancelTarget('服务实例变化');
@@ -1011,6 +1020,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return true;
   }
   function barrier() {
+    manualExpiryMessage='';
     dismissManualExecution();
     clearTimeout(autoPreviewTimer);autoPreviewTimer=null;
     cancelTarget('页面控制或上下文已改变');

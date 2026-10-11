@@ -187,6 +187,31 @@ for(const physical of [false,true]){
   assert.equal(h.get('manual-execution-dialog').open,false);h.get('manual-confirm').events.click();assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,1,'a confirmation is submitted at most once');
   h.app.destroy();
 }
+{
+  const {h,value,post,ready}=await pendingManualExecution();h.reply(post,{job_id:'intent-job'});await settle();
+  ready().workflow.review.expires_at_wall_ns=40e9;h.reply(h.requests.length-1,value);await settle();
+  assert.match(h.get('manual-confirm-expiry').textContent,/剩余 30 秒/);
+  h.advance(1250);h.intervals[1]();assert.match(h.get('manual-confirm-expiry').textContent,/剩余 29 秒/,'countdown advances with local monotonic time between server polls');
+  value.revision++;value.server_wall_ns=38.5e9;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.match(h.get('manual-confirm-expiry').textContent,/剩余 2 秒/,'a new server receipt updates the same absolute deadline without renewal');
+  h.advance(1500);h.intervals[1]();
+  assert.equal(h.get('manual-execution-dialog').open,false);assert.match(h.get('manual-request-status').textContent,/本次确认已过期，动作未执行；重新点击执行重新检查/);
+  assert.match(h.get('request-status').textContent,/本次确认已过期/);
+  h.get('manual-confirm').events.click();h.get('manual-confirm').events.click();
+  assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0,'late or repeated confirmation cannot execute an expired review');
+  value.revision++;value.server_wall_ns=40.1e9;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('manual-execution-dialog').open,false);assert.match(h.get('manual-request-status').textContent,/本次确认已过期/,'expiry explanation survives a later poll with the old review');
+  h.get('manual-preview').events.click();assert.equal(h.requests.at(-1).url,'/api/actions/manual_preview');assert.doesNotMatch(h.get('manual-request-status').textContent,/本次确认已过期/,'only an explicit new request clears the expired intent');h.app.destroy();
+}
+for(const status of ['expired','rejected']){
+  const {h,value,post,ready}=await pendingManualExecution();h.reply(post,{job_id:'intent-job'});await settle();h.reply(h.requests.length-1,ready());await settle();
+  h.get('manual-confirm').events.click();const execution=h.requests.length-1;h.reply(execution,{message:'确认请求已入队'});await settle();
+  value.revision++;value.workflow={...value.workflow,status,stage_id:'manual.rejected',busy:false,review:null,message:status==='expired'?'本次确认已过期，动作未执行；重新点击执行重新检查。':'本次确认被拒绝，动作未执行；请重新检查。',primary_action:{id:'manual_tools',allowed:false},outcomes:{motion:status,task:status}};
+  value.runtime.last_confirm_rejection={reason:status};h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('stage-title').textContent,'人工动作未执行');assert.equal(h.get('task-status').textContent,status==='expired'?'确认已过期':'未执行');
+  assert.match(h.get('manual-request-status').textContent,/动作未执行/);if(status==='rejected')assert.doesNotMatch(h.get('manual-request-status').textContent,/过期/);
+  assert.equal(h.get('manual-execution-dialog').open,false);assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,1,'a queue rejection is never automatically retried');h.app.destroy();
+}
 for(const invalidate of ['dismiss','escape','input','queue','stop','cancel','tab','environment','instance','permission','expiry','stale']){
   const {h,value,post,ready}=await pendingManualExecution({queue:true});h.reply(post,{job_id:'intent-job'});await settle();h.reply(h.requests.length-1,ready());await settle();
   assert.equal(h.get('manual-execution-dialog').open,true);
@@ -205,6 +230,7 @@ for(const invalidate of ['dismiss','escape','input','queue','stop','cancel','tab
     h.app.poll();h.reply(h.requests.length-1,value);await settle();
   }
   assert.equal(h.get('manual-execution-dialog').open,false,invalidate+' must dismiss confirmation');
+  assert.doesNotMatch(h.get('manual-request-status').textContent,/本次确认已过期/,'non-TTL invalidation must not be mislabeled as expiry');
   h.get('manual-confirm').events.click();assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0,invalidate+' cannot execute');
   if(['dismiss','escape'].includes(invalidate)){
     value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('manual-execution-dialog').open,false,'polling cannot reopen a dismissed review');

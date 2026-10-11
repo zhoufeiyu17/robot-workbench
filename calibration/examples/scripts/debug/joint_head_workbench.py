@@ -1048,6 +1048,7 @@ class Workbench:
         legacy_budget=float(preview['total_motion_duration_s'])+len(pending['queue'])*20+30
         budget=None;deadline=started+legacy_budget
         last_motion={}
+        rejected_before_start=False
         def check_budget():
             if budget:self.resident_capture_budget()
             elif time.monotonic()>deadline:raise ValueError(label+'采集超时')
@@ -1063,10 +1064,17 @@ class Workbench:
         def save():
             tmp=dataset/'dataset.json.tmp';tmp.write_text(json.dumps(manifest,allow_nan=False));tmp.replace(dataset/'dataset.json')
         def checked_owner(owner=None):
-            nonlocal window_v2,source_clock,first_source_stamp,last_source_stamp,last_motion
+            nonlocal window_v2,source_clock,first_source_stamp,last_source_stamp,last_motion,rejected_before_start
             if owner is None:owner=self.control_request('state').get('owner') or {}
             if owner.get('pid')!=pid or owner.get('command_epoch')!=epoch:
                 raise ValueError('控制器身份或动作版本已变化，采集中止'+('：'+str(owner['reason']) if owner.get('reason') else ''))
+            rejection=owner.get('last_confirm_rejection') or {}
+            hashes=[p['sha256'] for p in preview.get('plans',[])]
+            if (hashes and rejection.get('plan_sha256')==hashes and rejection.get('motion_started') is False
+                    and rejection.get('owner_pid')==pid and rejection.get('command_epoch')==epoch):
+                rejected_before_start=True
+                raise ValueError('本批确认已过期，动作与采集未执行；请重新审阅' if rejection.get('reason')=='review_expired'
+                                 else '本批动作在开始前已撤销，未执行；请重新审阅')
             if not owner.get('feedback_healthy') or owner.get('state') in ('FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY','STOPPED','DISCONNECTED'):
                 raise ValueError(owner.get('reason') or label+'反馈失效或已停止')
             if environment=='fake':
@@ -1196,7 +1204,7 @@ class Workbench:
                 try:reject_window(identity,ready_ns,exc)
                 except OSError:pass
             try:
-                self.control_request('stop',{'owner_pid':pid,'command_epoch':epoch})
+                if not rejected_before_start:self.control_request('stop',{'owner_pid':pid,'command_epoch':epoch})
             except Exception:pass
             try:
                 manifest['failure']={'reason':str(exc),'at_s':time.time(),'runtime_environment':environment,'timing':timing()}

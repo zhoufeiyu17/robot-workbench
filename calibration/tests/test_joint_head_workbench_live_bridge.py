@@ -20,6 +20,20 @@ LOADER_SHAPES=[({'id':'p','pair_status':'complete','left':{},'right':{}},True),
                ([],False),('complete',False),(None,False),({},False)]
 
 class BridgeTests(unittest.TestCase):
+    def test_expired_capture_confirmation_keeps_owner_hold_and_saves_failure(self):
+        a=self.app;dataset=a.output/'expired-capture';dataset.mkdir()
+        a.hardware_calibration_cameras=lambda:({},{});a.load_batch=lambda *args:None;a.persist=lambda:None
+        rejection=dict(owner_pid=123,command_epoch=0,plan_sha256=['expired-plan'],motion_started=False,reason='review_expired')
+        calls=[]
+        a.control_request=lambda action,body=None: calls.append(action) or {'owner':dict(pid=123,command_epoch=0,last_confirm_rejection=rejection)}
+        pending=dict(preview=dict(owner_pid=123,command_epoch=0,total_motion_duration_s=1.,plans=[{'sha256':'expired-plan'}]),
+                     queue=[dict(sample_id='s',capture=True)],intrinsics={})
+        with self.assertRaisesRegex(ValueError,'本批确认已过期'):
+            a.collect_hardware(pending,dataset,dict(frames=[],robot_source='physical'))
+        self.assertEqual(calls,['state'])
+        result=json.loads((dataset/'completion.json').read_text())
+        self.assertFalse(result['passed']);self.assertEqual(result['captured'],0)
+
     def test_ack_local_rejection_and_remote_stop_are_independent(self):
         a=self.app;a.import_error=None
         a.status='REJECTED';a.reason='wrist fit rejected';a.tokens={'stale':{}}

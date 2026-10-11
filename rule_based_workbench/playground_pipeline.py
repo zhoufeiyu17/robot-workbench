@@ -410,6 +410,10 @@ def resident_wait_progress(owner,started,budget):
                 percent=100*sent/total if qualified else None)
 
 
+class ConfirmationRejected(ValueError):
+    """Current Owner proves this confirmation never started a motion."""
+
+
 def resident_execution_identity(lane,confirmation,before,deadline,*,cancel=None):
     """Bind the queued confirm to its subsequent actual Owner acceptance."""
     reviewed=confirmation.get('plan_sha256')
@@ -420,6 +424,15 @@ def resident_execution_identity(lane,confirmation,before,deadline,*,cancel=None)
     while time.monotonic()<deadline:
         if cancel is not None and cancel():raise InterruptedError('等待本次 Owner 接受执行已中断')
         owner=lane.owner();accepted=owner.get('execution_calibration') or {};instance=owner.get('execution_instance_id')
+        rejection=owner.get('last_confirm_rejection') or {}
+        if (rejection.get('id') and rejection['id']!=(before.get('last_confirm_rejection') or {}).get('id')
+                and rejection.get('motion_started') is False and isinstance(rejection.get('plan_sha256'),list)
+                and rejection['plan_sha256'] and reviewed==rejection['plan_sha256'][0]
+                and type(rejection.get('owner_pid')) is int
+                and rejection.get('owner_pid')==owner.get('pid')==before.get('pid')
+                and rejection.get('command_epoch')==owner.get('command_epoch')==before.get('command_epoch')):
+            raise ConfirmationRejected('本次确认已过期，动作未执行；请重新审阅' if rejection.get('reason')=='review_expired'
+                                       else '本次动作在开始前已撤销，未执行；请重新审阅')
         if instance and instance!=previous:
             if (not isinstance(instance,str) or not re.fullmatch('[0-9a-f]{32}',instance)
                     or accepted.get('execution_instance_id')!=instance or not accepted.get('plan_sha256')
@@ -813,7 +826,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         stop_resident()
         raise
     except Exception as error:
-        if resident:
+        if resident and not isinstance(error,ConfirmationRejected):
             try:stop_resident()
             except Exception as stop_error:errors['controller_stop']=str(stop_error)
         # Preserve already-exported videos on a simulation failure, never label raw complete.

@@ -300,6 +300,7 @@ class Application:
                     self.manual_tasks.pop((environment,business),None)
         if review:
             value['review'] = {key:review[key] for key in ('id','summary','physical_clearance_required')}
+            value['review']['expires_at_wall_ns']=time.time_ns()+int(max(0.,review['deadline']-time.monotonic())*1e9)
             for name in ('request_job_id','total_motion_duration_s','waypoint_jaw_gap_mm'):
                 if name in review:value['review'][name]=review[name]
             if review.get('speed_scale') is not None:value['review']['speed_scale']=review['speed_scale']
@@ -594,7 +595,14 @@ class Application:
             status,stage,title,message='pending','manual.confirmation','人工执行等待控制器回执','执行请求已受理，等待 Runtime 确认本次轨迹。'
             binding=runtime.get('execution_calibration') or {}
             plans=task['plan_sha256'];motion=runtime.get('motion') or {}
-            if (plans and list(binding.get('plan_sha256',[]))==plans and binding.get('command_epoch')==task['epoch']
+            rejection=runtime.get('last_confirm_rejection') or {}
+            if (plans and rejection.get('plan_sha256')==plans and rejection.get('command_epoch')==task['epoch']
+                    and rejection.get('motion_started') is False and rejection.get('monotonic_s',0)>=submitted):
+                expired=rejection.get('reason')=='review_expired'
+                status,stage,title='expired' if expired else 'rejected','manual.rejected','人工动作未执行'
+                message=('本次确认已过期，动作未执行；重新点击执行重新检查。' if expired else
+                         '本次动作在开始前已撤销，未执行；请核对状态后重新点击执行。')
+            elif (plans and list(binding.get('plan_sha256',[]))==plans and binding.get('command_epoch')==task['epoch']
                     and binding.get('accepted_monotonic_s',0)>=submitted and motion.get('plan_sha256') in plans):
                 status,stage,title,message='executing','manual.execute','人工轨迹执行中',motion.get('reason') or 'Runtime 正在执行本次审阅的轨迹。'
                 if motion.get('status')=='READY' and motion['plan_sha256']==plans[-1]:

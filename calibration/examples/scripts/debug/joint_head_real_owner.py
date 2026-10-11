@@ -190,6 +190,8 @@ class Owner:
             raise TypeError("control_clock must be callable")
         self.control_clock = control_clock
         self.review_wall_deadline = None
+        self.accepted_review_age_s = None
+        self.last_confirm_rejection = None
         self.arm_tolerance = .01
         self.arm_tolerances = None
         self.control = safety.PedalTakeover(backend, stop_damping_scale=stop_scale)
@@ -242,6 +244,8 @@ class Owner:
         return time.monotonic() if self.control_clock is None else self.control_clock()
 
     def review_age(self):
+        if self.accepted_review_age_s is not None:
+            return self.accepted_review_age_s
         # Only an injected execution clock needs a separate wall-clock review age.
         if self.control_clock is not None and self.review_wall_deadline is not None:
             return 30. + time.monotonic() - self.review_wall_deadline
@@ -413,7 +417,7 @@ class Owner:
                         or self.stop_requested or self.release_requested or pid != os.getpid()
                         or self.pedal_snapshot() != (press, False, True)):
                     raise ValueError('preview expired or owner/pedal changed')
-                self.commands.put_nowait(('confirm', epoch, review))
+                self.commands.put_nowait(('confirm', epoch, (review, self.review_wall_deadline)))
                 return {'queued': 'confirm', 'plan_sha256': plan.sha256, 'sequence_id': plans[0].sha256}
             raise ValueError('unsupported action or fields')
 
@@ -630,26 +634,34 @@ class Owner:
                         self.control.reason = 'motion fault acknowledged; preview a new action'
                         self.event('fault_acknowledged', reason=reason, epoch=self.epoch)
                     continue
+                review, review_deadline = review
                 plans, _, press, _, samples = review
                 plan = plans[0]
+                accepted_age = 30. + time.monotonic() - review_deadline
+                if not 0. <= accepted_age <= 30.:
+                    self.reject_confirmation(plans, 'review_expired', review_deadline=review_deadline)
+                    continue
                 if (epoch != self.epoch or not self.feedback_healthy
                         or self.control.state not in (self.states.READY, self.states.STOPPED, self.states.MANUAL)
                         or self.runner and self.runner.status not in ('READY', 'HOLD_UNSETTLED', 'STOPPED', 'FAULT')
                         or tuple(map(tuple, limits)) != plan.joint_limits
                         or self.pedal_snapshot() != (press, False, True)):
-                    self.consumed.add(plan.sha256)
-                    self.event('confirm_rejected', plan_sha256=plan.sha256, reason='owner/pedal/state changed')
+                    self.reject_confirmation(plans, 'owner/pedal/state changed')
                     continue
                 if not self.accept_review(plans):
-                    self.consumed.add(plan.sha256)
-                    self.event('confirm_rejected', plan_sha256=plan.sha256, reason='review revoked before execution')
+                    self.reject_confirmation(plans, 'review revoked before execution')
                     continue
                 self.active_epoch, self.review_press = epoch, press
                 self.sequence_remaining = list(plans[1:])
                 self.sequence_samples = list(samples[1:]);self.capture_sample = samples[0];self.capture_wait = None;self.capture_stable_since = None
                 self.capture_recovery_deadline = None;self.last_capture_ack = None
                 self.sequence_deadline = self.control_time() + sum(p.duration_s for p in plans) + 4 * len(plans) + 11*sum(s is not None for s in samples)
-                self.start_motion(plan, feedback)
+                # TTL is checked at the Owner acceptance boundary, before any
+                # runner/gain/recording work. Construction cannot turn this
+                # accepted review into a hardware fault by crossing the deadline.
+                self.accepted_review_age_s = accepted_age
+                try:self.start_motion(plan, feedback)
+                finally:self.accepted_review_age_s = None
                 self.event('motion_confirmed', plan=asdict(plan), status=self.runner.status)
             if self.runner and self.runner.status not in ('ARMED', 'STOPPED', 'FAULT'):
                 # begin/send check the live press counter immediately before writes.
@@ -758,6 +770,17 @@ class Owner:
         """Embedding runtimes may atomically revoke queued, not-yet-started reviews."""
         return True
 
+    def reject_confirmation(self, plans, reason, *, review_deadline=None):
+        for plan in plans:
+            self.consumed.add(plan.sha256)
+            for name in ('frozen_payloads', 'alignment_plans'):
+                getattr(self, name, {}).pop(plan.sha256, None)
+        self.last_confirm_rejection = dict(id=secrets.token_hex(12),owner_pid=os.getpid(),
+            command_epoch=self.epoch,plan_sha256=[p.sha256 for p in plans],reason=reason,
+            motion_started=False,monotonic_s=time.monotonic(),wall_ns=time.time_ns(),
+            review_deadline_monotonic_s=review_deadline)
+        self.event('confirm_rejected', **self.last_confirm_rejection)
+
     def start_motion(self, plan, feedback, *, reviewed_deadline=None):
         self.plan_sequence += 1
         epoch = self.active_epoch
@@ -796,6 +819,7 @@ class Owner:
                      stationary_diagnostic=getattr(self.stationary_window,'last_diagnostic',None),
                      last_fault_diagnostic=self.last_fault_diagnostic,
                      last_capture_ack=self.last_capture_ack,
+                     last_confirm_rejection=self.last_confirm_rejection,
                      simulation_only=not self.hardware,
                      jaw_mapping=mapping_identity(),
                      evidence_source='physical_hardware' if self.hardware else 'simulated_owner',

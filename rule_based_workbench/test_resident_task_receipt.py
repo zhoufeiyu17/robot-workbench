@@ -10,10 +10,22 @@ import unittest
 from unittest.mock import patch
 
 from integration import _digest
-from playground_pipeline import resident_task_receipt,resident_execution_identity
+from playground_pipeline import resident_task_receipt,resident_execution_identity,ConfirmationRejected
 
 
 class ResidentTaskReceiptTest(unittest.TestCase):
+    def test_current_rejection_ends_wait_but_historical_rejection_cannot(self):
+        before=dict(self.owner(self.state),pid=123)
+        rejected=dict(before,last_confirm_rejection=dict(id='new-rejection',owner_pid=123,command_epoch=4,
+            plan_sha256=['c'*64],motion_started=False,reason='review_expired'))
+        self.lane.owner=lambda:rejected
+        with self.assertRaisesRegex(ConfirmationRejected,'动作未执行'):
+            resident_execution_identity(self.lane,dict(queued='confirm',plan_sha256='c'*64),before,time.monotonic()+1)
+        with patch('playground_pipeline.time.monotonic',side_effect=lambda:self.clock[0]), \
+             patch('playground_pipeline.time.sleep',side_effect=lambda _:self.clock.__setitem__(0,self.clock[0]+.1)):
+            with self.assertRaises(TimeoutError):
+                resident_execution_identity(self.lane,dict(queued='confirm',plan_sha256='c'*64),rejected,.5)
+
     def setUp(self):
         self.tmp=TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.execution='e'*64;self.clock=[0.]
