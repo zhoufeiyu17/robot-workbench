@@ -31,6 +31,27 @@ class LaggingPlant:
 
 
 class BoundaryTest(unittest.TestCase):
+    def test_metal_gap_offset_does_not_remove_zero_command(self):
+        from arx_env.joint_head_real_motion import make_workbench_plans
+        events=[];plant=LaggingPlant()
+        backend=PhysxBackend(plant,joint_offsets=[0.]*12,metal_gap_offset_mm=.008,
+                             event=lambda kind,**row:events.append((kind,row)))
+        raw=backend.read_calibration_state()['qpos']
+        for gap in (0.,.004,.008,83.):
+            plan=make_workbench_plans(raw,[dict(q12=[0.]*12,speeds12=[.2]*12,
+                jaw_gap_mm=[gap,gap])],backend.limits,environment='fake')[0]
+            for side,index in (('left',6),('right',13)):
+                self.assertEqual(plan.q_target[index],command_sdk(side,gap))
+                backend.send(side,plan.q_target)
+                self.assertAlmostEqual(backend.pending[side][0][6],max(0.,gap-.008))
+        self.assertEqual(len([row for kind,row in events if kind=='jaw_closed_stop']),4)
+        plant.q={side:[0.]*7 for side in plant.q};backend.actual,_=plant.read()
+        self.assertEqual(feedback_gaps(backend.read_calibration_state()['qpos']),[.008,.008])
+        for gap in (-.001,83.001):
+            with self.assertRaises(ValueError):
+                make_workbench_plans(raw,[dict(q12=[0.]*12,speeds12=[.2]*12,
+                    jaw_gap_mm=[gap,gap])],backend.limits,environment='fake')
+
     def test_collection_context_is_atomic_and_describes_only_applied_targets(self):
         from types import SimpleNamespace as NS
         backend=PhysxBackend(LaggingPlant(),joint_offsets=[0.]*12)

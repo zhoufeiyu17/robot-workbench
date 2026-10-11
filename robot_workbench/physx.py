@@ -57,7 +57,9 @@ class PhysxBackend:
         for n, side in enumerate(('left', 'right')):
             self.limits.extend([[lo - self.offsets[n*6+i], hi - self.offsets[n*6+i]]
                                 for i, (lo, hi) in enumerate(self.plant.limits[side])])
-            self.limits.append([jaw.command_sdk(side, max(0., self.gap_offset)), jaw.command_sdk(side, 83.)])
+            # The public command range remains 0..83 mm. A positive metal-gap
+            # offset is feedback/model truth, not a new minimum operator target.
+            self.limits.append([jaw.command_sdk(side, 0.), jaw.command_sdk(side, 83.)])
 
     def _check(self):
         if not self.is_connected:
@@ -109,7 +111,11 @@ class PhysxBackend:
             raise ValueError('invalid SDK target; trajectories are never clipped')
         offset = 0 if side == 'left' else 6
         target = [x+d for x, d in zip(q[start:start+6], self.offsets[offset:offset+6])]
-        target.append(self.jaw.command_gap_mm(side, q[start+6])-self.gap_offset)
+        plant_gap = self.jaw.command_gap_mm(side, q[start+6])-self.gap_offset
+        target.append(max(0., plant_gap))  # Physical closed stop; raw readback retains the offset.
+        if plant_gap < 0.:
+            self.event('jaw_closed_stop', side=side, requested_plant_gap_mm=plant_gap,
+                       applied_plant_gap_mm=0., metal_gap_offset_mm=self.gap_offset)
         epoch = self.owner.epoch if self.owner is not None else None
         runner = getattr(self.owner, 'runner', None)
         context = None
