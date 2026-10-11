@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 CALIBRATION_STAGES=('head.plan','head.capture','head.solve','wrist.plan','wrist.capture','wrist.solve','install')
 CALIBRATION_TOOLS=('configure_calibration','plan_batch','preview_batch','fit_source','fit_batch')
 HISTORY_ACTIONS=('delete_preview','delete_confirm','delete_cancel')
+COLLECTION_TOOLS=('collection_prepare','collection_plan')
 
 
 def calibration_stage(state):
@@ -52,6 +53,48 @@ def result_file(root,path):
     if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file() or path.stat().st_size==0:
         raise ValueError('回放文件不存在或超出当前工作台结果目录')
     return path.resolve()
+
+
+def collection_live_view(value,runtime):
+    """Join cached evidence only after the complete current execution binding matches."""
+    binding=value.get('execution_binding') or {};native=runtime.get('native_task') or {}
+    frozen=runtime.get('frozen') or {};timeline=runtime.get('execution_timeline') or {}
+    accepted=runtime.get('execution_calibration') or {}
+    def same(first,*others):return isinstance(first,str) and bool(first) and all(first==item for item in others)
+    if not (value.get('stage_id')=='collection.execute' and value.get('status')=='running' and value.get('busy') is True and value.get('id')
+            and runtime.get('holder')=='collection' and accepted.get('business')=='collection'
+            and same(binding.get('device_id'),runtime.get('device_id'))
+            and same(binding.get('environment'),runtime.get('environment'))
+            and same(binding.get('execution_instance_id'),runtime.get('execution_instance_id'),accepted.get('execution_instance_id'),native.get('execution_instance_id'))
+            and same(binding.get('runtime_nonce'),runtime.get('runtime_nonce'),native.get('runtime_nonce'))
+            and same(binding.get('source_clock_id'),native.get('source_clock_id'),(runtime.get('calibration_feedback') or {}).get('source_clock_id'))
+            and same(binding.get('timeline_digest'),frozen.get('timeline_digest'),timeline.get('parent_timeline_digest'))
+            and same(binding.get('execution_timeline_digest'),frozen.get('execution_timeline_digest'),timeline.get('timeline_digest'),native.get('execution_timeline_digest'))
+            and type(runtime.get('command_epoch')) is int and accepted.get('command_epoch')==runtime['command_epoch']):return value
+    outcomes=value.setdefault('outcomes',{})
+    def replace(name,placeholders,result):
+        previous=outcomes.get(name);status=previous.get('status') if isinstance(previous,dict) else previous
+        if result and (status is None or status in placeholders):outcomes[name]=result
+    motion=({'FAULT':'failed','STOPPED':'stopped'}.get(runtime.get('motion_status')) or
+        {'running':'running','awaiting_final_feedback':'verifying','completed':'completed','failed':'failed','cancelled':'stopped'}.get(frozen.get('status')))
+    replace('motion',('未执行','unknown','not_started','running','executing','verifying'),
+        dict(status=motion,message=frozen.get('reason') or frozen.get('stop_error')) if motion else None)
+    recording=runtime.get('recording') or {};validation=(recording.get('manifest') or {}).get('validation') or {}
+    error=runtime.get('recording_error') or recording.get('error') or recording.get('seal_error') or recording.get('diagnostics_error')
+    data=('invalid' if error or validation.get('status')=='failed' else 'valid' if validation.get('status')=='passed' else
+          'pending' if recording.get('done') else 'recording' if recording.get('ready') else None)
+    replace('data',('未录制','unknown','not_started','pending','recording'),dict(status=data,message=error) if data else None)
+    task=native.get('task_outcome')
+    replace('task',('未验证','unverified','unknown','not_started','pending','running'),
+        dict(status='failed',message=native['first_failure']) if native.get('first_failure') else
+        dict(status='pending',message='等待原生任务回执核验') if task in ('success','pending_receipt') else
+        dict(status=task,message=native.get('message')) if task else None)
+    current,total=frozen.get('submitted_command_ticks'),frozen.get('execution_tick_count')
+    if type(current) is int and type(total) is int and total==timeline.get('command_count') and 0<=current<=total and total>0:
+        value['progress']=dict(current=current,total=total,scope='motion')
+    collection=value.setdefault('collection',{})
+    collection.update(live_binding_verified=True,recording=deepcopy(recording),native_task=deepcopy(native))
+    return value
 
 
 class CalibrationWorkflow:
@@ -152,6 +195,12 @@ class CalibrationWorkflow:
             details=[{'label':'当前模型','value':self.app.config.get('asset_geometry_id','未知')},
                      {'label':'运行身份','value':run_id or '尚未生成'}])
         if capture_batch:value['details'].append({'label':'采集批次','value':capture_batch})
+        value['pipeline']={key:deepcopy(report[key]) for key in
+            ('run_id','phase','failed_phase','aborted','stopped','steps','subprogress','head_capture','wrist_capture') if key in report}
+        value['quality']=dict(counts=deepcopy(state.get('counts') or {}),completion=deepcopy(completion),
+            results=[{key:deepcopy(row[key]) for key in ('half','step','round','result_id','metrics','pair_status','acceptance','reused','adopted') if key in row}
+                     for row in report.get('steps',[]) if row.get('metrics') is not None],
+            **{key:deepcopy(report[key]) for key in ('pairs','best_pair','installed') if key in report})
         if status=='failed' and isinstance(completion,dict):
             value['outcomes']['data']='valid' if completion.get('passed') is True else 'invalid'
         value['manual_queue']=self.manual_queue_state()
@@ -416,6 +465,8 @@ class CalibrationWorkflow:
 
     def select_result(self,body):
         identity=body.get('result_id')
+        with self.lock:previous_context=deepcopy(self.replay_context or {})
+        if previous_context.get('result_id')!=identity:previous_context={}
         heads={row['id']:row for row in self.app.calibration_results()}
         wrists={row['id']:row for row in self.app.wrist_results()}
         if identity in heads:kind,row='head',heads[identity];batch=row['batch']
@@ -425,19 +476,35 @@ class CalibrationWorkflow:
         else:raise ValueError('所选标定结果或采集批次不存在')
         raw_deleted=hasattr(self.app,'deleted_batch') and self.app.deleted_batch(batch)
         view={'frames':[]} if raw_deleted else self.app.review_batch(batch)  # Replay never changes solver input.
-        frames=view.get('frames') or [];index=body.get('frame_index',0)
+        frames=view.get('frames') or [];index=body.get('frame_index',previous_context.get('frame_index',0))
         if type(index) is not int or index<0 or frames and index>=len(frames):raise ValueError('回放帧索引无效')
         image_urls=frames[index].get('image_urls',{}) if frames else {}
-        camera=body.get('camera','left' if kind=='wrist' and 'left' in image_urls else 'head')
+        camera=body.get('camera',previous_context.get('camera','left' if kind=='wrist' and 'left' in image_urls else 'head'))
         if camera not in ('head','left','right'):raise ValueError('请选择头部或左右腕相机')
-        overlay=body.get('overlay',False)
+        overlay=body.get('overlay',previous_context.get('overlay',False))
         if type(overlay) is not bool:raise ValueError('overlay 必须是布尔值')
-        overlay_id=identity
-        if kind=='wrist' and camera=='head':
-            overlay_id=self.app.wrist_head_id(row)
-            if overlay_id not in {r['id'] for r in view.get('results',[]) if r.get('kind')=='head'}:overlay_id=None
-        overlay_available=bool(frames) and not raw_deleted and (kind=='head' and camera=='head' or
-            kind=='wrist' and (camera in ('left','right') or camera=='head' and overlay_id is not None))
+        # review_batch owns the same-batch/dependency boundary. Quality controls
+        # installation, while historical overlay keeps its existing parameter checks.
+        review_results=view.get('results')
+        if review_results is None:
+            review_results=[dict(r,kind='head') for r in heads.values() if r.get('batch')==batch]
+            review_results += [dict(r,kind='wrist') for r in wrists.values() if str(Path(r.get('file','')).parent)==batch]
+        candidates=[dict(id=r['id'],kind=r.get('kind','wrist'),label=r.get('version') or r['id'],
+            status=r.get('pair_status') or r.get('status','candidate')) for r in review_results
+            if (r.get('kind')=='head')==(camera=='head')]
+        candidate_ids={r['id'] for r in candidates}
+        overlay_id=body.get('candidate_id')
+        if overlay_id is not None and (not isinstance(overlay_id,str) or overlay_id not in candidate_ids):
+            raise ValueError('叠加候选必须匹配当前批次与相机')
+        if overlay_id is None and not (kind=='wrist' and camera=='head') and previous_context.get('candidate_id') in candidate_ids:
+            overlay_id=previous_context['candidate_id']
+        if overlay_id is None:
+            overlay_id=identity if identity in candidate_ids else None
+            if kind=='wrist' and camera=='head':
+                dependency=self.app.wrist_head_id(row)
+                overlay_id=dependency if dependency in candidate_ids else None
+            elif overlay_id is None and kind=='capture' and candidates:overlay_id=candidates[0]['id']
+        overlay_available=bool(frames) and not raw_deleted and camera in image_urls and overlay_id is not None
         if overlay:
             if not overlay_available:raise ValueError('当前相机需要匹配的头部或双腕结果')
             image=self.app.historical_overlay(dict(batch_id=batch,frame_index=index,camera=camera,result_id=overlay_id))['image_url']
@@ -455,13 +522,16 @@ class CalibrationWorkflow:
         message='已打开只读回放；未配置实时 mesh 渲染器'
         previous=(self.replay_context or {}).get('result_id')
         if self.snapshot().get('busy') or getattr(self.app,'pipeline_running',False):message='当前任务仍在进行；已打开只读回放，未变更实时叠加选择'
-        elif previous==identity:message='已更新只读回放'
+        elif previous==identity or 'candidate_id' in body:message='已更新只读回放'
         elif kind=='wrist' or kind=='head' and getattr(self.app,'live',None):
             reply=self.app.action('/api/wrist-select' if kind=='wrist' else '/api/calibration',{'result_id':identity})
             message=reply.get('message','已选择标定结果')
         context=dict(result_id=identity,batch_id=batch,frame_index=index,frame_count=len(frames),camera=camera,
             cameras=sorted(image_urls),overlay=overlay,overlay_available=overlay_available,
-            overlay_result_id=overlay_id if overlay_available else None,
+            candidate_id=overlay_id,candidates=candidates,overlay_result_id=overlay_id if overlay_available else None,
+            frame={key:deepcopy(frames[index][key]) for key in
+                ('id','name','image','split','valid','valid_for_fit','detections','detections_by_camera') if key in frames[index]} if frames else None,
+            frames=[{key:deepcopy(frame[key]) for key in ('id','name','image','split','valid','valid_for_fit') if key in frame} for frame in frames],
             message='原始批次已删除；版本参数与依赖快照保留，无法回放原始图像' if raw_deleted else '本帧没有所选相机图像' if frames and not image else '尚无采集帧' if not frames else '')
         with self.lock:
             self.media_files=files;self.replay=replay;self.replay_context=context
@@ -603,6 +673,29 @@ class CollectionWorkflow:
             replan_action=dict(id='generate_plan',label='重新观测并规划',allowed=not busy,reason='数采任务正在进行' if busy else None) if plan.get('validated') else None,
             details=[{'label':'已耗时','value':f"{progress.get('elapsed_s',0):.1f} 秒"},
                      {'label':'计划身份','value':plan.get('timeline_digest','尚未生成')}])
+        actions={name:dict(id=action,label=label,allowed=not busy and ready if name=='plan' else
+                          not busy and bool(state.get('can_execute')) if name=='execute' else not busy,
+                          reason='数采任务正在进行' if busy else '请先完成环境准备' if name=='plan' and not ready else
+                          '请先生成并审阅可执行计划' if name=='execute' and not state.get('can_execute') else None)
+                 for name,action,label in (('prepare','collection_prepare','准备数采环境'),
+                     ('plan','collection_plan','采集新观测并生成计划'),('execute','execute','审阅并执行本批'))}
+        relations=dict(plan={key:deepcopy(plan[key]) for key in ('output','timeline_digest','plan_path','duration_s','speed_scale') if key in plan},
+                       source={},calibration={})
+        for key in ('source_path','hardware_binding'):
+            if not plan.get(key):continue
+            try:
+                artifact=json.loads(result_file(self.playground.directory,plan[key]).read_text())
+                if key=='source_path':
+                    relations['source']=dict(path=plan[key],**{name:artifact[name] for name in ('run_id','scene_digest','source_mode','environment') if name in artifact})
+                    profile=artifact.get('calibration_profile') or {}
+                    if profile.get('profile_id'):relations['calibration']['profile_id']=profile['profile_id']
+                else:relations['calibration'].update({name:artifact[name] for name in ('robot_id','camera_serials','calibration_profile_digest','environment') if name in artifact})
+            except (OSError,ValueError,TypeError) as error:relations.setdefault('errors',{})[key]=str(error)
+        value['collection']=dict(actions=actions,timing=deepcopy(progress),relations=relations,
+            environment=deepcopy(state.get('environment') or {}),recording=deepcopy(recording),native_task=deepcopy(native),
+            simulation=deepcopy(state.get('simulation')),errors=deepcopy(state.get('errors') or {}),
+            execution_wait=deepcopy(progress.get('execution_wait') or state.get('execution_wait')),
+            capture_ready=state.get('capture_ready'),capture_warning=state.get('capture_warning'))
         diagnostics=[]
         if state.get('environment',{}).get('checks'):diagnostics.append(dict(label='数采环境检查',value=state['environment']['checks']))
         if progress.get('stages'):
@@ -679,16 +772,25 @@ class CollectionWorkflow:
         return result_file(self.playground.directory,path) if path else None
     def allowed(self,action):
         value=self.snapshot()
+        if action in COLLECTION_TOOLS:
+            if value.get('busy'):return dict(allowed=False,reason='数采任务正在进行')
+            return deepcopy(value.get('collection',{}).get('actions',{}).get(
+                'prepare' if action=='collection_prepare' else 'plan',dict(allowed=False,reason='正在读取数采环境状态')))
         yes=action=='cancel' and value.get('busy') or action in ('generate_plan','execute') and not value.get('busy')
         return dict(allowed=bool(yes),reason=None if yes else '当前数采阶段不允许此操作')
     def action(self,action,body):
         if not self.allowed(action)['allowed']:raise ValueError(self.allowed(action)['reason'])
-        if action=='generate_plan':
+        if action in ('generate_plan',*COLLECTION_TOOLS):
             state=self.playground.snapshot()
             plan=state.get('plan') or {}
             speed=body.get('speed_scale',getattr(self,'speed_scale',None) or plan.get('speed_scale',.3))
             if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1:
                 raise ValueError('运动速度必须在 10% 至 100% 之间')
+            if action in COLLECTION_TOOLS:
+                stage='prepare' if action=='collection_prepare' else 'plan'
+                result=self.playground.start(dict(action=stage,speed_scale=speed))
+                with self.lock:self.speed_scale=speed
+                return self.accepted(result,stage)
             replan=body.get('replan',False)
             if type(replan) is not bool:raise ValueError('replan 必须是布尔值')
             if not replan and plan.get('validated') and state.get('can_execute'):

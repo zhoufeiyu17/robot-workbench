@@ -4,7 +4,7 @@ import {webcrypto} from 'node:crypto';
 
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
-const {createWorkbench,actionPermission,countedProgress,collectionExecutionView,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -28,6 +28,7 @@ function documentStub(){
 }
 const response=(value,headers={})=>({ok:true,status:200,headers:{get:key=>headers[key]??null},json:async()=>value,blob:async()=>new Blob(['fixture'])});
 const settle=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+const degrees=value=>value*180/Math.PI;
 function snapshot(overrides={}){
   return {schema:'robot-workbench-ui.v1',server_instance_id:'fixture-server',revision:1,server_wall_ns:10e9,csrf:'fixture-only',device:{id:'fixture-device',label:'Fixture device',environment:'fake'},runtime:{connected:true,holder:'calibration',feedback_healthy:true,motion_status:'idle',hold:{left:'position',right:'position'},allowed_operations:Object.fromEntries(['handoff','stop','connect','cancel','recover','mesh','manual_preview','select_result'].map(action=>[action,{allowed:true,reason:''}]))},workflow:{id:'fixture-run',revision:1,status:'planning',stage_id:'head.plan',title:'头部规划',message:'仍在规划',progress:null,primary_action:{id:'generate_plan',label:'生成计划',allowed:true,reason:''},outcomes:{}},media:[],results:[],diagnostics:[],mesh:{requested:false,applied:false},...overrides};
 }
@@ -36,9 +37,9 @@ function manualSnapshot(){
   value.manual={joint_names:Array.from({length:12},(_,i)=>'J'+i),positions:Array(12).fill(.1),limits:Array.from({length:12},()=>[-1,1]),jaw_gaps_mm:[80,80],default_joint_speed_rad_s:.2,default_jaw_speed_mm_s:10,queue:{available:true,revision:4,waypoints:[]}};
   return value;
 }
-function harness({audit=false}={}){
+function harness({audit=false,storage}={}){
   const document=documentStub(),requests=[],intervals=[],revoked=[],blobs=[],timeouts=new Map(),rafs=new Map();let now=0,timerId=0,rafId=0;
-  const app=createWorkbench({document,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
+  const app=createWorkbench({document,storage,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
   const fireTimer=predicate=>{const timer=[...timeouts.entries()].find(([,t])=>predicate(t.ms));assert(timer,'matching timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;};
   return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
@@ -61,7 +62,7 @@ function collectionSnapshot(){
   const value=snapshot(),binding={execution_instance_id:'current-instance',runtime_nonce:'owner',source_clock_id:'clock',
     execution_timeline_digest:'initialized-plan',timeline_digest:'frozen-plan',device_id:value.device.id,environment:'fake'};
   Object.assign(value.workflow,{status:'running',busy:true,stage_id:'collection.execute',execution_binding:binding,
-    outcomes:{motion:'未执行',data:'未录制',task:'未验证',simulation:'未验证'}});
+    outcomes:{motion:{status:'running'},data:{status:'recording'},task:{status:'running'},simulation:'未验证'},progress:{current:1270,total:3671,scope:'motion'}});
   Object.assign(value.runtime,{holder:'collection',environment:'fake',device_id:value.device.id,runtime_nonce:'owner',command_epoch:4,
     motion_status:'RUNNING',execution_instance_id:'current-instance',calibration_feedback:{source_clock_id:'clock'},
     execution_calibration:{business:'collection',execution_instance_id:'current-instance',command_epoch:4},
@@ -72,62 +73,17 @@ function collectionSnapshot(){
   return value;
 }
 {
-  const context={business:'collection',environment:'fake'},value=collectionSnapshot(),original=structuredClone(value);
-  const live=collectionExecutionView(value,context);
-  assert.deepEqual(live.progress,{current:1270,total:3671,scope:'motion'},'repeated 100 Hz sink calls cannot inflate frozen command progress');
-  assert.equal(live.outcomes.motion.status,'running');assert.equal(live.outcomes.data.status,'recording');
-  assert.equal(live.outcomes.task.status,'running');assert.deepEqual(value,original,'rendering must not rewrite server evidence');
-  for(const change of [
-    s=>delete s.workflow.execution_binding,s=>s.workflow.execution_binding.execution_instance_id='old-instance',
-    s=>s.runtime.execution_instance_id='new-instance',s=>s.runtime.execution_calibration.execution_instance_id='old-instance',
-    s=>s.runtime.native_task.execution_instance_id='old-instance',s=>s.runtime.native_task.runtime_nonce='old-owner',
-    s=>s.workflow.execution_binding.runtime_nonce='old-owner',s=>s.runtime.native_task.source_clock_id='old-clock',
-    s=>s.runtime.calibration_feedback.source_clock_id='old-clock',s=>s.runtime.frozen.timeline_digest='old-plan',
-    s=>s.runtime.execution_timeline.parent_timeline_digest='old-plan',s=>s.runtime.frozen.execution_timeline_digest='old-execution',
-    s=>s.runtime.native_task.execution_timeline_digest='old-execution',s=>s.runtime.execution_timeline.timeline_digest='old-execution',
-    s=>s.runtime.environment='physical',s=>s.runtime.device_id='other-device',s=>s.runtime.holder='calibration',
-    s=>s.runtime.execution_calibration.business='calibration',s=>s.runtime.command_epoch=5,
-    s=>s.workflow.stage_id='collection.plan',s=>s.workflow.status='failed',s=>s.workflow.busy=false]){
-    const other=structuredClone(original);change(other);assert.equal(collectionExecutionView(other,context),null,'missing or mismatched identities and terminal workflows must not be overlaid');
-  }
-  assert.equal(collectionExecutionView(value,{...context,business:'calibration'}),null);
-  assert.equal(collectionExecutionView(value,{...context,environment:'physical'}),null);
-  for(const invalid of [{submitted_command_ticks:undefined},{submitted_command_ticks:3672},{submitted_command_ticks:-1},
-    {submitted_command_ticks:1.5},{submitted_command_ticks:true},{execution_tick_count:undefined},{execution_tick_count:3670}]){
-    value.runtime.frozen={...original.runtime.frozen,...invalid};assert.equal(collectionExecutionView(value,context).progress,null);
-  }
-  value.runtime.frozen={...original.runtime.frozen,submitted_command_ticks:3671};
-  let complete=collectionExecutionView(value,context);assert.equal(complete.progress.current,complete.progress.total);
-  assert.equal(complete.outcomes.motion.status,'running');assert.equal(complete.outcomes.data.status,'recording');
-  assert.equal(complete.outcomes.task.status,'running');assert.equal(complete.outcomes.simulation,'未验证');
-  value.runtime.frozen.status='completed';value.runtime.recording.done=true;value.runtime.native_task.task_outcome='success';
-  complete=collectionExecutionView(value,context);assert.equal(complete.outcomes.motion.status,'completed');
-  assert.equal(complete.outcomes.data.status,'pending');assert.equal(complete.outcomes.task.status,'pending','native success still needs business receipt validation');
-  for(const field of ['error','seal_error','diagnostics_error']){
-    const bad=structuredClone(original);bad.runtime.recording[field]='disk full';
-    assert.match(collectionExecutionView(bad,context).outcomes.data.message,/disk full/);
-  }
-  const bad=structuredClone(original);bad.runtime.recording_error='queue overflow';bad.runtime.native_task.first_failure={reason:'contact height'};
-  let failed=collectionExecutionView(bad,context);assert.equal(failed.outcomes.data.status,'invalid');assert.equal(failed.outcomes.task.status,'failed');
-  assert.match(failed.outcomes.task.message,/contact height/);assert.equal(failed.outcomes.motion.status,'running');
-  bad.runtime.native_task.first_failure=null;bad.runtime.native_task.task_outcome='unverifiable';bad.runtime.native_task.message='receipt write failed';
-  assert.match(collectionExecutionView(bad,context).outcomes.task.message,/receipt write failed/);
-  bad.runtime.recording_error=null;bad.runtime.recording.manifest={validation:{status:'failed',reason:'missing frames'}};
-  assert.match(collectionExecutionView(bad,context).outcomes.data.message,/missing frames/);
-  bad.runtime.frozen.status='failed';bad.runtime.frozen.reason='control fault';assert.equal(collectionExecutionView(bad,context).outcomes.motion.status,'failed');
-  bad.workflow.outcomes={motion:{status:'stopped',message:'operator stop'},data:{status:'invalid',message:'validated raw failure'},task:'failed',simulation:'failed'};
-  assert.deepEqual(collectionExecutionView(bad,context).outcomes,bad.workflow.outcomes,'runtime must preserve explicit outcome receipts');
-}
-{
   const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
   const value=collectionSnapshot();h.reply(1,value);await settle();
   assert.equal(h.get('outcome-motion').textContent,'进行中');assert.equal(h.get('outcome-data').textContent,'录制中');
   assert.equal(h.get('task-progress').value,1270);assert.equal(h.get('task-progress').max,3671);
   assert.match(h.get('progress-label').textContent,/1270 \/ 3671.*34.6%.*仅运动指令进度/);assert.equal(h.get('overall-panel').hidden,true);
-  value.revision++;value.runtime.recording.error='raw queue overflow';h.app.poll();h.reply(2,value);await settle();
+  value.revision++;value.runtime.recording.error='unmatched raw event';value.runtime.frozen.submitted_command_ticks=3666;h.app.poll();h.reply(2,value);await settle();
+  assert.equal(h.get('outcome-data').textContent,'录制中');assert.equal(h.get('task-progress').value,1270,'only server workflow receipts determine displayed outcomes and progress');
+  value.revision++;value.workflow.outcomes.data={status:'invalid',message:'raw queue overflow'};h.app.poll();h.reply(3,value);await settle();
   assert.match(h.get('outcome-data').textContent,/无效.*raw queue overflow/);assert.match(h.get('alert').textContent,/录制失败，动作仍在执行/);
   value.revision++;value.workflow.status='failed';value.workflow.busy=false;value.workflow.outcomes={motion:'completed',data:'invalid',task:'failed'};
-  h.app.poll();h.reply(3,value);await settle();assert.equal(h.get('task-status').textContent,'失败');
+  h.app.poll();h.reply(4,value);await settle();assert.equal(h.get('task-status').textContent,'失败');
   assert.equal(h.get('outcome-task').textContent,'失败');assert.equal(h.get('outcome-motion').textContent,'已完成');h.app.destroy();
 }
 
@@ -261,7 +217,7 @@ for(const [status,message,label] of [['running','本轮准备仍在运行','进�
   const h=harness();h.app.start();const value=manualSnapshot();h.reply(0,value);await settle();
   const inputs=h.get('joint-inputs').querySelectorAll('input'),positions=inputs.filter(i=>i.dataset.role==='position'),speeds=inputs.filter(i=>i.dataset.role==='speed');
   assert.equal(positions.length,12);assert.equal(speeds.length,12);
-  positions[0].value=.25;speeds[0].value=.05;h.get('jaw-speed').value=5;h.get('queue-add').events.click();
+  positions[0].value=degrees(.25);speeds[0].value=.05;h.get('jaw-speed').value=5;h.get('queue-add').events.click();
   const queued=JSON.parse(h.requests[1].options.body);assert.equal(h.requests[1].url,'/api/actions/manual_queue');assert.equal(queued.operation,'add');assert.equal(queued.queue_revision,4);assert.equal(queued.waypoint.q[0],.25);assert.equal(queued.waypoint.speeds[0],.05);assert.equal(queued.waypoint.jaw_speed_mm_s,5);
   h.reply(1,{message:'队列已保存'});await settle();value.revision=2;value.manual.queue={available:true,revision:5,waypoints:[queued.waypoint]};h.reply(2,value);await settle();
   assert.equal(h.get('manual-queue-list').querySelectorAll('li').length,1);assert.equal(h.get('queue-preview').disabled,false);
@@ -359,11 +315,11 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.display_context='queue-context';h.reply(0,value);await settle();
   const positions=h.get('joint-inputs').querySelectorAll('input').filter(row=>row.dataset.role==='position');
   h.get('show-target').events.click();assert.equal(h.get('show-target').disabled,false,'the shared latest-input queue remains available while HTTP is in flight');
-  positions[0].value='.2';positions[0].events.input();h.get('show-target').events.click();positions[0].value='.3';positions[0].events.input();h.get('show-target').events.click();
+  positions[0].value=degrees(.2);positions[0].events.input();h.get('show-target').events.click();positions[0].value=degrees(.3);positions[0].events.input();h.get('show-target').events.click();
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'ordinary target edits use the bounded presentation queue');
   h.reply(1,{client_revision:8});await settle();assert.equal(JSON.parse(h.requests[3].options.body).q12[0],.3,'only the latest unsent ordinary target is dispatched');
-  h.reply(3,{client_revision:9});await settle();positions[0].value='.4';h.get('show-target').events.click();h.reply(4,{client_revision:10});await settle();
-  positions[0].value='.5';h.get('show-target').events.click();positions[0].value='.6';h.get('show-target').events.click();
+  h.reply(3,{client_revision:9});await settle();positions[0].value=degrees(.4);h.get('show-target').events.click();h.reply(4,{client_revision:10});await settle();
+  positions[0].value=degrees(.5);h.get('show-target').events.click();positions[0].value=degrees(.6);h.get('show-target').events.click();
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,3,'three slots include accepted, downloading and awaiting presentation');
   const headers=revision=>previewHeaders('target',revision,{display_context:'queue-context',server_instance_id:'fixture-server'});
   assert.match(h.requests[2].url,/revision=8/);h.reply(2,{},headers(8));await settle();const firstImage=h.get('media-preview').querySelector('img').src;
@@ -691,4 +647,108 @@ function deletionSnapshot(){
   const physical=harness();physical.app.start();physical.app.switchContext({environment:'physical',business:'calibration'});value.device.environment='physical';value.runtime.state='FAULT';physical.reply(1,value);await settle();
   assert.match(physical.get('control-fault-guidance').textContent,/可靠支撑双臂.*确认断开后再连接.*未确认时不要重试/);physical.app.destroy();
 }
-console.log('PASS unified web: reviewed speed, readonly trajectory, paired replay, release confirmation, latched fault visibility, instance/media guards and preview evidence.');
+{
+  const saved=new Map(),storage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
+  const h=harness({storage});h.app.start();const value=previewSnapshot();
+  value.workflow.primary_action={id:'manual_execute',allowed:true};value.workflow.review={id:'never-save-this-review',physical_clearance_required:true};
+  h.reply(0,value);await settle();h.get('clearance').checked=true;
+  const positions=()=>h.get('joint-inputs').querySelectorAll('input').filter(node=>node.dataset.role==='position');
+  const slider=h.get('joint-inputs').querySelectorAll('input').find(node=>node.dataset.role==='slider');
+  assert.equal(slider.step,'any','non-integral degree limits must not shift slider targets onto a min-anchored step grid');assert.equal(positions()[0].step,'0.05');
+  slider.value=30;slider.events.input();assert.equal(Number(positions()[0].value),30);
+  assert.equal(h.get('primary').disabled,true,'changing a draft revokes its existing motion review');
+  assert.equal(h.get('clearance').checked,false);h.fireTimer(ms=>ms===33);
+  assert.equal(h.requests[1].url,'/api/actions/preview_target');
+  assert(Math.abs(JSON.parse(h.requests[1].options.body).q12[0]-Math.PI/6)<1e-14,'display degrees are sent as radians');
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url.endsWith('/preview_target')),'automatic editing never requests a motion preview or executes');
+  assert.equal(saved.size,1);assert.doesNotMatch([...saved.values()][0],/never-save-this-review|token|csrf|command_epoch/);
+  h.app.selectTab('collection');const collection=previewSnapshot();h.reply(2,collection);await settle();
+  assert(Math.abs(Number(positions()[0].value)-degrees(.1))<1e-12,'another business starts with its own draft');
+  h.app.selectTab('calibration');value.revision++;value.manual.positions[0]=.2;h.reply(3,value);await settle();
+  assert.equal(Number(positions()[0].value),30,'returning to calibration preserves the editable target');
+  assert.match(h.get('joint-inputs').querySelectorAll('small').find(node=>node.dataset.role==='actual').textContent,/11\.46/,'live feedback still refreshes alongside the preserved target');
+  h.app.destroy();
+  const reload=harness({storage});reload.app.start();const restored=previewSnapshot();restored.workflow.primary_action={id:'manual_execute',allowed:true};restored.workflow.review={id:'server-kept-old-review'};reload.reply(0,restored);await settle();
+  assert.equal(Number(reload.get('joint-inputs').querySelectorAll('input').find(node=>node.dataset.role==='position').value),30);
+  assert.equal(reload.get('primary').disabled,true,'restored targets must be reviewed again even if the server retained an older review');
+  assert.equal(reload.requests.filter(row=>row.options.method==='POST').length,0,'restoring a draft never sends any command');reload.app.destroy();
+  const other=harness({storage});other.app.start();const otherDevice=previewSnapshot();otherDevice.device.id='another-device';other.reply(0,otherDevice);await settle();
+  assert(Math.abs(Number(other.get('joint-inputs').querySelectorAll('input').find(node=>node.dataset.role==='position').value)-degrees(.1))<1e-12,'drafts never cross device identities');other.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,previewSnapshot());await settle();
+  const position=h.get('joint-inputs').querySelectorAll('input').find(node=>node.dataset.role==='position');
+  position.value=90;position.events.input();h.fireTimer(ms=>ms===33);
+  assert.match(h.get('manual-error').textContent,/超出限位/);assert.equal(h.requests.length,1,'invalid drafts cannot reach the renderer');
+  position.value=10;position.events.input();h.app.selectTab('results');h.fireTimer(ms=>ms===33);
+  assert.equal(h.requests.length,1,'leaving the work pane cancels pending automatic display');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();
+  value.workflow.calibration_tools={available:true,workflow:{kind:'head'},waypoints:[{name:'参考',q:Array(12).fill(0),jaw_gap_mm:[80,80]},{name:'留出姿态',capture:true,q:Array(12).fill(.2),jaw_gap_mm:[80,80]}]};
+  value.workflow.pipeline={steps:[{half:'head',step:'capture',counts:{captured:34,valid:32,failed:2}},{half:'head',step:'solve',metrics:{holdout_marker_rms_px:.7,holdout_mesh_px:3,holdout_mesh_coverage:.8}}]};
+  value.workflow.quality={counts:{captured:34,valid:32,failed:2},completion:{passed:true}};
+  h.reply(0,value);await settle();assert.equal(h.get('calibration-plan-select').children.length,2);assert.equal(h.get('calibration-pipeline-steps').children.length,7);assert.match(h.get('calibration-quality-summary').textContent,/34 帧.*有效 32.*通过/);
+  h.get('calibration-plan-next').events.click();assert.match(h.get('calibration-plan-position').textContent,/姿态 2 \/ 2/);
+  assert.equal(h.requests[1].url,'/api/actions/preview_target');assert.deepEqual(JSON.parse(h.requests[1].options.body).q12,Array(12).fill(.2));assert.equal(h.get('calibration-plan-next').disabled,true);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=snapshot();
+  value.workflow.replay_context={result_id:'capture:batch/capture',batch_id:'batch/capture',frame_index:1,frame_count:2,camera:'left',cameras:['head','left'],overlay:true,overlay_available:true,candidate_id:'wrist-a',
+    candidates:[{id:'wrist-a',label:'腕部 v1'},{id:'wrist-b',label:'腕部 v2',status:'quality_failed'}],
+    frame:{id:'holdout-1',name:'抬腕留出',split:'holdout',valid_for_fit:false,detections:{ids:[30]}},frames:[{id:'fit-1',split:'fit',valid_for_fit:true},{id:'holdout-1',name:'抬腕留出',split:'holdout',valid_for_fit:false}]};
+  h.reply(0,value);await settle();assert.match(h.get('replay-index').children[1].textContent,/抬腕留出.*留出.*不可用于求解/);
+  assert.match(h.get('replay-frame-details').textContent,/当前相机检测.*\n/s);
+  h.get('replay-candidate').value='wrist-b';h.get('replay-candidate').events.change();const body=JSON.parse(h.requests[1].options.body);
+  assert.equal(body.result_id,'capture:batch/capture');assert.equal(body.candidate_id,'wrist-b');assert.equal(body.frame_index,1);assert.equal(body.camera,'left');assert.equal(body.overlay,true);
+  assert.equal(h.requests[1].url,'/api/actions/select_result','candidate comparison is read-only and keeps batch, frame and camera');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('results');h.get('results-business').value='collection';h.get('results-business').events.change();
+  assert.equal(h.get('results-pane').hidden,false);assert.equal(h.app.context.business,'collection');assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'switching result business does not transfer control');
+  const value=snapshot();value.runtime.allowed_operations.collection_prepare={allowed:true};value.runtime.allowed_operations.collection_plan={allowed:false,reason:'先准备环境'};
+  value.workflow.collection={timing:{elapsed_s:12,stage_elapsed_s:4,stage_estimate_s:8,next_label:'核验三路相机',stages:[{label:'加载环境',status:'completed',elapsed_s:8,estimate_s:10},{label:'相机检查',status:'running',elapsed_s:4,estimate_s:8}]},environment:{ready:false,checks:{cameras:'waiting'}},relations:{plan:{timeline_digest:'private-plan'}}};
+  h.reply(1,value);await settle();assert.equal(h.get('collection-stages').children.length,2);assert.match(h.get('collection-timing').textContent,/12\.0 秒.*4\.0 秒.*8\.0 秒.*核验三路相机/);
+  assert.equal(h.get('collection-plan').disabled,true);assert.match(h.get('collection-plan-reason').textContent,/先准备环境/);
+  h.get('collection-prepare').events.click();assert.equal(h.requests[2].url,'/api/actions/collection_prepare');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.mesh={requested:true,applied:true,camera:'head',candidate_id:'poor-head'};
+  h.reply(0,value);await settle();h.get('observation-camera').value='left';h.get('observation-camera').events.change();assert.equal(h.get('camera-grid').dataset.camera,'left');
+  h.get('mesh-camera').value='left';h.get('mesh-camera').events.change();assert.equal(JSON.parse(h.requests[1].options.body).candidate_id,null);
+  h.reply(1,{client_revision:5});await settle();value.revision++;value.preview.revisions.mesh=5;value.preview.mesh={requested:false,applied:false,camera:'left',candidate_id:null};h.reply(2,value);await settle();
+  h.get('mesh-candidate').value='poor-wrist';h.get('mesh-candidate').events.change();assert.equal(JSON.parse(h.requests[3].options.body).candidate_id,'poor-wrist');
+  h.reply(3,{client_revision:6});await settle();value.revision++;value.preview.revisions.mesh=6;value.preview.mesh.candidate_id='poor-wrist';h.reply(4,value);await settle();
+  h.get('mesh-camera').value='head';h.get('mesh-camera').events.change();assert.equal(JSON.parse(h.requests[5].options.body).candidate_id,'poor-head','switching cameras restores its own remembered candidate');
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url.endsWith('/preview_mesh')),'camera selection never routes to install or execution');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=snapshot();
+  value.workflow.stage_id='collection.execute';value.workflow.title='fake 同 plant · L3辅助回放';value.workflow.message='真机回放准备中';
+  value.workflow.collection={timing:{label:'fake 同 plant · L3辅助回放',next_label:'检查真机视频'}};
+  h.reply(0,value);await settle();assert.equal(h.get('stage-title').textContent,'执行与录制');
+  assert.match(h.get('task-message').textContent,/开发设备回放准备中/);assert.doesNotMatch(h.get('collection-timing').textContent,/fake|plant|L3|真机/);
+  assert(h.get('task-details').querySelectorAll('dd').some(node=>node.textContent==='真机回放准备中'),'original backend wording remains available in technical details');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=snapshot(),current='/runs/current-job',historical='/runs/old-job';value.workflow.id=current;
+  const video=(role,run)=>({id:role,kind:'replay',mime_type:'video/mp4',ready:true,camera:'base_0',role,url:'/videos/'+(run?'old':'current')+'-'+role+'.mp4',...(run?{run_id:run}:{})});
+  value.media=['source','target'].map(role=>video(role));
+  value.results=['source','target'].map(role=>({id:role,kind:'recording',run_id:historical,label:role,media:video(role,historical)}));
+  h.reply(1,value);await settle();h.app.selectTab('results');
+  assert.equal(h.get('collection-history-run').children.length,2);assert.equal(h.get('collection-history-run').value,current);
+  let videos=h.get('replay-media').querySelectorAll('video');assert.equal(videos.length,2);assert(videos.every(node=>node.src.includes('current-')));
+  for(const node of videos){node.duration=3;node.events.loadedmetadata();}await h.get('collection-replay-toggle').events.click();assert(videos.every(node=>!node.paused));
+  const before=h.requests.length;h.get('collection-history-run').value=historical;h.get('collection-history-run').events.change();
+  assert(videos.every(node=>node.paused),'switching runs stops playback from the old pair');
+  videos=h.get('replay-media').querySelectorAll('video');assert.equal(videos.length,2,'same camera and media ids across runs never form a four-video pair');assert(videos.every(node=>node.src.includes('old-')));
+  assert.equal(h.get('results-list').querySelectorAll('article').length,2);assert.match(h.get('collection-history-summary').textContent,/正在查看历史任务.*2 项回放/);assert.equal(h.get('collection-history-summary').title,historical);
+  for(const node of videos){node.duration=4;node.events.loadedmetadata();}assert.equal(h.get('collection-replay-toggle').disabled,false);await h.get('collection-replay-toggle').events.click();assert(videos.every(node=>!node.paused));
+  assert.equal(h.requests.length,before,'history browsing and local playback send no device actions');
+  value.revision++;value.workflow.id='/runs/newly-generated-job';h.app.poll();h.reply(before,value);await settle();
+  assert.equal(h.get('collection-history-run').value,historical,'a new current job cannot reset an existing history selection');assert.equal(h.get('replay-media').querySelectorAll('video')[0],videos[0],'unchanged history playback is not rebuilt on status refresh');
+  h.app.selectTab('calibration');h.reply(before+1,snapshot());await settle();h.app.selectTab('collection');h.reply(before+2,value);await settle();
+  assert.equal(h.get('collection-history-run').value,historical,'history selection survives switching business context');h.app.destroy();
+}
+console.log('PASS unified web: per-run history pairing, server-owned outcomes, workspace drafts, degree sliders, readonly auto-preview, calibration comparison, explicit collection stages, reviewed speed, replay, release and instance/media guards.');

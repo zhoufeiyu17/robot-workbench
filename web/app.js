@@ -2,6 +2,10 @@ const BUSINESS = {calibration: '标定', collection: '数采'};
 const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理设备'};
 const CALIBRATION_TOOLS=['configure_calibration','plan_batch','preview_batch','fit_source','fit_batch'];
 const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','preview_recover'];
+const STAGE_LABELS={'head.plan':'头部规划','head.review':'头部轨迹审阅','head.capture':'头部采集','head.solve':'头部求解与验收','head.fit':'头部重新求解','wrist.plan':'双腕规划','wrist.review':'双腕轨迹审阅','wrist.capture':'双腕采集','wrist.solve':'双腕求解与验收','wrist.fit':'双腕重新求解','install':'安装标定','calibration.idle':'准备标定','calibration.complete':'标定完成','collection.prepare':'准备数采环境','collection.plan':'观测与规划','collection.execute':'执行与录制','collection.idle':'准备数采','manual.review':'人工轨迹待审阅','connecting':'正在连接'};
+const degrees=value=>value*180/Math.PI;
+const radians=value=>Number((Number(value)*Math.PI/180).toPrecision(15));
+const seconds=value=>Number.isFinite(value)?value.toFixed(1)+' 秒':'尚无记录';
 const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
 const reasonText=value=>({'motion or capture is still active':'当前动作或采集尚未结束','holding/control state is not confirmed':'保持/控制状态尚未确认，请查看设备诊断'}[value]||value);
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
@@ -16,40 +20,6 @@ export function frameAgeSeconds(media, state, elapsedMs = 0) {
 
 export function countedProgress(value) {
   return value && Number.isFinite(value.current) && Number.isFinite(value.total) && value.total > 0 && value.current >= 0 && value.current <= value.total ? value : null;
-}
-
-export function collectionExecutionView(state, context) {
-  const w=state?.workflow, r=state?.runtime, b=w?.execution_binding, n=r?.native_task, f=r?.frozen, t=r?.execution_timeline, a=r?.execution_calibration;
-  const same=(value,...others)=>typeof value==='string'&&value.length>0&&others.every(other=>other===value);
-  if(context.business!=='collection'||w?.stage_id!=='collection.execute'||w.status!=='running'||w.busy!==true||!w.id
-      ||!same(b?.environment,context.environment,state?.device?.environment,r?.environment)
-      ||!same(b?.device_id,state?.device?.id,r?.device_id)||r?.holder!=='collection'||a?.business!=='collection'
-      ||!same(b?.execution_instance_id,r?.execution_instance_id,a?.execution_instance_id,n?.execution_instance_id)
-      ||!same(b?.runtime_nonce,r?.runtime_nonce,n?.runtime_nonce)
-      ||!same(b?.source_clock_id,n?.source_clock_id,r?.calibration_feedback?.source_clock_id)
-      ||!same(b?.timeline_digest,f?.timeline_digest,t?.parent_timeline_digest)
-      ||!same(b?.execution_timeline_digest,f?.execution_timeline_digest,t?.timeline_digest,n?.execution_timeline_digest)
-      ||!Number.isInteger(r?.command_epoch)||a?.command_epoch!==r.command_epoch)return null;
-  const outcomes={...w.outcomes},recording=r.recording;
-  const replace=(name,placeholders,value)=>{if(value&&(outcomes[name]==null||placeholders.includes(outcomeStatus(outcomes[name]))))outcomes[name]={...value,message:[outcomes[name]?.message,value.message].filter(Boolean).join('；')};};
-  const motion=['FAULT','STOPPED'].includes(r.motion_status)?{FAULT:'failed',STOPPED:'stopped'}[r.motion_status]
-    :{running:'running',awaiting_final_feedback:'verifying',completed:'completed',failed:'failed',cancelled:'stopped'}[f.status];
-  replace('motion',['未执行','unknown','not_started','running','executing','verifying'],motion?{status:motion,message:f.reason||f.stop_error||r.reason||null}:null);
-  const validation=recording?.manifest?.validation;
-  const errors=[r.recording_error,recording?.error,recording?.seal_error,recording?.diagnostics_error,
-    ['failed','invalid'].includes(validation?.status)?validation:null].filter(Boolean);
-  const data=errors.length?{status:'invalid',message:[...new Set(errors.map(textValue))].join('；')}
-    :recording?.done===true?{status:'pending',message:'录制已结束，等待封存与完整性核验'}
-    :recording?.ready===true?{status:'recording'}:null;
-  replace('data',['未录制','unknown','not_started','pending','recording'],data);
-  const task=n.first_failure?{status:'failed',message:textValue(n.first_failure)}
-    :['success','pending_receipt'].includes(n.task_outcome)?{status:'pending',message:'等待原生任务回执核验'}
-    :n.task_outcome?{status:n.task_outcome,message:n.message}:null;
-  replace('task',['未验证','unverified','unknown','not_started','pending','running'],task);
-  // send_count includes repeated control-loop submissions, not distinct trajectory commands.
-  const progress=Number.isInteger(f.submitted_command_ticks)&&Number.isInteger(f.execution_tick_count)
-    &&f.execution_tick_count===t.command_count?countedProgress({current:f.submitted_command_ticks,total:f.execution_tick_count,scope:'motion'}):null;
-  return {outcomes,progress};
 }
 
 export function actionPermission(state, action, options = {}) {
@@ -114,10 +84,15 @@ export function previewAuditSummary(window){
     latency_p95_unbounded:p95===Infinity,latency_p99_unbounded:p99===Infinity,latency_max_unbounded:maximum===Infinity};
 }
 
-export function createWorkbench({document:doc, fetch:request, location, performance:clock, URL:urls, crypto, setInterval, clearInterval, setTimeout, clearTimeout,requestAnimationFrame,cancelAnimationFrame}) {
+export function createWorkbench({document:doc, fetch:request, location, performance:clock, URL:urls, crypto, setInterval, clearInterval, setTimeout, clearTimeout,requestAnimationFrame,cancelAnimationFrame,storage}) {
   const el = id => doc.getElementById(id);
   const setText = (id, value) => { el(id).textContent = textValue(value); };
   let context = {environment:'fake', business:'calibration'}, tab = 'calibration';
+  const operatorText=value=>{
+    let text=textValue(value).replace(/fake\s*同\s*plant/gi,'当前仿真设备').replace(/\bL3\s*辅助/g,'辅助').replace(/\bL3\b/g,'辅助回放').replace(/\bplant\b/gi,'仿真设备');
+    if(context.environment==='fake')text=text.replace(/真机/g,'开发设备');
+    return text;
+  };
   let state = null, generation = 0, revision = -1, receivedAt = 0, online = false, polling = null;
   let serverInstance;const retiredServerInstances=new Set();
   let requestSequence = 0, displayedRequest = 0, reviewKey = '', manualKey = '', replayKey = '', stopped = false;
@@ -127,22 +102,57 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   let calibrationKey='',calibrationPlanKey='',resultsKey='';
   let speedKey='',trajectoryKey='',trajectory=null,trajectoryRequest=null;
   let replayVideos=[],pairedCamera='',pairedPosition=0,pairedStarted=0,pairedPlaying=false,pairedRate=1,pairVersion=0;
+  const historySelections=new Map();let historyRun='';
   let deletionKey='';const confirmedDeletions=new Set();
   let previewView='target',meshCamera='head',meshCandidate='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
   let overview={yaw:-Math.PI/2,pitch:.4,zoom:1,pan_y:0},overviewDirty=false,overviewSending=false,overviewPointer=null;
+  const drafts=new Map(),meshChoices=new Map();let autoPreviewTimer=null,planIndex=0,observationCamera='all';
   const displayRequests=new Map(),previewFloors=new Map(),previewErrors=new Map(),planPreviewButtons=[];
   const targetFlights=[];let targetPending=null,presentedTarget=null;
   const auditEnabled=new URL(location.href).searchParams.get('preview-audit')==='1';let audit=null,auditDownload=null;
   const jointInputs=role=>[...el('joint-inputs').querySelectorAll('input')].filter(input=>input.dataset.role===role);
   function displayPose(){
-    const inputs=jointInputs('position'),q12=inputs.map(input=>Number(input.value));
+    const inputs=jointInputs('position'),q12=inputs.map(input=>radians(input.value));
     const noise=state?.manual?.position_noise_rad??0;
-    if(inputs.length!==12||inputs.some((input,i)=>String(input.value).trim()===''||!Number.isFinite(q12[i])||q12[i]<Number(input.min)-noise||q12[i]>Number(input.max)+noise))throw Error('关节目标超出限位及允许的位置噪声范围');
+    if(inputs.length!==12||inputs.some((input,i)=>String(input.value).trim()===''||!Number.isFinite(q12[i])||q12[i]<state.manual.limits[i][0]-noise-1e-12||q12[i]>state.manual.limits[i][1]+noise+1e-12))throw Error('关节目标超出限位及允许的位置噪声范围');
     const values=[el('jaw-left').value,el('jaw-right').value],jaw_gap_mm=values.map(Number);
     if(values.some((value,i)=>String(value).trim()===''||!Number.isFinite(jaw_gap_mm[i])||jaw_gap_mm[i]<0||jaw_gap_mm[i]>83))throw Error('夹爪目标必须在 0–83 mm 之间');
     return {q12,jaw_gap_mm};
   }
   const key = () => context.environment + '/' + context.business;
+  const historyKey=()=>JSON.stringify([state?.device?.id,key()]);
+  const draftKey=()=>state?.device?.id?'robot-workbench-draft.v1/'+encodeURIComponent(state.device.id)+'/'+key():null;
+  function readDraft(){
+    const id=draftKey();if(!id)return null;
+    try{return drafts.get(id)||JSON.parse(storage?.getItem(id)||'null');}catch{return null;}
+  }
+  function saveDraft(){
+    const id=draftKey();if(!id||jointInputs('position').length!==12)return;
+    // Only editable drafts and viewing preferences survive; no review or execution identity is stored.
+    const value={positions:jointInputs('position').map(input=>input.value),speeds:jointInputs('speed').map(input=>input.value),
+      jaw:[el('jaw-left').value,el('jaw-right').value],jawSpeed:el('jaw-speed').value,uniformSpeed:el('manual-speed').value,
+      collectionSpeed:el('collection-speed').value,observationCamera,meshChoices:Object.fromEntries(meshChoices)};
+    drafts.set(id,value);try{storage?.setItem(id,JSON.stringify(value));}catch{}
+  }
+  function restoreDraft(){
+    const draft=readDraft();if(!draft||typeof draft!=='object')return;
+    for(const [role,values]of [['position',draft.positions],['speed',draft.speeds]])if(Array.isArray(values)&&values.length===12)
+      jointInputs(role).forEach((input,index)=>{if(typeof values[index]==='string'||typeof values[index]==='number')input.value=values[index];});
+    if(Array.isArray(draft.jaw)&&draft.jaw.length===2){el('jaw-left').value=draft.jaw[0];el('jaw-right').value=draft.jaw[1];}
+    if(draft.jawSpeed!==undefined)el('jaw-speed').value=draft.jawSpeed;
+    if(draft.uniformSpeed!==undefined)el('manual-speed').value=draft.uniformSpeed;
+    if(Number(draft.collectionSpeed)>=10&&Number(draft.collectionSpeed)<=100){
+      el('collection-speed').value=draft.collectionSpeed;setText('collection-speed-value',draft.collectionSpeed+'%');
+      if(context.business==='collection'&&state?.workflow?.review?.id&&Number(draft.collectionSpeed)!==100*(state.workflow.review.speed_scale??state.workflow.speed_scale??.3))
+        invalidatedReviews.add(key()+'/'+state.workflow.review.id);
+    }
+    observationCamera=['all','head','left','right'].includes(draft.observationCamera)?draft.observationCamera:'all';
+    meshChoices.clear();for(const [camera,id]of Object.entries(draft.meshChoices||{}))if(['head','left','right'].includes(camera)&&typeof id==='string')meshChoices.set(camera,id);
+    syncJointSliders();
+    if(state?.workflow?.primary_action?.id==='manual_execute'&&state.workflow.review?.id)
+      invalidatedReviews.add(key()+'/'+state.workflow.review.id);
+  }
+  function syncJointSliders(){jointInputs('slider').forEach((input,index)=>input.value=jointInputs('position')[index].value);}
   const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('clearance').checked, supported:el('supported').checked,releaseSupported:el('release-supported').checked,deleteClearance:el('delete-clearance').checked});
   const permission = action => ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
     ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
@@ -264,9 +274,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(auditDownload)urls.revokeObjectURL(auditDownload);auditDownload=urls.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));
     const link=el('audit-download');link.href=auditDownload;link.download='preview-browser-'+audit.mode+'.json';link.hidden=false;
   }
-  function notice(message, active = false, waitingForState = false) { waitingForStateNotice=waitingForState;setText('request-status',message); el('request-status').classList.toggle('pending',active); }
+  function notice(message, active = false, waitingForState = false) { waitingForStateNotice=waitingForState;setText('request-status',operatorText(message)); el('request-status').classList.toggle('pending',active); }
   function gate(id, action, extraReason = '') {
-    const p = permission(action), reason = reasonText(extraReason || p.reason);
+    const p = permission(action), reason = operatorText(reasonText(extraReason || p.reason)||'');
     el(id).disabled = !!reason || !p.allowed;
     el(id).setAttribute('aria-disabled',String(el(id).disabled));
     setText(id+'-reason',reason);
@@ -321,7 +331,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     draw('trajectory-joints',Array.from({length:6},(_,i)=>ticks.map(row=>row.target[side+'_arm_joints'][i])),160);
     draw('trajectory-jaws',['left','right'].map(side=>ticks.map(row=>row.target[side+'_gripper'])),120);
   }
-  const pair=()=>replayVideos.filter(row=>row.camera===pairedCamera&&['source','target'].includes(row.role)).map(row=>row.node);
+  const pair=()=>replayVideos.filter(row=>(context.business!=='collection'||row.run_id===historyRun)&&row.camera===pairedCamera&&['source','target'].includes(row.role)).map(row=>row.node);
   const pairDuration=()=>Math.max(0,...pair().map(node=>Number.isFinite(node.duration)?node.duration:0));
   const pairTime=()=>Math.min(pairDuration(),pairedPosition+(pairedPlaying?(clock.now()-pairedStarted)/1000*pairedRate:0));
   function pausePair(){pairVersion++;pairedPosition=pairTime();pairedPlaying=false;for(const node of pair())node.pause?.();setText('collection-replay-toggle','播放两侧');}
@@ -383,6 +393,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('collection-speed').disabled=state?.workflow?.busy===true||options().fresh===false;
     gate('review-speed','generate_plan',state?.workflow?.trajectory?.url?'':'请先生成可审阅的冻结计划');
     gate('replan','generate_plan',state?.workflow?.replan_action?.allowed===false?(state.workflow.replan_action.reason||'当前不能重新规划'):'');
+    for(const [id,action]of [['collection-prepare','collection_prepare'],['collection-plan','collection_plan'],['collection-execute','execute']])gate(id,action);
     const tools=state?.workflow?.calibration_tools,selectedKind=el('calibration-kind').value,selectedHead=el('calibration-head').value;
     const dirty=selectedKind!==tools?.workflow?.kind || selectedKind==='wrist'&&selectedHead!==tools?.workflow?.head_result_id;
     const reason=!tools?.available?'标定服务未配置':dirty?'先应用标定类型与头部依赖':'';
@@ -400,6 +411,11 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     for(const id of ['overview-preset','overview-zoom'])el(id).disabled=!permission('preview_overview').allowed||displayRequests.has('recovery');
     for(const id of ['mesh-camera','mesh-candidate'])el(id).disabled=!permission('preview_mesh').allowed||displayBusy('mesh');
     for(const button of planPreviewButtons)button.disabled=!permission('preview_target').allowed||displayRequests.has('recovery');
+    const planLength=state?.workflow?.calibration_tools?.waypoints?.length||0,canBrowse=permission('preview_target').allowed&&!displayRequests.has('recovery');
+    el('calibration-plan-select').disabled=!canBrowse||!planLength;
+    el('calibration-plan-prev').disabled=!canBrowse||planIndex<=0;
+    el('calibration-plan-next').disabled=!canBrowse||planIndex>=planLength-1;
+    el('replay-candidate').disabled=!replay?.candidates?.length||!permission('select_result').allowed;
     gate('preview-recover','preview_recover',!preview?.recovery?.allowed?(preview?.recovery?.reason||'当前没有后端允许的渲染恢复操作'):displayRequests.has('recovery')?'渲染服务恢复请求正在处理':'');
     gate('delete-all','delete_preview',(state?.results||[]).some(row=>row.kind==='capture')?'':'当前没有可删除的原始批次');
     gate('delete-confirm','delete_confirm');gate('delete-cancel','delete_cancel');
@@ -413,32 +429,47 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   function fillFeedbackInputs(){
     if(!manualReady())return;
-    jointInputs('position').forEach((input,i)=>input.value=state.manual.positions[i]);
+    jointInputs('position').forEach((input,i)=>input.value=degrees(state.manual.positions[i]));
     const gaps=state.manual.jaw_gaps_mm.map(value=>Math.max(0,Math.min(83,value)));
     el('jaw-left').value=gaps[0];el('jaw-right').value=gaps[1];
+    syncJointSliders();
   }
   function renderManual() {
-    const m=state?.manual, signature=JSON.stringify([key(),m?.joint_names,m?.limits]);
+    const m=state?.manual, signature=JSON.stringify([draftKey(),m?.joint_names,m?.limits]);
+    for(const [index,node]of [...el('joint-inputs').querySelectorAll('small')].filter(node=>node.dataset.role==='actual').entries())
+      node.textContent=Number.isFinite(m?.positions?.[index])?'实测 '+degrees(m.positions[index]).toFixed(2)+'°':'实测未知';
     if(signature===manualKey)return;
     el('joint-inputs').replaceChildren();
     if(!manualReady())return;
     manualKey=signature;
+    const speedDetails=make('details',undefined,'joint-speeds');speedDetails.append(make('summary','逐关节速度 · rad/s'));
     m.joint_names.forEach((name,index)=>{
-      const label=make('label',name+' · rad'), input=make('input'); input.type='number';input.step='0.01';input.id='joint-'+index;
+      const label=make('div',undefined,'joint-control'),title=make('label',name+' · 目标 °'),input=make('input'); input.type='number';input.step='0.05';input.id='joint-'+index;title.htmlFor=input.id;
       input.dataset.role='position';
-      input.min=m.limits[index][0];input.max=m.limits[index][1];input.disabled=true;input.setAttribute('aria-label',name+' 目标 rad');
-      input.addEventListener('input',editManual);
+      input.min=degrees(m.limits[index][0]);input.max=degrees(m.limits[index][1]);input.disabled=true;input.setAttribute('aria-label',name+' 目标角度 °');
+      const slider=make('input');slider.type='range';slider.min=input.min;slider.max=input.max;slider.step='any';slider.dataset.role='slider';slider.setAttribute('aria-label',name+' 目标角度滑块');
+      slider.addEventListener('input',()=>{input.value=slider.value;editManual();});
+      input.addEventListener('input',()=>{slider.value=input.value;editManual();});
+      const actual=make('small','实测 '+degrees(m.positions[index]).toFixed(2)+'°','joint-feedback');actual.dataset.role='actual';
       const speed=make('input');speed.type='number';speed.min='0.001';speed.step='0.01';speed.value=m.default_joint_speed_rad_s??.2;speed.dataset.role='speed';speed.setAttribute('aria-label',name+' 速度 rad/s');speed.addEventListener('input',editManual);
-      label.append(input,make('small','速度 · rad/s'),speed);el('joint-inputs').append(label);
+      const speedLabel=make('label',name+' · rad/s','joint-speed');speedLabel.append(speed);speedDetails.append(speedLabel);
+      title.append(actual);label.append(title,slider,input);el('joint-inputs').append(label);
     });
+    el('joint-inputs').append(speedDetails);
     fillFeedbackInputs();
     el('manual-speed').value=m.default_joint_speed_rad_s??.2;el('jaw-speed').value=m.default_jaw_speed_mm_s??10;
+    restoreDraft();
   }
   function editManual(){
     finishAudit('人工姿态草稿改变');
     if(state?.workflow?.primary_action?.id==='manual_execute'&&state.workflow.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
-    if(state?.preview){previewErrors.set('target','人工姿态草稿已改变，请重新查看目标图像。');renderMedia();}
-    clearReview();renderGates();
+    saveDraft();clearReview();renderGates();
+    clearTimeout(autoPreviewTimer);const binding=targetBinding();
+    autoPreviewTimer=setTimeout(()=>{
+      autoPreviewTimer=null;if(stopped||doc.hidden||tab!==context.business||binding!==targetBinding()||!permission('preview_target').allowed)return;
+      try{const pose=displayPose();el('manual-error').hidden=true;void showTarget(pose.q12,pose.jaw_gap_mm);}
+      catch(error){setText('manual-error',error.message);el('manual-error').hidden=false;}
+    },33);
   }
   function renderQueue(){
     const queue=state?.manual?.queue,signature=JSON.stringify([key(),queue]);
@@ -486,13 +517,82 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const planKey=JSON.stringify([key(),waypoints]);
     if(planKey!==calibrationPlanKey){
       calibrationPlanKey=planKey;const list=el('calibration-waypoints');list.replaceChildren();planPreviewButtons.length=0;
+      planIndex=Math.min(planIndex,Math.max(0,waypoints.length-1));el('calibration-plan-select').replaceChildren();
       for(const [index,row]of waypoints.entries()){
-        const li=make('li'),button=make('button','查看此姿态图像 · 不执行');button.addEventListener('click',()=>showTarget(row.q,row.jaw_gap_mm));planPreviewButtons.push(button);li.append(make('strong',`${index+1}. ${row.capture===false?'仅过渡':'采样'} · ${row.name||row.id||row.kind||'姿态'}`),make('p',`关节 rad：${(row.q||[]).join(' / ')}；速度 rad/s：${(row.speeds||[]).join(' / ')}；夹爪 mm：${(row.jaw_gap_mm||[]).join(' / ')}`),button);list.append(li);
+        const title=`${index+1}. ${row.capture===false?'仅过渡':'采样'} · ${row.name||row.id||row.kind||'姿态'}`;
+        const option=make('option',title);option.value=index;el('calibration-plan-select').append(option);
+        const li=make('li'),button=make('button','查看此姿态图像 · 不执行');button.addEventListener('click',()=>browsePlan(index));planPreviewButtons.push(button);li.append(make('strong',title),make('p',`关节 °：${(row.q||[]).map(value=>degrees(value).toFixed(1)).join(' / ')}；速度 rad/s：${(row.speeds||[]).join(' / ')}；夹爪 mm：${(row.jaw_gap_mm||[]).join(' / ')}`),button);list.append(li);
       }
       const coverage=el('calibration-coverage');coverage.replaceChildren();
       for(let cell=0;cell<9;cell++){const count=capturing.filter(row=>Array.isArray(row.cell)&&row.cell[0]*3+row.cell[1]===cell).length;coverage.append(make('div',`视野 ${Math.floor(cell/3)+1}行 ${cell%3+1}列 · ${count} 点`));}
     }
+    el('calibration-plan-select').value=planIndex;
+    setText('calibration-plan-position',waypoints.length?`姿态 ${planIndex+1} / ${waypoints.length} · 查看只更新图像，不执行动作`:'先生成计划，再逐姿态审阅');
     el('calibration-coverage').hidden=tools?.workflow?.kind==='wrist'||!waypoints.some(row=>Array.isArray(row.cell));
+    const workflow=state?.workflow||{},pipeline=workflow.pipeline||{},steps=el('calibration-pipeline-steps');steps.replaceChildren();
+    const milestones=['head.plan','head.capture','head.solve','wrist.plan','wrist.capture','wrist.solve','install'];
+    const current=workflow.stage_id?.replace('.review','.capture').replace('.fit','.solve');
+    const stageFor=step=>step.step==='install'?'install':step.step==='head'?'head.solve':step.step==='wrist'?'wrist.solve':step.half+'.'+step.step;
+    for(const [index,stage]of milestones.entries()){
+      const step=(pipeline.steps||[]).filter(row=>stageFor(row)===stage).at(-1)||{},metrics=step.metrics||{};
+      const done=!!step.step||index<(workflow.overall_progress?.completed_stages??0)||stage==='install'&&workflow.quality?.installed?.verified===true;
+      const active=current===stage&&!done,failed=workflow.status==='failed'&&workflow.failed_stage===stage;
+      const row=make('li',undefined,'workflow-step'+(active?' is-current':''));row.append(make('strong',STAGE_LABELS[stage]));
+      const descriptions=[];
+      if(Number.isFinite(step.waypoints))descriptions.push(`${step.waypoints} 个路径点 / ${step.capture_points??'未知'} 个采样点`);
+      if(step.counts)descriptions.push(`已采 ${step.counts.captured??'未知'} 帧 · 有效 ${step.counts.valid??'未知'} · 失败 ${step.counts.failed??0}`);
+      if(Number.isFinite(metrics.holdout_marker_rms_px))descriptions.push('留出贴纸误差 '+metrics.holdout_marker_rms_px.toFixed(3)+' px');
+      if(Number.isFinite(metrics.holdout_mesh_px))descriptions.push('Mesh 留出误差 '+metrics.holdout_mesh_px.toFixed(2)+' px');
+      if(Number.isFinite(metrics.holdout_mesh_coverage))descriptions.push('Mesh 覆盖 '+(metrics.holdout_mesh_coverage*100).toFixed(1)+'%');
+      for(const side of ['left','right'])if(Number.isFinite(metrics[side]?.holdout_rms_px))descriptions.push((side==='left'?'左腕':'右腕')+'留出误差 '+metrics[side].holdout_rms_px.toFixed(3)+' px');
+      if(step.pair_status)descriptions.push('成对状态：'+statusText(step.pair_status));
+      const status=done?'已完成':failed?'未通过':active?statusText(workflow.status):'待开始';
+      row.append(make('p',status+(descriptions.length?' · '+descriptions.join(' · '):step.message?' · '+step.message:'')));steps.append(row);
+    }
+    const quality=state?.workflow?.quality||{},qualityCounts=quality.counts||counts;
+    setText('calibration-quality-summary',`当前来源：${qualityCounts.captured??qualityCounts.frames??0} 帧 · 求解有效 ${qualityCounts.valid??'未知'} · 无效 ${qualityCounts.failed??'未知'}。`+(quality.completion?`采集完整性：${quality.completion.passed===true?'通过':quality.completion.passed===false?'未通过':'尚未核验'}。`:'')+(pipeline.aborted?'中断原因：'+pipeline.aborted: pipeline.stopped?'已停止；已保存数据保留，继续前须重新审阅。':''));
+  }
+  function browsePlan(index){
+    const rows=state?.workflow?.calibration_tools?.waypoints||[];if(!rows.length)return;
+    planIndex=Math.max(0,Math.min(rows.length-1,Number(index)||0));renderCalibration();renderGates();
+    return showTarget(rows[planIndex].q,rows[planIndex].jaw_gap_mm);
+  }
+  function renderCollection(){
+    const collection=state?.workflow?.collection||{},timing=collection.timing||{},rows=el('collection-stages');rows.replaceChildren();
+    for(const [index,step]of(timing.stages||[]).entries()){
+      const item=make('li',undefined,'workflow-step'+(step.status==='running'?' is-current':''));
+      item.append(make('strong',operatorText(step.label||'阶段 '+(index+1))),make('p',statusText(step.status)),make('small','实际 '+seconds(step.elapsed_s)+' · 参考 '+seconds(step.estimate_s)));rows.append(item);
+    }
+    if(!rows.children.length)rows.append(make('li','准备 → 观测与规划 → 审阅执行；阶段记录将在操作后显示。','muted'));
+    setText('collection-timing',operatorText((timing.label?'当前处理：'+timing.label+'。':'')+`本次已用 ${seconds(timing.elapsed_s)} · 当前阶段 ${seconds(timing.stage_elapsed_s)} · 参考耗时 ${seconds(timing.stage_estimate_s??timing.estimate_s)}`+(timing.estimate_source?'（'+timing.estimate_source+'）':'')+'。下一步：'+(timing.next_label||'根据上方操作状态继续')+'。参考耗时不是完成倒计时。'));
+    const environment=collection.environment||{},checks=el('collection-environment');checks.replaceChildren();
+    const checkList=make('div',undefined,'environment-checks');
+    const rawChecks=environment.checks||[],checkRows=Array.isArray(rawChecks)?rawChecks:Object.entries(rawChecks).map(([key,value])=>value&&typeof value==='object'?{key,...value}:{key,status:value});
+    for(const check of checkRows){const badge=make('span',(check.label||check.key)+' · '+statusText(check.status),'environment-check '+(check.status==='ready'?'tone-good':check.status==='failed'?'tone-bad':''));badge.title=check.message||'';checkList.append(badge);}
+    if(checkList.children.length)checks.append(checkList);
+    else checks.append(make('p',environment.ready?'环境已准备':'环境尚待检查','hint'));
+    const recording=collection.recording||{},native=collection.native_task||{},simulation=collection.simulation||{};
+    const failure=native.first_failure,errors=collection.errors||{};
+    const evidence=Object.keys(recording).length||Object.keys(native).length||Object.keys(simulation).length||Object.keys(errors).length||collection.execution_wait;
+    el('collection-evidence').hidden=!evidence;
+    if(evidence){
+      const facts=[];
+      if(Object.keys(recording).length)facts.push({label:'录制与封存',value:recording.error||recording.seal_error||recording.diagnostics_error||recording.manifest?.validation|| (recording.done?'录制结束，等待完整性核验':recording.ready?'记录已建立，等待本轮封存':'录制尚未就绪')});
+      if(native.task_outcome)facts.push({label:'原生任务观测',value:(native.task_outcome==='success'?'观测报告成功；流程结果以上方独立结果为准':statusText(native.task_outcome))});
+      if(failure)facts.push({label:'首次失败',value:failure.reason||failure.detail||failure},{label:'失败位置',value:`物理步 ${failure.absolute_physics_step??failure.physics_step??'未知'}`});
+      if(Object.keys(simulation).length)facts.push({label:'辅助回放',value:statusText(simulation.status||'pending')+'；仅用于对照，不代替任务成功证据'});
+      if(collection.execution_wait)facts.push({label:'当前等待',value:collection.execution_wait});
+      if(Object.keys(errors).length)facts.push({label:'本轮异常',value:errors});
+      renderDetails('collection-evidence-details',facts);
+    }
+    const relations=collection.relations||{},target=el('collection-relations'),signature=JSON.stringify([key(),relations]);
+    if(target.dataset.signature!==signature){
+      target.dataset.signature=signature;target.replaceChildren();const detail=make('details'),list=make('dl',undefined,'detail-list');detail.append(make('summary','观测、计划与标定来源'));
+      for(const [name,fields]of Object.entries(relations)){
+        for(const [field,value]of Object.entries(fields||{})){const entry=make('div');entry.append(make('dt',({plan:'计划',source:'观测',calibration:'标定',errors:'读取异常'}[name]||name)+' · '+({run_id:'运行',timeline_digest:'轨迹身份',calibration_profile_digest:'标定身份',profile_id:'版本',camera_serials:'相机',robot_id:'设备',duration_s:'计划时长 s',speed_scale:'速度比例',path:'文件',output:'产物目录',plan_path:'计划文件',scene_digest:'场景身份',environment:'环境'}[field]||field)),make('dd',value));list.append(entry);}
+      }
+      if(!list.children.length)list.append(make('p','尚无可核验记录','muted'));detail.append(list);target.append(detail);
+    }
   }
   function clearReview() { el('clearance').checked=false; }
   function renderPreview(){
@@ -501,7 +601,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(presentedTarget&&presentedTarget.binding!==targetBinding())presentedTarget=null;
     if(preview?.renderer_id!==previewRenderer){previewRenderer=preview?.renderer_id;previewFloors.clear();previewErrors.clear();}
     const meshKey=JSON.stringify([key(),mesh.camera,mesh.candidate_id]);
-    if(meshKey!==meshStateKey&&!displayRequests.has('mesh')){meshStateKey=meshKey;meshCamera=mesh.camera||meshCamera;meshCandidate=mesh.candidate_id||'';}
+    if(meshKey!==meshStateKey&&!displayRequests.has('mesh')){meshStateKey=meshKey;meshCamera=mesh.camera||meshCamera;meshCandidate=mesh.candidate_id||'';if(meshCandidate)meshChoices.set(meshCamera,meshCandidate);}
     el('preview-view').value=previewView;el('overview-controls').hidden=previewView!=='overview';
     el('media-preview').classList.toggle('overview',previewView==='overview');
     el('mesh-controls').hidden=!preview;el('media-mesh').hidden=!preview;
@@ -527,6 +627,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function render() {
     renderAudit();
     const s=state, r=s?.runtime||{}, w=s?.workflow||{};
+    el('work-pane').dataset.business=context.business;
+    setText('observation-title',context.business==='calibration'?'调姿预览与相机':'实际观测与规划场景');
+    el('primary-action').hidden=context.business==='collection'&&!!w.collection?.actions&&w.primary_action?.id!=='prepare_collection';
+    el('results-business').value=context.business;
     setText('device-name',s?.device?.label||s?.device?.id||'机器人工作台');
     setText('holder',BUSINESS[r.holder] || (r.holder ? String(r.holder) : '未分配 / 未知'));
     setText('connection','连接：'+(r.connected===true?'已连接':r.connected===false?'未连接':'未知'));
@@ -544,15 +648,17 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     setText('stop-state',r.stop_receipt?(r.stop_receipt.stop_hold_return_confirmed===true?'停止：保持调用已确认':'停止：已受理，尚未确认'):'');
     setText('release-state',r.release_receipt?({requested:'释放：已受理，等待设备断开',released:'释放：设备连接已断开',unconfirmed:'释放：尚未确认'}[r.release_receipt.status]||'释放：状态待核验')+(r.release_receipt.message?' · '+r.release_receipt.message:''):'');
     setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',statusText(w.status));
-    setText('run-identity','Run：'+textValue(w.id));setText('stage-title',w.title||'等待任务状态');setText('stage-id',w.stage_id||'—');
-    setText('task-message',w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理请求：'+textValue(w.request.action)+'。'+(w.message||''):w.message||'尚未取得当前任务回执。');
-    const live=collectionExecutionView(s,context),p=countedProgress(w.progress)||live?.progress;el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
+    setText('run-identity','Run：'+textValue(w.id));setText('stage-title',STAGE_LABELS[w.stage_id]||operatorText(w.title&&/[\u3400-\u9fff]/.test(w.title)?w.title:'等待任务状态'));setText('stage-id',w.stage_id||'—');
+    const actionName={generate_plan:'生成计划',collection_prepare:'准备数采环境',collection_plan:'观测与规划',execute:'执行已审阅轨迹',manual_preview:'检查人工轨迹',fit_batch:'求解当前批次',plan_batch:'规划当前批次',preview_batch:'审阅当前批次'};
+    const taskMessage=w.request?.status==='failed'?[w.message,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理：'+(actionName[w.request.action]||'当前操作')+'。'+(w.message||''):w.message||'尚未取得当前任务回执。';
+    setText('task-message',operatorText(taskMessage));
+    const p=countedProgress(w.progress);el('task-progress').hidden=!p&&w.progress?.indeterminate!==true;
     if(p){el('task-progress').max=p.total;el('task-progress').value=p.current;}
     else el('task-progress').removeAttribute('value');
     setText('progress-label',p?(p.scope==='motion'?`${p.current} / ${p.total} 条运动命令已提交 · ${(100*p.current/p.total).toFixed(1)}% · 仅运动指令进度；数据、任务与回放分别核验`:p.kind==='fraction'?`${(100*p.current/p.total).toFixed(1)}% · ${p.unit||'当前阶段'} · 后端工作量`:`${p.current} / ${p.total} ${p.unit||''} · 后端实际计数`):'尚无可计数进度；不估算完成比例');
     const overall=countedProgress(w.overall_progress);el('overall-panel').hidden=!overall;
     if(overall){el('overall-progress').max=overall.total;if(overall.indeterminate)el('overall-progress').removeAttribute('value');else el('overall-progress').value=overall.current;setText('overall-label',`${overall.indeterminate?'当前阶段工作量未知':'整体 '+(100*overall.current/overall.total).toFixed(1)+'%'} · ${overall.completed_stages??overall.current} / ${overall.total} 阶段已完成 · 阶段等权，不代表剩余时间`);}
-    renderDetails('task-details',w.details);
+    renderDetails('task-details',[...(w.details||[]),...(w.title?[{label:'原始阶段说明',value:w.title}]:[]),...(w.message?[{label:'原始消息',value:w.message}]:[]),...(w.request?.error?[{label:'原始请求错误',value:w.request.error}]:[])]);
     const reviewedSpeed=w.review?.speed_scale??w.speed_scale??.3,nextSpeedKey=JSON.stringify([key(),w.id,reviewedSpeed]);
     if(nextSpeedKey!==speedKey){speedKey=nextSpeedKey;el('collection-speed').value=100*reviewedSpeed;setText('collection-speed-value',el('collection-speed').value+'%');}
     renderTrajectory();
@@ -561,10 +667,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('review-panel').hidden=!w.review;
     setText('review-summary',w.review?.summary||'尚无执行摘要');setText('review-id','审阅身份：'+textValue(w.review?.id));
     el('clearance-label').hidden=!w.review || !(context.environment==='physical'||w.review.physical_clearance_required);
-    const outcomes=live?.outcomes||w.outcomes||{};
+    const outcomes=w.outcomes||{};
     for(const name of ['motion','data','simulation','task']) {
       const outcome=outcomes[name],value=outcomeStatus(outcome),target=el('outcome-'+name);
-      target.textContent=statusText(value)+(outcome?.message?' · '+outcome.message:'');
+      target.textContent=statusText(value)+(outcome?.message?' · '+operatorText(outcome.message):'');
       target.className=['failed','invalid'].includes(value)?'tone-bad':['passed','completed','complete','valid'].includes(value)?'tone-good':executing(value)?'tone-active':'';
     }
     const dataFailed=['failed','invalid'].includes(outcomeStatus(outcomes.data));
@@ -573,7 +679,10 @@ export function createWorkbench({document:doc, fetch:request, location, performa
       r.service_error?'设备服务异常：'+r.service_error:'',
       !online&&s?'状态连接中断；旧画面与状态仅作参考，等待重新核验。':s&&options().fresh===false?'状态已超过 3 秒未核验；操作已停用，停止请求仍独立可用。':''].filter(Boolean).join(' ');
     el('alert').hidden=!alert;setText('alert',alert);
-    renderManual();renderQueue();renderArrival();renderCalibration();renderResults();renderPreview();renderDetails('diagnostics-list',s?.diagnostics);
+    renderManual();renderQueue();renderArrival();renderCalibration();renderCollection();renderResults();renderPreview();renderDetails('diagnostics-list',s?.diagnostics);
+    el('observation-camera').value=observationCamera;
+    el('camera-grid').dataset.camera=observationCamera;
+    setText('manual-feedback',(options().fresh?'当前实测':'最后实测（状态待核验）')+' · 左夹爪 '+(Number.isFinite(s?.manual?.jaw_gaps_mm?.[0])?s.manual.jaw_gaps_mm[0].toFixed(1)+' mm':'未知')+' · 右夹爪 '+(Number.isFinite(s?.manual?.jaw_gaps_mm?.[1])?s.manual.jaw_gaps_mm[1].toFixed(1)+' mm':'未知')+'；输入框始终是目标草稿。');
     setText('stop-details',r.stop_receipt||'尚无停止回执；请求受理不代表停止已确认');setText('raw-state',s||'尚未核验');
     for(const id of ['results-context','diagnostics-context','footer-context'])setText(id,ENVIRONMENT[context.environment]+' · '+BUSINESS[context.business]);
     renderMedia();renderGates();renderAge();
@@ -740,23 +849,44 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     const installed=state?.workflow?.calibration_tools?.installed;
     el('installed-group').hidden=context.business!=='calibration';
     renderDetails('installed-details',installed?Object.entries(installed).map(([label,value])=>({label:({head_id:'头部结果',wrist_id:'双腕结果',head_version:'头部版本',wrist_version:'双腕版本',verified:'active 文件校验',problems:'校验问题',path:'安装目录',geometry_id:'几何身份',installed_at:'安装时间',acceptance:'验收依据',notes:'说明',environment:'环境'}[label]||label),value:label==='verified'?(value===true?'通过':value===false?'未通过':'未知'):value})):[{label:'当前安装组',value:'尚未安装'}]);
-    const box=el('results-list');
-    const results=state?.results||[];
-    const signature=JSON.stringify([key(),results]);
+    const box=el('results-list'),allResults=state?.results||[],currentRun=state?.workflow?.id||'__current__';
+    const runFor=entry=>entry.run_id||entry.media?.run_id||currentRun;
+    const allMedia=[...(state?.media||[]),...(state?.workflow?.replay||[]),...allResults.map(row=>row.media).filter(Boolean)].filter(row=>row.kind==='replay');
+    const collection=context.business==='collection',runs=new Set([currentRun,...allMedia.map(runFor),...allResults.map(runFor)]);
+    const nextHistoryRun=collection&&runs.has(historySelections.get(historyKey()))?historySelections.get(historyKey()):currentRun;
+    if(nextHistoryRun!==historyRun)pausePair();historyRun=nextHistoryRun;
+    if(collection&&state&&!historySelections.has(historyKey()))historySelections.set(historyKey(),historyRun);
+    el('collection-history-controls').hidden=!collection;
+    const selector=el('collection-history-run'),optionsKey=JSON.stringify([key(),currentRun,[...runs]]);
+    if(selector.dataset.options!==optionsKey){selector.dataset.options=optionsKey;selector.replaceChildren();
+      for(const run of runs){const option=make('option',run===currentRun?'当前任务':'历史任务 · '+String(run).split('/').filter(Boolean).at(-1).slice(-24));option.value=run;option.title=run==='__current__'?'尚未生成当前任务':run;selector.append(option);}
+    }
+    selector.value=historyRun;
+    const selectedMedia=[...new Map(allMedia.filter(row=>!collection||runFor(row)===historyRun).map(row=>[JSON.stringify([runFor(row),row.id||row.url]),{...row,run_id:runFor(row)}])).values()];
+    setText('collection-history-summary',collection?(historyRun===currentRun?'正在查看当前任务':'正在查看历史任务，当前任务状态仍显示在数采工作区')+' · '+selectedMedia.length+' 项回放；只读浏览，不改变控制权或继续动作。':'');
+    el('collection-history-summary').title=historyRun==='__current__'?'尚未生成当前任务':historyRun;
+    const results=allResults.filter(row=>!collection||runFor(row)===historyRun);
+    const signature=JSON.stringify([key(),historyRun,results]);
     if(signature!==resultsKey){resultsKey=signature;box.replaceChildren();resultActions=[];
     if(!results.length)box.append(make('p','当前业务尚无结果回执。','muted'));
-    const addAction=(container,label,action,body,rule={})=>{const cell=make('div',undefined,'action-cell'),button=make('button',label),reason=make('p','', 'action-reason');button.addEventListener('click',()=>send(action,body));cell.append(button,reason);container.append(cell);resultActions.push({button,reason,action,allowed:rule.allowed,ruleReason:rule.reason||'此结果当前不可安装'});};
+    const addAction=(container,label,action,body,rule={})=>{const cell=make('div',undefined,'action-cell'),button=make('button',label),reason=make('p','', 'action-reason');button.addEventListener('click',()=>send(action,typeof body==='function'?body():body));cell.append(button,reason);container.append(cell);resultActions.push({button,reason,action,allowed:rule.allowed,ruleReason:rule.reason||'此结果当前不可安装'});};
     for(const result of results){
       const row=make('article',undefined,'result-row'),label=make('div'),actions=make('div',undefined,'result-actions');
-      label.append(make('h3',result.label||result.id),make('p',({head:'头部标定',wrist:'双腕标定',capture:'采集批次',recording:'录制视频'}[result.kind]||result.kind||'结果')+' · '+statusText(result.status)+' · '+result.id));
-      if(result.kind!=='recording')addAction(actions,'查看此结果','select_result',{result_id:result.id});
+      label.append(make('h3',result.label||result.id),make('p',({head:'头部标定',wrist:'双腕标定',capture:'采集批次',recording:'录制视频'}[result.kind]||result.kind||'结果')+' · '+statusText(result.status)));
+      if(result.kind!=='recording'){
+        addAction(actions,'查看此结果','select_result',()=>{
+          const selected=state?.workflow?.replay_context;
+          const sameBatch=selected&&result.kind!=='capture'&&(result.details?.batch===selected.batch_id||selected.candidates?.some(candidate=>candidate.id===result.id));
+          return sameBatch?{result_id:selected.result_id,candidate_id:result.id,frame_index:selected.frame_index,camera:selected.camera,overlay:selected.overlay===true}:{result_id:result.id};
+        });
+      }
       else actions.append(make('p','下方独立回放','muted'));
       if(result.kind==='capture')addAction(actions,'预览删除原始批次','delete_preview',{scope:'batch',result_id:result.id});
       if(result.raw_deleted)label.append(make('p','原始批次已删除；已登记版本、参数和依赖快照保留。'));
       if(result.install){const install=result.install;label.append(make('p','安装组：头部 '+String(install.head_result_id||result.id).slice(0,12)+' + 双腕 '+String(install.wrist_result_id||'尚无').slice(0,12)));addAction(actions,install.installed?'当前有效标定':'安装这组头部与双腕','install',{result_id:result.id},install);}
-      if(result.details){
+      if(result.details||result.id){
         const details=make('details'),list=make('dl',undefined,'detail-list');details.append(make('summary','质量指标、依赖与来源'));
-        for(const [field,value]of Object.entries(result.details)){const entry=make('div');entry.append(make('dt',({metrics_rectified_px:'贴纸像素误差',mesh_metrics:'Mesh 留出指标',acceptance:'验收结论',optimizer:'求解收敛',left:'左腕结果',right:'右腕结果',head_result_id:'依赖头部结果',group:'头部与双腕组',batch:'来源批次',version:'版本',environment:'环境',robot_source:'设备来源',simulation_only:'仅仿真',capture_coverage:'采集覆盖',file:'结果文件',objective:'求解目标',completion:'采集完整性'}[field]||field)),make('dd',value));list.append(entry);}
+        for(const [field,value]of Object.entries({id:result.id,...result.details})){const entry=make('div');entry.append(make('dt',({id:'结果身份',metrics_rectified_px:'贴纸像素误差',mesh_metrics:'Mesh 留出指标',acceptance:'验收结论',optimizer:'求解收敛',left:'左腕结果',right:'右腕结果',head_result_id:'依赖头部结果',group:'头部与双腕组',batch:'来源批次',version:'版本',environment:'环境',robot_source:'设备来源',simulation_only:'仅仿真',capture_coverage:'采集覆盖',file:'结果文件',objective:'求解目标',completion:'采集完整性'}[field]||field)),make('dd',value));list.append(entry);}
         details.append(list);label.append(details);
       }
       const download=safeMediaUrl(result.download_url,location.href);
@@ -769,13 +899,21 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(view&&viewKey!==replayControlsKey){
       replayControlsKey=viewKey;el('replay-camera').replaceChildren();
       for(const camera of view.cameras||[]){const option=make('option',{head:'头部',left:'左腕',right:'右腕'}[camera]||camera);option.value=camera;el('replay-camera').append(option);}
+      const frameLabel=(frame,index)=>`${index+1}. ${frame.name||frame.id||'帧'} · ${{fit:'拟合',holdout:'留出'}[frame.split]||frame.split||'未分组'} · ${(frame.valid_for_fit??frame.valid)===true?'可用于求解':(frame.valid_for_fit??frame.valid)===false?'不可用于求解':'有效性未知'}`;
+      el('replay-index').replaceChildren();
+      for(let index=0;index<view.frame_count;index++){const option=make('option',frameLabel(view.frames?.[index]||{},index));option.value=index;el('replay-index').append(option);}
       el('replay-camera').value=view.camera;el('replay-index').value=view.frame_index;el('replay-index').max=Math.max(0,view.frame_count-1);el('replay-overlay').checked=view.overlay===true;
+      const candidates=el('replay-candidate');candidates.replaceChildren();
+      const blank=make('option','选择当前帧的标定候选');blank.value='';candidates.append(blank);
+      for(const candidate of view.candidates||[]){const option=make('option',(candidate.label||candidate.id)+(candidate.status?' · '+statusText(candidate.status):''));option.value=candidate.id;candidates.append(option);}
+      candidates.value=view.candidate_id||view.overlay_result_id||'';
+      const frame=view.frame||{};
+      setText('replay-frame-details',frameLabel(frame,view.frame_index)+(frame.detections||frame.detections_by_camera?'\n当前相机检测：'+textValue(frame.detections_by_camera?.[view.camera]??frame.detections):'')+(frame.reason?'\n原因：'+frame.reason:''));
       setText('replay-context',`${view.batch_id} · 第 ${view.frame_count?view.frame_index+1:0} / ${view.frame_count} 帧${view.message?' · '+view.message:''}`);
     }
-    const allMedia=[...(state?.media||[]),...(state?.workflow?.replay||[]),...results.map(r=>r.media).filter(Boolean)];
-    const media=[...new Map(allMedia.filter(m=>m.kind==='replay').map(m=>[m.id||m.url,m])).values()],nextKey=JSON.stringify([key(),media]);
+    const media=selectedMedia,nextKey=JSON.stringify([key(),historyRun,media]);
     if(nextKey===replayKey)return;pausePair();replayKey=nextKey;replayVideos=[];const replay=el('replay-media');replay.replaceChildren();
-    for(const m of media){const url=safeMediaUrl(m.url,location.href);if(!m.ready||!url)continue;const figure=make('figure'),video=/\.(mp4|webm)(\?|$)/i.test(url)||m.mime_type?.startsWith('video/');const node=make(video?'video':'img');node.src=url;if(video){node.controls=true;node.preload='metadata';node.playsInline=true;node.addEventListener('loadedmetadata',renderPairClock);replayVideos.push({node,figure,camera:m.camera,role:m.role});}else node.alt=m.label||'录制回放';figure.append(make('figcaption',(m.label||'录制回放')+' · 回放'),node);replay.append(figure);}
+    for(const m of media){const url=safeMediaUrl(m.url,location.href);if(!m.ready||!url)continue;const figure=make('figure'),video=/\.(mp4|webm)(\?|$)/i.test(url)||m.mime_type?.startsWith('video/');const node=make(video?'video':'img');node.src=url;if(video){node.controls=true;node.preload='metadata';node.playsInline=true;node.addEventListener('loadedmetadata',renderPairClock);replayVideos.push({node,figure,camera:m.camera,role:m.role,run_id:m.run_id});}else node.alt=m.label||'录制回放';figure.append(make('figcaption',(m.label||'录制回放')+' · 回放'),node);replay.append(figure);}
     const cameras=[...new Set(replayVideos.filter(row=>['source','target'].includes(row.role)).map(row=>row.camera))];
     el('collection-replay-controls').hidden=!cameras.length;el('collection-replay-camera').replaceChildren();
     for(const camera of cameras){const option=make('option',{base_0:'头部',left_wrist_0:'左腕',right_wrist_0:'右腕'}[camera]||camera);option.value=camera;el('collection-replay-camera').append(option);}
@@ -819,6 +957,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     return true;
   }
   function barrier() {
+    clearTimeout(autoPreviewTimer);autoPreviewTimer=null;
     cancelTarget('页面控制或上下文已改变');
     generation++;polling?.abort();polling=null;clearReview();
     for(const slot of mediaSlots.values())cancelMediaRequest(slot);
@@ -926,9 +1065,9 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?el('clearance').checked:true;}
     if(action==='connect'&&context.environment==='physical')body.arms_supported=el('supported').checked;
     if(action==='release')body.arms_supported=el('release-supported').checked;
-    if(context.business==='collection'&&['generate_plan','execute'].includes(action))body.speed_scale=Number(el('collection-speed').value)/100;
+    if(context.business==='collection'&&['generate_plan','collection_plan','execute'].includes(action))body.speed_scale=Number(el('collection-speed').value)/100;
     const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),requestInstance=serverInstance,controller=new AbortController();
-    if(state.workflow?.review?.id&&['stop','cancel','handoff','release','generate_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
+    if(state.workflow?.review?.id&&['stop','cancel','handoff','release','generate_plan','collection_prepare','collection_plan','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     barrier();const at=generation;displayedRequest=sequence;pending.set(sequence,{action,context:requestContext,controller});
     notice(action==='stop'?'正在请求停止；等待后端停止回执。':'请求已发送，等待后端受理；尚未确认完成。',true);renderGates();
@@ -941,6 +1080,7 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   }
   function switchContext(next) {
     if(next.environment===context.environment&&next.business===context.business)return;
+    saveDraft();meshChoices.clear();observationCamera='all';
     pausePair();el('release-supported').checked=false;
     finishAudit('设备环境或业务变化');
     barrier();for(const p of pending.values())p.controller.abort();pending.clear();clearMedia();
@@ -971,19 +1111,26 @@ export function createWorkbench({document:doc, fetch:request, location, performa
   function start() {
     el('environment').addEventListener('change',()=>switchContext({...context,environment:el('environment').value}));
     for(const button of doc.querySelectorAll('[data-tab]'))button.addEventListener('click',()=>selectTab(button.dataset.tab));
+    el('results-business').addEventListener('change',()=>{const business=el('results-business').value;if(BUSINESS[business])switchContext({...context,business});});
+    el('calibration-compare-link').addEventListener('click',()=>{if(context.business!=='calibration')switchContext({...context,business:'calibration'});selectTab('results');});
+    el('observation-camera').addEventListener('change',()=>{const value=el('observation-camera').value;if(['all','head','left','right'].includes(value)){observationCamera=value;el('camera-grid').dataset.camera=value;saveDraft();}});
     el('primary').addEventListener('click',()=>{if(state?.workflow?.primary_action)void send(state.workflow.primary_action.id);});
     el('replan').addEventListener('click',()=>send('generate_plan',{replan:true}));
+    el('collection-prepare').addEventListener('click',()=>send('collection_prepare'));
+    el('collection-plan').addEventListener('click',()=>send('collection_plan'));
+    el('collection-execute').addEventListener('click',()=>send('execute'));
     el('review-speed').addEventListener('click',()=>send('generate_plan'));
     el('collection-speed').addEventListener('input',()=>{
       setText('collection-speed-value',el('collection-speed').value+'%');
       if(state?.workflow?.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);
-      clearReview();renderGates();
+      saveDraft();clearReview();renderGates();
     });
     el('trajectory-load').addEventListener('click',loadTrajectory);
     el('trajectory-tick').addEventListener('input',renderTrajectoryTick);
     el('trajectory-stage').addEventListener('change',()=>{el('trajectory-tick').value=el('trajectory-stage').value;renderTrajectoryTick();});
     el('trajectory-arm').addEventListener('change',renderTrajectoryPlots);
     el('collection-replay-camera').addEventListener('change',selectPair);
+    el('collection-history-run').addEventListener('change',()=>{pausePair();historySelections.set(historyKey(),el('collection-history-run').value);renderResults();renderGates();});
     el('collection-replay-toggle').addEventListener('click',playPair);
     el('collection-replay-time').addEventListener('input',()=>seekPair(Number(el('collection-replay-time').value)||0));
     el('collection-replay-speed').addEventListener('change',()=>{const value=Number(el('collection-replay-speed').value);if(![.25,.5,1,2].includes(value))return;pairedPosition=pairTime();pairedStarted=clock.now();pairedRate=value;for(const node of pair())node.playbackRate=value;});
@@ -991,16 +1138,24 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('configure-calibration').addEventListener('click',()=>send('configure_calibration',{kind:el('calibration-kind').value,head_result_id:el('calibration-kind').value==='wrist'?el('calibration-head').value:null}));
     el('wrist-redo').addEventListener('click',()=>send('generate_plan',{mode:'wrist',head_result_id:el('calibration-head').value}));
     el('plan-batch').addEventListener('click',()=>send('plan_batch'));
+    el('calibration-plan-prev').addEventListener('click',()=>browsePlan(planIndex-1));
+    el('calibration-plan-next').addEventListener('click',()=>browsePlan(planIndex+1));
+    el('calibration-plan-select').addEventListener('change',()=>browsePlan(el('calibration-plan-select').value));
     el('preview-batch').addEventListener('click',()=>send('preview_batch',{queue_revision:state?.workflow?.calibration_tools?.queue_revision}));
     el('apply-fit-source').addEventListener('click',()=>send('fit_source',{batch_id:el('fit-source').value}));
     el('clear-fit-source').addEventListener('click',()=>send('fit_source',{batch_id:null}));
     el('fit-batch').addEventListener('click',()=>send('fit_batch'));
-    el('replay-open').addEventListener('click',()=>{
+    const openReplay=()=>{
       const view=state?.workflow?.replay_context,index=Number(el('replay-index').value);
       if(!view||el('replay-index').value===''||!Number.isInteger(index)||index<0||index>=view.frame_count){notice('请选择当前批次内的有效帧');return;}
-      void send('select_result',{result_id:view.result_id,frame_index:index,camera:el('replay-camera').value,overlay:el('replay-overlay').checked});
-    });
-    el('replay-camera').addEventListener('change',()=>{el('replay-overlay').checked=false;renderGates();});
+      const candidate=el('replay-candidate').value;
+      return send('select_result',{result_id:view.result_id,frame_index:index,camera:el('replay-camera').value,overlay:el('replay-overlay').checked,...(candidate?{candidate_id:candidate}:{})});
+    };
+    el('replay-open').addEventListener('click',openReplay);
+    el('replay-index').addEventListener('change',openReplay);
+    el('replay-candidate').addEventListener('change',openReplay);
+    el('replay-overlay').addEventListener('change',openReplay);
+    el('replay-camera').addEventListener('change',()=>{el('replay-overlay').checked=false;el('replay-candidate').value='';renderGates();return openReplay();});
     for(const action of ['stop','connect','cancel','recover','release'])el(action).addEventListener('click',()=>send(action));
     el('control-fault-diagnostics').addEventListener('click',()=>selectTab('diagnostics'));
     el('handoff').addEventListener('click',()=>send('handoff',{target_business:el('handoff').dataset.target}));
@@ -1017,8 +1172,8 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     overviewImage.addEventListener('pointermove',event=>{if(!overviewPointer||previewView!=='overview')return;overview.yaw=((overview.yaw-(event.clientX-overviewPointer.x)*.006+3*Math.PI)%(2*Math.PI))-Math.PI;overview.pan_y=Math.max(-2,Math.min(2,overview.pan_y+(event.clientY-overviewPointer.y)/(overviewImage.clientHeight||240)));overviewPointer={x:event.clientX,y:event.clientY};void sendOverview();});
     for(const event of ['pointerup','pointercancel'])overviewImage.addEventListener(event,()=>{overviewPointer=null;});
     overviewImage.addEventListener('wheel',event=>{if(previewView!=='overview'||!permission('preview_overview').allowed)return;event.preventDefault();overview.zoom=Math.max(.4,Math.min(4,overview.zoom*Math.exp(-event.deltaY*.001)));el('overview-zoom').value=overview.zoom;void sendOverview();},{passive:false});
-    el('mesh-camera').addEventListener('change',()=>{meshCamera=el('mesh-camera').value;meshCandidate='';el('mesh').checked=false;renderPreview();el('mesh').checked=false;renderMedia();void sendMesh();});
-    el('mesh-candidate').addEventListener('change',()=>{meshCandidate=el('mesh-candidate').value;renderMedia();void sendMesh();});
+    el('mesh-camera').addEventListener('change',()=>{const enabled=el('mesh').checked;meshCamera=el('mesh-camera').value;meshCandidate=meshChoices.get(meshCamera)||'';renderPreview();el('mesh').checked=enabled&&!!meshCandidate;saveDraft();renderMedia();void sendMesh();});
+    el('mesh-candidate').addEventListener('change',()=>{meshCandidate=el('mesh-candidate').value;meshChoices.set(meshCamera,meshCandidate);saveDraft();renderMedia();void sendMesh();});
     el('mesh').addEventListener('change',sendMesh);
     el('reconnect-images').addEventListener('click',reconnectImages);
     el('preview-recover').addEventListener('click',()=>sendDisplay('preview_recover'));
@@ -1037,15 +1192,16 @@ export function createWorkbench({document:doc, fetch:request, location, performa
     el('queue-clear').addEventListener('click',()=>send('manual_queue',{operation:'clear',queue_revision:state?.manual?.queue?.revision}));
     el('apply-manual-speed').addEventListener('click',()=>{const speed=Number(el('manual-speed').value);if(!Number.isFinite(speed)||speed<=0){notice('统一关节速度必须为正数');return;}for(const input of jointInputs('speed'))input.value=speed;editManual();});
     el('use-feedback').addEventListener('click',()=>{if(!manualReady())return;fillFeedbackInputs();editManual();});
-    el('zero-preview').addEventListener('click',()=>{for(const input of jointInputs('position'))input.value=0;el('jaw-left').value=83;el('jaw-right').value=83;editManual();});
+    el('zero-preview').addEventListener('click',()=>{for(const input of jointInputs('position'))input.value=0;syncJointSliders();el('jaw-left').value=83;el('jaw-right').value=83;editManual();});
     doc.addEventListener('visibilitychange',()=>{if(doc.hidden){finishAudit('页面进入后台');cancelTarget('页面进入后台');clearMedia();}else{renderMedia();void poll();}});
     render();void poll();timers.push(setInterval(poll,1000),setInterval(()=>{renderAge();renderGates();if(state&&options().fresh===false)render();},250),setInterval(renderPairClock,100));
   }
-  function destroy(){pausePair();trajectoryRequest?.abort();finishAudit('页面关闭');if(auditDownload)urls.revokeObjectURL(auditDownload);stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}
+  function destroy(){saveDraft();pausePair();trajectoryRequest?.abort();finishAudit('页面关闭');if(auditDownload)urls.revokeObjectURL(auditDownload);stopped=true;barrier();for(const p of pending.values())p.controller.abort();pending.clear();for(const controller of displayRequests.values())controller.abort();displayRequests.clear();overviewDirty=false;clearMedia();timers.forEach(clearInterval);}
   return {start,poll,send,switchContext,selectTab,destroy,get state(){return state;},get context(){return {...context};}};
 }
 
 if(typeof window!=='undefined'&&typeof document!=='undefined'){
-  const app=createWorkbench({document,fetch:window.fetch.bind(window),location:window.location,performance:window.performance,URL:window.URL,crypto:window.crypto,setInterval:window.setInterval.bind(window),clearInterval:window.clearInterval.bind(window),setTimeout:window.setTimeout.bind(window),clearTimeout:window.clearTimeout.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window)});
+  let storage;try{storage=window.localStorage;}catch{}
+  const app=createWorkbench({document,fetch:window.fetch.bind(window),location:window.location,performance:window.performance,URL:window.URL,crypto:window.crypto,setInterval:window.setInterval.bind(window),clearInterval:window.clearInterval.bind(window),setTimeout:window.setTimeout.bind(window),clearTimeout:window.clearTimeout.bind(window),requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),storage});
   app.start();window.addEventListener('pagehide',()=>app.destroy());
 }

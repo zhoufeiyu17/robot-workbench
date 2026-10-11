@@ -256,6 +256,7 @@ def run(args, base, nominal):
         robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
         device=Device(robot_id,'fake',factory,label='A1 PhysX · 同源三相机',
                       drive=lambda runtime,closed:closed.wait())
+        if args.collection_history is not None:device.collection_history=args.collection_history
         if args.resume_source:device.label='A1 PhysX · 日常开发（复用标定）'
         if args.diagnostic_source:
             from robot_workbench.calibration_profile import diagnostic_metadata
@@ -473,6 +474,8 @@ def main():
         help='explicit current resident GPU/resource contract; enables post-install background D preparation only')
     parser.add_argument('--calibration-resume-source',type=Path,
         help='pinned dev_resume source; independent editable calibration copy, never motion/task resume')
+    parser.add_argument('--collection-history-source',type=Path,
+        help='pinned completed fake recordings; read-only history, never execution or checkpoint resume')
     parser.add_argument('--dry-run',action='store_true')
     args=parser.parse_args();args.output=args.output.resolve()
     if not 0<args.duration_wall_s<=86400 or any(not 0<=p<=65535 for p in [args.port,args.gateway_port,*args.camera_ports]):
@@ -481,6 +484,7 @@ def main():
     args.collection_spec=None
     args.diagnostic_source=None
     args.resume_source=None
+    args.history_source=None;args.collection_history=None
     if args.collection_contract:
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
@@ -520,9 +524,18 @@ def main():
         checked.update(calibration_resume=dict(mode='dev_resume',source_run=args.resume_source['source_run'],
             robot_id=args.resume_source['origin_robot_id'],expected_install=args.resume_source['expected_install']),
             fresh_C_completed=False,empty_store_qualification=False)
+    if args.collection_history_source:
+        from robot_workbench.collection_history import validate_source
+        robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
+        args.history_source=validate_source(json.loads(args.collection_history_source.read_bytes()),robot_id=robot_id)
+        checked['collection_history']=dict(source_run=args.history_source['spec']['source_run'],
+            jobs=args.history_source['spec']['jobs'],videos=len(args.history_source['entries']),readonly=True)
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)
+    if args.history_source is not None:
+        from robot_workbench.collection_history import import_history
+        args.collection_history=import_history(args.history_source,args.output/'collection-history')
     args.camera_spool_root.mkdir(exist_ok=False)
     started_wall_ns=time.time_ns();args.resident_deadline_wall_ns=started_wall_ns+round(args.duration_wall_s*1e9)
     save(args.output/'run.json',dict(pid=os.getpid(),started_wall_ns=started_wall_ns,duration_wall_s=args.duration_wall_s,

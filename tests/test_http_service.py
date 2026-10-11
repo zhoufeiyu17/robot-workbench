@@ -1,5 +1,6 @@
 """Live loopback HTTP + real shared Owner. Protocol fake only, no SDK/GPU."""
 from pathlib import Path
+from copy import deepcopy
 from http.client import HTTPConnection
 import json
 import socket
@@ -20,6 +21,23 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_readonly_history_is_available_before_collection_backend_or_connection(self):
+        path=Path(self.temp.name)/'history.mp4';path.write_bytes(b'0123456789')
+        row=dict(id='history-video',kind='recording',label='历史任务',media=dict(
+            id='history-video',kind='replay',run_id='old-job',role='source',camera='base_0',ready=True))
+        self.device.collection_history=SimpleNamespace(results=lambda:[row],media=lambda ident:path if ident=='history-video' else None)
+        state=self.state('collection')
+        self.assertEqual(state['results'],[row]);self.assertFalse(state['runtime']['connected'])
+        self.assertEqual(self.state('calibration')['results'],[])
+        url=self.url+'/api/result-media?environment=fake&business=collection&result_id=history-video'
+        with self.http.open(Request(url,headers={'Range':'bytes=2-5'})) as response:
+            self.assertEqual(response.status,206);self.assertEqual(response.read(),b'2345')
+        for wrong in (url.replace('collection','calibration'),url.replace('history-video','unknown')):
+            with self.assertRaises(HTTPError) as error:self.http.open(wrong)
+            self.assertEqual(error.exception.code,404)
+        with self.assertRaises(HTTPError):self.action('execute',business='collection',result_id='history-video')
+        self.assertIsNone(self.device.runtime,'viewing history cannot connect or restore an execution')
+
     def setUp(self):
         self.temp=TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -501,6 +519,25 @@ class HTTPTest(unittest.TestCase):
         state['plan']={};flow.refresh()
         with self.assertRaises(HTTPError) as error:self.http.open(url)
         self.assertEqual(error.exception.code,404);self.assertIsNone(self.device.runtime)
+
+    def test_explicit_collection_steps_do_not_authorize_execution(self):
+        from robot_workbench.workflows import CollectionWorkflow
+        self.connect();self.action('handoff',target_business='collection')
+        state=dict(status='ready',busy=False,environment={'ready':True},plan={},can_execute=False)
+        playground=SimpleNamespace(directory=Path(self.temp.name),snapshot=lambda:deepcopy(state),
+            start=Mock(return_value={'output':'new-step','status':'accepted'}))
+        flow=CollectionWorkflow(playground,self.device,self.app);flow.closed.set();flow.thread.join(1);flow.refresh()
+        self.device.workflows['collection']=flow
+        for action,expected in (('collection_prepare','prepare'),('collection_plan','plan')):
+            flow.refresh();self.assertTrue(self.state('collection')['runtime']['allowed_operations'][action]['allowed'])
+            code,_=self.action(action,business='collection',speed_scale=.4);self.assertEqual(code,202)
+            deadline=time.monotonic()+2
+            while self.app.jobs[('fake','collection')]['status']=='running' and time.monotonic()<deadline:time.sleep(.01)
+            self.assertEqual(self.app.jobs[('fake','collection')]['status'],'completed')
+            playground.start.assert_called_with({'action':expected,'speed_scale':.4})
+        self.assertFalse(self.state('collection')['runtime']['allowed_operations']['execute']['allowed'])
+        with self.assertRaises(HTTPError):self.action('execute',business='collection',review_id='not-approved',physical_clearance=True)
+        self.assertEqual(playground.start.call_count,2,'step buttons must never bypass the execution review')
 
     def test_calibration_JSON_export_uses_original_version_store_without_connect(self):
         sys.path[:0]=[str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'calibration/examples/scripts/debug'),str(ROOT/'calibration/tests')]

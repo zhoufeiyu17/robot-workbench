@@ -11,10 +11,86 @@ import unittest
 from unittest.mock import Mock,patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from robot_workbench.workflows import CalibrationWorkflow,CollectionWorkflow,calibration_stage
+from robot_workbench.workflows import CalibrationWorkflow,CollectionWorkflow,calibration_stage,collection_live_view
 
 
 class WorkflowAdapterTest(unittest.TestCase):
+    def test_history_candidate_switch_keeps_frame_camera_and_solver_source(self):
+        flow=self.calibration();a=flow.app
+        a.selected_batch='solver-source'
+        a.calibration_results.return_value.append(dict(id='head-second',batch='batch/capture',status='quality_failed'))
+        frames=[dict(id='frame-'+str(i),image='head.png',split='holdout',valid_for_fit=False,
+            detections={'24':{'corners':[]}},image_urls={'head':'/artifacts/batch/capture/head.png'}) for i in range(2)]
+        a.review_batch.return_value={'frames':frames,'results':[dict(r,kind='head') for r in a.calibration_results()]}
+        flow.action('select_result',dict(result_id='capture:batch/capture',frame_index=1,camera='head',overlay=True,candidate_id='head-poor'))
+        flow.action('select_result',dict(result_id='capture:batch/capture',candidate_id='head-second'))
+        context=flow.snapshot()['replay_context']
+        self.assertEqual((context['frame_index'],context['camera'],context['candidate_id']),(1,'head','head-second'))
+        self.assertEqual(context['frame']['split'],'holdout');self.assertFalse(context['frame']['valid_for_fit'])
+        self.assertEqual(len(context['frames']),2);self.assertEqual(context['frame']['detections'],frames[1]['detections'])
+        a.historical_overlay.assert_called_with(dict(batch_id='batch/capture',frame_index=1,camera='head',result_id='head-second'))
+        self.assertEqual(a.selected_batch,'solver-source');a.action.assert_not_called()
+        with self.assertRaisesRegex(ValueError,'匹配'):flow.action('select_result',dict(result_id='capture:batch/capture',candidate_id='another-batch'))
+
+    def test_domain_views_keep_report_metrics_timing_and_source_identity(self):
+        flow=self.calibration();report=dict(phase='头部：求解',steps=[dict(step='solve',half='head',result_id='head-poor',metrics={'holdout_marker_rms_px':4.2})],aborted='质量失败')
+        flow.app.runtime_state.return_value=dict(status='REJECTED',pipeline=report,counts={'captured':34})
+        flow.refresh();value=flow.snapshot()
+        self.assertEqual(value['pipeline']['steps'],report['steps']);self.assertEqual(value['quality']['results'][0]['metrics'],report['steps'][0]['metrics'])
+        value['quality']['results'][0]['metrics']['holdout_marker_rms_px']=0
+        self.assertEqual(report['steps'][0]['metrics']['holdout_marker_rms_px'],4.2)
+        flow,state=self.collection();source=self.root/'source.json';binding=self.root/'binding.json'
+        source.write_text(json.dumps(dict(run_id='observation',scene_digest='scene',calibration_profile={'profile_id':'profile'})))
+        binding.write_text(json.dumps(dict(robot_id='robot',calibration_profile_digest='profile-sha',camera_serials={'head':'camera'})))
+        state['plan'].update(source_path=str(source),hardware_binding=str(binding))
+        state['progress']=dict(label='检测',elapsed_s=25,stage_elapsed_s=12,estimate_s=40,estimate_source='历史参考',next_label='规划',stages=[{'label':'观测','status':'completed','elapsed_s':5,'estimate_s':4}])
+        flow.refresh();domain=flow.snapshot()['collection']
+        self.assertEqual(domain['timing'],state['progress']);self.assertEqual(domain['relations']['source']['run_id'],'observation')
+        self.assertEqual(domain['relations']['calibration']['calibration_profile_digest'],'profile-sha')
+        flow.action('collection_prepare',{});flow.playground.start.assert_called_with({'action':'prepare','speed_scale':.3})
+        with self.assertRaisesRegex(ValueError,'正在进行'):flow.action('collection_plan',{})
+        state.update(busy=False);flow.refresh();flow.action('collection_plan',{});flow.playground.start.assert_called_with({'action':'plan','speed_scale':.3})
+        state.update(busy=False,environment={'ready':False});flow.refresh()
+        with self.assertRaisesRegex(ValueError,'环境准备'):flow.action('collection_plan',{})
+
+    def test_live_collection_receipts_require_current_full_binding(self):
+        binding=dict(device_id='device',environment='fake',execution_instance_id='execution',runtime_nonce='owner',source_clock_id='clock',timeline_digest='parent',execution_timeline_digest='timeline')
+        view=dict(id='job',status='running',stage_id='collection.execute',busy=True,execution_binding=binding,outcomes={'motion':'未执行','data':'未录制','task':'unverified'})
+        runtime=dict(device_id='device',environment='fake',holder='collection',execution_instance_id='execution',runtime_nonce='owner',command_epoch=4,
+            execution_calibration=dict(business='collection',execution_instance_id='execution',command_epoch=4),calibration_feedback={'source_clock_id':'clock'},
+            native_task=dict(execution_instance_id='execution',runtime_nonce='owner',source_clock_id='clock',execution_timeline_digest='timeline',task_outcome='success'),
+            frozen=dict(timeline_digest='parent',execution_timeline_digest='timeline',status='completed',submitted_command_ticks=10,execution_tick_count=10),
+            execution_timeline=dict(parent_timeline_digest='parent',timeline_digest='timeline',command_count=10),recording=dict(done=True,manifest={'validation':{'status':'passed'}}))
+        live=collection_live_view(deepcopy(view),runtime)
+        self.assertEqual(live['outcomes']['motion']['status'],'completed');self.assertEqual(live['outcomes']['data']['status'],'valid')
+        self.assertEqual(live['outcomes']['task']['status'],'pending','native success still requires the workflow receipt audit')
+        self.assertEqual(live['progress']['current'],10)
+        invalid=[('view',('execution_binding',),{}),('view',('execution_binding','execution_instance_id'),'old'),
+            ('view',('execution_binding','runtime_nonce'),'old'),('view',('stage_id',),'collection.plan'),
+            ('view',('status',),'completed'),('view',('busy',),False),('view',('id',),None),
+            *[('runtime',(key,),'other') for key in ('runtime_nonce','execution_instance_id','device_id','environment','holder')],
+            *[('runtime',('execution_calibration',key),'other') for key in ('execution_instance_id','business')],
+            ('runtime',('execution_calibration','command_epoch'),3),('runtime',('command_epoch',),True),
+            *[('runtime',('native_task',key),'other') for key in ('execution_instance_id','runtime_nonce','source_clock_id','execution_timeline_digest')],
+            ('runtime',('calibration_feedback','source_clock_id'),'other'),
+            *[('runtime',('frozen',key),'other') for key in ('timeline_digest','execution_timeline_digest')],
+            *[('runtime',('execution_timeline',key),'other') for key in ('parent_timeline_digest','timeline_digest')]]
+        for target,path,replacement in invalid:
+            with self.subTest(target=target,path=path):
+                copied_view,copied_runtime=deepcopy(view),deepcopy(runtime)
+                parent=copied_view if target=='view' else copied_runtime
+                for key in path[:-1]:parent=parent[key]
+                parent[path[-1]]=replacement
+                self.assertEqual(collection_live_view(deepcopy(copied_view),copied_runtime),copied_view)
+        for count in (-1,1.5,True,11):
+            malformed=deepcopy(runtime);malformed['frozen']['submitted_command_ticks']=count
+            self.assertNotIn('progress',collection_live_view(deepcopy(view),malformed))
+        for count in (0,-1,True,10.5,11):
+            malformed=deepcopy(runtime);malformed['frozen']['execution_tick_count']=count
+            self.assertNotIn('progress',collection_live_view(deepcopy(view),malformed))
+        failures={name:{'status':'failed','message':'authoritative workflow failure'} for name in ('motion','data','task')}
+        self.assertEqual(collection_live_view({**deepcopy(view),'outcomes':deepcopy(failures)},runtime)['outcomes'],failures)
+
     def setUp(self):
         folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup);self.root=Path(folder.name).resolve()
 

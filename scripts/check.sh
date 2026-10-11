@@ -35,6 +35,8 @@ else
     echo 'SKIP collection setup 4/5-role asset checks: set AC_ONE_ASSET_ROOT to sealed A1 assets'
 fi
 python tests/test_serve_physx_device.py
+python tests/test_dev_calibration_resume.py
+python tests/test_collection_history.py
 python tests/test_atomic_evidence_save.py
 python tests/test_setup_resident_collection.py
 python tests/test_collection_physx_protocol.py

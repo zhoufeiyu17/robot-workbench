@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit,urlencode
-from robot_workbench.workflows import CALIBRATION_TOOLS,HISTORY_ACTIONS,CalibrationWorkflow
+from robot_workbench.workflows import CALIBRATION_TOOLS,COLLECTION_TOOLS,HISTORY_ACTIONS,CalibrationWorkflow,collection_live_view
 from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
 from robot_workbench.sample_clock import host_sample_status
 
@@ -269,6 +269,7 @@ class Application:
         value = workflow.snapshot() if workflow else dict(status='unconfigured',busy=False,
             stage_id='configuration',title='配置业务后端',message='设备控制可独立验证；当前业务的采集、求解与数据路径尚未配置。',
             primary_action=None,progress=None,outcomes={})
+        if business=='collection':value=collection_live_view(value,runtime)
         if readiness is not None:value['control_readiness']=readiness
         preparation=device.collection_preparation.snapshot() if business=='collection' and device.collection_preparation else None
         preparing=bool(preparation and (workflow is None or preparation['busy'] or preparation['status']=='failed' and not value.get('busy')))
@@ -344,10 +345,10 @@ class Application:
             allowed[action]=dict(allowed=bool(preview.get('connected')),reason=None if preview.get('connected') else '目标图像服务尚未就绪，请查看画面恢复指引')
         allowed['preview_recover']=dict(allowed=bool(device.preview and hasattr(device.preview,'recover') and preview.get('recovery',{}).get('allowed')),
             reason=preview.get('recovery',{}).get('message'))
-        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*HISTORY_ACTIONS):
+        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS):
             allowed.setdefault(action,dict(allowed=False,reason='当前业务后端尚未配置'))
         if workflow:
-            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*HISTORY_ACTIONS):
+            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS):
                 if hasattr(workflow,'allowed'):
                     allowed[action]=workflow.allowed(action)
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
@@ -369,6 +370,12 @@ class Application:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
         if primary and primary['id']!='prepare_collection' and (not runtime['connected'] or holder != business):
             primary.update(allowed=False,reason='请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有')
+        if business=='collection':
+            for action in (*COLLECTION_TOOLS,'execute'):
+                reason=('请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有' if holder!=business else
+                    '请先完成数采环境准备' if preparing else '请先生成并审阅当前执行计划' if action=='execute' and not review else None)
+                if reason:allowed[action]=dict(allowed=False,reason=reason)
+            for entry in value.get('collection',{}).get('actions',{}).values():entry.update(allowed[entry['id']])
         raw = (runtime.get('calibration_feedback') or {}).get('qpos')
         limits = runtime.get('joint_limits')
         manual = {}
@@ -382,11 +389,12 @@ class Application:
         manual['queue']=queue
         calibration=device.workflows.get('calibration')
         arrival=(calibration.snapshot().get('arrival_statistics') if calibration and hasattr(calibration,'snapshot') else None) or {'error':'未配置标定到位统计；协议 Fake 不生成统计数据'}
+        history=getattr(device,'collection_history',None) if business=='collection' else None
         return dict(schema='robot-workbench-ui.v1',server_instance_id=self.server_instance_id,
             revision=revision,server_wall_ns=time.time_ns(),csrf=self.csrf,
             device=dict(id=device.id,label=device.label,environment=environment),runtime=runtime,
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
-            results=workflow.results() if workflow else [],diagnostics=[
+            results=(workflow.results() if workflow else [])+(history.results() if history else []),diagnostics=[
                 {'label':'控制器状态','value':runtime.get('state','未知')},
                 {'label':'控制器当前原因','value':runtime.get('reason') or '未提供当前状态原因'},
                 {'label':'服务线程异常','value':device.error or '未报告服务线程异常'},*value.get('diagnostics',[])],
@@ -489,7 +497,7 @@ class Application:
                 raise ValueError('当前数采后台准备入口未配置')
             state=device.collection_preparation.snapshot()
             if not state['can_retry']:raise ValueError(state['retry_reason'] or '当前数采准备不能重试')
-        if business=='collection' and action in ('generate_plan','execute') and device.collection_preparation:
+        if business=='collection' and action in ('generate_plan','execute',*COLLECTION_TOOLS) and device.collection_preparation:
             if device.collection_preparation.snapshot()['status']!='ready':
                 raise ValueError('数采环境尚未准备成功；已有标定保留，请先完成环境准备')
         if action in ('manual_execute','execute'):
@@ -532,7 +540,7 @@ class Application:
                     raise
             body={**body,'token':review['token']}
             if review.get('speed_scale') is not None:body['speed_scale']=review['speed_scale']
-        if action not in {'connect','prepare_collection','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*HISTORY_ACTIONS}:
+        if action not in {'connect','prepare_collection','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
         if action not in ('connect','prepare_collection','mesh','select_result','cancel',*HISTORY_ACTIONS):
             if device.runtime is None:raise ValueError('请先连接设备')
@@ -548,7 +556,7 @@ class Application:
             if active and active['status']=='running':raise ValueError('当前请求仍在处理；停止始终可用')
             job=dict(id=secrets.token_hex(12),action=action,status='running',started_wall_ns=time.time_ns())
             self.jobs[(environment,business)]=job
-            if action in ('generate_plan','manual_preview','manual_queue','manual_queue_preview','cancel',*CALIBRATION_TOOLS):
+            if action in ('generate_plan','manual_preview','manual_queue','manual_queue_preview','cancel',*CALIBRATION_TOOLS,*COLLECTION_TOOLS):
                 self.manual_tasks.pop((environment,business),None)
                 self.reviews.pop((environment,business),None)
             response=dict(message='请求已受理，请查看当前任务状态',job_id=job['id'])
@@ -730,7 +738,9 @@ def handler(app):
                     workflow=device.workflows.get(business)
                     result_id=query.get('result_id',[''])[0]
                     file=workflow.media(result_id) if workflow else None
-                    if file is None:return self.send(404,{'error':'本轮媒体尚未就绪'})
+                    history=getattr(device,'collection_history',None) if business=='collection' else None
+                    if file is None and history is not None:file=history.media(result_id)
+                    if file is None:return self.send(404,{'error':'本轮或所选历史媒体尚未就绪'})
                     from robot_workbench.http_media import serve_file
                     kind=mimetypes.guess_type(str(file))[0]
                     current_plan=(kind=='application/json' and business=='collection'
