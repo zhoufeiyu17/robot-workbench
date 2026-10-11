@@ -756,7 +756,7 @@ def handler(app):
                     if self.headers.get('If-None-Match')==meta['etag']:return self.send(304,b'','image/jpeg',headers)
                     return self.send(200,raw,'image/jpeg',headers)
                 resource=path.path.removeprefix('/web') if path.path.startswith('/web/') else path.path
-                if resource not in ('/','/index.html','/app.js','/style.css'):
+                if resource not in ('/','/index.html','/app.js','/style.css','/session.js'):
                     return self.send(404,{'error':'not found'})
                 file=ROOT/'web'/('index.html' if resource=='/' else resource[1:])
                 return self.send(200,file.read_bytes(),mimetypes.guess_type(str(file))[0] or 'application/octet-stream')

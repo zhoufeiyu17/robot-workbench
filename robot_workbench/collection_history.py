@@ -189,3 +189,24 @@ class CollectionHistory:
         relative,pin=self.files[result_id];path=_file(self.root,relative)
         if _pin(path)!=pin:raise ValueError('historical media SHA or size changed')
         return path
+
+
+class CollectionHistoryGroup:
+    """Read retained immutable catalogs without copying videos at every restart."""
+    def __init__(self,histories):
+        self.histories=tuple(histories)
+        rows={}
+        for history in self.histories:
+            for row in history.results():
+                if row['id'] in rows and row!=rows[row['id']]:
+                    raise ValueError('conflicting historical result identity')
+                rows[row['id']]=row
+        self.catalog=list(rows.values())
+
+    def results(self):return deepcopy(self.catalog)
+
+    def media(self,result_id):
+        for history in self.histories:
+            path=history.media(result_id)
+            if path is not None:return path
+        return None

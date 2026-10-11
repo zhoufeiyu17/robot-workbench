@@ -14,6 +14,7 @@
     <div class="action-cell"><button id="handoff" aria-describedby="handoff-reason" disabled>交接控制权</button><small id="handoff-reason">等待后端状态</small></div>
     <div class="action-cell stop-cell"><button id="stop" class="danger" aria-describedby="stop-reason" disabled>停止当前设备任务</button><small id="stop-reason">等待后端状态</small></div>
     <div class="action-cell"><button id="release" aria-describedby="release-reason" disabled>释放设备连接</button><small id="release-reason">等待后端状态</small><label id="release-support-label" hidden><input id="release-supported" type="checkbox">我已可靠支撑双臂，允许本次释放</label></div>
+    <a id="session-link" class="session-link" href="/session" hidden><strong>开发服务</strong><small id="session-summary"></small></a>
     <div class="health-row" aria-label="设备运行状态"><span id="connection">连接：未知</span><span id="control-state">控制：未知</span><span id="feedback">反馈：未知</span><span id="hold">保持：未知</span><span id="motion">动作：未知</span><span id="stop-state"></span><span id="release-state"></span><span id="state-age">状态尚未核验</span></div>
     <div id="control-fault" class="control-fault" role="alert" hidden><div><strong>控制故障仍锁定，反馈恢复健康不代表可以执行。</strong><p id="control-fault-reason"></p><p id="control-fault-guidance"></p></div><button id="control-fault-diagnostics">查看设备诊断</button></div>
   </header>

@@ -37,6 +37,8 @@ fi
 python tests/test_serve_physx_device.py
 python tests/test_dev_calibration_resume.py
 python tests/test_collection_history.py
+python tests/test_fake_session.py
+python tests/test_fake_session_profile.py
 python tests/test_atomic_evidence_save.py
 python tests/test_setup_resident_collection.py
 python tests/test_collection_physx_protocol.py
@@ -64,4 +66,5 @@ python rule_based_workbench/test_real_control.py "$ROOT/calibration"
 if command -v node >/dev/null 2>&1; then
     node calibration/tests/test_joint_head_workbench_ui.js
     node tests/test_web_ui.mjs
+    node tests/test_session_ui.mjs
 fi

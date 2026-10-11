@@ -37,9 +37,9 @@ function manualSnapshot(){
   value.manual={joint_names:Array.from({length:12},(_,i)=>'J'+i),positions:Array(12).fill(.1),limits:Array.from({length:12},()=>[-1,1]),jaw_gaps_mm:[80,80],default_joint_speed_rad_s:.2,default_jaw_speed_mm_s:10,queue:{available:true,revision:4,waypoints:[]}};
   return value;
 }
-function harness({audit=false,storage}={}){
+function harness({audit=false,storage,sessionMonitor}={}){
   const document=documentStub(),requests=[],intervals=[],revoked=[],blobs=[],timeouts=new Map(),rafs=new Map();let now=0,timerId=0,rafId=0;
-  const app=createWorkbench({document,storage,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
+  const app=createWorkbench({document,storage,sessionMonitor,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
   const fireTimer=predicate=>{const timer=[...timeouts.entries()].find(([,t])=>predicate(t.ms));assert(timer,'matching timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;};
   return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
@@ -57,6 +57,11 @@ const review=snapshot({device:{environment:'physical'},workflow:{primary_action:
 assert.match(actionPermission(review,'execute').reason,/净空/);
 assert.equal(actionPermission(review,'execute',{clearance:true}).allowed,true);
 assert.equal(actionPermission(snapshot(),'stop',{pending:true,fresh:false}).allowed,true);
+
+{
+  let starts=0,stops=0;const h=harness({sessionMonitor:{start:()=>starts++,destroy:()=>stops++}});
+  h.app.start();assert.equal(starts,1);h.reply(0,snapshot());await settle();h.app.selectTab('collection');assert.equal(starts,1,'business navigation does not restart development services');h.app.destroy();assert.equal(stops,1,'workbench destruction also stops the independent management monitor');
+}
 
 function collectionSnapshot(){
   const value=snapshot(),binding={execution_instance_id:'current-instance',runtime_nonce:'owner',source_clock_id:'clock',

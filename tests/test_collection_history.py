@@ -6,13 +6,14 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'scripts')]
-from robot_workbench.collection_history import CAMERAS,source_spec,validate_source,import_history,CollectionHistory,_pin
+from robot_workbench.collection_history import CAMERAS,source_spec,validate_source,import_history,CollectionHistory,CollectionHistoryGroup,_pin
 import serve_physx_device
 
 
@@ -68,6 +69,14 @@ class CollectionHistoryTest(unittest.TestCase):
             path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'not history input')
 
     def spec(self):return source_spec(self.origin,[self.job])
+
+    def test_retained_catalog_survives_original_removal_and_deduplicates_restarts(self):
+        history=import_history(validate_source(self.spec()),self.output);rows=history.results()
+        shutil.rmtree(self.origin)  # Only this test's synthetic disposable source.
+        group=CollectionHistoryGroup([CollectionHistory(self.output),CollectionHistory(self.output)])
+        self.assertEqual(group.results(),rows)
+        for row in rows:self.assertTrue(group.media(row['id']).is_file())
+        self.assertIsNone(group.media('not-a-result'))
 
     def test_readonly_history_preserves_identity_and_six_scoped_pairs_without_execution_state(self):
         spec=self.spec();before={str(path):_pin(path) for path in self.origin.rglob('*') if path.is_file()}

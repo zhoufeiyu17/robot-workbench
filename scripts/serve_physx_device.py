@@ -476,8 +476,13 @@ def main():
         help='pinned dev_resume source; independent editable calibration copy, never motion/task resume')
     parser.add_argument('--collection-history-source',type=Path,
         help='pinned completed fake recordings; read-only history, never execution or checkpoint resume')
+    parser.add_argument('--collection-history-catalog',type=Path,action='append',default=[],
+        help='retained local read-only history catalog; does not depend on original raw source')
     parser.add_argument('--dry-run',action='store_true')
+    parser.add_argument('--deadline-wall-ns',type=int,help='optional absolute cap from the bounded fake manager')
     args=parser.parse_args();args.output=args.output.resolve()
+    if args.deadline_wall_ns is not None and args.deadline_wall_ns<=time.time_ns():
+        raise ValueError('authorized fake session deadline expired')
     if not 0<args.duration_wall_s<=86400 or any(not 0<=p<=65535 for p in [args.port,args.gateway_port,*args.camera_ports]):
         raise ValueError('bounded duration and valid loopback ports required')
     if args.output.exists():raise FileExistsError(args.output)
@@ -530,14 +535,32 @@ def main():
         args.history_source=validate_source(json.loads(args.collection_history_source.read_bytes()),robot_id=robot_id)
         checked['collection_history']=dict(source_run=args.history_source['spec']['source_run'],
             jobs=args.history_source['spec']['jobs'],videos=len(args.history_source['entries']),readonly=True)
+    retained=[]
+    if args.collection_history_catalog:
+        from robot_workbench.collection_history import CollectionHistory
+        robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
+        for path in args.collection_history_catalog:
+            if not path.is_absolute() or path.resolve()!=path or path.is_symlink():
+                raise ValueError('retained history requires a canonical absolute catalog')
+            history=CollectionHistory(path)
+            if any(row['details']['robot_id']!=robot_id for row in history.results()):
+                raise ValueError('retained history belongs to another virtual robot')
+            retained.append(history)
+        checked['retained_history_catalogs']=[str(path) for path in args.collection_history_catalog]
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)
     if args.history_source is not None:
         from robot_workbench.collection_history import import_history
         args.collection_history=import_history(args.history_source,args.output/'collection-history')
+    if retained:
+        from robot_workbench.collection_history import CollectionHistoryGroup
+        args.collection_history=CollectionHistoryGroup(retained+([args.collection_history] if args.collection_history else []))
     args.camera_spool_root.mkdir(exist_ok=False)
     started_wall_ns=time.time_ns();args.resident_deadline_wall_ns=started_wall_ns+round(args.duration_wall_s*1e9)
+    if args.deadline_wall_ns is not None:
+        if args.deadline_wall_ns<=started_wall_ns:raise ValueError('authorized fake session deadline expired')
+        args.resident_deadline_wall_ns=min(args.resident_deadline_wall_ns,args.deadline_wall_ns)
     save(args.output/'run.json',dict(pid=os.getpid(),started_wall_ns=started_wall_ns,duration_wall_s=args.duration_wall_s,
         resident_deadline_wall_ns=args.resident_deadline_wall_ns,
         base_sha256=hashlib.sha256(args.base.read_bytes()).hexdigest(),
