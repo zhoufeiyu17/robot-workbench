@@ -1,10 +1,10 @@
 {
-  "status": "bounded_dev_resume_full_fake_entry_live_overall_NOT_CLOSED",
-  "updated_at": "2026-10-11T18:05:34.686693+08:00",
+  "status": "business_workspaces_restored_bounded_full_fake_live_overall_NOT_CLOSED",
+  "updated_at": "2026-10-11T19:46:14.077804+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "69c531c",
-  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Current69c531c adds editable same-device calibration resume, independent D job budget, measured jaw display boundary;76 targeted CPU tests and two full CPU setup cases passed. Actual dev175603 READY and three camera/target/mesh JPEG verified;approved18866 loopback entry switched;D ready collection.idle, explicit handoff needed before D motion. No new motion or cold suite. Physical/L4 and scoped UI/fault cases remain unqualified.",
+  "candidate_commit_before_summary": "d9b0a2a",
+  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Currentd9b0a2a restores separate business workspaces without changing shared control/data contracts. Main CPU796 executions789pass7skip, final targeted45pass and Node checks; full fake dev193413 three cameras/target/mesh, explicit handoff, prepare and6historical video decode/paired replay verified. No new motion or cold suite. Full actual fault/branch coverage, self-service lifecycle and L4 remain open.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -106,8 +106,8 @@
     },
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
-    "latest_scope_screenshot": ".evidence/s2/parity-ui-20261010T174002Z-verified/trajectory-verified.jpg",
-    "temporary_loopback_forward": "18867 SSH PID41393 exited and port closed15:25:24.814292;18866 protocol-fake HTTP still healthy",
+    "latest_scope_screenshot": ".evidence/ui-workspaces-20261011/live-collection-workspace.jpg",
+    "temporary_loopback_forward": "18866 PID26602 original authorized Mac loopback->73443759 reused;18867 remains closed",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
     "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
@@ -119,7 +119,7 @@
       "off": ".evidence/s2/warm-145124-browser-mesh-off.json",
       "on": ".evidence/s2/warm-145124-browser-mesh-on.json"
     },
-    "current_UI_scope": "26-row comparison/approved implementation restoration complete;only each stated browser scope verified;matrix remaining_gap persists for full browser/actualbackend branches",
+    "current_UI_scope": "Two business workspaces restored; actual18866 fake screenshots/handoff/prepare/history replay and CPU draft/candidate comparison verified; each remaining actual branch still bounded separately",
     "performance_windows_ref": "event_driven_preview.off.windows and event_driven_preview.on.windows",
     "live_collection_progress_fix": {
       "commit": "30fc9f3",
@@ -531,19 +531,24 @@
   "current_gpu_run": {
     "mode": "dev_resume",
     "fresh_C_completed": false,
-    "tag": "dev-20261011-175603",
-    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-175603",
-    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-175603",
-    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-175603-source.tar.gz",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-175603-contract.json",
-    "gpu_record": "unified-dev-20261011-175603",
-    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-175603-camera-spool",
-    "source_files": 378,
+    "tag": "dev-20261011-193413",
+    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-193413",
+    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-193413",
+    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-193413-source.tar.gz",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-193413-contract.json",
+    "gpu_record": "unified-dev-20261011-193413",
+    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-193413-camera-spool",
+    "source_files": 382,
     "started": true,
     "dry_run_exit": 0,
-    "reserved_until": "2026-10-11T22:02:10.659438+08:00"
+    "reserved_until": "2026-10-11T21:51:34.123049+08:00",
+    "live_service_available": true,
+    "full_backends_ready": true,
+    "current_source_commit": "d9b0a2a",
+    "browser_entry": "http://127.0.0.1:18866",
+    "motion_requested": false
   },
-  "last_gpu_run": "full-scene-xy-20261011-134701",
+  "last_gpu_run": "dev-20261011-175603",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -3641,14 +3646,44 @@
   "stable_fake_operational_delivery": {
     "authority": "D7",
     "status": "bounded_full_fake_entry_live",
-    "current": "18866 full fake connected READY; C and D backends ready, three cameras/target/mesh actual JPEG verified;control held by calibration",
+    "current": "18866 dev193413 C/D ready; holder collection connected READY; actual prepare passed; readonly history6videos verified",
     "next_action": "self-service startup/expiry/restart UX and fault-specific qualification remain",
-    "service_deadline": "2026-10-11T21:57:25+08:00",
+    "service_deadline": "2026-10-11T21:46:58.988027+08:00",
     "resource_monitor": "fake heartbeat every45minutes; actual checks required",
-    "source_resume": "independent same-device copy, old installation/capture clocks preserved; no old runtime tokens restored"
+    "source_resume": "independent same-device copy, old installation/capture clocks preserved; no old runtime tokens restored",
+    "latest_workspace_delivery": "business_workspaces"
   },
   "delivery_verification_source": "Git history, .evidence/s2/active-task-checkpoint.json and actual final owner settlement receipts; delivery is not an additional feature backlog item",
   "dev_resume": {
+    "source_commit": "d9b0a2a",
+    "source_run": "dev-20261011-175603",
+    "run": "dev-20261011-193413",
+    "cpu_evidence": ".evidence/ui-workspaces-20261011/final-code-validation.json",
+    "availability": ".evidence/s2/dev-20261011-193413-availability/receipt.json",
+    "browser_entry": "http://127.0.0.1:18866",
+    "actual_browser_visual_QA": true,
+    "motion_requested": false,
+    "imported_arrival_samples": 71,
+    "imported_completed_collection_videos": 6
+  },
+  "business_workspaces": {
+    "commit": "d9b0a2a",
+    "decision": "preserve shared control/data contracts; separate calibration and collection business workspaces",
+    "cpu": ".evidence/ui-workspaces-20261011/final-code-validation.json",
+    "live_evidence": ".evidence/ui-workspaces-20261011/live-final-state.json",
+    "history_evidence": ".evidence/ui-workspaces-20261011/live-history-check.json",
+    "browser_screenshots": [
+      "live-calibration-workspace.jpg",
+      "live-collection-workspace.jpg",
+      "live-collection-history.jpg"
+    ],
+    "source_root": ".evidence/ui-workspaces-20261011",
+    "cold_suite_unchanged": true,
+    "new_motion": false,
+    "actual_resident_deadline": "2026-10-11T21:46:58.988027+08:00",
+    "documentation": "/Users/wujie/Developer/work/anyverse/_context/notes/unified-workbench-refactor-20261009/09-business-workspaces-20261011.md"
+  },
+  "historical_dev_resume_175603": {
     "source_commit": "69c531c",
     "source_run": "full-20261011-122428",
     "run": "dev-20261011-175603",

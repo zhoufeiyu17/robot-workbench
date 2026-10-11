@@ -69,20 +69,29 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 最后案例的[实际头相机终帧](.evidence/s2/full-scene-xy-20261011-134701-final-cameras/head.jpg)、[源录像](.evidence/s2/full-scene-xy-20261011-134701-source-head.mp4)、[独立审计](.evidence/s2/full-scene-xy-20261011-134701-audit.json)可直接查看。内容证据不冒充新的浏览器版式验收。
 
-## 当前入口、资源与重验口径
+## 两个业务工作区与当前入口
 
-2026-10-11 18:05：已恢复完整fake后端 `dev-20261011-175603`，控制READY/已连接、三实际相机、姿态预览、已安装头解mesh均通过API与实际JPEG核验；D已初始化完成并进入collection.idle，C/D后端均可用。控制权当前在标定，进入数采需显式交接。[恢复回执](.evidence/s2/dev-20261011-175603-availability/receipt.json)。本轮无新标定或数采轨迹。
+2026-10-11：根据旧版体验审计及用户决定，已保留共享Owner/权限/数据契约，恢复两个业务工作区（d9b0a2a）：
 
-- **18866**：用户批准后已切换到完整fake，Mac本机18866→734本机43759，SSH PID26602/tool55377；HTTP设备身份、READY/连接、标定入口和D就绪已回读，[入口核验](.evidence/s2/full-fake-entry-18866-20261011.json)。刷新后设备名应为「A1 PhysX · 日常开发（复用标定）」。浏览器版式本轮未新增自动化验收。
-- **18867**：原临时验收转发已关闭，未复开。
-- **734 GPU**：当前run独占双卡；计算GPU1，GPU0为Isaac图形上下文。服务截止约21:57 CST，资源登记至22:02用于清退。`fake` heartbeat每45分钟真实核验；不自动延长或重启。原CPU协议进程已核验闲置后停止、数据保留，未接真机。
-- **来源**：复用qualified nominal `full-20261011-122428`，保留头v000001/腕v000002、34+29张历史采样和71个到位样本，原source只读，当前独立复制。新Owner/clock/凭据，旧审批和动作不恢复。
-- **修复**：驻留寿命与D单任务预算分开，D仍最多120分钟；显示镜像接受既有−2～85mm反馈容差、记录原值与显示修正，显示模型限制在0～83mm，用户目标范围不变。最初174752启动尝试保留为失败诊断，9个自有PID与双GPU核空后已释放。
-- **历史与纠错**：3/3冷验收仍绑定757b290/suite-v7，不重新运行，也不当作本次新增恢复功能资格。device-j1提前登记release的纠错及治理非阻断一致性警告继续保留。
+- **标定**：度数滑块和实测值并列，输入自动只读预览；七阶段与质量/有效帧摘要；逐姿态前后浏览；固定帧/相机更换同批次候选。人工目标草稿按设备/环境/业务保存，恢复草稿不会恢复执行审批。
+- **数采**：准备、观测规划、审阅执行三个动作及速度设置同时可见；显示原阶段耗时、下一步、环境、来源和录制/封存/任务错误。后端按完整执行身份解释状态，前端不重复推断任务成功。
+- **结果**：标定候选与数采记录分别查看；历史按任务分组，同任务同相机双侧播放，刷新保留选择。原生任务结果与L3辅助回放仍分开。
+
+主体完整CPU796次执行（789通过、7明确跳过），最后45项历史/HTTP/serve/resume定向检查通过，Node交互检查通过。[代码验证回执](.evidence/ui-workspaces-20261011/final-code-validation.json)。CPU保存图像fixture验证5°换算、草稿恢复及同帧A/B切换，不冒充物理渲染资格。
+
+**19:46实测入口：[18866](http://127.0.0.1:18866/)**，完整fake `dev-20261011-193413`。C/D后端就绪；三实际相机、姿态预览、已安装头解mesh通过；71个到位样本、头v000001/腕v000002及34+29历史采样保留。浏览器显式交接和准备已通过，当前控制权在数采，connected/READY，可继续观测与规划。本轮没有重新标定或执行数采动作。
+
+[标定工作区截图](.evidence/ui-workspaces-20261011/live-calibration-workspace.jpg)、[数采工作区截图](.evidence/ui-workspaces-20261011/live-collection-workspace.jpg)、[历史双侧回放截图](.evidence/ui-workspaces-20261011/live-collection-history.jpg)、[实际状态](.evidence/ui-workspaces-20261011/live-final-state.json)与[实时图像回执](.evidence/s2/dev-20261011-193413-availability/receipt.json)保留。运行Python/前端与d9b0a2a一致，仅check.sh两行测试注册在冻结后加入；未热改远端。
+
+原175603用户数采已完成3417/3417命令、data valid、native task success、L3完成；部署前确认无活跃任务，19:36:17逐一核验14自有PID/start_ticks和双GPU C/G全空，随后release并启动新run。六视频＋11必要JSON共11,037,036字节已独立保留，原raw/模型不动。历史查看核验原身份/文件，不重审raw或恢复控制审批。
+
+18866原本机SSH转发复用；734 GPU1计算/GPU0图形独占，服务实际截止 **21:46:58 CST**（早于原21:57:25上限），资源登记至21:51清退，45分钟heartbeat真实核验。18867仍关闭。原标定/新Owner时钟分开，3/3冷验收仍只绑定757b290/suite-v7，不再重跑。动态状态以[检查点](.evidence/s2/active-task-checkpoint.json)为准；本有界入口仍不等于自助生命周期完成。
 
 ### 完整fake复用启动
 
 在持有原run的主机，用 `scripts/calibration_resume_source.py --source-run <原run绝对路径> --source-base <原base-manifest.json绝对路径>` 生成只读SHA规格；将该JSON作为 `serve_physx_device.py --calibration-resume-source <规格JSON>` 的独立参数，配合正常base/nominal/新output和有界collection合同启动。它不是warm诊断模式，正常C/D操作保留；`--dry-run`会验证同虚拟设备、模型、相机、完整文件和成组依赖。不得把来源规格中的plant/truth核验材料传给求解与规划。
+
+完成记录可单独用 `scripts/collection_history_source.py --source-run <原run> --job <完整job路径>` 生成规格，再传入 `--collection-history-source <JSON>`。该入口只导入原生回执核验成功的已完成fake任务，校验SHA/size/原robot-clock-install-execution身份；它是只读历史，不能恢复动作或checkpoint，暂不承担通用失败记录迁移。
 
 导入图像、结果和统计各自独立复制；原版本ID、原采样时钟和原事件身份不改。新采样使用新时钟；精确批次散列支持旧头＋新腕及重新求解。恢复不计空库验收。启动代码与76项定向CPU检查及两组完整CPU配置链见[定向回执](.evidence/s2/dev-resume-targeted-cpu-20261011.json)；实际浏览器切换、D就绪和之后生命周期以检查点的实测时间为准。
 
@@ -93,10 +102,10 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 ## 剩余工作（按优先级）
 
 1. **完整fake入口与生命周期交付**：恢复代码、C/D后端与图像核验已完成，18866已切完整fake；后续补用户自助启停/到期续用/重启交互和实际故障恢复。当前有界服务不等于无限常驻或D7全部完成。
-2. **定点补验已有功能**：完整人工队列、仅腕/分步操作、清空/单批重解、逐相机/逐帧/低质量候选/下载、不同速度实际执行、故障后的显式恢复和重新审阅。C12与预动作恢复CPU已补，不重列待办；实际历史head mesh、50%审阅和30%执行只覆盖各自子范围。浏览器自动化此前连续失败，需按已有工具边界补可执行的人工/浏览器证据，不伪造视觉通过。
+2. **定点补验已有功能**：完整人工队列、仅腕/分步操作、清空/单批重解、逐相机/逐帧/低质量候选/下载、不同速度实际执行、故障后的显式恢复和重新审阅。C12与预动作恢复CPU已补，不重列待办；实际历史head mesh、50%审阅和30%执行只覆盖各自子范围。本轮已新增上述浏览器证据，其他实际后端分支仍按范围补验，不把页面成功冒充采集/执行资格。
 3. **正式真机部署与L4验收**：SDK/支撑与停止、时延/载荷、真实相机及单writer切换独立完成；fake结果不替代现场资格。当前没有待用户裁决的新算法或UI行为决定。
 
-已完成的UI对照实现、封存导出优化和3/3空库验收不再回到开发待办。独立纠正数据生产由原任务负责，不并入本工作台范围。
+本轮两个业务工作区恢复、封存导出优化和3/3空库验收不再回到实现待办；体验与实际分支资格按证据边界继续补齐。独立纠正数据生产由原任务负责，不并入本工作台范围。
 
 正式安装对外路径仍为`/var/lib/anyverse/calibration/hardware/active/{head.json,wrist.json,manifest.json}`；fake使用隔离身份和安装根。真机支撑与逐批运动审阅门保留。
 
