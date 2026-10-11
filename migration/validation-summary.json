@@ -1,10 +1,10 @@
 {
-  "status": "business_workspaces_restored_bounded_full_fake_live_overall_NOT_CLOSED",
-  "updated_at": "2026-10-11T19:46:14.077804+08:00",
+  "status": "bounded_fake_self_service_and_restart_verified_overall_NOT_CLOSED",
+  "updated_at": "2026-10-11T22:21:47.682301+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "d9b0a2a",
-  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Currentd9b0a2a restores separate business workspaces without changing shared control/data contracts. Main CPU796 executions789pass7skip, final targeted45pass and Node checks; full fake dev193413 three cameras/target/mesh, explicit handoff, prepare and6historical video decode/paired replay verified. No new motion or cold suite. Full actual fault/branch coverage, self-service lifecycle and L4 remain open.",
+  "candidate_commit_before_summary": "f7e0ae9",
+  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Currentf7e0ae9 bounded CPU fake manager + actual fullfake start/stop/restart retention and one display-renderer fault/browser recovery passed;825 CPU unittest executions818pass7skip with original failed scheduling-dependent test block retained and deterministic harness correction aa0ad13. No new robot trajectory, capture, solve or install. New resource periods/long-lived entry, remaining targeted business/fault branches and L4 remain open.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -99,14 +99,18 @@
       "fault_injection": false,
       "browser_interaction": false,
       "remaining_gap": [
-        "actual renderer fault recovery and budget/monitor failure isolation",
-        "browser recovery interaction"
+        "other actual fault branches, budget/monitor failure isolation; one SIGTERM fault does not prove all recovery reliability"
       ],
-      "v1_failure_preserved": "helper-v1 wait_ms1000 exceeded0..100 media contract;HTTP409 after preview_target only,no recover;v2 uses100ms and matching-frame wait"
+      "v1_failure_preserved": "helper-v1 wait_ms1000 exceeded0..100 media contract;HTTP409 after preview_target only,no recover;v2 uses100ms and matching-frame wait",
+      "actual_fault_browser": {
+        "passed": true,
+        "evidence": ".evidence/fake-lifecycle-20261011/preview-fault/verified.json",
+        "scope": "one registered display-only SIGTERM and browser recover; source clock/Owner binding preserved"
+      }
     },
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
-    "latest_scope_screenshot": ".evidence/ui-workspaces-20261011/live-collection-workspace.jpg",
+    "latest_scope_screenshot": ".evidence/fake-lifecycle-20261011/full-management-ready.jpg",
     "temporary_loopback_forward": "18866 PID26602 original authorized Mac loopback->73443759 reused;18867 remains closed",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
@@ -192,12 +196,13 @@
         "exit_reason": "unknown",
         "not_restarted_during_review": true
       }
-    ]
+    ],
+    "fake_lifecycle": "actual browser start, stop result, restart, new instance, same-origin proxy and deadline CPU cases verified; stop click tool timed out around native confirmation but completion independently verified"
   },
   "remaining": [
-    "完善D7自助启停/到期续用/重启交互及实际故障恢复；18866完整fake已上线且C/D就绪，有限驻留不冒充无限常驻。",
-    "定点补齐C02/C04/C05/C06、C07余项、D06/D07浏览器与实际故障恢复、D02多速度实际执行、renderer故障/浏览器及其他matrix明确边界；C12原缺证据已关闭，不重开cold套件。",
-    "L4真实SDK/支撑/止动/时延载荷/正式singlewriter部署独立验收，fake结论不替代。"
+    "D7已授权窗口内自助启停/停止后重启已通过；长期入口及新的资源时段申请仍待接入，当前不自动续期。",
+    "定点补齐人工队列、仅腕/分步采集、多速度及其他matrix故障边界；本次一种实际renderer故障与browser恢复已关闭，不重开cold。",
+    "独立L4真实SDK/支撑/停止/时延载荷/singlewriter资格。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -529,26 +534,30 @@
     "connection_idle_timeout_s": 5
   },
   "current_gpu_run": {
-    "mode": "dev_resume",
+    "mode": "managed_fake",
     "fresh_C_completed": false,
-    "tag": "dev-20261011-193413",
-    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-193413",
-    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-193413",
-    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-193413-source.tar.gz",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-193413-contract.json",
-    "gpu_record": "unified-dev-20261011-193413",
-    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-193413-camera-spool",
-    "source_files": 382,
+    "tag": "dev-20261011-213856",
+    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-213856",
+    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-213856",
+    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-213856-source.tar.gz",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-213856-contract.json",
+    "gpu_record": "unified-dev-20261011-213856",
+    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-213856-camera-spool",
+    "source_files": 389,
     "started": true,
     "dry_run_exit": 0,
-    "reserved_until": "2026-10-11T21:51:34.123049+08:00",
+    "reserved_until": "2026-10-12T01:52:00+08:00",
+    "manager_deadline_wall_ns": 1791741120000000000,
+    "resident_deadline_wall_ns": 1791740818000000000,
+    "current_source_commit": "f7e0ae9",
     "live_service_available": true,
     "full_backends_ready": true,
-    "current_source_commit": "d9b0a2a",
-    "browser_entry": "http://127.0.0.1:18866",
-    "motion_requested": false
+    "browser_entry": "http://127.0.0.1:18866/",
+    "management_entry": "http://127.0.0.1:18866/session",
+    "motion_requested": false,
+    "active_child": "session-2-abf2e493bb01"
   },
-  "last_gpu_run": "dev-20261011-175603",
+  "last_gpu_run": "dev-20261011-193413",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -3645,13 +3654,15 @@
   ],
   "stable_fake_operational_delivery": {
     "authority": "D7",
-    "status": "bounded_full_fake_entry_live",
-    "current": "18866 dev193413 C/D ready; holder collection connected READY; actual prepare passed; readonly history6videos verified",
-    "next_action": "self-service startup/expiry/restart UX and fault-specific qualification remain",
-    "service_deadline": "2026-10-11T21:46:58.988027+08:00",
+    "status": "bounded_self_service_lifecycle_verified",
+    "current": "dev213856 manager/child generation2 ready; holder calibration connected READY; C/D ready;71arrivals6historyvideos preserved",
+    "next_action": "new GPU time-window admission and long-lived CPU/SSH entry; remaining targeted branches",
+    "service_deadline": "2026-10-12T01:46:58+08:00",
     "resource_monitor": "fake heartbeat every45minutes; actual checks required",
     "source_resume": "independent same-device copy, old installation/capture clocks preserved; no old runtime tokens restored",
-    "latest_workspace_delivery": "business_workspaces"
+    "latest_workspace_delivery": "business_workspaces",
+    "manager_deadline": "2026-10-12T01:52:00+08:00",
+    "latest_lifecycle_delivery": "fake_service_lifecycle"
   },
   "delivery_verification_source": "Git history, .evidence/s2/active-task-checkpoint.json and actual final owner settlement receipts; delivery is not an additional feature backlog item",
   "dev_resume": {
@@ -3695,5 +3706,21 @@
     "imported_arrival_samples": 71,
     "failed_startup_preserved": "dev-20261011-174752",
     "failed_startup_released": true
+  },
+  "fake_service_lifecycle": {
+    "commit": "f7e0ae9",
+    "test_commit": "aa0ad13",
+    "scope": "explicit lifecycle within a pre-reserved bounded window; not self-authorized resource renewal",
+    "evidence": ".evidence/fake-lifecycle-20261011",
+    "cpu": ".evidence/fake-lifecycle-20261011/cpu-receipt.json",
+    "restart": ".evidence/fake-lifecycle-20261011/restart-preservation.json",
+    "first_stop": ".evidence/fake-lifecycle-20261011/first-stop-check.json",
+    "renderer_fault": ".evidence/fake-lifecycle-20261011/preview-fault/verified.json",
+    "source_diff_from_deployment": [
+      "tests/test_recording_io.py"
+    ],
+    "manager_deadline": "2026-10-12T01:52:00+08:00",
+    "gpu_deadline": "2026-10-12T01:46:58+08:00",
+    "no_new_motion": true
   }
 }

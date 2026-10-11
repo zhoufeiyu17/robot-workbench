@@ -41,12 +41,12 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 2026-10-11：已按用户要求完成中间状态梳理，并完成同一冻结版本下的 **3/3 新空库完整 fake 验收，每例独立9/9通过**。本组冷启动验收到此结束。整体重构仍为 **NOT_CLOSED**：稳定完整fake日常入口、部分专项交互/恢复资格及正式真机部署仍未完成，不能标为生产就绪或“95%完成”。
 
-本轮冻结产品为 **757b290c12dde26732474cb58cf99b5a62cbc914**，375项源码与验收driver固定不变。当前代码、数据和证据的机器入口是[验证摘要](migration/validation-summary.json)，三例联合核验为[总回执](.evidence/s2/cold-suite-v7-qualified-20261011.json)。动态运行与资源见[续接检查点](.evidence/s2/active-task-checkpoint.json)。
+冷验收冻结产品为 **757b290c12dde26732474cb58cf99b5a62cbc914**，375项源码与验收driver固定不变。当前代码、数据和证据的机器入口是[验证摘要](migration/validation-summary.json)，三例联合核验为[总回执](.evidence/s2/cold-suite-v7-qualified-20261011.json)。动态运行与资源见[续接检查点](.evidence/s2/active-task-checkpoint.json)。
 
 | 已完成范围 | 证据与边界 |
 | --- | --- |
 | 共同入口与控制 | 四栏目、单Owner、显式交接、原C/D业务、结果绑定和诊断已实现；26项旧功能对照与已批准实现补齐完成，不等于每项全部浏览器/实际后端分支已验收 |
-| 当前CPU/L1 | 791次测试执行：790通过、1旧fixture跳过；L1故障矩阵27/27；软件stop P95 4.128ms/max4.660ms，仅本机软件资格 |
+| 冷验收时CPU/L1 | 791次测试执行：790通过、1旧fixture跳过；L1故障矩阵27/27；软件stop P95 4.128ms/max4.660ms，仅本机软件资格 |
 | 姿态显示预览 | warm-145124指定profile：mesh关23.17–23.52FPS/P95≤173.5ms，开22.30–22.58FPS/P95≤183.7ms；不外推其他主机、负载或PhysX慢执行画面 |
 | 封存与导出 | 同一完整raw总耗时576.222→309.245s，降低46.33%；解码帧、PTS、MP4 SHA一致，限实测输入/主机/存储 |
 | 到位统计证据 | 已复核实际浏览器截图、文本和当前两例各71个到位样本及相关源码；原C12缺证据项可关闭，不当作实体精度证明 |
@@ -79,13 +79,17 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 主体完整CPU796次执行（789通过、7明确跳过），最后45项历史/HTTP/serve/resume定向检查通过，Node交互检查通过。[代码验证回执](.evidence/ui-workspaces-20261011/final-code-validation.json)。CPU保存图像fixture验证5°换算、草稿恢复及同帧A/B切换，不冒充物理渲染资格。
 
-**19:46实测入口：[18866](http://127.0.0.1:18866/)**，完整fake `dev-20261011-193413`。C/D后端就绪；三实际相机、姿态预览、已安装头解mesh通过；71个到位样本、头v000001/腕v000002及34+29历史采样保留。浏览器显式交接和准备已通过，当前控制权在数采，connected/READY，可继续观测与规划。本轮没有重新标定或执行数采动作。
+### 当前完整fake与服务管理
 
-[标定工作区截图](.evidence/ui-workspaces-20261011/live-calibration-workspace.jpg)、[数采工作区截图](.evidence/ui-workspaces-20261011/live-collection-workspace.jpg)、[历史双侧回放截图](.evidence/ui-workspaces-20261011/live-collection-history.jpg)、[实际状态](.evidence/ui-workspaces-20261011/live-final-state.json)与[实时图像回执](.evidence/s2/dev-20261011-193413-availability/receipt.json)保留。运行Python/前端与d9b0a2a一致，仅check.sh两行测试注册在冻结后加入；未热改远端。
+2026-10-11 22:18：已部署f7e0ae9。入口仍为[18866](http://127.0.0.1:18866/)，设备栏“开发服务”进入[管理页](http://127.0.0.1:18866/session)。管理页独立于仿真进程，在已授权时段内显式启动、停止和重启；每秒显示阶段、截止、失败原因与清退状态。没有自动重启、连接设备或续跑动作。
 
-原175603用户数采已完成3417/3417命令、data valid、native task success、L3完成；部署前确认无活跃任务，19:36:17逐一核验14自有PID/start_ticks和双GPU C/G全空，随后release并启动新run。六视频＋11必要JSON共11,037,036字节已独立保留，原raw/模型不动。历史查看核验原身份/文件，不重审raw或恢复控制审批。
+管理器 `dev-20261011-213856`、当前child `session-2-abf2e493bb01`。C/D均就绪，fake已连接READY、持权标定。实际完成一次完整fake启动→停止（双GPU C/G核空、页面仍可访问）→再次启动；新实例最初未连接，标定ID/版本、71个到位样本和6视频完整SHA保持，随后相机/target/mesh检查通过。另实际终止自有显示renderer后，通过浏览器恢复成功；旧PID退出、新renderer与目标图成立，Owner绑定及相机源时钟保持。没有重新采集/求解/安装或执行轨迹。
 
-18866原本机SSH转发复用；734 GPU1计算/GPU0图形独占，服务实际截止 **21:46:58 CST**（早于原21:57:25上限），资源登记至21:51清退，45分钟heartbeat真实核验。18867仍关闭。原标定/新Owner时钟分开，3/3冷验收仍只绑定757b290/suite-v7，不再重跑。动态状态以[检查点](.evidence/s2/active-task-checkpoint.json)为准；本有界入口仍不等于自助生命周期完成。
+[管理页截图](.evidence/fake-lifecycle-20261011/full-management-ready.jpg)、[停止后仍可访问](.evidence/fake-lifecycle-20261011/full-management-stopped.jpg)、[重启保留检查](.evidence/fake-lifecycle-20261011/restart-preservation.json)、[实际渲染故障恢复](.evidence/fake-lifecycle-20261011/preview-fault/verified.json)可核验。CPU整套按成功前缀和完整后缀接续完成，825次执行818通过/7跳过；旧录制测试wall时序依赖已以确定性fixture修复（aa0ad13），原失败日志保留，生产录制策略/容量未改。[CPU证据](.evidence/fake-lifecycle-20261011/cpu-receipt.json)。部署运行代码与f7e0ae9一致，只有该测试在冻结后变化。
+
+用户明确批准本次734双GPU至 **2026-10-12 01:46:58 CST**，CPU管理器和原18866本机SSH转发至 **01:52** 清退。GPU1计算/GPU0图形；child停止会清空自己的GPU进程，但保留本Session时段预留以便再次启动。45分钟heartbeat真实核验；本机转发另有按PID/UTC启动时间/完整命令的截止关闭守卫。旧193413在14自有PID及双GPU核空后已release，18867保持关闭。动态状态见[检查点](.evidence/s2/active-task-checkpoint.json)。本入口没有新的时段自授权能力，不等于无限常驻。
+
+管理员在实际仿真主机用 `scripts/serve_fake_session.py --help` 核对固定profile入口：冻结contract/base/nominal、独立state目录、派生资源lease、GPU绝对截止与独立CPU截止；UI不能提供命令/路径/GPU/期限。每次child新目录，原数据不删除；历史catalog只读复用，未确认清退不能启动。lease只是已有唯一GPU登记的派生许可，不是另一份使用账本。
 
 ### 完整fake复用启动
 
@@ -101,8 +105,8 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ## 剩余工作（按优先级）
 
-1. **完整fake入口与生命周期交付**：恢复代码、C/D后端与图像核验已完成，18866已切完整fake；后续补用户自助启停/到期续用/重启交互和实际故障恢复。当前有界服务不等于无限常驻或D7全部完成。
-2. **定点补验已有功能**：完整人工队列、仅腕/分步操作、清空/单批重解、逐相机/逐帧/低质量候选/下载、不同速度实际执行、故障后的显式恢复和重新审阅。C12与预动作恢复CPU已补，不重列待办；实际历史head mesh、50%审阅和30%执行只覆盖各自子范围。本轮已新增上述浏览器证据，其他实际后端分支仍按范围补验，不把页面成功冒充采集/执行资格。
+1. **新资源时段与长期入口**：已授权窗口内的自助启停、重启与结果保留已通过；到期后新的GPU时段及长期CPU/SSH入口仍需接入，当前不会自动续期。
+2. **定点补验已有功能**：完整人工队列、仅腕/分步操作、清空/单批重解、逐相机/逐帧/低质量候选/下载、不同速度实际执行、其他故障后的显式恢复和重新审阅；本轮一种实际renderer故障与浏览器恢复已经通过。C12与预动作恢复CPU已补，不重列待办；实际历史head mesh、50%审阅和30%执行只覆盖各自子范围。本轮已新增上述浏览器证据，其他实际后端分支仍按范围补验，不把页面成功冒充采集/执行资格。
 3. **正式真机部署与L4验收**：SDK/支撑与停止、时延/载荷、真实相机及单writer切换独立完成；fake结果不替代现场资格。当前没有待用户裁决的新算法或UI行为决定。
 
 本轮两个业务工作区恢复、封存导出优化和3/3空库验收不再回到实现待办；体验与实际分支资格按证据边界继续补齐。独立纠正数据生产由原任务负责，不并入本工作台范围。
