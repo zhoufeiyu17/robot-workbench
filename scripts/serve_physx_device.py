@@ -44,6 +44,17 @@ def install_notification(workflow,workbench,notify):
     return installed
 
 
+def bootstrap_calibration(workbench,*,notify=None,runtime=None):
+    """Publish the actual restored installation; never restore a motion approval."""
+    from robot_workbench.workflows import CalibrationWorkflow
+    snapshot=workbench.installed_pair()
+    if not snapshot or snapshot.get('verified') is not True:
+        raise ValueError('restored calibration must match this Workbench geometry and library')
+    if runtime is not None:runtime.notify_calibration_installed(CalibrationWorkflow.install_identity(snapshot))
+    if notify is not None:notify(snapshot)
+    return snapshot
+
+
 def nominal_inputs(path):
     config = json.loads(path.read_text())
     if config.get('model_family') != 'ac_one' or config.get('simulation_only') is not True:
@@ -77,7 +88,7 @@ def printed_marker_fixture(candidate):
 
 
 def configure_calibration(nominal, output, intrinsics, ports, gateway_port, token_file, *, source_clock, auto_confirm=False,
-                          resident_deadline_wall_ns=None):
+                          resident_deadline_wall_ns=None,robot_id=None):
     from robot_workbench.physx_camera import CAMERAS
     keys=('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','model_family',
           'asset_geometry_id','asset_seal_sha256','parking_support_contact','wrist_nominal_mounts',
@@ -88,7 +99,8 @@ def configure_calibration(nominal, output, intrinsics, ports, gateway_port, toke
         path=output/('camera-'+role+'.json');save(path,intrinsics[name]);camera_files[role]=str(path)
     calibration_root=output/'calibrations'
     calibration_root.mkdir(exist_ok=False)
-    config.update(robot_id='fake-physx-'+output.name, simulation_only=True, mode='simulation',
+    if robot_id is not None and not robot_id.startswith('fake-'):raise ValueError('fake robot identity required')
+    config.update(robot_id=robot_id or 'fake-physx-'+output.name, simulation_only=True, mode='simulation',
         environment='fake',robot_source='simulated',clock=deepcopy(source_clock),
         evidence_source='physx_articulation', calibration_root=str(calibration_root),
         camera=camera_files['head'], marker_size_m=.015, gap_m=dict(left=.08,right=.08),
@@ -241,8 +253,10 @@ def run(args, base, nominal):
                         raise TimeoutError('PhysX main thread did not acquire the controller')
             if 'error' in request:raise RuntimeError(request['error'])
             return request['runtime']
-        device=Device('fake-physx-'+args.output.name,'fake',factory,label='A1 PhysX · 同源三相机',
+        robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
+        device=Device(robot_id,'fake',factory,label='A1 PhysX · 同源三相机',
                       drive=lambda runtime,closed:closed.wait())
+        if args.resume_source:device.label='A1 PhysX · 日常开发（复用标定）'
         if args.diagnostic_source:
             from robot_workbench.calibration_profile import diagnostic_metadata
             device.label='A1 PhysX · 复用标定诊断（非空库验收）'
@@ -252,10 +266,15 @@ def run(args, base, nominal):
         gateway,_=start_control_gateway(device,tokens,port=args.gateway_port)
         calibration_config=configure_calibration(nominal,args.output,intrinsics,ports,gateway.server_port,
             token_files['calibration'],source_clock=source_clock,auto_confirm=args.calibration_auto_confirm,
-            resident_deadline_wall_ns=resident_deadline_wall_ns)
+            resident_deadline_wall_ns=resident_deadline_wall_ns,robot_id=robot_id)
+        if args.resume_source:
+            from robot_workbench.calibration_profile import restore_calibration
+            calibration_config['calibration_resume']=restore_calibration(args.resume_source,calibration_config,args.output)
+            save(args.output/'calibration-config.json',calibration_config)
         from examples.scripts.debug.joint_head_workbench import Workbench
         from robot_workbench.workflows import CalibrationWorkflow
         calibration=Workbench(calibration_config,args.output/'calibration-workbench')
+        if args.resume_source:bootstrap_calibration(calibration)
         device.workflows['calibration']=CalibrationWorkflow(calibration,device,application)
         mesh_workbench=calibration
         if args.diagnostic_source:
@@ -292,6 +311,7 @@ def run(args, base, nominal):
             device.collection_preparation=collection_preparation
             install_notification(device.workflows['calibration'],calibration,collection_preparation.notify)
             if args.diagnostic_source:collection_preparation.notify(diagnostic_snapshot(args.diagnostic_source))
+            if args.resume_source:bootstrap_calibration(calibration,notify=collection_preparation.notify)
         for role,name in CAMERAS.items():
             def frame(name=name):
                 value=producer.frames[name].snapshot()
@@ -312,6 +332,7 @@ def run(args, base, nominal):
             collection_enabled=args.collection_spec is not None,
             preview_enabled=preview_service is not None,
             full_pipeline_qualified=False,physical_hardware_connected=False,
+            **({'calibration_resume':calibration_config['calibration_resume'],'fresh_C_completed':False} if args.resume_source else {}),
             **({'diagnostic_calibration':device.diagnostic_calibration,'fresh_C_completed':False} if args.diagnostic_source else {})))
         save(args.output/'collection-runtime.json',dict(environment='fake',clock=source_clock,
             robot_id=device.id,camera_serials=calibration_config['hardware_camera_serials'],
@@ -362,6 +383,7 @@ def run(args, base, nominal):
                     if args.diagnostic_source:
                         identity=hashlib.sha256(json.dumps(device.diagnostic_calibration,sort_keys=True).encode()).hexdigest()
                         runtime.notify_calibration_installed('diagnostic-calibration-'+identity)
+                    if args.resume_source:bootstrap_calibration(calibration,runtime=runtime)
                     task_observer.attach(runtime.owner)
                     with request['lock']:
                         cancelled=request['cancelled']
@@ -449,6 +471,8 @@ def main():
     parser.add_argument('--calibration-auto-confirm',action='store_true')
     parser.add_argument('--collection-contract',type=Path,
         help='explicit current resident GPU/resource contract; enables post-install background D preparation only')
+    parser.add_argument('--calibration-resume-source',type=Path,
+        help='pinned dev_resume source; independent editable calibration copy, never motion/task resume')
     parser.add_argument('--dry-run',action='store_true')
     args=parser.parse_args();args.output=args.output.resolve()
     if not 0<args.duration_wall_s<=86400 or any(not 0<=p<=65535 for p in [args.port,args.gateway_port,*args.camera_ports]):
@@ -456,10 +480,13 @@ def main():
     if args.output.exists():raise FileExistsError(args.output)
     args.collection_spec=None
     args.diagnostic_source=None
+    args.resume_source=None
     if args.collection_contract:
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
         args.collection_spec=load_collection_contract(args.collection_contract,args.output,args.gpu,args.duration_wall_s)
+    if args.calibration_resume_source and (args.collection_spec or {}).get('diagnostic_calibration_source') is not None:
+        raise ValueError('dev_resume and warm_diagnostic are mutually exclusive')
     from robot_workbench.service import loopback_browser_hosts
     args.browser_ports=list((args.collection_spec or {}).get('browser_ports',[]))
     args.camera_spool_root=Path((args.collection_spec or {}).get('camera_spool_root',args.output/'camera-spool')).resolve()
@@ -486,6 +513,13 @@ def main():
             args.diagnostic_source=validate_diagnostic_source(diagnostic,base,nominal,
                 printed_marker_fixture(json.loads(Path(nominal['candidate']).read_bytes())),args.output)
             checked.update(diagnostic_calibration=diagnostic_metadata(args.diagnostic_source),fresh_C_completed=False)
+    if args.calibration_resume_source:
+        from robot_workbench.calibration_profile import validate_resume_source
+        args.resume_source=validate_resume_source(json.loads(args.calibration_resume_source.read_bytes()),base,nominal,
+            printed_marker_fixture(json.loads(Path(nominal['candidate']).read_bytes())),args.output)
+        checked.update(calibration_resume=dict(mode='dev_resume',source_run=args.resume_source['source_run'],
+            robot_id=args.resume_source['origin_robot_id'],expected_install=args.resume_source['expected_install']),
+            fresh_C_completed=False,empty_store_qualification=False)
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)

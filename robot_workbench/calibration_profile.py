@@ -9,6 +9,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 
@@ -31,7 +32,8 @@ def _inside(path, root):
 
 def _capture_evidence(config,capture_root,records,expected_install):
     """Same origin checks for fresh C and a pinned diagnostic C source."""
-    batches={};pins={}
+    batches={};pins={};resume=_resume_receipt(config,capture_root.parent)
+    if resume:pins[config['calibration_resume']['path']]=config['calibration_resume']['sha256']
     for kind in ('head','wrist'):
         record=records[kind]
         if record['id']!=expected_install[kind+'_id']:
@@ -40,11 +42,14 @@ def _capture_evidence(config,capture_root,records,expected_install):
         if not batch.is_absolute():batch=capture_root/batch
         path=_inside(batch/'dataset.json',capture_root);completion=_inside(batch/'completion.json',capture_root)
         data=_json(path)
+        origin=(resume or {}).get('capture_origins',{}).get(str(path.parent.relative_to(capture_root)))
+        if origin and (_sha(path)!=origin['dataset_sha256'] or _sha(completion)!=origin['completion_sha256']):
+            raise ValueError('imported capture differs from its pinned original batch')
         if (data.get('runtime_environment')!='fake' or data.get('simulation_only') is not True
                 or data.get('robot_source')!='simulated' or data.get('robot_id')!=config['robot_id']
                 or data.get('asset_geometry_id')!=config['asset_geometry_id']
                 or data.get('asset_seal_sha256')!=config['asset_seal_sha256']
-                or data.get('clock')!=config['clock']
+                or data.get('clock')!=(origin['clock'] if origin else config['clock'])
                 or not data.get('frames') or _json(completion).get('passed') is not True):
             raise ValueError(kind+' must come from a completed current-run fake capture')
         batches[kind]=data;pins.update({str(path):_sha(path),str(completion):_sha(completion)})
@@ -168,6 +173,16 @@ def build_fake_profile(config_path, capture_root, template, registration, output
             input_sha256=pins,registration=registration,profile_digest=_digest(profile),
             planning_bundle_seal_sha256=planner['bundle_seal_sha256'],runtime_allowed=False,
             qualification='offline configuration only; no calibration accuracy or GPU execution claim')
+        resume=_resume_receipt(config,run_root)
+        if resume:
+            origins={kind:deepcopy(resume['capture_origins'].get(str(
+                _inside(Path(record['source_batch'])/'dataset.json',capture_root).parent.relative_to(capture_root))))
+                for kind,record in records.items() if kind in ('head','wrist')}
+            clocks={kind:deepcopy(data['clock']) for kind,data in batches.items()}
+            receipt.update(calibration_capture_clock=clocks['head'] if clocks['head']==clocks['wrist'] else None,
+                calibration_capture_clocks=clocks,calibration_origins=origins,observation_clock=deepcopy(config['clock']),
+                fresh_C_completed=not any(origins.values()),empty_store_qualification=False)
+            binding.update(fresh_C_completed=receipt['fresh_C_completed'],calibration_origins=origins)
         for name,value in [('profile',profile),('acquisition-binding',binding),('planning-model',planner),
                            ('configuration',configuration),('bridge',receipt)]:
             (stage/(name+'.json')).write_bytes(canonical(value)+b'\n')
@@ -222,13 +237,17 @@ def diagnostic_wrist_cameras(config,records,root):
 
 def validate_diagnostic_source(spec,base,nominal,markers,output):
     """Explicit fake-only diagnostic import; immutable origin is never relabelled."""
+    return _validate_reuse_source(spec,base,nominal,markers,output,mode='warm_diagnostic')
+
+
+def _validate_reuse_source(spec,base,nominal,markers,output,*,mode):
     from a1_cal import read_active
     from integration import _digest
     from model_adapt import verify
     from robot_workbench.sample_clock import clock_for_source
     if (not isinstance(spec,dict) or set(spec)!={'mode','source_run','source_base_manifest','expected_install','input_sha256'}
-            or spec['mode']!='warm_diagnostic' or nominal.get('simulation_only') is not True):
-        raise ValueError('explicit warm_diagnostic fake source contract required')
+            or spec['mode']!=mode or nominal.get('simulation_only') is not True):
+        raise ValueError('explicit '+mode+' fake source contract required')
     root=Path(spec['source_run']);destination=Path(output).resolve()
     if (not root.is_absolute() or root.is_symlink() or not root.is_dir()
             or destination==root.resolve() or destination.is_relative_to(root.resolve())):
@@ -276,6 +295,7 @@ def validate_diagnostic_source(spec,base,nominal,markers,output):
     required=[config_path,base_path,source_nominal_path,seal_path,root/'run.json',root/'plant-fixture.json',root/'truth-fixture.json',
               root/'registration.json',*paths.values(),Path(config['camera'])]
     required.extend(_inside(path,root) for path in config['hardware_wrist_camera_files'].values())
+    if config.get('calibration_resume'):required.append(_inside(config['calibration_resume']['path'],root))
     for key in ('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','head_motion_seed'):
         if config.get(key):required.append(Path(config[key]))
     if config.get('chassis_mesh'):required.append(Path(config['mesh_manifest']).parent/config['chassis_mesh'])
@@ -288,6 +308,123 @@ def validate_diagnostic_source(spec,base,nominal,markers,output):
     check_diagnostic_pins(spec)
     return dict(deepcopy(spec),origin_robot_id=config['robot_id'],origin_clock=deepcopy(config['clock']),
         records=records,fixture_identity_sha256=_digest(_fixture_identity(base)))
+
+
+def _resume_receipt(config,root):
+    binding=config.get('calibration_resume')
+    if binding is None:return None
+    path=_inside(binding['path'],Path(root));value=_json(path)
+    if (_sha(path)!=binding['sha256'] or value.get('schema')!='fake_calibration_resume.v1'
+            or value.get('mode')!='dev_resume' or value.get('robot_id')!=config['robot_id']
+            or value.get('observation_clock')!=config['clock']):
+        raise ValueError('calibration resume provenance differs from this fake device')
+    return value
+
+
+def _resume_files(root):
+    """Copy only durable C results/batches and device statistics, never execution state."""
+    root=Path(root);paths=[]
+    for environment in ('hardware','simulation'):
+        library=root/'calibrations'/environment
+        if library.is_symlink():raise ValueError('resume library must not be symlinked')
+        paths.extend(library.glob('v*.json'))
+    directories=[root/'calibrations/hardware/active',
+        root/'calibrations/diagnostics/arrival-errors/simulated',
+        *(root/'calibration-workbench').glob('batch-*')]
+    for directory in directories:
+        if directory.is_symlink():raise ValueError('resume input directory must not be symlinked')
+        if directory.exists():paths.extend(directory.rglob('*'))
+    files={}
+    for path in sorted(set(paths)):
+        if any(parent.is_symlink() for parent in (path,*path.parents)):
+            raise ValueError('resume input must not be symlinked')
+        if path.is_dir() or path.name=='.lock' or path.suffix=='.tmp':continue
+        checked=_inside(path,root)
+        files[str(checked.relative_to(root))]=_sha(checked)
+    return files
+
+
+def validate_resume_source(spec,base,nominal,markers,output):
+    """Admit one fixed virtual device's history without writing to its source run."""
+    source=_validate_reuse_source(spec,base,nominal,markers,output,mode='dev_resume')
+    root=Path(source['source_run']);config=_json(root/'calibration-config.json')
+    if Path(config['calibration_root'])!=root/'calibrations':
+        raise ValueError('resume requires the resident run calibration library')
+    files=_resume_files(root)
+    if any(source['input_sha256'].get(str(root/path))!=digest for path,digest in files.items()):
+        raise ValueError('resume source pin set omits a result, image or arrival statistic')
+    previous=_resume_receipt(config,root);origins={}
+    for relative in files:
+        path=Path(relative)
+        if path.parts[0]!='calibration-workbench' or path.name!='dataset.json':continue
+        data=_json(root/path);completion=path.with_name('completion.json')
+        if str(completion) not in files or _json(root/completion).get('passed') is not True:continue
+        batch=str(path.parent.relative_to('calibration-workbench'))
+        origin=(previous or {}).get('capture_origins',{}).get(batch)
+        if (data.get('robot_id')!=config['robot_id'] or data.get('robot_source')!='simulated'
+                or data.get('runtime_environment')!='fake' or data.get('simulation_only') is not True
+                or data.get('asset_geometry_id')!=config['asset_geometry_id']
+                or data.get('asset_seal_sha256')!=config['asset_seal_sha256']
+                or data.get('clock')!=(origin['clock'] if origin else config['clock'])
+                or origin and (files[relative]!=origin['dataset_sha256'] or files[str(completion)]!=origin['completion_sha256'])):
+            raise ValueError('resume batch has a different device, geometry or capture provenance')
+        origins[batch]=dict(source_run=origin['source_run'] if origin else str(root),clock=deepcopy(data['clock']),
+            dataset_sha256=files[relative],completion_sha256=files[str(completion)])
+    source.update(copy_files=files,capture_origins=origins)
+    return source
+
+
+def restore_calibration(source,config,output):
+    """Independent writable copies, unchanged version/capture identities, fresh runtime."""
+    from a1_cal import canonical
+    from arx_env.joint_head_calibration_store import CalibrationStore
+    from arx_env.joint_head_arrival_stats import ArrivalStats
+    from integration import _digest
+    from robot_workbench.sample_clock import clock_for_source
+    root=Path(output).resolve();origin=Path(source['source_run']);old=_json(origin/'calibration-config.json')
+    check_diagnostic_pins(source)
+    if (source.get('mode')!='dev_resume' or config.get('environment')!='fake' or config.get('simulation_only') is not True
+            or config.get('robot_source')!='simulated' or config['robot_id']!=old['robot_id']
+            or source['origin_robot_id']!=old['robot_id'] or source['origin_clock']!=old['clock']
+            or clock_for_source(config,'fake') in [old['clock'],*[entry['clock'] for entry in source['capture_origins'].values()]]
+            or root==origin.resolve() or root.is_relative_to(origin.resolve())
+            or Path(config['calibration_root'])!=root/'calibrations'):
+        raise ValueError('resume requires the same fake robot, a new clock and an independent output')
+    for key in ('urdf','jaw_mapping_file','asset_geometry_id','asset_seal_sha256','hardware_camera_serials'):
+        if config[key]!=old[key]:raise ValueError('resume nominal geometry or camera identities differ')
+    for current,previous in [(config['camera'],old['camera']),*[(config['hardware_wrist_camera_files'][side],
+            old['hardware_wrist_camera_files'][side]) for side in ('left','right')]]:
+        if _json(current)!=_json(previous):raise ValueError('resume raw camera intrinsics differ')
+    if _json(root/'registration.json')!=_json(origin/'registration.json'):
+        raise ValueError('resume base registration differs')
+    if _resume_files(origin)!=source['copy_files']:raise ValueError('resume file inventory changed after validation')
+    for relative,digest in source['copy_files'].items():
+        path=_inside(origin/relative,origin);target=root/relative
+        if any(parent.is_symlink() for parent in target.parents):
+            raise ValueError('resume destination must not be symlinked')
+        if target.exists() or target.is_symlink():raise FileExistsError(target)
+        target.parent.mkdir(parents=True,exist_ok=True)
+        with path.open('rb') as src,target.open('xb') as dst:shutil.copyfileobj(src,dst)
+        if _sha(target)!=digest:raise ValueError('resume copy differs: '+relative)
+    for environment in ('hardware','simulation'):
+        store=CalibrationStore(root/'calibrations'/environment,config['robot_id'],environment)
+        store.list()
+        if environment=='hardware' and not (store.active() or {}).get('verified'):
+            raise ValueError('resumed installation does not match its copied library')
+    stats=root/'calibrations/diagnostics/arrival-errors/simulated'
+    # Validate/rebuild only the copy. Original events, identities and clocks remain unchanged.
+    if stats.exists():ArrivalStats(stats,config['robot_id'],'simulated')
+    check_diagnostic_pins(source)
+    receipt=dict(schema='fake_calibration_resume.v1',mode='dev_resume',robot_id=config['robot_id'],
+        source_run=str(origin),origin_clock=deepcopy(old['clock']),observation_clock=deepcopy(config['clock']),
+        expected_install=deepcopy(source['expected_install']),capture_origins=deepcopy(source['capture_origins']),
+        imported_files=deepcopy(source['copy_files']),fixture_identity_sha256=source['fixture_identity_sha256'],
+        admission_evidence_set_sha256=_digest(source['input_sha256']),fresh_C_completed=False,
+        arrival_statistics='same virtual device cumulative simulated events; original event metadata retained',
+        qualification='reused fake calibration for editable development; not an empty-store qualification')
+    path=root/'calibration-resume.json'
+    with path.open('xb') as stream:stream.write(canonical(receipt)+b'\n')
+    return dict(path=str(path),sha256=_sha(path))
 
 
 def diagnostic_snapshot(source):
