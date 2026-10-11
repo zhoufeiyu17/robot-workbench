@@ -81,9 +81,13 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ### 当前完整fake与服务管理
 
-2026-10-11 22:18：已部署f7e0ae9。入口仍为[18866](http://127.0.0.1:18866/)，设备栏“开发服务”进入[管理页](http://127.0.0.1:18866/session)。管理页独立于仿真进程，在已授权时段内显式启动、停止和重启；每秒显示阶段、截止、失败原因与清退状态。没有自动重启、连接设备或续跑动作。
+2026-10-11 23:55：当前冻结候选为 `dev-20261011-234651`（child `session-1-3111ae19812f`），已连接READY、持权标定、无自动动作；数采后台按新实例重新准备，动态状态以[检查点](.evidence/s2/active-task-checkpoint.json)为准。入口仍为[18866](http://127.0.0.1:18866/)，设备栏“开发服务”进入[管理页](http://127.0.0.1:18866/session)。管理页独立于仿真进程，在已授权时段内显式启动、停止和重启；每秒显示阶段、截止、失败原因与清退状态。没有自动重启、连接设备或续跑动作。
 
-管理器 `dev-20261011-213856`、当前child `session-2-abf2e493bb01`。C/D均就绪，fake已连接READY、持权标定。实际完成一次完整fake启动→停止（双GPU C/G核空、页面仍可访问）→再次启动；新实例最初未连接，标定ID/版本、71个到位样本和6视频完整SHA保持，随后相机/target/mesh检查通过。另实际终止自有显示renderer后，通过浏览器恢复成功；旧PID退出、新renderer与目标图成立，Owner绑定及相机源时钟保持。没有重新采集/求解/安装或执行轨迹。
+人工操作已合并：拖动只看目标图像，点击“执行到目标姿态”或“执行整队”后在后台检查，完成后自动弹出一次本次动作确认。确认窗绑定请求job_id和冻结审批；取消、编辑、换环境、停止、权限变化或过期不执行、不重新弹旧审批。fake夹爪接受0–83mm命令，0mm在仿真机械闭合位置饱和，实测仍保留0.008mm偏移。静止、到位、碰撞与实体SDK策略未改。
+
+196项定向CPU及Node检查通过；中间冻结232236实际完成单姿态、双爪0mm闭合与两点整队执行，取消前后实测不变且零下发；最终234651只再加重连控件缓存修复，浏览器实际断开/连接后12关节输入和草稿恢复。头/腕ID、71个到位样本保持。阶段耗时及原输入落在每个run的 `data/calibration-workbench/diagnostics/manual-preview-<id>.json`；实测单姿态准备3.367s、整队9.920s，主要耗在路径检查，不外推原142s失败。[验收回执](.evidence/manual-preview-20261011/final-receipt.json)、[确认窗](.evidence/manual-preview-20261011/confirmation-zero-jaws.jpg)、[阶段原记录](.evidence/manual-preview-20261011/full-fake-phase-traces.json)。一次30s审批临界过期导致既有FAULT的原始失败保留，未放宽TTL；及时确认的独立测试通过，这种边缘拒绝的恢复体验仍待优化。未重跑标定或数采，也未重新宣称3/3冷验收。
+
+历史管理器 `dev-20261011-213856`、child `session-2-abf2e493bb01`已清退。该版实际完成一次完整fake启动→停止（双GPU C/G核空、页面仍可访问）→再次启动；新实例最初未连接，标定ID/版本、71个到位样本和6视频完整SHA保持，随后相机/target/mesh检查通过。另实际终止自有显示renderer后，通过浏览器恢复成功；旧PID退出、新renderer与目标图成立，Owner绑定及相机源时钟保持。该历史生命周期验收没有重新采集/求解/安装或执行轨迹。
 
 [管理页截图](.evidence/fake-lifecycle-20261011/full-management-ready.jpg)、[停止后仍可访问](.evidence/fake-lifecycle-20261011/full-management-stopped.jpg)、[重启保留检查](.evidence/fake-lifecycle-20261011/restart-preservation.json)、[实际渲染故障恢复](.evidence/fake-lifecycle-20261011/preview-fault/verified.json)可核验。CPU整套按成功前缀和完整后缀接续完成，825次执行818通过/7跳过；旧录制测试wall时序依赖已以确定性fixture修复（aa0ad13），原失败日志保留，生产录制策略/容量未改。[CPU证据](.evidence/fake-lifecycle-20261011/cpu-receipt.json)。部署运行代码与f7e0ae9一致，只有该测试在冻结后变化。
 

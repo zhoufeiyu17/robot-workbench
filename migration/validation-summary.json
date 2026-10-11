@@ -1,10 +1,10 @@
 {
   "status": "bounded_fake_self_service_and_restart_verified_overall_NOT_CLOSED",
-  "updated_at": "2026-10-11T22:21:47.682301+08:00",
+  "updated_at": "2026-10-11T23:59:06.990618+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
-  "candidate_commit_before_summary": "f7e0ae9",
-  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. Currentf7e0ae9 bounded CPU fake manager + actual fullfake start/stop/restart retention and one display-renderer fault/browser recovery passed;825 CPU unittest executions818pass7skip with original failed scheduling-dependent test block retained and deterministic harness correction aa0ad13. No new robot trajectory, capture, solve or install. New resource periods/long-lived entry, remaining targeted business/fault branches and L4 remain open.",
+  "candidate_commit_before_summary": "b80cdb384c20c11f123a1bb297c10267451ec864",
+  "qualification_scope": "Historical757b290/suite-v7 cold3/3 remains qualified and stopped. f7e0ae9 lifecycle/restart/render-recovery evidence remains historical. Current b80cdb3 manual execution dialog, 0mm fake jaw endpoint and phase diagnostics:196 targeted CPU checks plus Node passed; fullfake232236 single-pose/zero-jaw/two-waypoint execution and cancel-no-motion verified. Final234651 adds only input-cache reconnect fix; actual browser reconnect verified, runtime sources match b80cdb3. No new calibration, collection, solve or install. Manual path latency, review-TTL boundary recovery, long-lived entry and L4 remain open.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -536,28 +536,29 @@
   "current_gpu_run": {
     "mode": "managed_fake",
     "fresh_C_completed": false,
-    "tag": "dev-20261011-213856",
-    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-213856",
-    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-213856",
-    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-213856-source.tar.gz",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/dev-20261011-213856-contract.json",
-    "gpu_record": "unified-dev-20261011-213856",
-    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-213856-camera-spool",
-    "source_files": 389,
+    "tag": "dev-20261011-234651",
+    "code": "/mnt/data/feiyu.zhou/code/robot-workbench-dev-20261011-234651",
+    "run": "/mnt/data/feiyu.zhou/runs/robot-workbench/dev-20261011-234651",
+    "package": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-preview-20261011/dev-20261011-234651/source.tar.gz",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/manual-preview-20261011/dev-20261011-234651/contract.json",
+    "gpu_record": "unified-dev-20261011-234651",
+    "camera_spool_root": "/tmp/robot-workbench-dev-20261011-234651-camera-spool",
+    "source_files": 387,
     "started": true,
     "dry_run_exit": 0,
     "reserved_until": "2026-10-12T01:52:00+08:00",
     "manager_deadline_wall_ns": 1791741120000000000,
     "resident_deadline_wall_ns": 1791740818000000000,
-    "current_source_commit": "f7e0ae9",
+    "current_source_commit": "10fef1df5a4ab5e530337fed270a999b6667e98f",
     "live_service_available": true,
     "full_backends_ready": true,
     "browser_entry": "http://127.0.0.1:18866/",
     "management_entry": "http://127.0.0.1:18866/session",
     "motion_requested": false,
-    "active_child": "session-2-abf2e493bb01"
+    "active_child": "session-1-3111ae19812f",
+    "validated_runtime_source_commit": "b80cdb384c20c11f123a1bb297c10267451ec864"
   },
-  "last_gpu_run": "dev-20261011-193413",
+  "last_gpu_run": "dev-20261011-232236",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -3722,5 +3723,40 @@
     "manager_deadline": "2026-10-12T01:52:00+08:00",
     "gpu_deadline": "2026-10-12T01:46:58+08:00",
     "no_new_motion": true
+  },
+  "manual_execution_delivery": {
+    "checked_at": "2026-10-11T23:55:52.521176+08:00",
+    "run": "dev-20261011-234651",
+    "child": "session-1-3111ae19812f",
+    "server_instance_id": "bce50f8d-9b9f-4a48-8eac-3692f9a580ec",
+    "runtime": {
+      "state": "READY",
+      "connected": true,
+      "stationary": true,
+      "automatic_enabled": false,
+      "holder": "calibration"
+    },
+    "collection": {
+      "stage_id": "collection.idle",
+      "status": "idle"
+    },
+    "head_id": "c5ab77545382af41239848e0ef2471c550c56da161e4143d8b62e8bf4a049580",
+    "wrist_id": "e98f04c0c2ac94f27b67a2f819e6d97ede95019fa02397373111e2c13e6b447d",
+    "arrival_count": 71,
+    "test_queue_cleared": true,
+    "physical_hardware": false,
+    "single_and_queue_execution_evidence_run": "dev-20261011-232236",
+    "final_run_extra_change": "rebuild inputs after reconnect; browser verified",
+    "evidence": ".evidence/manual-preview-20261011",
+    "cpu_tests": 196,
+    "node_passed": true,
+    "ttl_edge_failure_preserved": true,
+    "remaining": [
+      "manual path check latency",
+      "review expires between acceptance and owner handling -> existing fault recovery"
+    ],
+    "last_verified_at": "2026-10-11T23:59:06.990618+08:00",
+    "code_commit": "b80cdb384c20c11f123a1bb297c10267451ec864",
+    "deployed_runtime_sources_match_local_commit": true
   }
 }
