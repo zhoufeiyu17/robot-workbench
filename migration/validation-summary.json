@@ -1,10 +1,10 @@
 {
-  "status": "intermediate_review_complete_overall_NOT_CLOSED_v7_cold2_of_3_last_original_run_continues",
-  "updated_at": "2026-10-11T14:19:49.458118+08:00",
+  "status": "frozen_v7_cold3_of_3_complete_stopped_overall_NOT_CLOSED",
+  "updated_at": "2026-10-11T15:30:46.508143+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
   "candidate_commit_before_summary": "757b290c12dde26732474cb58cf99b5a62cbc914",
-  "qualification_scope": "757b290/v7 implementation and26-row comparison/restoration complete;CPU791(790pass1skip)/L127 and two original coldcases+9checks passed. Last scene-xy C34+29 installed14:12:34,newD planning-assets conversion14:12:52,no Dexecution yet,current2/3. Matrix remaining_gap is pending scoped browser/actual-backend evidence,not unimplemented behavior. Bounded3case cold stop is explicit;3/3 does not replace D7stable fake availability or independentL4 deployment.18866offline at14:09 causeunknown,18867/734currentrun retained. OverallNOT_CLOSED;this status reconciliation complete,no new run/product change.",
+  "qualification_scope": "Frozen757b290/suite-v7: three declared original empty-C full-fake cases each completed and passed9/9;3/3 finite cold acceptance complete and stopped. CPU791 executions(790pass1skip)/L127 preserved. C12 original evidence gap closed by scoped reuse;D06 standalone CPU resume and one healthy renderer explicit recovery passed within their stated scopes. Remaining matrix/browser/fault branches,D7 stable complete-fake daily entry and independentL4 unqualified. All task-owned DSW/GPU processes exited;18867 closed;18866 CPU protocol-fake restored and retained. OverallNOT_CLOSED;no new cold runs or product changes.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -19,7 +19,7 @@
     "current_source_matches_tested_hashes": true,
     "finished_at": "2026-10-11T10:59:17.641439+08:00",
     "git_head_at_test_start": "972e3fa001b5c867e3ce355138505d094bc9dde7",
-    "qualification_binding": "757b290 source-equivalent full CPU/L1;current suitev7 cold0/3",
+    "qualification_binding": "757b290 source-equivalent full CPU/L1;current suite-v7 cold3/3 is separately qualified",
     "skip_detail": "explicit old local mesh fixture only",
     "count_note": "execution counts,not unique tests;L1 separate"
   },
@@ -52,30 +52,62 @@
     "gpu_released": true
   },
   "l2_complete": {
-    "status": "current_final_suite_partially_qualified",
-    "normal_cases_passed": 2,
+    "status": "current_final_suite_qualified_cold_acceptance_stopped",
+    "normal_cases_passed": 3,
     "required_normal_cases": 3,
     "latest_cold_attempt": "full-scene-xy-20261011-134701",
     "latest_diagnostic": "warm-20261011-050624",
-    "meaning": "current757b290/suitev7 cold2/3(device-j1+nominal);scene-xy pending;historicalv6/v5 excluded",
-    "latest_cold_attempt_status": "C_complete_D_planning_assets_converting",
-    "latest_qualified_cold_case": "full-20261011-122428",
-    "full_suite_qualified": false,
-    "qualification_suite": "cold-suite-normal-v31-20261011-v7"
+    "meaning": "same757b290/suite-v7 device-j1+nominal+scene-xy each original driver completed and9/9;historicalv5/v6 excluded",
+    "latest_cold_attempt_status": "qualified_released",
+    "latest_qualified_cold_case": "full-scene-xy-20261011-134701",
+    "full_suite_qualified": true,
+    "qualification_suite": "cold-suite-normal-v31-20261011-v7",
+    "cold_acceptance_complete": true,
+    "cold_acceptance_stopped": true,
+    "aggregate_evidence": ".evidence/s2/cold-suite-v7-qualified-20261011.json"
   },
   "browser": {
     "four_tab_layout": "human_confirmed",
     "protocol_fake_manual_preview_execute": "passed",
     "explicit_handoff_keeps_connection_hold": "passed",
     "tab_switch_does_not_handoff": "passed",
-    "full_business_and_preview_performance": "one warm task/native/raw plus separately recovered source replay; cold suite pending; preview has stated warm145124 qualification",
+    "full_business_and_preview_performance": "current suite-v7 original cold3/3 qualified;browser preview performance retains only stated warm145124 scope;no fresh v7 browser qualification",
     "initial_loading_clears": "passed after fix",
     "image_recovery_and_l1_scope": "passed on real browser; protocol-only service",
-    "renderer_gpu_lifecycle": "pending",
+    "renderer_gpu_lifecycle": {
+      "status": "healthy_explicit_recovery_qualified_fault_and_browser_residuals_open",
+      "run": "full-scene-xy-20261011-134701",
+      "evidence": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/receipt.json",
+      "verification": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/verification.json",
+      "passed": true,
+      "recovery_wall_s": 19.052190708,
+      "old_preview": {
+        "pid": 2250511,
+        "start_ticks": "34537372",
+        "same_process_alive_after": false
+      },
+      "new_preview": {
+        "pid": 2745044,
+        "start_ticks": "35082525",
+        "exited_at_final_teardown": true
+      },
+      "owner_binding_unchanged": true,
+      "source_clock_and_advancing_cameras_verified": true,
+      "target_JPEG_renderer_identity_verified": true,
+      "submitted_ticks_before_after": 3624,
+      "no_robot_action_sent": true,
+      "fault_injection": false,
+      "browser_interaction": false,
+      "remaining_gap": [
+        "actual renderer fault recovery and budget/monitor failure isolation",
+        "browser recovery interaction"
+      ],
+      "v1_failure_preserved": "helper-v1 wait_ms1000 exceeded0..100 media contract;HTTP409 after preview_target only,no recover;v2 uses100ms and matching-frame wait"
+    },
     "legacy_deletion_preview": "actual browser scope review and cancel passed; permanent deletion only tested in temporary CPU fixtures",
     "service_instance_restart": "two real loopback HTTP instances and Node late-response checks passed",
     "latest_scope_screenshot": ".evidence/s2/parity-ui-20261010T174002Z-verified/trajectory-verified.jpg",
-    "temporary_loopback_forward": "18867 loopback SSH PID41393 active/currentfakeAPI healthy at14:09;retained for current734run",
+    "temporary_loopback_forward": "18867 SSH PID41393 exited and port closed15:25:24.814292;18866 protocol-fake HTTP still healthy",
     "full_fake_three_cameras_and_static_target": "passed on actual browser, full-115724",
     "performance_host_context": ".evidence/s2/full-123915-preview-host-context.json",
     "starvation_failure_evidence": ".evidence/s2/full-115724-browser-mesh-off-failed.json",
@@ -127,23 +159,45 @@
         55373,
         51135
       ],
-      "user_18866_untouched": true
+      "user_18866_untouched": true,
+      "current_source_reuse_evidence": ".evidence/s2/targeted-evidence-reconciliation-20261011.json",
+      "current_reuse_scope": "8/14 old receipt files match current globally;selected source/AST checks justify only stated branches;not whole old receipt current"
     },
     "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json",
     "protocol_fake_18866_current": {
-      "listening": false,
-      "http": "connection_refused",
-      "observed_at": "2026-10-11T14:09:00+08:00",
-      "exit_reason": "unknown",
-      "not_restarted_during_review": true
+      "role": "L1 CPU protocol only;not full PhysX fake",
+      "url": "http://127.0.0.1:18866",
+      "listening": true,
+      "http": "healthy",
+      "pid": 5573,
+      "tool_session": 67215,
+      "restored_at": "2026-10-11T14:33:02.666358+08:00",
+      "last_http_verified_at": "2026-10-11T15:25:24.814292+08:00",
+      "device": "protocol-fake",
+      "physical_device": "physical-unconfigured",
+      "original_offline_reason": "unknown;bounded inspection found no old live process/log identity",
+      "no_old_state_overwritten": true,
+      "gpu_used": false,
+      "retained_for_local_development": true,
+      "visual_browser_verification": false,
+      "evidence": ".evidence/s2/local-protocol-entry-restored-20261011-1432.json",
+      "last_http_evidence": ".evidence/s2/temporary-forward-18867-close-20261011.json"
     },
-    "browser_automation_constraint": "two consecutive failures;no automatic alternative-technology bypass"
+    "browser_automation_constraint": "two consecutive failures;no automatic alternative-technology bypass",
+    "protocol_fake_18866_history": [
+      {
+        "listening": false,
+        "http": "connection_refused",
+        "observed_at": "2026-10-11T14:09:00+08:00",
+        "exit_reason": "unknown",
+        "not_restarted_during_review": true
+      }
+    ]
   },
   "remaining": [
-    "继续唯一正在运行的原scene-xy driver及9项审计；同757b/v7三声明case全部通过即结束cold验收，文档/无关改动不重跑，不降低D5或暗中加run。",
-    "按matrix完成定点证据补验：C02/C04/C05/C06/C07/C12、D06/D07、renderer生命周期及D02实际不同速度等；先复用匹配证据，不将remaining_gap误写成新实现缺口。",
-    "完成D7稳定fake开发入口、生命周期与自助恢复验收；先查18866实际离线原因并复用launcher，本次盘点不重启、不新建长驻GPU或扩成本。",
-    "完成最终记录/授权交付与真实资源核账；旧release纠错、治理stickyunknown保留，不伪造settle。L4真实SDK/支撑/止动/延迟载荷/部署singlewriter独立未验收。"
+    "优先完成D7稳定完整fake日常入口、生命周期与自助恢复运行交付；18866已恢复但仅L1协议，不以3/3或单次健康renderer恢复替代D7。",
+    "定点补齐C02/C04/C05/C06、C07余项、D06/D07浏览器与实际故障恢复、D02多速度实际执行、renderer故障/浏览器及其他matrix明确边界；C12原缺证据已关闭，不重开cold套件。",
+    "L4真实SDK/支撑/止动/时延载荷/正式singlewriter部署独立验收，fake结论不替代。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -474,8 +528,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": "full-scene-xy-20261011-134701",
-  "last_gpu_run": "full-20261011-122428",
+  "current_gpu_run": null,
+  "last_gpu_run": "full-scene-xy-20261011-134701",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -1257,8 +1311,8 @@
     }
   },
   "intermediate_closeout": {
-    "recorded_at": "2026-10-11T14:19:49.458118+08:00",
-    "scope": "user-requested intermediate reconciliation then continuation;no new product changes,runs,shutdowns,or handoff file",
+    "recorded_at": "2026-10-11T15:30:46.508143+08:00",
+    "scope": "final frozen cold-suite qualification and scoped evidence/runtime reconciliation;overall project remainsNOT_CLOSED",
     "overall_status": "NOT_CLOSED",
     "status_review_completed": true,
     "overall_development_complete": false,
@@ -1275,11 +1329,12 @@
       "CPU_passed": 790,
       "CPU_skipped": 1,
       "L1_passed": 27,
-      "current_cold_passed": 2,
+      "current_cold_passed": 3,
       "current_cold_required": 3,
       "qualified_cases": [
         "device-j1",
-        "nominal"
+        "nominal",
+        "scene-xy"
       ],
       "preview_scope": "warm145124;1280x720/DPR1;Dworkers idle/ready;same-plant source/display;not all hosts/loads",
       "preview_mesh_off_fps": [
@@ -1309,15 +1364,17 @@
       "stop_condition": "each of the three declared cases completes one original driver and all9independent audit checks on the same frozen product/suite;then stop cold acceptance",
       "completed": [
         "device-j1",
-        "nominal"
-      ],
-      "remaining": [
+        "nominal",
         "scene-xy"
       ],
+      "remaining": [],
       "documentation_or_unrelated_changes_trigger_rerun": false,
       "new_failure_policy": "targeted diagnosis first;explain actual impact and minimal revalidation;no implicit endless runs or lower D5 coverage/thresholds",
       "authority": "context04-decisions.md D5 and02-contracts-and-migration.md section7",
-      "statistical_reliability_claim": false
+      "statistical_reliability_claim": false,
+      "stopping_condition_achieved": true,
+      "cold_acceptance_complete": true,
+      "cold_acceptance_stopped": true
     },
     "targeted_evidence_queue": [
       {
@@ -1359,33 +1416,23 @@
       {
         "id": "C07",
         "capability": "结果库/详情/JSON下载/原图和自身候选历史mesh",
-        "status": "implemented;qualification_gap_not_new_feature_gap",
-        "remaining_gap": "逐相机/逐帧/低质量历史结果的浏览器路径继续补",
-        "qualification_boundary": "真实浏览器选择腕结果及其head画面，原图/历史mesh开关请求完成；JSON下载、逐相机/逐帧完整路径未自动资格",
-        "owner": "current lead session",
-        "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
-      },
-      {
-        "id": "C12",
-        "capability": "关节到位误差统计",
-        "status": "implemented;qualification_gap_not_new_feature_gap",
-        "remaining_gap": "真实浏览器统计表及实际样本展示尚缺专属证据",
-        "qualification_boundary": "统计不直接用作几何零偏",
+        "status": "partial_scoped_reuse;residual_qualification_open",
+        "remaining_gap": "other cameras,first/middle/last frames,low-quality candidates and actual browser JSON-download click/response remain unqualified",
+        "qualification_boundary": "local downloaded JSON does not prove browser download",
         "owner": "current lead session",
         "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite",
-        "existing_evidence_to_reconcile": [
-          ".evidence/s2/full-20261011-015820-arrival-stats.jpg",
-          ".evidence/s2/full-20261011-015820-arrival-browser.json"
-        ]
+        "verified_scope": "actual historical wrist result head/frame0 mesh;downloaded head JSON matches frozen dependency"
       },
       {
         "id": "D06",
         "capability": "取消当前阶段、planner恢复、checkpoint重新审阅",
         "status": "implemented;qualification_gap_not_new_feature_gap",
-        "remaining_gap": "新入口故障后的实际浏览器恢复路径仍需专项证据",
+        "remaining_gap": "browser explicit recovery/new review and actual GPU planner/fault recovery remain unqualified",
         "qualification_boundary": "不自动中途resume；恢复已有checkpoint仍需新审阅",
         "owner": "current lead session",
-        "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite",
+        "verified_scope": "standalone CPU checkpoint/resume exit0 and PASS marker now recorded",
+        "CPU_evidence": ".evidence/s2/targeted-resume-cpu-20261011-1443.json"
       },
       {
         "id": "D07",
@@ -1400,18 +1447,21 @@
         "id": "D02",
         "capability": "10%–100%执行速度且保留静止等待",
         "status": "implemented;qualification_gap_not_new_feature_gap",
-        "remaining_gap": "实际轨迹按不同速度执行未在此CPU UI fixture资格；原retime入口CPU回归保留",
-        "qualification_boundary": "改速撤销当前UI审阅；服务端拒绝旧review新速度与布尔伪装；不重写控制策略",
+        "remaining_gap": "multiple actual execution speeds with unchanged stationary waits and1.5s open remain unqualified",
+        "qualification_boundary": "no50percent execution in reviewed browser events;do not infer another speed from oldmetadata",
         "owner": "current lead session",
-        "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite",
+        "verified_scope": "50percent browser review only;current audited actual execution30percent;CPU retime contract"
       },
       {
         "id": "renderer_gpu_lifecycle",
         "capability": "actual GPU renderer lifecycle evidence",
-        "status": "pending scoped qualification",
-        "remaining_gap": "dedicated actual renderer lifecycle/resource evidence not claimed complete",
+        "status": "healthy_explicit_recovery_qualified_fault_browser_residuals_open",
+        "remaining_gap": "actual fault recovery,budget/monitor isolation and browserinteraction remain unqualified",
         "owner": "current lead session",
-        "next_action": "bounded lifecycle evidence review;whole-run teardown is not all renderer branch qualification"
+        "next_action": "bounded lifecycle evidence review;whole-run teardown is not all renderer branch qualification",
+        "verified_scope": "one publicAPI recover of healthy display renderer;old PIDexit,newrenderer/target JPEG,unchanged Owner/clock/commands and final cleanup",
+        "evidence": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/receipt.json"
       }
     ],
     "other_matrix_remaining_gaps": {
@@ -1426,46 +1476,48 @@
     "stable_fake_delivery": {
       "authority": "D7",
       "status": "not_qualified",
-      "current": "bounded isolated734resident through temporary18867,not a stable daily complete-fake entry",
-      "next_action": "first inspect actual entry/lifecycle state and reuse existing launcher;qualify stable fake availability/self-service recovery in a bounded follow-up",
+      "current": "time-limited full PhysX fake run ended and temporary18867 closed;only localCPU L1 protocol18866 remains",
+      "next_action": "qualify stable complete-fake daily entry,lifecycle/self-service recovery using existing launcher and explicit bounded operating plan;no new long-livedGPU cost inferred",
       "new_long_lived_GPU_or_cost_expansion_during_this_review": false
     },
     "current_run": {
-      "run": "full-scene-xy-20261011-134701",
-      "original_driver_continues": true,
-      "calibration_completed_at": "2026-10-11T14:12:34+08:00",
-      "head_frames": 34,
-      "wrist_frames": 29,
-      "group_installed": true,
-      "stage": "collection.setup.converting_planning_assets",
-      "stage_observed_at": "2026-10-11T14:12:52+08:00",
-      "new_D_executed": false,
-      "full_pipeline_qualified": false,
-      "resource_evidence": ".evidence/s2/full-scene-xy-20261011-134701-resources-140903.json",
-      "supervisor": {
-        "pid": 2249730,
-        "start_ticks": "34529531"
-      },
-      "source_pid": 2249736,
-      "preview_pid": 2250511,
-      "resource_retained": true
+      "run": null,
+      "last_run": "full-scene-xy-20261011-134701",
+      "original_driver_continues": false,
+      "last_original_workflow": "completed",
+      "last_full_pipeline_qualified": true,
+      "resource_retained": false,
+      "current_owned_DSW_GPU_processes": 0,
+      "release_evidence": ".evidence/s2/full-scene-xy-20261011-134701-teardown.json"
     },
     "local18866": {
-      "role": "L1 protocol only",
-      "listening": false,
-      "http": "connection_refused",
-      "observed_at": "2026-10-11T14:09:00+08:00",
-      "exit_reason": "unknown",
-      "investigate_before_restoring_development_entry": true,
-      "restarted_during_review": false
+      "role": "L1 CPU protocol only;not full PhysX fake",
+      "url": "http://127.0.0.1:18866",
+      "listening": true,
+      "http": "healthy",
+      "pid": 5573,
+      "tool_session": 67215,
+      "restored_at": "2026-10-11T14:33:02.666358+08:00",
+      "last_http_verified_at": "2026-10-11T15:25:24.814292+08:00",
+      "device": "protocol-fake",
+      "physical_device": "physical-unconfigured",
+      "original_offline_reason": "unknown;bounded inspection found no old live process/log identity",
+      "no_old_state_overwritten": true,
+      "gpu_used": false,
+      "retained_for_local_development": true,
+      "visual_browser_verification": false,
+      "evidence": ".evidence/s2/local-protocol-entry-restored-20261011-1432.json",
+      "last_http_evidence": ".evidence/s2/temporary-forward-18867-close-20261011.json"
     },
     "local18867": {
-      "listening": true,
+      "role": "temporary task-owned loopback SSH route",
       "pid": 41393,
       "bind": "127.0.0.1",
-      "current_fake_API_healthy": true,
-      "observed_at": "2026-10-11T14:09:00+08:00",
-      "retained": true
+      "listening": false,
+      "ssh_pid_exited": true,
+      "retained": false,
+      "verified_at": "2026-10-11T15:25:24.814292+08:00",
+      "evidence": ".evidence/s2/temporary-forward-18867-close-20261011.json"
     },
     "browser_automation": {
       "consecutive_failures": 2,
@@ -1484,19 +1536,77 @@
       ]
     },
     "resource_release_correction_preserved": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json",
-    "governance_status": "sticky_unknown;not green;no fabricated settlement",
+    "governance_status": "sticky_unknown;intermediate actual settlement receipts invalid/nonblocking;final owner settlement pending;not green",
     "responsibility": {
-      "lead": "01a0e689-ddf5-7410-98d5-743920bfa8f7 owns implementation,active run,evidence and operational delivery",
+      "lead": "01a0e689-ddf5-7410-98d5-743920bfa8f7 owns integration,evidence and operating delivery;current GPU run completed/released",
       "peers": "baseline facts only",
       "independent_correction_data_production": "not this workbench backlog",
       "recipient_transfer_requested": false
     },
     "remaining_required": [
-      "last coldcase",
-      "targeted matrix/renderer evidence",
-      "stable fake D7 operating entry/lifecycle delivery"
+      "targeted matrix/browser/actualbackend and renderer fault evidence",
+      "D7 stable full-fake operating entry/lifecycle delivery",
+      "independentL4 deployment qualification"
     ],
-    "deployment_not_equivalent_to_3_of_3": true
+    "deployment_not_equivalent_to_3_of_3": true,
+    "aggregate_evidence": ".evidence/s2/cold-suite-v7-qualified-20261011.json",
+    "closed_scoped_evidence": [
+      {
+        "id": "C12",
+        "status": "evidence_gap_closed_by_scoped_reuse",
+        "evidence": ".evidence/s2/targeted-evidence-reconciliation-20261011.json",
+        "browser_screenshot_samples": 8,
+        "later_browser_json_samples": 11,
+        "browser_json_observed_at": "2026-10-10T18:03:16.779Z",
+        "current_v7_device_and_nominal_valid_simulated_samples_each": 71,
+        "joints_per_run": 12,
+        "samples_per_joint": 71,
+        "limits": [
+          "no fresh v7 browser screenshot",
+          "71sample statistics not independently recomputed from remote raw JSONL",
+          "no physical precision or geometric-zero claim"
+        ]
+      }
+    ],
+    "D06_standalone_CPU_resume": {
+      "evidence": ".evidence/s2/targeted-resume-cpu-20261011-1443.json",
+      "exit_code": 0,
+      "source_pins_unchanged": true,
+      "source_pin_count": 375,
+      "scope": "existing standalone pre-action checkpoint CPU resume receipt only;not browser/GPU planner or fault recovery",
+      "checked_at": "2026-10-11T14:44:25.159133+08:00",
+      "success_marker": "PASS pre-action checkpoint, calibration/source checks, zero-command recovery, unknown/partial execution rejection; no motion"
+    },
+    "renderer_healthy_recovery": {
+      "status": "healthy_explicit_recovery_qualified_fault_and_browser_residuals_open",
+      "run": "full-scene-xy-20261011-134701",
+      "evidence": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/receipt.json",
+      "verification": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/verification.json",
+      "passed": true,
+      "recovery_wall_s": 19.052190708,
+      "old_preview": {
+        "pid": 2250511,
+        "start_ticks": "34537372",
+        "same_process_alive_after": false
+      },
+      "new_preview": {
+        "pid": 2745044,
+        "start_ticks": "35082525",
+        "exited_at_final_teardown": true
+      },
+      "owner_binding_unchanged": true,
+      "source_clock_and_advancing_cameras_verified": true,
+      "target_JPEG_renderer_identity_verified": true,
+      "submitted_ticks_before_after": 3624,
+      "no_robot_action_sent": true,
+      "fault_injection": false,
+      "browser_interaction": false,
+      "remaining_gap": [
+        "actual renderer fault recovery and budget/monitor failure isolation",
+        "browser recovery interaction"
+      ],
+      "v1_failure_preserved": "helper-v1 wait_ms1000 exceeded0..100 media contract;HTTP409 after preview_target only,no recover;v2 uses100ms and matching-frame wait"
+    }
   },
   "historical_cpu_qualifications": [
     {
@@ -1827,7 +1937,11 @@
     "historical_validation_status": "invalid",
     "sticky_unknown": true,
     "green": false,
-    "current_document_update_settlement_declared": false
+    "current_document_update_settlement_declared": false,
+    "intermediate_settlement_evidence": [
+      ".evidence/s2/interim-closeout-20261011-1409-repo-settlement.json",
+      ".evidence/s2/interim-closeout-20261011-1409-context-settlement.json"
+    ]
   },
   "parity": {
     "status": "comparison_and_approved_implementation_restoration_complete_scoped_qualification_pending",
@@ -1844,9 +1958,48 @@
       "withdrawn multi-round auto-iteration",
       "old marker-prior experiments and old-format batch compatibility"
     ],
-    "remaining_qualification": "See current intermediate_closeout.targeted_evidence_queue plus every matrix remaining_gap;existing matching evidence reused first;no whole-suite reopening",
+    "remaining_qualification": "Current intermediate_closeout.targeted_evidence_queue plus stated other matrix gaps;C12 closed by scoped reuse;D06 CPU and healthy renderer explicit recovery closed only within stated scope",
     "implementation_inventory_complete": true,
-    "remaining_gap_is_implementation_gap": false
+    "remaining_gap_is_implementation_gap": false,
+    "scoped_evidence_reconciliation": {
+      "evidence": ".evidence/s2/targeted-evidence-reconciliation-20261011.json",
+      "sha256": "f759e03694fc65f3b8bd830fb6c513080d32ac948b19f5d15515e605b0b57f1a",
+      "current_suite_source_pins_verified": 375,
+      "current_cpu_source_pins_verified": 374,
+      "old_receipt_matching_files": 8,
+      "old_receipt_total_files": 14,
+      "whole_old_receipt_revalidated": false,
+      "closed_original_gap": [
+        "C12"
+      ]
+    },
+    "closed_scoped_evidence": [
+      {
+        "id": "C12",
+        "status": "evidence_gap_closed_by_scoped_reuse",
+        "evidence": ".evidence/s2/targeted-evidence-reconciliation-20261011.json",
+        "browser_screenshot_samples": 8,
+        "later_browser_json_samples": 11,
+        "browser_json_observed_at": "2026-10-10T18:03:16.779Z",
+        "current_v7_device_and_nominal_valid_simulated_samples_each": 71,
+        "joints_per_run": 12,
+        "samples_per_joint": 71,
+        "limits": [
+          "no fresh v7 browser screenshot",
+          "71sample statistics not independently recomputed from remote raw JSONL",
+          "no physical precision or geometric-zero claim"
+        ]
+      }
+    ],
+    "D06_standalone_CPU_resume": {
+      "evidence": ".evidence/s2/targeted-resume-cpu-20261011-1443.json",
+      "exit_code": 0,
+      "source_pins_unchanged": true,
+      "source_pin_count": 375,
+      "scope": "existing standalone pre-action checkpoint CPU resume receipt only;not browser/GPU planner or fault recovery",
+      "checked_at": "2026-10-11T14:44:25.159133+08:00",
+      "success_marker": "PASS pre-action checkpoint, calibration/source checks, zero-command recovery, unknown/partial execution rejection; no motion"
+    }
   },
   "performance": {
     "status": "passed_for_full_archived_raw_CPU_comparison",
@@ -1917,20 +2070,20 @@
     "case": "scene-xy",
     "case_id": "l2-case2-scene-xy-10mm-v1",
     "suite": "cold-suite-normal-v31-20261011-v7",
-    "status": "C_complete_D_planning_assets_converting",
+    "status": "qualified_released",
     "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "fresh_C_completed": true,
     "group_installed": true,
-    "D_motion_started": false,
-    "full_pipeline_qualified": false,
+    "D_motion_started": true,
+    "full_pipeline_qualified": true,
     "startup_confirmed_by_launch_metadata": true,
     "service_published": true,
     "head_confirmed_at": "2026-10-11T13:49:13+08:00",
     "head_frames": 34,
     "expected_head_frames": 34,
-    "progress_observed_at": "2026-10-11T14:12:52+08:00",
+    "progress_observed_at": "2026-10-11T15:26:57.076789+08:00",
     "original_driver_error": null,
-    "original_driver_running": true,
+    "original_driver_running": false,
     "launch_metadata": ".evidence/s2/current-full.json",
     "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-scene-xy-20261011-134701-contract.json",
     "source_files": 375,
@@ -1940,15 +2093,15 @@
       "start_ticks": "34529531"
     },
     "source_pid": 2249736,
-    "released": false,
-    "resource_evidence": ".evidence/s2/full-scene-xy-20261011-134701-resources-140903.json",
+    "released": true,
+    "resource_evidence": ".evidence/s2/full-scene-xy-20261011-134701-teardown.json",
     "resource_window": {
       "expected_start": "2026-10-11T13:47:48.649202+08:00",
       "expected_end": "2026-10-11T15:42:48.649202+08:00",
       "actual_start_registered_at": "2026-10-11T13:48:35+08:00",
       "service_deadline": "2026-10-11T15:37:54.997819+08:00",
       "service_deadline_wall_ns": 1791704274997819433,
-      "next_actual_check_by": "2026-10-11T14:45:00+08:00"
+      "released_at": "2026-10-11T15:24:03+08:00"
     },
     "startup_readonly_poll": {
       "observed_around": "2026-10-11T13:48:49+08:00",
@@ -1956,11 +2109,22 @@
       "original_driver_failed": false,
       "counts_as_control_or_acceptance_failure": false
     },
-    "scope": "fresh last scene-xy head0/34 snapshot only;complete C/install/D/task qualification pending",
+    "scope": "current suite-v7 scene-xy original full fake cold case9/9;original terminal saved before renderer check;no continuation/replacement",
     "wrist_frames": 29,
     "calibration_completed_at": "2026-10-11T14:12:34+08:00",
-    "stage": "collection.setup.converting_planning_assets",
-    "preview_pid": 2250511
+    "stage": "completed",
+    "preview_pid": 2745044,
+    "original_workflow": "completed",
+    "original_terminal_busy": false,
+    "released_at": "2026-10-11T15:24:03+08:00",
+    "audit": ".evidence/s2/full-scene-xy-20261011-134701-audit.json",
+    "terminal": ".evidence/s2/full-scene-xy-20261011-134701-terminal.json",
+    "audit_checks_passed": 9,
+    "audit_checks_total": 9,
+    "commands": 3624,
+    "feedback": 12082,
+    "camera_frames_each": 3635,
+    "renderer_old_pid_exited_during_recovery": 2250511
   },
   "base_alignment": {
     "status": "owner_reply_read_back_dynamic_recipe_implemented",
@@ -2034,10 +2198,10 @@
     "source_files": 375,
     "motion_recipe": "normal-v31-dynamic-targets",
     "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
-    "normal_cases_passed": 2,
+    "normal_cases_passed": 3,
     "required_normal_cases": 3,
-    "current_run": "full-scene-xy-20261011-134701",
-    "status": "last_scene_xy_C_complete_D_setup",
+    "current_run": null,
+    "status": "qualified3_of_3_cold_acceptance_stopped",
     "predeclared_cases_unchanged": [
       "nominal",
       "scene-xy",
@@ -2045,12 +2209,15 @@
     ],
     "qualified_cases": [
       "device-j1",
-      "nominal"
-    ],
-    "remaining_cases": [
+      "nominal",
       "scene-xy"
     ],
-    "finite_stopping_condition": "each of the three declared cases completes one original driver and all9independent audit checks on the same frozen product/suite;then stop cold acceptance"
+    "remaining_cases": [],
+    "finite_stopping_condition": "each of the three declared cases completes one original driver and all9independent audit checks on the same frozen product/suite;then stop cold acceptance",
+    "last_completed_run": "full-scene-xy-20261011-134701",
+    "cold_acceptance_complete": true,
+    "cold_acceptance_stopped": true,
+    "aggregate_evidence": ".evidence/s2/cold-suite-v7-qualified-20261011.json"
   },
   "historical_cold_attempts": {
     "full-20261011-031842": {
@@ -2422,21 +2589,21 @@
     "L1_total": 27
   },
   "latest_resource_release": {
-    "run": "full-20261011-122428",
-    "record": "unified-full-20261011-122428",
-    "teardown": ".evidence/s2/full-20261011-122428-teardown.json",
-    "verified_at": "2026-10-11T13:46:27.302072+08:00",
-    "actual_cleanup_verified_wall_ns": 1791697587302072375,
-    "artifacts_verified_at": "2026-10-11T13:46:44.841787+08:00",
-    "artifacts_verified_wall_ns": 1791697604841787469,
-    "registry_released_at": "2026-10-11T13:46:45+08:00",
-    "released_at": "2026-10-11T13:46:45+08:00",
+    "run": "full-scene-xy-20261011-134701",
+    "record": "unified-full-scene-xy-20261011-134701",
+    "teardown": ".evidence/s2/full-scene-xy-20261011-134701-teardown.json",
+    "verified_at": "2026-10-11T15:23:43.929044+08:00",
+    "actual_cleanup_verified_wall_ns": 1791703423929043910,
+    "artifacts_verified_at": "2026-10-11T15:24:03.728370+08:00",
+    "artifacts_verified_wall_ns": 1791703443728370226,
+    "registry_released_at": "2026-10-11T15:24:03+08:00",
+    "released_at": "2026-10-11T15:24:03+08:00",
     "premature_registry_release": false,
     "release_after_cleanup_and_artifact_verification": true,
     "all_owned_exited": true,
     "owned_process_count": 14,
     "both_gpu_process_lists_empty": true,
-    "artifacts_after_teardown": ".evidence/s2/full-20261011-122428-artifacts-after-teardown.json",
+    "artifacts_after_teardown": ".evidence/s2/full-scene-xy-20261011-134701-artifacts-after-teardown.json",
     "verified_artifact_count": 5,
     "artifact_hashes_unchanged": true,
     "dynamic_authority": "/Users/wujie/Developer/work/anyverse/_context/projects/gpu-usage.md"
@@ -2641,9 +2808,105 @@
       "verified_artifact_count": 5,
       "release_after_cleanup_and_hash_verification": true,
       "premature_registry_release": false
+    },
+    "scene-xy": {
+      "run": "full-scene-xy-20261011-134701",
+      "case": "nominal",
+      "case_id": "coffee-soft15-right-open-v2-20261009",
+      "suite": "cold-suite-normal-v31-20261011-v7",
+      "status": "complete_cold_case_qualified",
+      "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": true,
+      "full_pipeline_qualified": true,
+      "startup_confirmed_by_launch_metadata": true,
+      "head_frames": 34,
+      "expected_head_frames": 34,
+      "head_capture_state": "SETTLING",
+      "progress_observed_at": "2026-10-11T12:26:23+08:00",
+      "original_driver_running": true,
+      "launch_metadata": ".evidence/s2/current-full.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-122428-contract.json",
+      "source_files": 375,
+      "gpu_record": "unified-full-20261011-122428",
+      "supervisor": {
+        "pid": 1812376,
+        "start_ticks": "34034020"
+      },
+      "source_pid": 1812382,
+      "released": true,
+      "resource_evidence": ".evidence/s2/full-20261011-122428-resources-122555.json",
+      "resource_window": {
+        "expected_start": "2026-10-11T12:25:13.422899+08:00",
+        "expected_end": "2026-10-11T14:20:13.422899+08:00",
+        "actual_start_registered_at": "2026-10-11T12:26:09+08:00",
+        "service_deadline": "2026-10-11T14:15:19.964877+08:00",
+        "service_deadline_wall_ns": 1791699319964877002,
+        "next_actual_check_by": "2026-10-11T13:10:00+08:00"
+      },
+      "scope": "new nominal head0/34 snapshot only;complete C/install/D/task pending;not started before prior actualcleanup",
+      "wrist_frames": 29,
+      "original_driver_completed": true,
+      "original_workflow": "completed",
+      "original_terminal_busy": false,
+      "motion_outcome": "completed",
+      "native_task_outcome": "success",
+      "hardware_qualified": false,
+      "qualification_scope": "this one frozen fake run only; not three-case suite or physical robot",
+      "audit_complete": true,
+      "audit_checks_passed": 9,
+      "audit_checks_total": 9,
+      "artifact_audit": ".evidence/s2/full-20261011-122428-audit.json",
+      "original_terminal": ".evidence/s2/full-20261011-122428-terminal.json",
+      "command_count": 3234,
+      "feedback_count": 10782,
+      "camera_frames": {
+        "base_0": 3246,
+        "left_wrist_0": 3246,
+        "right_wrist_0": 3246
+      },
+      "raw_complete": true,
+      "raw_manifest_sha256": "b72ba959953dc46526918a74428be16c6a4896e34a3cb4699d52b3dbc4a4e37b",
+      "sealed_files_verified": 9749,
+      "sealed_bytes": 3604479225,
+      "source_replay": "passed",
+      "auxiliary_replay": "passed",
+      "task_success_evidence": "same-plant native receipt;not L3",
+      "source_video_duration_s": 121.166,
+      "source_video_max_frame_pts_error_s": 0.00033333400000401525,
+      "source_video_pts_tolerance_s": 0.002,
+      "auxiliary_replay_duration_s": 120.8,
+      "auxiliary_replay_max_frame_pts_error_s": 3.333333467026023e-07,
+      "local_source_head": ".evidence/s2/full-20261011-122428-source-head.mp4",
+      "local_final_cameras": ".evidence/s2/full-20261011-122428-final-cameras/receipt.json",
+      "local_native_receipt": ".evidence/s2/full-20261011-122428-native-task-receipt.json",
+      "teardown": ".evidence/s2/full-20261011-122428-teardown.json",
+      "owned_processes_exited": 14,
+      "both_gpu_process_lists_empty": true,
+      "released_at": "2026-10-11T15:24:03+08:00",
+      "actual_cleanup_verified_at": "2026-10-11T15:23:43.929044+08:00",
+      "actual_cleanup_verified_wall_ns": 1791703423929043910,
+      "artifacts_before_teardown": ".evidence/s2/full-20261011-122428-artifacts-before-teardown.json",
+      "artifacts_after_teardown": ".evidence/s2/full-20261011-122428-artifacts-after-teardown.json",
+      "artifacts_verified_at": "2026-10-11T15:24:03.728370+08:00",
+      "artifacts_verified_wall_ns": 1791703443728370226,
+      "artifact_hashes_unchanged_after_final_teardown": true,
+      "verified_artifact_count": 5,
+      "release_after_cleanup_and_hash_verification": true,
+      "premature_registry_release": false,
+      "commands": 3624,
+      "feedback": 12082,
+      "camera_frames_each": 3635,
+      "raw_verified_files": 10916,
+      "raw_verified_bytes": 3984706263,
+      "evidence": ".evidence/s2/full-scene-xy-20261011-134701-audit.json",
+      "final_teardown_evidence": ".evidence/s2/full-scene-xy-20261011-134701-teardown.json",
+      "final_artifacts_evidence": ".evidence/s2/full-scene-xy-20261011-134701-artifacts-after-teardown.json",
+      "display_recovery_before_teardown": ".evidence/s2/full-scene-xy-20261011-134701-display-recovery-v2/receipt.json"
     }
   },
-  "last_completed_cold_run": "full-20261011-122428",
+  "last_completed_cold_run": "full-scene-xy-20261011-134701",
   "historical_cold_suites": {
     "cold-suite-normal-v31-20261011-v5": {
       "suite": {
@@ -3117,13 +3380,256 @@
         "new_grasp_policy": "historical decision pending at that closeout; subsequently approved and implemented"
       },
       "historical_only": true
+    },
+    {
+      "recorded_at": "2026-10-11T14:19:49.458118+08:00",
+      "scope": "user-requested intermediate reconciliation then continuation;no new product changes,runs,shutdowns,or handoff file",
+      "overall_status": "NOT_CLOSED",
+      "status_review_completed": true,
+      "overall_development_complete": false,
+      "product_source_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+      "git_local_and_remote_head_at_inventory": "0fde4336ca0238d64717bf30cbd1277ad9ad6545",
+      "worktree_clean_at_inventory": true,
+      "document_refresh_is_uncommitted_after_inventory": true,
+      "inventory_evidence": ".evidence/s2/interim-closeout-20261011-1409.json",
+      "inventory_observed_at": "2026-10-11T14:10:24.627191+08:00",
+      "source_pins_verified": 375,
+      "implemented_scope": "approved unified C/D implementation and26-row comparison/gap restoration complete;remaining qualification is not automatically missing implementation",
+      "verified_scope": {
+        "CPU_executions": 791,
+        "CPU_passed": 790,
+        "CPU_skipped": 1,
+        "L1_passed": 27,
+        "current_cold_passed": 2,
+        "current_cold_required": 3,
+        "qualified_cases": [
+          "device-j1",
+          "nominal"
+        ],
+        "preview_scope": "warm145124;1280x720/DPR1;Dworkers idle/ready;same-plant source/display;not all hosts/loads",
+        "preview_mesh_off_fps": [
+          23.166666666666668,
+          23.516666666666666
+        ],
+        "preview_mesh_off_p95_max_ms": 173.5,
+        "preview_mesh_on_fps": [
+          22.3,
+          22.583333333333332
+        ],
+        "preview_mesh_on_p95_max_ms": 183.69999980926514,
+        "seal_export_total_s": [
+          576.2221695539774,
+          309.244813094032
+        ]
+      },
+      "why_repeated_cold_runs": "acceptance requires emptyC→new solve/install→newD model/observation→actual fake execution/native/raw/source+L3;warm reuse cannot count;v5/v6 passes stayed historical when relevant product/driver gates changed;thresholds not relaxed and failed actions not retried",
+      "cold_acceptance_limits": {
+        "product": "757b290c12dde26732474cb58cf99b5a62cbc914",
+        "suite": "cold-suite-normal-v31-20261011-v7",
+        "cases": [
+          "device-j1",
+          "nominal",
+          "scene-xy"
+        ],
+        "stop_condition": "each of the three declared cases completes one original driver and all9independent audit checks on the same frozen product/suite;then stop cold acceptance",
+        "completed": [
+          "device-j1",
+          "nominal"
+        ],
+        "remaining": [
+          "scene-xy"
+        ],
+        "documentation_or_unrelated_changes_trigger_rerun": false,
+        "new_failure_policy": "targeted diagnosis first;explain actual impact and minimal revalidation;no implicit endless runs or lower D5 coverage/thresholds",
+        "authority": "context04-decisions.md D5 and02-contracts-and-migration.md section7",
+        "statistical_reliability_claim": false
+      },
+      "targeted_evidence_queue": [
+        {
+          "id": "C02",
+          "capability": "队列加入/移除/清空/持久化/整队预览",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "完整队列编辑及预览的浏览器证据未获得；不借用旧人工单姿态截图",
+          "qualification_boundary": "真实浏览器仅证明加入q0=0.05的人工队列点且发出原/api/queue；移除/清空/持久化/整队预览仍是CPU资格",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "C04",
+          "capability": "仅重做腕部并固定头解",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "浏览器请求路由样例待root确认，实际腕-only重跑未资格",
+          "qualification_boundary": "保持rounds=1，不恢复已撤回多轮迭代",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "C05",
+          "capability": "独立head/wrist批次规划、逐姿态审阅、采集",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "分步入口浏览器路由及实际完整采集分别验证",
+          "qualification_boundary": "实采仍按旧到位/静止及保存成功ACK；fixture仅请求路由",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "C06",
+          "capability": "设置/清空fit-source、单批重解",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "清空与单批重解的浏览器/实际求解证据未获得",
+          "qualification_boundary": "真实浏览器设置head-capture并路由到原/api/fit-source；清空与单批重解仍CPU；fixture没有运行solver",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "C07",
+          "capability": "结果库/详情/JSON下载/原图和自身候选历史mesh",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "逐相机/逐帧/低质量历史结果的浏览器路径继续补",
+          "qualification_boundary": "真实浏览器选择腕结果及其head画面，原图/历史mesh开关请求完成；JSON下载、逐相机/逐帧完整路径未自动资格",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "C12",
+          "capability": "关节到位误差统计",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "真实浏览器统计表及实际样本展示尚缺专属证据",
+          "qualification_boundary": "统计不直接用作几何零偏",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite",
+          "existing_evidence_to_reconcile": [
+            ".evidence/s2/full-20261011-015820-arrival-stats.jpg",
+            ".evidence/s2/full-20261011-015820-arrival-browser.json"
+          ]
+        },
+        {
+          "id": "D06",
+          "capability": "取消当前阶段、planner恢复、checkpoint重新审阅",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "新入口故障后的实际浏览器恢复路径仍需专项证据",
+          "qualification_boundary": "不自动中途resume；恢复已有checkpoint仍需新审阅",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "D07",
+          "capability": "准备失败原始阶段、重试保持有效安装",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "完整准备失败→重试的本次浏览器路径未声明通过",
+          "qualification_boundary": "重试不重采C，不重连或移动设备",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "D02",
+          "capability": "10%–100%执行速度且保留静止等待",
+          "status": "implemented;qualification_gap_not_new_feature_gap",
+          "remaining_gap": "实际轨迹按不同速度执行未在此CPU UI fixture资格；原retime入口CPU回归保留",
+          "qualification_boundary": "改速撤销当前UI审阅；服务端拒绝旧review新速度与布尔伪装；不重写控制策略",
+          "owner": "current lead session",
+          "next_action": "reuse matching existing evidence first,then bounded targeted verification;do not rerun whole cold suite"
+        },
+        {
+          "id": "renderer_gpu_lifecycle",
+          "capability": "actual GPU renderer lifecycle evidence",
+          "status": "pending scoped qualification",
+          "remaining_gap": "dedicated actual renderer lifecycle/resource evidence not claimed complete",
+          "owner": "current lead session",
+          "next_action": "bounded lifecycle evidence review;whole-run teardown is not all renderer branch qualification"
+        }
+      ],
+      "other_matrix_remaining_gaps": {
+        "S03": "physical实体SDK释放/支撑确认仍为L4资格；本次实际浏览器仅协议Fake生命周期",
+        "C08": "实际渲染/设备资格不属于此CPU fixture",
+        "D03": "31点合成CPU计划仅验证只读显示/接口；真实规划内容仍按其实际run证据核验",
+        "D04": "浏览器仅两份原字节合成2×2视频验证控件和同步；真实相机/任务视频内容不在此fixture资格",
+        "D08": "缓存字段详情由CPU测试核验；本次浏览器只证明诊断页面与控制器/服务线程三项准确显示，不是实际原生任务资格"
+      },
+      "implementation_reopened_by_evidence_gaps": false,
+      "all_browser_or_actual_backend_branches_qualified": false,
+      "stable_fake_delivery": {
+        "authority": "D7",
+        "status": "not_qualified",
+        "current": "bounded isolated734resident through temporary18867,not a stable daily complete-fake entry",
+        "next_action": "first inspect actual entry/lifecycle state and reuse existing launcher;qualify stable fake availability/self-service recovery in a bounded follow-up",
+        "new_long_lived_GPU_or_cost_expansion_during_this_review": false
+      },
+      "current_run": {
+        "run": "full-scene-xy-20261011-134701",
+        "original_driver_continues": true,
+        "calibration_completed_at": "2026-10-11T14:12:34+08:00",
+        "head_frames": 34,
+        "wrist_frames": 29,
+        "group_installed": true,
+        "stage": "collection.setup.converting_planning_assets",
+        "stage_observed_at": "2026-10-11T14:12:52+08:00",
+        "new_D_executed": false,
+        "full_pipeline_qualified": false,
+        "resource_evidence": ".evidence/s2/full-scene-xy-20261011-134701-resources-140903.json",
+        "supervisor": {
+          "pid": 2249730,
+          "start_ticks": "34529531"
+        },
+        "source_pid": 2249736,
+        "preview_pid": 2250511,
+        "resource_retained": true
+      },
+      "local18866": {
+        "role": "L1 protocol only",
+        "listening": false,
+        "http": "connection_refused",
+        "observed_at": "2026-10-11T14:09:00+08:00",
+        "exit_reason": "unknown",
+        "investigate_before_restoring_development_entry": true,
+        "restarted_during_review": false
+      },
+      "local18867": {
+        "listening": true,
+        "pid": 41393,
+        "bind": "127.0.0.1",
+        "current_fake_API_healthy": true,
+        "observed_at": "2026-10-11T14:09:00+08:00",
+        "retained": true
+      },
+      "browser_automation": {
+        "consecutive_failures": 2,
+        "no_automatic_technology_switch": true,
+        "no_CPU_or_API_image_substitution_for_browser_qualification": true
+      },
+      "L4": {
+        "status": "independent_unqualified",
+        "scope": [
+          "real SDK",
+          "physical support",
+          "stop",
+          "latency",
+          "payload",
+          "deployment singlewriter"
+        ]
+      },
+      "resource_release_correction_preserved": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json",
+      "governance_status": "sticky_unknown;not green;no fabricated settlement",
+      "responsibility": {
+        "lead": "01a0e689-ddf5-7410-98d5-743920bfa8f7 owns implementation,active run,evidence and operational delivery",
+        "peers": "baseline facts only",
+        "independent_correction_data_production": "not this workbench backlog",
+        "recipient_transfer_requested": false
+      },
+      "remaining_required": [
+        "last coldcase",
+        "targeted matrix/renderer evidence",
+        "stable fake D7 operating entry/lifecycle delivery"
+      ],
+      "deployment_not_equivalent_to_3_of_3": true
     }
   ],
   "stable_fake_operational_delivery": {
     "authority": "D7",
     "status": "not_qualified",
-    "current": "bounded isolated734resident through temporary18867,not a stable daily complete-fake entry",
-    "next_action": "first inspect actual entry/lifecycle state and reuse existing launcher;qualify stable fake availability/self-service recovery in a bounded follow-up",
+    "current": "time-limited full PhysX fake run ended and temporary18867 closed;only localCPU L1 protocol18866 remains",
+    "next_action": "qualify stable complete-fake daily entry,lifecycle/self-service recovery using existing launcher and explicit bounded operating plan;no new long-livedGPU cost inferred",
     "new_long_lived_GPU_or_cost_expansion_during_this_review": false
-  }
+  },
+  "delivery_verification_source": "Git history, .evidence/s2/active-task-checkpoint.json and actual final owner settlement receipts; delivery is not an additional feature backlog item"
 }
