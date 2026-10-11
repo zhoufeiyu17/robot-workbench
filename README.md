@@ -39,7 +39,7 @@ PYTHONPATH=. .venv/bin/python -B -m robot_workbench.service \
 
 ## 当前资格与运行
 
-已推送产品 **757b290**，仍是隔离开发候选；**当前suite-v7完整冷启动1/3，真机未接入**。历史suite-v5的nominal和suite-v6的scene-xy已各自完整通过，但不代替新版本资格。本节记录2026-10-11 12:26 CST事实节点；动态进度与资源见[续接检查点](.evidence/s2/active-task-checkpoint.json)及[机器验证摘要](migration/validation-summary.json)。
+已推送产品 **757b290**，仍是隔离开发候选；**当前suite-v7完整冷启动2/3，真机未接入**。本轮device-j1与nominal已通过，scene-xy运行中。历史suite-v5的nominal和suite-v6的scene-xy不代替新版本资格。本节记录2026-10-11 13:50 CST事实节点；动态进度与资源见[续接检查点](.evidence/s2/active-task-checkpoint.json)及[机器验证摘要](migration/validation-summary.json)。
 
 | 范围 | 已完成 | 当前边界 |
 | --- | --- | --- |
@@ -66,7 +66,9 @@ device-j1-100608头部34/34已解，但腕部确认因`host_sample_stale_or_cloc
 
 full-device-j1-20261011-110144原始空库工作流及[独立9/9审计](.evidence/s2/full-device-j1-20261011-110144-audit.json)已通过：头34＋腕29新采安装，3215条命令、10718条反馈、三相机各3227帧RGB-D；同plant任务成功，raw、源录像与L3均通过。预声明左右J1±0.003rad偏置仅加入plant，真值未进入求解或规划输入。[实际终帧](.evidence/s2/full-device-j1-20261011-110144-final-cameras/head.jpg)、[源录像](.evidence/s2/full-device-j1-20261011-110144-source-head.mp4)及[原始终态](.evidence/s2/full-device-j1-20261011-110144-terminal.json)已保存。12:23:15实际核验14个PID及双GPU全空，清退前后5项制品SHA保持。资源表12:23:04提前登记释放是牵头执行顺序错误，旧结束行不可改；[纠正记录](.evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json)与下一记录notes保留差异，无两轮GPU重叠，不把提前登记时间当作核验完成时间。
 
-新nominal full-20261011-122428已通过预检、dry-run和空库检查，12:26:23头部采集0/34；本例尚未资格。734双GPU预留12:25:13–14:20:13，12:26:09登记启动；驻留截止14:15:19，随后清退，不延长，下一资源核验13:10。18867临时loopback转发仍在，18866 L1未动。
+nominal full-20261011-122428原始空库工作流及[独立9/9审计](.evidence/s2/full-20261011-122428-audit.json)已通过：头34＋腕29新采安装，3234条命令、10782条反馈、三相机各3246帧RGB-D；同plant任务成功，raw、源录像与L3通过。[实际终帧](.evidence/s2/full-20261011-122428-final-cameras/head.jpg)和[源录像](.evidence/s2/full-20261011-122428-source-head.mp4)保留。13:46:27实际核验14个自有PID及双GPU全空，五项制品SHA在清退前后保持，之后13:46:45登记释放。
+
+最后一例scene-xy full-scene-xy-20261011-134701已通过预检、dry-run、空库检查及头部预览/确认，13:50:02头部采集0/34；本例尚未资格。杯子位移[+0.01,-0.01,0]m，咖啡机位移[-0.01,+0.01,0]m，其余声明保持。734双GPU预留13:47:48–15:42:48，13:48:35登记启动；驻留截止15:37:54，随后清退，不延长，下一资源核验14:30。服务初始化时一次本机只读状态连接reset，服务就绪后原driver正常进入C，未构成动作失败。18867临时loopback转发仍在，18866 L1未动。
 
 [当前CPU/L1](.evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json)、[历史nominal独立审计](.evidence/s2/full-20261011-064034-audit.json)、[nominal实际头相机终帧](.evidence/s2/full-20261011-064034-final-cameras/head.jpg)及[源录像](.evidence/s2/full-20261011-064034-source-head.mp4)保留。历史nominal清退14个PID后，native/raw/三源视频SHA一致；每路视频3218帧/107.266s，最大PTS误差0.333334ms，沿用2ms门。warm-050624复用C的8/8通过、所有旧失败及修复详见[行为记录](/Users/wujie/Developer/work/anyverse/_context/notes/unified-workbench-refactor-20261009/07-behavior-parity.md)。
 
@@ -74,7 +76,7 @@ full-device-j1-20261011-110144原始空库工作流及[独立9/9审计](.evidenc
 
 ## 剩余验收
 
-1. 完成suite-v7剩余nominal（运行中）和scene-xy新空库全链；device-j1已通过。继续核验原始终态、安装、实际任务、raw、源录像与辅助回放，不借用旧版本成功。
+1. 完成suite-v7最后一例scene-xy（运行中）新空库全链；device-j1与nominal已通过。继续核验原始终态、安装、实际任务、raw、源录像与辅助回放，不借用旧版本成功。
 2. 同步最终文档与验收证据，核验并清退自有资源；中断或诊断续跑不计完整冷启动通过。
 3. 独立完成L4真机SDK、现场止动、时延、载荷与单writer正式切换。
 

@@ -1,10 +1,10 @@
 {
-  "status": "suitev7_device_j1_qualified1_of_3_release_correction_preserved_nominal_head_capture",
-  "updated_at": "2026-10-11T12:29:40.186457+08:00",
+  "status": "suitev7_device_j1_nominal_qualified2_of_3_scene_xy_head_capture",
+  "updated_at": "2026-10-11T13:52:02.535052+08:00",
   "maintenance_trigger": "implementation, source identity or qualification evidence changes",
   "repository": "git@github.com:zhoufeiyu17/robot-workbench.git",
   "candidate_commit_before_summary": "757b290c12dde26732474cb58cf99b5a62cbc914",
-  "qualification_scope": "757b290/suitev7 device-j1110144 original cold workflow and independent9checks qualified,current1/3(device-j1 only);newC34+29,newD3215commands/10718feedback/3x3227RGB-D,native/raw/source+L3 passed. Resource table was prematurely released12:23:04 while preceding12:23:03.968check still saw6owned processes;actual14PID/GPU empty verification12:23:15.448,then5artifact preservation check,next run only afterward. Correction retained without rewriting immutable registry;case qualification unaffected. Newnominal122428 head0/34 SETTLING at12:26:23,pending fullC/D. v6/v5 historical passes separate;L4 unqualified.",
+  "qualification_scope": "757b290/suitev7 nominal122428 original workflow and independent9checks qualified;current2/3(device-j1+nominal). NewC34+29,D3234commands/10782feedback/3x3246RGB-D,native/raw/source+L3 passed.14PID/GPU actualempty13:46:27.302072,5artifact verification13:46:44.841787,then release13:46:45;this release was not premature. Prior device-j1 premature-release correction remains intact. Last scene-xy134701 service published,head confirmed13:49:13 and head.capture0/34 RUNNING at13:50:02,no drivererror;readonlystartup connectionreset is not a driver failure. v6/v5 historical passes excluded;L4 unqualified.",
   "cpu": {
     "source_equivalent_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "evidence": ".evidence/s2/readiness-diagnostics-full-cpu-20261011-v1/receipt.json",
@@ -53,13 +53,13 @@
   },
   "l2_complete": {
     "status": "current_final_suite_partially_qualified",
-    "normal_cases_passed": 1,
+    "normal_cases_passed": 2,
     "required_normal_cases": 3,
-    "latest_cold_attempt": "full-20261011-122428",
+    "latest_cold_attempt": "full-scene-xy-20261011-134701",
     "latest_diagnostic": "warm-20261011-050624",
-    "meaning": "current757b290/suitev7 cold1/3(device-j1 only);historicalv6scene-xy1/3 andv5nominal1/3 remain excluded",
-    "latest_cold_attempt_status": "head_capture_started_0_of_34_settling",
-    "latest_qualified_cold_case": "full-device-j1-20261011-110144",
+    "meaning": "current757b290/suitev7 cold2/3(device-j1+nominal);scene-xy pending;historicalv6/v5 excluded",
+    "latest_cold_attempt_status": "head_capture_started_0_of_34_running",
+    "latest_qualified_cold_case": "full-20261011-122428",
     "full_suite_qualified": false,
     "qualification_suite": "cold-suite-normal-v31-20261011-v7"
   },
@@ -132,10 +132,9 @@
     "actual_camera_content_evidence": ".evidence/s2/full-20261011-040630-actual-camera-evidence/receipt.json"
   },
   "remaining": [
-    "完成运行中suite-v7 nominal新空库全链及独立审计；12:26:23 head0/34 SETTLING，不计第二次通过。",
-    "随后新跑scene-xy；当前只device-j1合格1/3，不混加历史v6/v5通过。",
-    "完成文档/实际轨迹回放证据与授权交付；保留提前release登记纠错，后续先确认全清空再release，不绕过immutable记录；治理stickyunknown不伪造settle。",
-    "UI26项/封存导出性能已完成；L4实体SDK、止动、时延、载荷及单writer切换独立验收。"
+    "完成最后suite-v7 scene-xy新空库全链和独立审计；13:50:02 head0/34 RUNNING无driver错误，当前2/3，不提前计通过。",
+    "完成最终文档/实际轨迹回放证据和授权交付；资源严格先核全空与制品保持再release，旧device提前登记纠错继续保留。",
+    "UI26项/封存导出性能已完成；治理stickyunknown按规范处理，不伪造settle；L4实体SDK、止动、时延、载荷与单writer独立验收。"
   ],
   "versioning": "isolated candidate; original workbenches untouched; no hardware deployment implied",
   "previous_full_attempt": {
@@ -466,8 +465,8 @@
     "request_security_preserved": true,
     "connection_idle_timeout_s": 5
   },
-  "current_gpu_run": "full-20261011-122428",
-  "last_gpu_run": "full-device-j1-20261011-110144",
+  "current_gpu_run": "full-scene-xy-20261011-134701",
+  "last_gpu_run": "full-20261011-122428",
   "preview_pipeline_candidate": {
     "commit": "9bcceb1",
     "cpu_passed": true,
@@ -1679,42 +1678,51 @@
     "scope": "CPU-only postprocessing of one complete archived three-camera raw input on the measured host/load/storage; not GPU/live collection throughput, new cold-case success or universal storage performance."
   },
   "latest_cold_attempt": {
-    "run": "full-20261011-122428",
-    "case": "nominal",
-    "case_id": "coffee-soft15-right-open-v2-20261009",
+    "run": "full-scene-xy-20261011-134701",
+    "case": "scene-xy",
+    "case_id": "l2-case2-scene-xy-10mm-v1",
     "suite": "cold-suite-normal-v31-20261011-v7",
-    "status": "head_capture_started_0_of_34_settling",
+    "status": "head_capture_started_0_of_34_running",
     "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
     "fresh_C_completed": false,
     "group_installed": false,
     "D_motion_started": false,
     "full_pipeline_qualified": false,
     "startup_confirmed_by_launch_metadata": true,
+    "service_published": true,
+    "head_confirmed_at": "2026-10-11T13:49:13+08:00",
     "head_frames": 0,
     "expected_head_frames": 34,
-    "head_capture_state": "SETTLING",
-    "progress_observed_at": "2026-10-11T12:26:23+08:00",
+    "head_capture_state": "RUNNING",
+    "progress_observed_at": "2026-10-11T13:50:02+08:00",
+    "original_driver_error": null,
     "original_driver_running": true,
     "launch_metadata": ".evidence/s2/current-full.json",
-    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-122428-contract.json",
+    "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-scene-xy-20261011-134701-contract.json",
     "source_files": 375,
-    "gpu_record": "unified-full-20261011-122428",
+    "gpu_record": "unified-full-scene-xy-20261011-134701",
     "supervisor": {
-      "pid": 1812376,
-      "start_ticks": "34034020"
+      "pid": 2249730,
+      "start_ticks": "34529531"
     },
-    "source_pid": 1812382,
+    "source_pid": 2249736,
     "released": false,
-    "resource_evidence": ".evidence/s2/full-20261011-122428-resources-122555.json",
+    "resource_evidence": ".evidence/s2/full-scene-xy-20261011-134701-resources-134819.json",
     "resource_window": {
-      "expected_start": "2026-10-11T12:25:13.422899+08:00",
-      "expected_end": "2026-10-11T14:20:13.422899+08:00",
-      "actual_start_registered_at": "2026-10-11T12:26:09+08:00",
-      "service_deadline": "2026-10-11T14:15:19.964877+08:00",
-      "service_deadline_wall_ns": 1791699319964877002,
-      "next_actual_check_by": "2026-10-11T13:10:00+08:00"
+      "expected_start": "2026-10-11T13:47:48.649202+08:00",
+      "expected_end": "2026-10-11T15:42:48.649202+08:00",
+      "actual_start_registered_at": "2026-10-11T13:48:35+08:00",
+      "service_deadline": "2026-10-11T15:37:54.997819+08:00",
+      "service_deadline_wall_ns": 1791704274997819433,
+      "next_actual_check_by": "2026-10-11T14:30:00+08:00"
     },
-    "scope": "new nominal head0/34 snapshot only;complete C/install/D/task pending;not started before prior actualcleanup"
+    "startup_readonly_poll": {
+      "observed_around": "2026-10-11T13:48:49+08:00",
+      "error": "connection reset before service ready",
+      "original_driver_failed": false,
+      "counts_as_control_or_acceptance_failure": false
+    },
+    "scope": "fresh last scene-xy head0/34 snapshot only;complete C/install/D/task qualification pending"
   },
   "base_alignment": {
     "status": "owner_reply_read_back_dynamic_recipe_implemented",
@@ -1758,10 +1766,10 @@
     "original_physical_and_control_gates_unchanged": true,
     "new_GPU_runs_started": true,
     "full_pipeline_qualified": false,
-    "workbench_nominal_full_chain_qualified": false,
-    "qualified_nominal_run": null,
+    "workbench_nominal_full_chain_qualified": true,
+    "qualified_nominal_run": "full-20261011-122428",
     "three_case_suite_qualified": false,
-    "full_pipeline_scope": "current757b290/suitev7 device-j1 qualified1/3;current nominal/scene-xy pending;olderv6/v5passes historical",
+    "full_pipeline_scope": "current757b290/suitev7 device-j1+nominal qualified2/3;lastscene-xy pending;olderv6/v5 historical",
     "historical_qualified_nominal_run": "full-20261011-064034",
     "workbench_current_scene_xy_full_chain_qualified": false,
     "qualified_current_scene_xy_run": null,
@@ -1788,20 +1796,20 @@
     "source_files": 375,
     "motion_recipe": "normal-v31-dynamic-targets",
     "upstream_base_freeze_sha256": "6bb4dd37fd4752a59357670f7ff98c151802cf6056a7b274129c81500fba8e03",
-    "normal_cases_passed": 1,
+    "normal_cases_passed": 2,
     "required_normal_cases": 3,
-    "current_run": "full-20261011-122428",
-    "status": "nominal_head_capture_started",
+    "current_run": "full-scene-xy-20261011-134701",
+    "status": "last_scene_xy_head_capture_running",
     "predeclared_cases_unchanged": [
       "nominal",
       "scene-xy",
       "device-j1"
     ],
     "qualified_cases": [
-      "device-j1"
+      "device-j1",
+      "nominal"
     ],
     "remaining_cases": [
-      "nominal",
       "scene-xy"
     ]
   },
@@ -2175,25 +2183,23 @@
     "L1_total": 27
   },
   "latest_resource_release": {
-    "run": "full-device-j1-20261011-110144",
-    "record": "unified-full-device-j1-20261011-110144",
-    "teardown": ".evidence/s2/full-device-j1-20261011-110144-teardown.json",
-    "verified_at": "2026-10-11T12:23:15.448176+08:00",
-    "actual_cleanup_verified_wall_ns": 1791692595448176383,
-    "registry_released_at": "2026-10-11T12:23:04+08:00",
-    "premature_registry_release": true,
-    "verification_scope": "all_owned_exited only true at12:23:15.448;not at registry release12:23:04",
+    "run": "full-20261011-122428",
+    "record": "unified-full-20261011-122428",
+    "teardown": ".evidence/s2/full-20261011-122428-teardown.json",
+    "verified_at": "2026-10-11T13:46:27.302072+08:00",
+    "actual_cleanup_verified_wall_ns": 1791697587302072375,
+    "artifacts_verified_at": "2026-10-11T13:46:44.841787+08:00",
+    "artifacts_verified_wall_ns": 1791697604841787469,
+    "registry_released_at": "2026-10-11T13:46:45+08:00",
+    "released_at": "2026-10-11T13:46:45+08:00",
+    "premature_registry_release": false,
+    "release_after_cleanup_and_artifact_verification": true,
     "all_owned_exited": true,
     "owned_process_count": 14,
     "both_gpu_process_lists_empty": true,
-    "artifacts_after_teardown": ".evidence/s2/full-device-j1-20261011-110144-artifacts-after-teardown.json",
+    "artifacts_after_teardown": ".evidence/s2/full-20261011-122428-artifacts-after-teardown.json",
     "verified_artifact_count": 5,
     "artifact_hashes_unchanged": true,
-    "correction_evidence": ".evidence/s2/full-device-j1-20261011-110144-resource-release-correction.json",
-    "registry_terminal_immutable": true,
-    "no_registry_bypass": true,
-    "qualification_affected": false,
-    "next_run_after_actual_cleanup": true,
     "dynamic_authority": "/Users/wujie/Developer/work/anyverse/_context/projects/gpu-usage.md"
   },
   "preparing_gpu_run": null,
@@ -2301,9 +2307,104 @@
       "artifacts_after_teardown": ".evidence/s2/full-device-j1-20261011-110144-artifacts-after-teardown.json",
       "artifact_hashes_unchanged_after_final_teardown": true,
       "verified_artifact_count": 5
+    },
+    "nominal": {
+      "run": "full-20261011-122428",
+      "case": "nominal",
+      "case_id": "coffee-soft15-right-open-v2-20261009",
+      "suite": "cold-suite-normal-v31-20261011-v7",
+      "status": "complete_cold_case_qualified",
+      "product_commit": "757b290c12dde26732474cb58cf99b5a62cbc914",
+      "fresh_C_completed": true,
+      "group_installed": true,
+      "D_motion_started": true,
+      "full_pipeline_qualified": true,
+      "startup_confirmed_by_launch_metadata": true,
+      "head_frames": 34,
+      "expected_head_frames": 34,
+      "head_capture_state": "SETTLING",
+      "progress_observed_at": "2026-10-11T12:26:23+08:00",
+      "original_driver_running": true,
+      "launch_metadata": ".evidence/s2/current-full.json",
+      "contract": "/Users/wujie/Developer/work/anyverse/github/zhoufeiyu17/robot-workbench/.evidence/s2/full-20261011-122428-contract.json",
+      "source_files": 375,
+      "gpu_record": "unified-full-20261011-122428",
+      "supervisor": {
+        "pid": 1812376,
+        "start_ticks": "34034020"
+      },
+      "source_pid": 1812382,
+      "released": true,
+      "resource_evidence": ".evidence/s2/full-20261011-122428-resources-122555.json",
+      "resource_window": {
+        "expected_start": "2026-10-11T12:25:13.422899+08:00",
+        "expected_end": "2026-10-11T14:20:13.422899+08:00",
+        "actual_start_registered_at": "2026-10-11T12:26:09+08:00",
+        "service_deadline": "2026-10-11T14:15:19.964877+08:00",
+        "service_deadline_wall_ns": 1791699319964877002,
+        "next_actual_check_by": "2026-10-11T13:10:00+08:00"
+      },
+      "scope": "new nominal head0/34 snapshot only;complete C/install/D/task pending;not started before prior actualcleanup",
+      "wrist_frames": 29,
+      "original_driver_completed": true,
+      "original_workflow": "completed",
+      "original_terminal_busy": false,
+      "motion_outcome": "completed",
+      "native_task_outcome": "success",
+      "hardware_qualified": false,
+      "qualification_scope": "this one frozen fake run only; not three-case suite or physical robot",
+      "audit_complete": true,
+      "audit_checks_passed": 9,
+      "audit_checks_total": 9,
+      "artifact_audit": ".evidence/s2/full-20261011-122428-audit.json",
+      "original_terminal": ".evidence/s2/full-20261011-122428-terminal.json",
+      "command_count": 3234,
+      "feedback_count": 10782,
+      "camera_frames": {
+        "base_0": 3246,
+        "left_wrist_0": 3246,
+        "right_wrist_0": 3246
+      },
+      "raw_complete": true,
+      "raw_manifest_sha256": "57045893a62926a0ee1d4fa7e4168e012caa55ce6c3b038649e2beaf02fccb03",
+      "sealed_files_verified": 9749,
+      "sealed_bytes": 3604479225,
+      "source_replay": "passed",
+      "auxiliary_replay": "passed",
+      "task_success_evidence": "same-plant native receipt;not L3",
+      "source_video_duration_s": {
+        "base_0": 108.2,
+        "left_wrist_0": 108.2,
+        "right_wrist_0": 108.2
+      },
+      "source_video_max_frame_pts_error_s": 0.0003333330000003798,
+      "source_video_pts_tolerance_s": 0.002,
+      "auxiliary_replay_duration_s": {
+        "base_0": 107.8,
+        "left_wrist_0": 107.8,
+        "right_wrist_0": 107.8
+      },
+      "auxiliary_replay_max_frame_pts_error_s": 3.333333467026023e-07,
+      "local_source_head": ".evidence/s2/full-20261011-122428-source-head.mp4",
+      "local_final_cameras": ".evidence/s2/full-20261011-122428-final-cameras/receipt.json",
+      "local_native_receipt": ".evidence/s2/full-20261011-122428-native-task-receipt.json",
+      "teardown": ".evidence/s2/full-20261011-122428-teardown.json",
+      "owned_processes_exited": 14,
+      "both_gpu_process_lists_empty": true,
+      "released_at": "2026-10-11T13:46:45+08:00",
+      "actual_cleanup_verified_at": "2026-10-11T13:46:27.302072+08:00",
+      "actual_cleanup_verified_wall_ns": 1791697587302072375,
+      "artifacts_before_teardown": ".evidence/s2/full-20261011-122428-artifacts-before-teardown.json",
+      "artifacts_after_teardown": ".evidence/s2/full-20261011-122428-artifacts-after-teardown.json",
+      "artifacts_verified_at": "2026-10-11T13:46:44.841787+08:00",
+      "artifacts_verified_wall_ns": 1791697604841787469,
+      "artifact_hashes_unchanged_after_final_teardown": true,
+      "verified_artifact_count": 5,
+      "release_after_cleanup_and_hash_verification": true,
+      "premature_registry_release": false
     }
   },
-  "last_completed_cold_run": "full-device-j1-20261011-110144",
+  "last_completed_cold_run": "full-20261011-122428",
   "historical_cold_suites": {
     "cold-suite-normal-v31-20261011-v5": {
       "suite": {
@@ -2715,7 +2816,11 @@
     "L1_qualified": true,
     "new_cold_qualified": true,
     "new_cold_qualification_run": "full-device-j1-20261011-110144",
-    "new_cold_qualification_scope": "one device-j1 frozen fake case only;suitev7current1/3;does not reconstruct old failed age"
+    "new_cold_qualification_scope": "two frozenv7fake cases qualified2/3;historical failed age still not reconstructed",
+    "new_cold_qualification_runs": [
+      "full-device-j1-20261011-110144",
+      "full-20261011-122428"
+    ]
   },
   "harness_UI_readiness": {
     "scope": "validation harness only;does not change product action behavior",
