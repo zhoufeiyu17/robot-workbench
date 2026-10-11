@@ -490,7 +490,10 @@ class MotionRunner:
             # The polynomial can round above 1 near the endpoint. Bound its
             # progress, never the approved targets or measured feedback.
             s = min(1.0, max(0.0, u * u * u * (10.0 + u * (-15.0 + 6.0 * u))))
-            desired = tuple((1.-s)*a + s*b for a, b in zip(self.execution_start, self.execution_target))
+            # Even a constant at the exact SDK limit can round one ULP outside
+            # it in (1-s)*a+s*b. Stay within the already validated endpoints.
+            desired = tuple(min(max(a+(b-a)*s,min(a,b)),max(a,b))
+                            for a, b in zip(self.execution_start, self.execution_target))
             error = max(abs(q[i] - desired[i]) for i in indices)
             jaw_error_mm = max(abs(measured_gaps[n]-command_gap(side, desired[i]))
                                for n, (side, i) in enumerate(zip(("left", "right"), JAW_INDICES)) if i in jaws)

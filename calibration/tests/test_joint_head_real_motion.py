@@ -134,6 +134,25 @@ class RealMotionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'position-boundary'):
                 make_plan('both',[0.]*14,beyond,bounds,kind='workbench',environment=environment)
 
+    def test_constant_sdk_upper_limit_never_rounds_outside_interval(self):
+        high=.07633374999999999
+        bounds=limits();bounds[0]=[0.,high]
+        raw=[0.]*14;raw[0]=high
+        target=raw[:];target[1]=.001
+        plan=make_plan('both',raw,target,bounds,kind='workbench',duration_s=1.,created_at_s=8500.)
+        sent=[]
+        def send(q):
+            if q[0]!=high:raise ValueError('constant endpoint rounded outside SDK limit')
+            sent.append(q)
+        runner=MotionRunner(plan,begin=lambda q:q,send=send,stop=lambda reason:None)
+        runner.start(8500.,feedback(8500.,raw))
+        for i in range(1,10):runner.tick(8500.+i*.05,feedback(8500.+i*.05,raw))
+        for i in range(1,151):
+            stamp=runner.previous+.005
+            runner.tick(stamp,feedback(stamp,raw))
+            self.assertNotEqual(runner.status,'FAULT',runner.reason)
+        self.assertTrue(sent)
+
     def test_quintic_endpoint_does_not_emit_a_negative_zero_limit_target(self):
         bounds=limits();bounds[8]=[0.,2.]
         raw=[0.]*14;raw[8]=1e-12
