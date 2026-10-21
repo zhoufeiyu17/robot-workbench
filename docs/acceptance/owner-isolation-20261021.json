@@ -1,0 +1,261 @@
+{
+  "schema": "robot_workbench.stage_acceptance.v1",
+  "recorded_date": "2026-10-21",
+  "session": "01a13e4e-70dc-7513-9467-d34b9a7a99a3",
+  "publication": {
+    "source_name": "robot-workbench-owner-isolation-20261021-v14",
+    "run_name": "owner-isolation-20261021-v14-env2",
+    "deployment_sha256": "f60167ca026fc88fef2eb7de365c8b6defdad5566031bf4badd371f7c6f7b9c7",
+    "status": "independent_owner_published_reconnected",
+    "normal_business_reload_verified": true
+  },
+  "prepublication_linux_cpu": {
+    "passed": true,
+    "source_stable": true,
+    "counted_tests": 516,
+    "groups": 33,
+    "failed": []
+  },
+  "qualified_source_sha256": {
+    "robot_workbench/target_display_gateway.py": "9d81a470cc053c88bf8e0e3214322ddc53319ee9d1fa180311e20a4b9bd48bae",
+    "robot_workbench/target_preview.py": "c34dd43ca4283bc9d74a3da544172c8d4fc71a8d7f4a69c72d2fa299945b0de2",
+    "scripts/serve_cpu_target_display.py": "b9120ff8754ef52d1b70430f5af920664863d395afc9361511b8626c3157382e",
+    "web/app.js": "5d2f28f630c0feeab97a71c4afaf1d0ad9da47ad37264f7a123047668fe3a587",
+    "web/index.html": "51a9e25a0ec04924e9462b02caf008c147c539965e959041b66c0f9fcb3bea91",
+    "web/style.css": "90cac6ef7fd9d32a3906f8a6340ec59bda3839edf2ec7271773e35958652a6d2",
+    "web/target_viewer.js": "d117df021ca28acc3e6fec81b37e290045f64af73806f4e97c50e6d26ea9a374",
+    "web/vendor/three.module.js": "08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7",
+    "web/vendor/OrbitControls.js": "6f3052dd8860a60fe6999260d50558ff54609523724c6e374326228e5590cf55",
+    "web/vendor/three.LICENSE": "4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454",
+    "robot_workbench/target_model.py": "6e83b840731c19dd0876cdcd955cfc9a32091a26ade819ba88d42b00c548a1c0",
+    "scripts/export_target_model.py": "fe28a1dfaf8f14bfedc72e164897b32d84b8a42474a8c8703634572e9931684a",
+    "configs/collection-profile-template.json": "df248796872603e1fa9c506f3187585efb4f40e2d297853055eab650e7daad8c",
+    "calibration/configs/wrist-motion-seed-v7.json": "f4aaffe85ca1926800c9d4f21b97f0800e29b1e889044617046669943d50cd6f",
+    "robot_workbench/workflows.py": "5591cddb693e76774e81225b8a4ab72a1a830812865844dc4e5bd65ff8be0648",
+    "robot_workbench/control_owner.py": "9bd9e33045a3bfd23ae2bf176b9be0c6de5b17f06abd69121d1c08e2c9e1d7db",
+    "robot_workbench/owner_inference.py": "e2e5a62ba6501d979e2d44aabb3f6129083ef5376bc2325ef1a206cadebb22b1",
+    "robot_workbench/cpu_preview.py": "82ff74ed27a2154343a9d1a6de2c5d8c44ab15a328047f3f60e26674b4405b2b",
+    "robot_workbench/service.py": "47b70ff3cc3000ca74702f39efae537c6224ee64ebe50f5e83d8881a81fda5e6",
+    "robot_workbench/management.py": "9abb6639f2b74dd65b3c8534072d18f8f7640163dba753489aa4b21fde5a495f",
+    "scripts/serve_control_owner.py": "b1e278dda7f527a92a195530a6b88cdeab294ba38783231156e2b4d5faf5d0e7",
+    "scripts/serve_physical_device.py": "88a20b8904ae7fb8028286d104d9de5f6749a3b4ab2a3d995c0797216593328b",
+    "robot_workbench/target_interpreter.py": "9b6d1c85b6066eee5571cbef378cf3151eb77e31e7fe3ddaf0abb52286165235",
+    "robot_workbench/motion_reference.py": "b130ef73be0a337dd41428b269f917934789d9057f3fc97c237e5df9ea754ad2",
+    "robot_workbench/runtime.py": "5ad0751917e906c137ab658db2e46dea59ea5707e51d0731e952b2e2792d3bad",
+    "robot_workbench/inference.py": "57259cec0d552578d2bee3b6b0358eaae28f8003db9f318be3720714f1a755c9",
+    "robot_workbench/inference_owner.py": "eb6ebaa96b97075a393640d49687fc2d38207bd1e92a2b6a36efc312f2c7e95f",
+    "robot_workbench/inference_workflow.py": "852c854c566210174ca78459485ebdcfde168dbc26c6bd2fa7303fc6a396f1ec",
+    "robot_workbench/sdk_process.py": "676da849a15a9d3a95687238e6cad72d3b5838d322025c77bf082f1ec83d7fb2",
+    "robot_workbench/device_bootstrap.py": "69b75407643e6ec5a84b92f88c3bf98a394909b3f3eefdabc31f987b468d7d14",
+    "robot_workbench/recording_process.py": "17f9ec28071a70d9b31fa81a817236a2823db8868870630ab4a12df173e8e165",
+    "scripts/serve_sdk_control.py": "bda3b80df8a59e7c91f3abc132a9d0d9eeb30a76ace449af3b31d91d2cb5355b",
+    "calibration/examples/scripts/debug/joint_head_real_owner.py": "656a889e0ed241c6d86633de1899518b4fad62fcf2356b061bc21b9e188ce5fe",
+    "calibration/examples/scripts/debug/joint_head_workbench_live.py": "062d5b2177adfb907a5bd559747d2231b0e3a51a975a80e9c99200905ffb551c",
+    "calibration/infra/arx_env/joint_head_workbench_control.py": "0359affc010826453c5f73a7dd51be2ee7e35e8e990fc85cee5eac95b843ef41",
+    "calibration/infra/arx_env/joint_head_real_motion.py": "ed45c53495291dec7198067638c7adc85dce154d3a85bcdfe378436671e9b38a",
+    "calibration/infra/arx_env/joint_head_jaw_mapping.py": "eb57ef048272ee62440329f3abe7de6d8f7383af3e0eab64f4ed3a93833506c9",
+    "rule_based_workbench/real_control.py": "bf7ecb67a80083822abca450952766752e99a67d0e71b2fd0ba9996f32215755",
+    "rule_based_workbench/frozen_executor.py": "8bd91d6f71625b3cc352bee8f60caa7e92937c0e00497a59502c1470bb936fd8",
+    "rule_based_workbench/real_recording.py": "8e5ae5db6c7edd8bbbb0c5fa1a671afb6e5f5aaea3c309f464c88b460b54cb65",
+    "rule_based_workbench/a1_conservative_refinement.json": "2eabe0a7814a9b580238ba62c300c51c714b56137be7f635a94824a2a74f469e",
+    "rule_based_workbench/a1_cup_inset.json": "1d4aa4a40290ec532cfb0989c7be9e928a3f7f4dcf44233db8383d937120f24f",
+    "rule_based_workbench/a1_fixed_domain.json": "d24e3e391567108600c0d395d820e7ecdc2805fa690379f1291a8eb8a72b79ee",
+    "rule_based_workbench/a1_grasp_contact.json": "2c94211ee4ec7cf46c32e41c7ac47ae5ef5b3dfc3e337b4598ca0d34694375be",
+    "rule_based_workbench/a1_pickup_refinement.json": "0113fb5892415e3e1f280347dfbeb95ec4f5383c6fe067c5042fcc5b64569b83",
+    "rule_based_workbench/a1_pickup_refinement_v2.json": "c7906b53001344b7cc13ebb6fbf5f98d5d76c20398c78c867a9ea308081e1732",
+    "rule_based_workbench/a1_self_domain_certificate.json": "30e2fa38d228d5c57ae34481fd3ce0b8dadf3bbb8bf936b6b2c2d8e2a969bf36",
+    "rule_based_workbench/a1_support_domain.json": "4cdc3f1880bb225618ce4c386acc26b6206981ba98113129c4cf56fb29768421",
+    "rule_based_workbench/a1_support_near.json": "4a1ec025e792cce249b41e16cb90bba9978faf935600556e38197ef7adf1f25f",
+    "tests/test_control_operations.py": "5d241e04e6fd645815da2e105a95657981b2719f0fe8a2d4f56aaed7d47e9267",
+    "tests/test_target_model.py": "623e4f54e476775ab11ffb0998c01ac788a021bafa0ba94940daa7ffb9288285",
+    "calibration/tests/test_joint_head_jaw_mapping.py": "7316c97bc186c788fe241d4627948a0b560c4f6bcfdf977d9cc04e546085c12a",
+    "tests/test_workflow_adapter.py": "1f215eeed7c40309d3b8f564c347530ccef8657cc5f2afe1ff638e795bf7741c",
+    "tests/test_control_owner_process.py": "985c0791a955554a3b18bd4baf30d3c3920d3aee7864778fc993b852403f583f",
+    "tests/test_cpu_preview.py": "4105fc9be9b93010f91df446ef0451d977fe8b41c6ad7a572020c0a259fd4060",
+    "tests/test_target_preview.py": "34e45b5bb2e51affb867c495e1a35a8828fa5a1365c4ae2650a5c4c15826f595",
+    "tests/test_physical_preview.py": "31b93d9b1c1fd60d3377eb8abb7031d99372122bf397a670dc0686e2b7086585",
+    "tests/test_device_bootstrap.py": "342088e98c42a1353236d43af57df03fc159f1b9b39858d2adc7d03ea083f945",
+    "tests/test_management.py": "37fd0c27591f3b24f46ceca12ff23c2382fb632884cdccf0fbcc4a32c92ec3e6",
+    "tests/test_remote_collection_setup.py": "7cace3d295f43e5b20c40fedb972e9c032d2b5fd81bae373a69344fe1084aa21",
+    "tests/test_target_interpreter.py": "b54511f03320e22680a2eb9678fec6ad79ed95d720ccba27170e382b1f033e6f",
+    "tests/test_shared_target_routes.py": "e4279cd1361980fb1402160d54cc76b6694466b0e823a7909b19274499866042",
+    "tests/test_motion_reference.py": "1ca5f08b41ad255cdfef1a346adfdd569d38373dbde20ad55cdf1e986ab0e11f",
+    "tests/test_prepared_reference_backend.py": "caa49067214a17f9c595f122bb75c490710746ea8ace817f64e0a3291496d9e7",
+    "tests/test_inference.py": "94602a1962a28291b273b917eb103afe347c749c046adc0bb23f3fac43add741",
+    "tests/test_inference_owner.py": "d52e5c8f11ecfe8183b0748bcde65b87af2e6799a3dfa979e320064c967c0a19",
+    "tests/test_unified_runtime.py": "8a03c6d0849d4ce25afda98823afe12b5afc3fdb238ba5ff5035ef6729996116",
+    "tests/test_sdk_process.py": "6862852e14a638c82113651e50d32c0231c99eb1fdeb1444deed1b6d7fe2f7cd",
+    "tests/test_arx_output_guard.py": "c2837a8891b0218032b256cdec42dc9de05e464fdf53f828753ca063d268d6c2",
+    "tests/test_device_profile.py": "0a72a97ce66079ff73a088915b57157891b62e8853090f9ca24328e941e32aa4",
+    "tests/test_serve_physical_device.py": "64d9eb3b1995fa6cfe05f71f45aa1dfb33f36f85a1e6240c3d0de81d87cc6814",
+    "tests/test_http_service.py": "1397c5ca3f92507aeab61c3d24d68aa0854adb310dbf6531a9728f14a1daa901",
+    "tests/test_information_flow.py": "d08a099ca6fb714fcc0cdfbad65cdd1ab05b082f09eba4717c514f0fe37d3e84",
+    "tests/test_recording_process.py": "1af4d7fa64f0146971ba298224fb3295d2059a278914a73bdba5ecdd582bc638",
+    "tests/test_streaming_recording.py": "06a80174d68411f303d4a91e3e5884fd0cfd23e07f57d4db0a364369e314c4f5",
+    "tests/test_recording_event_budget.py": "d538a98e20b9a7dda60f3bac5769e2d0d074daca2507ea2baea36fdb8b12ee5c",
+    "calibration/tests/test_joint_head_real_motion.py": "a8a3df8141878e48fe6e2600603200ddb05d6b8833ef45753690446ebc180c1f",
+    "calibration/tests/test_joint_head_real_owner.py": "b0764fb4a5fb9b57396cef6b433cb204ebe7d47cb4e017c203714e96624d16d9",
+    "rule_based_workbench/test_frozen_executor.py": "ae8c1b1b63373aeae6faf8c35f5d9a0efe5b86f6bfa99950b182555183495ff3",
+    "rule_based_workbench/test_real_recording.py": "cf3c7670095f9e761d59bbd0dcc7526ed35d1077efbdb98bb9a9a2f390a22b0b",
+    "tests/test_inference_workflow.py": "eed63255926fbf1ae11d09ea4d600693b5ffb34d9e5a98a90486330a0e251850",
+    "tests/test_inference_memory.py": "200136f710793aa91a6410750e35f65844b78fe9f48c3e936913975531777aa5"
+  },
+  "workload": {
+    "cycles": 377,
+    "wall_s": 1800.4953102150466,
+    "commands": 8295,
+    "feedback": 109117,
+    "camera_frames": {
+      "base_0": 31100,
+      "left_wrist_0": 31112,
+      "right_wrist_0": 31128
+    },
+    "maximum_feedback_gap_s": 0.016614385996945202,
+    "videos": 1131,
+    "all_retired_objects_released": true,
+    "memory_bounds": {
+      "business": {
+        "tail_samples": 125,
+        "tail_span_KiB": 11248,
+        "tail_median_growth_KiB": 10044,
+        "passed": true
+      },
+      "owner": {
+        "tail_samples": 125,
+        "tail_span_KiB": 640,
+        "tail_median_growth_KiB": 616,
+        "passed": true
+      },
+      "camera": {
+        "tail_samples": 125,
+        "tail_span_KiB": 14568,
+        "tail_median_growth_KiB": 5972,
+        "passed": true
+      },
+      "producer": {
+        "tail_samples": 125,
+        "tail_span_KiB": 0,
+        "tail_median_growth_KiB": 0,
+        "passed": true
+      }
+    },
+    "maximum_queue_bytes": 44591813,
+    "queue_budget_bytes": 1073741824,
+    "history_entries": 1131,
+    "history_json_bytes": 6224437
+  },
+  "business_gc": {
+    "injections": 126,
+    "min_wall_s": 0.35435293207410723,
+    "max_wall_s": 0.3623842099914327
+  },
+  "business_http": {
+    "injections": 126,
+    "min_wall_s": 0.5006745390128344,
+    "max_wall_s": 0.5024687439436093
+  },
+  "owner_max_age_after_business_injection_s": 0.010429029003717005,
+  "actual_idle": {
+    "wall_s": 900.1330279160757,
+    "samples": 180,
+    "roles": {
+      "owner": {
+        "first_KiB": 88868,
+        "last_KiB": 88884,
+        "min_KiB": 88868,
+        "max_KiB": 88892,
+        "delta_KiB": 16
+      },
+      "business_launcher": {
+        "first_KiB": 13716,
+        "last_KiB": 13716,
+        "min_KiB": 13716,
+        "max_KiB": 13716,
+        "delta_KiB": 0
+      },
+      "sdk_supervisor": {
+        "first_KiB": 40508,
+        "last_KiB": 40508,
+        "min_KiB": 40508,
+        "max_KiB": 40508,
+        "delta_KiB": 0
+      },
+      "sdk_worker": {
+        "first_KiB": 50032,
+        "last_KiB": 50032,
+        "min_KiB": 50032,
+        "max_KiB": 50032,
+        "delta_KiB": 0
+      },
+      "business": {
+        "first_KiB": 215160,
+        "last_KiB": 219432,
+        "min_KiB": 215160,
+        "max_KiB": 219432,
+        "delta_KiB": 4272
+      }
+    },
+    "scope": "physical connected idle roles; proc read only, not active model/recording workload"
+  },
+  "recording_and_codec_path_real": true,
+  "hardware_and_model_inputs_in_workload": "explicit CPU substitutes; separate physical connected-idle observation",
+  "all_test_observers_exited": true,
+  "whole_service_long_term_memory_bounded": false,
+  "limits": [
+    "CPU substitute plant/model/pixels; real IPC, native-window command records, recorder and FFmpeg",
+    "Physical observation is connected idle only, no live fault injection",
+    "History catalog/media_files grow with valid results; not all RSS increment heap-attributed",
+    "Precision target <=0.2 degrees remains incomplete; home left J3 approximately 0.295 degrees"
+  ],
+  "raw_evidence_directory": ".evidence/gc-owner-isolation-20261021",
+  "raw_evidence_sha256": {
+    "full-memory-acceptance.json": "9e21ba80f7096f173b8eb61dff2af52dac466e14f4058cb40b1742559d6bd990",
+    "owner-publication.json": "835ab637ab9366e5d1b3de666cf1724dce4f60f9d5ad57930cb72e5af40b9770",
+    "business-reload-once.json": "0f9c30504d576608e00009e1d2c27435b1b22a8cf8e5eddbb62cb12d229cfd12",
+    "long-soak-v13-v14-equivalence.json": "1b609f03376629eefbf57a53f17f8782d91ea4133a1bafbbc800cc740667a0c5",
+    "linux-owner-v14-qualification.json": "feb647659c8ed98c5d9755ef2b067def541e1f4bd51be5743d0a694a0ee59746",
+    "full-codec-smoke-v5-latest.json": "76abaf703d74621d4049b6aaff93efddf26a204d881b0ea9e7b123447f68849a"
+  },
+  "git_closeout_validation": {
+    "passed": true,
+    "index_tree": "6bae1f692a58ca849ae93a50ebdcd8d9433db797",
+    "scope": "scripts/check.sh CPU and Node coverage; unchanged passing prefix reused after a display-only test correction",
+    "interpreter": "CPython 3.12.14 macOS arm64",
+    "unittest_executions": 1663,
+    "unittest_skipped": 36,
+    "unittest_passed": 1627,
+    "failures_in_final_coverage": 0,
+    "frontend_suites": 6,
+    "native_fk": {
+      "cases": 4,
+      "link_transforms": 92,
+      "max_absolute_error": 7.771561172376096e-16
+    },
+    "source_snapshot_stable": true,
+    "tracked_files_verified": 577,
+    "only_delta_from_prefix_snapshot": [
+      "tests/test_preview_subscription.py"
+    ],
+    "reused_linux_v14_qualified_manifest_files": 82,
+    "gpu_jobs": 0,
+    "sdk_acquisitions": 0,
+    "robot_commands": 0,
+    "logs": {
+      "git-closeout-full-check.log": {
+        "sha256": "79719c807d248a3a25b078307c83abca9f1c02f5efb84b0d7bba773a25274bc4"
+      },
+      "git-closeout-full-check-v2.log": {
+        "sha256": "42f18057f626d7dd7c015e2b54099ec449bfcb344c528814a5ae18ed028cca5c"
+      },
+      "git-closeout-full-check-v3-suffix.log": {
+        "sha256": "90723a5bd1938177ffbbfaed5db828ddc33c3cef2d6e1591ca32683f2a16bf3b"
+      }
+    },
+    "historical_failed_attempts": [
+      "check entry lacked calibration import path",
+      "legacy display-only overview assertion contradicted current intended rendering; test corrected, no product code change"
+    ],
+    "explicit_asset_skip": "AC_ONE_ASSET_ROOT collection 4/5-role checks not configured",
+    "source_commit": "9e35dc95fe4e06014343a8f8deb62284989db33a"
+  }
+}
