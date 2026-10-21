@@ -2,9 +2,10 @@
 import io
 import json
 from pathlib import Path
+import shlex
 from tempfile import TemporaryDirectory
 from unittest.mock import patch, Mock
-from detector_service import DetectorService, OWNED_GPU_CHECK, SUPERVISOR, gpu_check_command, validate_config
+from detector_service import DetectorService, OWNED_GPU_CHECK, SUPERVISOR, gpu_check_command, validate_config, launch_command
 
 
 def main():
@@ -35,6 +36,29 @@ def main():
         try:validate_config(c,t)
         except ValueError:pass
         else:raise AssertionError('invalid lifetime accepted')
+    # Remote services require an explicit contract opt-in; missing deadlines alone never opt in.
+    c=deepcopy(frozen);t=deepcopy(contract)
+    t['resources'].update(persistent_service=True,service_lifetime_seconds=None)
+    c['detector_service'].update(persistent_service=True,max_lifetime_seconds=None)
+    t['detector_service']=deepcopy(c['detector_service'])
+    validate_config(c,t)
+    for resources in ({'persistent_service':False,'service_lifetime_seconds':None},
+                      {'persistent_service':True},
+                      {'persistent_service':True,'service_lifetime_seconds':7200}):
+        bad=deepcopy(t);bad['resources']={'max_workers_per_instance':2,**resources}
+        try:validate_config(c,bad)
+        except ValueError:pass
+        else:raise AssertionError('unapproved remote persistence accepted')
+    c.update(detection_runtime_root='/remote/runtime',detection_python='/remote/venv/bin/python',
+             detection_cuda_home='/remote/cuda')
+    t['provenance']['code_sha256']['/remote/runtime/scripts/run_online_detection_episode.py']='d'*64
+    with TemporaryDirectory() as temp:
+        c['contract_path']=str(Path(temp)/'contract.json');Path(c['contract_path']).write_text(json.dumps(t))
+        command=shlex.split(launch_command(c));assert command[-1]=='persistent'
+        worker=json.loads(command[-2])
+        assert 'ROBOT_WORKBENCH_DETECTOR_RUNTIME_ROOT=/remote/runtime' in worker
+        assert any(value.startswith('ROBOT_WORKBENCH_DETECTOR_RUNTIME_IDENTITY=') for value in worker)
+        assert 'CUDA_VISIBLE_DEVICES=0' in worker and 'execution' not in c
     for service_root, allowed in [('/tmp/rbw-detector-20260923-0310/service-acde',True),('/tmp/unrelated/service',False),('/tmp/rbw-detector-/service',False),('/tmp/rbw-detector-test',False)]:
         tmp_config=deepcopy(frozen);tmp_contract=deepcopy(contract)
         tmp_config['detector_service'].update(root=service_root,socket=service_root+'/s')
@@ -76,12 +100,17 @@ def main():
     service.close();assert process.stdin.closed;process.wait.assert_called_once_with(timeout=30)
     process.terminate.assert_not_called();assert service.status()['status']=='stopped'
     # Supervisor EOF terminates only the Popen child it created, including that owned group.
-    child=Mock(pid=456,returncode=0);child.poll.return_value=None
-    with patch('subprocess.Popen',return_value=child) as spawn,patch('select.select',return_value=([0],[],[])),patch('os.read',return_value=b''),patch('os.killpg') as kill,patch('sys.argv',['supervisor','["detector"]','0']),patch('time.monotonic',side_effect=AssertionError('unlimited supervisor must not use a deadline')),patch('sys.stdin',Mock()):
-        try:exec(compile(SUPERVISOR,'supervisor','exec'),{})
-        except SystemExit:pass
-        spawn.assert_called_once();assert spawn.call_args.kwargs['start_new_session'] is True
-        assert kill.call_args.args[0]==456
+    for lifetime in ('0','persistent'):
+        child=Mock(pid=456,returncode=0);child.poll.return_value=None
+        with patch('subprocess.Popen',return_value=child) as spawn,patch('select.select',return_value=([0],[],[])),patch('os.read',side_effect=[b'x',b'']),patch('os.killpg') as kill,patch('sys.argv',['supervisor','["detector"]',lifetime]),patch('time.monotonic',side_effect=AssertionError('unlimited supervisor must not use a deadline')),patch('sys.stdin',Mock()):
+            try:exec(compile(SUPERVISOR,'supervisor','exec'),{})
+            except SystemExit:pass
+            spawn.assert_called_once();assert spawn.call_args.kwargs['start_new_session'] is True
+            assert kill.call_args.args[0]==456
+        with patch('subprocess.Popen') as spawn,patch('select.select',return_value=([0],[],[])),patch('os.read',return_value=b''),patch('sys.argv',['supervisor','["detector"]',lifetime]),patch('sys.stdin',Mock()):
+            try:exec(compile(SUPERVISOR,'supervisor','exec'),{})
+            except SystemExit:pass
+            spawn.assert_not_called()  # Stop/EOF before the remote launch does not create a model.
     # A structured service failure survives the subsequent SSH exit.
     manager=DetectorService()
     failed={'owner_token':spec['owner_token'],'identity':spec['identity'],'service_root':spec['root'],'socket':spec['socket'],

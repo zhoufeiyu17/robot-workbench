@@ -47,11 +47,13 @@ def request_paths(line, read_roots, output_root):
         raise ValueError('request exceeds 65536 bytes')
     message = json.loads(line, object_pairs_hook=unique_object, parse_constant=reject_constant)
     required = {'input', 'source', 'output'}
-    if not isinstance(message, dict) or not required <= message.keys() or message.keys()-required-{'speed_scale','physical_binding','environment'}:
+    if not isinstance(message, dict) or not required <= message.keys() or message.keys()-required-{'speed_scale','physical_binding','environment','operation'}:
         raise ValueError('request requires input/source/output, optional speed_scale/physical_binding')
+    operation=message.get('operation','plan')
+    if operation not in ('plan','warmup'):raise ValueError('unsupported planner operation')
     speed = message.get('speed_scale', .3)
-    if type(speed) not in (int, float) or not math.isfinite(speed) or not .1 <= speed <= 1.:
-        raise ValueError('speed_scale must be finite and between 0.1 and 1.0')
+    if type(speed) not in (int, float) or not math.isfinite(speed) or not .3 <= speed <= 1.7:
+        raise ValueError('speed_scale must be finite and between 0.3 and 1.7')
     paths = {key: allowed_path(message[key], read_roots) for key in ('input', 'source')}
     if not all(path.is_file() for path in paths.values()):
         raise ValueError('input and source must be files')
@@ -67,7 +69,9 @@ def request_paths(line, read_roots, output_root):
         raise FileExistsError(f'output already exists; refusing overwrite: {output}')
     from real_contract import namespace
     environment = namespace(message.get('environment','physical'))['environment']
-    return dict(**paths, output=output, speed_scale=float(speed), **({'environment':environment} if environment=='fake' else {}))
+    return dict(**paths, output=output, speed_scale=float(speed),
+        **({'operation':'warmup'} if operation=='warmup' else {}),
+        **({'environment':environment} if environment=='fake' else {}))
 
 
 @contextmanager
@@ -113,10 +117,48 @@ class Worker:
         from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
         urdf=ac_one_asset_spec(self.assets).urdf_path
         grip=gripper_geometry(planner,urdf);opening=grip['open_travel_mm']
-        state,_=initial_motion_state(planner,data,dict(source,synthetic_fixture=True),ac_one_dual_arm_zero_home_action_spec(),opening)
+        state,_=initial_motion_state(planner,data,source if self.formal else dict(source,synthetic_fixture=True),
+            ac_one_dual_arm_zero_home_action_spec(),opening)
         prepared=prepare_model(planner,observation,data,urdf,dict(state,left_joint7=opening/2000,left_joint8=opening/2000),self.engine_cache)
+        if not self.engine_cache.get('engine'):raise ValueError('model warmup did not initialize an engine')
         return dict(warmup_seconds=time.perf_counter()-started,model_initialized=True,model_key=self.engine_cache['key'],
-            backend='curobo_motiongen',policy_planned=False)
+            backend='curobo_motiongen',policy_planned=False,engine_reused=prepared['reused'],
+            timings={key:prepared[key] for key in ('model_reused','model_preparation_seconds','model_build_seconds',
+                'dynamic_update_seconds','engine_initialization_wall_seconds','cold_preparation_seconds',
+                'preparation_wall_seconds') if key in prepared})
+
+    def validate_source(self,request,parent,binding):
+        if not self.formal:return
+        from real_contract import is_device_source,validate_real_source
+        from joint_space import validate_initial_state
+        physical=is_device_source(parent)
+        if physical:
+            validate_real_source(parent,binding,environment=request.get('environment','physical'))
+            validate_initial_state(parent.get('initial_state'),parent['calibration_profile'])
+        if (not physical and (parent.get('schema_version')!='dual_gpu_pipeline.v1' or parent.get('lane')!='simulated-real')
+                or any(parent.get(key) for key in ('offline_candidate','synthetic_fixture','test_fixture'))):
+            raise ValueError('formal worker requires a non-fixture simulation source')
+        if not physical and binding is not None:raise ValueError('physical binding cannot relabel a simulation source')
+
+    def warmup_request(self,request):
+        """Initialize the model graph only; never call plan_loaded or issue controls."""
+        from motiongen_plan import write_new
+        output=request['output'];output.mkdir(parents=True,exist_ok=False)
+        report=dict(type='result',operation='warmup',status='failed',passed=False,output=str(output),
+            model_initialized=False,policy_planned=False,motion_requested=False,
+            worker_identity=getattr(self,'service_identity',None))
+        try:
+            parent=json.loads(request['source'].read_text())
+            binding=json.loads(request['physical_binding'].read_text()) if request.get('physical_binding') else None
+            self.validate_source(request,parent,binding)
+            report.update(self.warmup(request['input'],request['source']))
+            report.update(status='motiongen-warm-ready',passed=True,
+                input_sha256=hashlib.sha256(request['input'].read_bytes()).hexdigest(),
+                source_sha256=hashlib.sha256(request['source'].read_bytes()).hexdigest())
+        except Exception as error:
+            report.update(error=f'{type(error).__name__}: {error}',fatal_backend_error=isinstance(error,(RuntimeError,MemoryError)))
+        write_new(output/'result.json',report)
+        return report
 
     def load_geometry(self,request,parent,provenance):
         from playground_geometry import load
@@ -142,17 +184,7 @@ class Worker:
             provenance={key+'_sha256':hashlib.sha256(request[key].read_bytes()).hexdigest() for key in ('input','source')}
             provenance.update(parent_source_sha256=provenance['source_sha256'],planning_input_sha256=provenance['input_sha256'],parent_source_schema=parent['schema_version'])
             if self.formal:
-                from real_contract import is_device_source
-                physical=is_device_source(parent)
-                if physical:
-                    from real_contract import validate_real_source
-                    from joint_space import validate_initial_state
-                    validate_real_source(parent,binding,environment=request.get('environment','physical'))
-                    validate_initial_state(parent.get('initial_state'),parent['calibration_profile'])
-                if (not physical and (parent.get('schema_version')!='dual_gpu_pipeline.v1' or parent.get('lane')!='simulated-real')
-                        or any(parent.get(key) for key in ('offline_candidate','synthetic_fixture','test_fixture'))):
-                    raise ValueError('formal worker requires a non-fixture simulation source')
-                if not physical and binding is not None:raise ValueError('physical binding cannot relabel a simulation source')
+                self.validate_source(request,parent,binding)
                 source=parent
             else:
                 from verify_motiongen_chain import synthetic_source,seal_offline
@@ -184,6 +216,7 @@ class Worker:
                 input_sha256=provenance['input_sha256'],source_sha256=provenance['source_sha256'])
         except Exception as error:
             report['error']=f'{type(error).__name__}: {error}'
+            if getattr(error,'failure',None):report['failure']=error.failure
             report['fatal_backend_error']=isinstance(error,(RuntimeError,MemoryError))
         report['total_wall_seconds']=time.perf_counter()-began
         durable=dict(report)
@@ -198,7 +231,7 @@ def process_start_ticks():
 
 
 def serve(worker, spec, read_roots, output_root, ready):
-    """Sequential requests; stdin EOF and a bounded lifetime own this process."""
+    """Sequential requests; stdin EOF always ends the owned service."""
     from motiongen_plan import write_new
     from planner_service import validate_spec
     validate_spec(spec,private=True)
@@ -208,19 +241,20 @@ def serve(worker, spec, read_roots, output_root, ready):
         spec_sha256=hashlib.sha256(json.dumps(spec,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
         process_start_ticks=process_start_ticks(),
         model_initialized=False)
+    worker.service_identity=dict(pid=state['pid'],process_start_ticks=state['process_start_ticks'],identity=spec['identity'])
     def status(**values):
         state.update(values)
         temporary=root/'status.partial'
         temporary.write_text(json.dumps(state,allow_nan=False))
         os.chmod(temporary,0o600);temporary.replace(root/'status.json')
         emit(dict(type='service-state',service={k:v for k,v in state.items() if k!='owner_token'}))
-    deadline=time.monotonic()+spec['max_lifetime_seconds']
+    deadline=None if spec.get('persistent_service') else time.monotonic()+spec['max_lifetime_seconds']
     server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
     try:
         server.bind(str(endpoint)); os.chmod(endpoint,0o600); server.listen(1)
         status(); emit(dict(**ready,service={k:v for k,v in state.items() if k!='owner_token'}))
-        while time.monotonic()<deadline:
-            available,_,_=select.select([server,sys.stdin],[],[],max(0.,min(1.,deadline-time.monotonic())))
+        while deadline is None or time.monotonic()<deadline:
+            available,_,_=select.select([server,sys.stdin],[],[],1. if deadline is None else max(0.,min(1.,deadline-time.monotonic())))
             if sys.stdin in available and not os.read(sys.stdin.fileno(),1):break
             if server not in available:continue
             connection,_=server.accept()
@@ -235,9 +269,13 @@ def serve(worker, spec, read_roots, output_root, ready):
                         raise ValueError('planner request ownership mismatch')
                     request=request_paths(json.dumps(message['request']),read_roots,output_root)
                     status(status='busy')
-                    with progress_to_stderr():response=worker.plan(request)
+                    with progress_to_stderr():
+                        response=(worker.warmup_request(request) if request.get('operation')=='warmup' else worker.plan(request))
+                    response['worker_identity']=dict(pid=state['pid'],process_start_ticks=state['process_start_ticks'],
+                        identity=spec['identity'])
                 except Exception as error:response['error']=f'{type(error).__name__}: {error}'
-                finally:status(status='ready',model_initialized=bool(worker.engine_cache.get('engine')))
+                finally:status(status='ready',model_initialized=bool(worker.engine_cache.get('engine')),
+                    model_key=worker.engine_cache.get('key'))
                 try:connection.sendall((json.dumps(response,allow_nan=False)+'\n').encode())
                 except (BrokenPipeError,ConnectionResetError):
                     # The completed or failed request remains in its unique run;
@@ -284,10 +322,13 @@ def self_check():
                        output=str(outputs/'new'), speed_scale=.3)
         good = request_paths(json.dumps(message), (reads,), outputs)
         assert good['output'] == outputs/'new' and not good['output'].exists()
+        for speed in (.3,1.,1.7):
+            assert request_paths(json.dumps(dict(message,speed_scale=speed)),(reads,),outputs)['speed_scale']==speed
         bad = [dict(message, input='relative'), dict(message, source=str(reads/'escape.json')),
                dict(message, output=str(outputs/'escape'/'new')), dict(message, output=str(outputs/'existing')),
                dict(message, output=str(outputs/'..'/'outside'/'new')), dict(message, speed_scale=True),
-               dict(message, speed_scale=.09), dict(message, extra=1), [], {'input': message['input']}]
+               dict(message, speed_scale=.29), dict(message,speed_scale=1.71),
+               dict(message, extra=1), [], {'input': message['input']}]
         lines = [json.dumps(value) for value in bad]
         lines += ['{"input":"one","input":"two"}', json.dumps(message).replace('0.3', 'NaN'),
                   ' '*(MAX_MESSAGE_BYTES+1)]
@@ -322,7 +363,8 @@ def main():
         spec=load_private_spec(args.service_spec_file,args.spec_sha256)
         result=request_service(spec['socket'],spec['owner_token'],args.request)
         emit(result)
-        return 0 if result.get('passed') is True and result.get('status')=='motiongen-plan-ready' else 1
+        expected='motiongen-warm-ready' if args.request.get('operation')=='warmup' else 'motiongen-plan-ready'
+        return 0 if result.get('passed') is True and result.get('status')==expected else 1
     if any(getattr(args, name) is None for name in ('native_code', 'assets', 'allow_read_root', 'allow_output_root')):
         parser.error('native-code/assets/allow-read-root/allow-output-root are required')
     if bool(args.warmup_input) != bool(args.warmup_source):

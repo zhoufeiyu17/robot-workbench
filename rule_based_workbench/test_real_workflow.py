@@ -2,6 +2,8 @@
 from copy import deepcopy
 import hashlib
 import json
+import sys
+import inspect
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,7 +13,90 @@ from real_workflow import load, summary, playback, live_preview, image_evidence,
 from test_frozen_executor import fixture
 
 
+def check_disabled_workflow(source=None, plan=None, binding=None, *, mapping_path=None):
+    """Artifact loading plus optional real shared compiler on a CPU backend; no SDK or sends."""
+    from physical_motiongen import freeze_physical
+    if source is None:
+        from test_fixed_right_policy import fixture as fixed_fixture
+        source,model,binding=fixed_fixture();plan=freeze_physical(model,source,binding)
+    assert source['initial_state']['disabled_grippers']==['right']
+    with TemporaryDirectory() as directory:
+        root=Path(directory)
+        config=dict(environment='physical',robot_id=source['robot_id'],control_url='http://127.0.0.1:1',
+            cameras={camera:dict(serial=source['camera_serials'][side])
+                     for camera,side in zip(('base_0','left_wrist_0','right_wrist_0'),('head','left','right'))})
+        for name,value in (('source_path',source),('plan_path',plan),('hardware_binding',binding)):
+            path=root/(name+'.json');path.write_text(json.dumps(value));config[name]=str(path)
+        loaded=load(config)
+        assert not loaded['blockers'] and loaded['plan']==plan, loaded['blockers']
+        bridge=RealBridge.__new__(RealBridge);bridge.config=config
+        requests=[]
+        bridge.request=lambda url,payload,**kw:(requests.append(payload) or b'{}','application/json')
+        bridge.control(dict(action='preview_frozen'))
+        bridge.control(dict(action='confirm',token='fixture',confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+        assert [row['action'] for row in requests]==['preview_frozen','confirm']
+        assert requests[0]['source']==source and requests[0]['plan']==plan
+        compiled=None
+        if mapping_path is not None:
+            repo=Path(__file__).resolve().parents[1]
+            sys.path.insert(0,str(repo/'tests'))
+            from test_owner_clock import ClockBackend,Safety,calibration,jaw
+            from robot_workbench.runtime import Runtime
+            from execution_timeline import validate
+            from real_recording import RealRecorder
+            assert hashlib.sha256(Path(mapping_path).read_bytes()).hexdigest()==source['calibration_profile']['model_binding']['jaw_mapping_sha256']
+            jaw.configure_mapping(mapping_path)
+            first=source['initial_state']['planned_reported'];clock=[10.]
+            q=[*first['left_arm_joints'],jaw.feedback_sdk('left',first['left_gripper']),*first['right_arm_joints'],0.]
+            backend=ClockBackend(lambda:clock[0],q);backend.passive_jaws=('right',)
+            runtime=Runtime(calibration,Safety,lambda:backend,device_id='cpu-disabled-source-chain',environment='physical',
+                lock_root=root/'lock',initial_holder='collection',control_clock=lambda:clock[0],jaw_mapping_file=mapping_path,
+                hardware_binding=config['hardware_binding'],initialize_backend=lambda b:b.set_damping_hold(manual=True))
+            try:
+                credential=runtime.register_business('collection')
+                for _ in range(42):clock[0]+=.01;runtime.tick()
+                assert runtime.owner.backend.passive_jaws==('right',)
+                before=list(backend.events)
+                # Actual backend state still owns the runtime gate, regardless of source declaration.
+                backend.passive_jaws=()
+                try:runtime.submit(credential,dict(action='preview_frozen',source=source,plan=plan))
+                except ValueError as error:assert 'disabled' in str(error)
+                else:raise AssertionError('runtime accepted a source-only disabled declaration')
+                backend.passive_jaws=('right',)
+                review=runtime.submit(credential,dict(action='preview_frozen',source=source,plan=plan))
+                assert review['disabled_grippers']==['right'] and review['held_arms']==['right']
+                proxy=runtime.owner.pending[review['token']][0][0]
+                payload,frozen,base=runtime.owner.frozen_payloads[proxy.sha256]
+                runner_type=inspect.getclosurevars(runtime.collection.start_motion).nonlocals['Runner']
+                runner=runner_type(runtime.owner,proxy,payload,frozen,base)
+                from unittest.mock import patch
+                from robot_workbench.control_plan import load_artifact
+                with patch.object(runtime.owner,'runner',runner):
+                    compiled=runner.compile_runtime(q)
+                # This explicit CPU audit/recorder fixture is outside the Owner
+                # loop; production keeps only the sealed rows and artifact ref.
+                compiled=load_artifact(compiled['execution_timeline_ref'])
+                assert compiled['initialization']['disabled_grippers']==['right']
+                assert compiled['initialization']['held_arms']==['right']
+                assert compiled['initialization']['actual_start']['right_gripper']==0.
+                validate(compiled,plan)
+                recorder=RealRecorder(root/'recording',source,plan,binding,execution_timeline=compiled)
+                assert recorder.frozen.disabled_grippers==('right',)
+                recorder.abort()
+                # Queue only; never tick a confirmation or start an execution.
+                result=runtime.submit(credential,dict(action='confirm',token=review['token'],
+                    confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+                assert result['queued']=='confirm' and backend.events==before
+            finally:
+                backend.close();runtime.close();jaw.configure_mapping(None)
+        return dict(artifact_load_ready=True,bridge_preview_and_confirm_artifact_checks=True,
+            actual_shared_compiler=compiled is not None,disabled_grippers=['right'],
+            compiled_commands=len(compiled['commands']) if compiled else None,
+            runtime_disabled_guard_preserved=compiled is not None,backend_motion_calls=0)
+
+
 def main():
+    check_disabled_workflow()
     source,plan = fixture(.001)
     real = {k:deepcopy(v) for k,v in source.items() if k not in ('lane','adapter','instance_id','gpu')}
     serials = dict(head='h',left='l',right='r')

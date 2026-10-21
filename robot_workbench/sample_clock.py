@@ -2,6 +2,19 @@
 from bisect import bisect_left
 from math import isfinite
 
+POLICY_DURATION_TOLERANCE_S = .03
+
+
+def policy_duration_coverage(required_s, observed_s):
+    """User-approved policy-video coverage tolerance; preserve actual timestamps."""
+    if any(type(value) not in (int,float) or not isfinite(value) for value in (required_s,observed_s)) or required_s<=0:
+        raise ValueError('finite duration evidence and positive requested duration required')
+    shortfall=max(0.,required_s-observed_s)
+    return dict(required_duration_s=required_s,observed_duration_s=observed_s,
+        shortfall_s=shortfall,tolerance_s=POLICY_DURATION_TOLERANCE_S,
+        passed=observed_s>=0 and shortfall<=POLICY_DURATION_TOLERANCE_S+1e-9,
+        policy='policy_source_duration_30ms_v1',timestamps_modified=False)
+
 
 def host_sample_status(sample_wall_ns, now_ns, *, max_age_s=.5):
     """The existing wall-age gate, shared by readers and cached UI readiness."""

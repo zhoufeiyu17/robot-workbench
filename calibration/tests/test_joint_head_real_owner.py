@@ -25,6 +25,60 @@ class Safety:
         def release(self): self.backend.close(); self.state=Safety.TakeoverState.RELEASED
 
 class OwnerTest(unittest.TestCase):
+    def test_selected_arm_speed_sweep_keeps_inactive_outputs_and_logs_fast_motion(self):
+        for speed in (.03,.1,.3,.5):
+            with self.subTest(speed=speed):
+                self.events.clear()
+                backend=SimulatedBackend();backend.q[10]=-.0341424942
+                self.owner=Owner(backend,Safety,event=lambda *a,**k:self.events.append((a,k)))
+                for _ in range(45):self.advance(.01)
+                inactive=backend.q[:7]
+                review=self.owner.submit(dict(action='preview',active_arm='right',
+                    q_active=[*backend.q[7:10],0.,*backend.q[11:13]],max_velocity=speed))
+                self.assertEqual(review['plan']['active_arm'],'right')
+                self.assertGreaterEqual(review['plan']['duration_s'],1.875*.0341424942/speed-1e-12)
+                self.confirm(review['token'])
+                for _ in range(1500):
+                    self.advance(.005)
+                    if self.owner.runner and self.owner.runner.status in ('READY','FAULT'):break
+                self.assertEqual(self.owner.runner.status,'READY',self.owner.runner.reason)
+                self.assertEqual(backend.q[:7],inactive)
+                self.assertEqual({e[1] for e in backend.events if e[0] in ('begin','send')},{'right'})
+                records=[k['motion_record'] for a,k in self.events if a==('motion_state',) and k.get('motion_record')]
+                self.assertEqual(len(records),1)
+                record=records[0]
+                self.assertFalse(record['truncated']);self.assertEqual(record['execution_target'][10],0.)
+                samples=[row for row in record['rows'] if record['motion_started_s']<=row[0]<=record['motion_started_s']+record['plan_duration_s']]
+                self.assertGreaterEqual(len(samples),20,'fast movement must retain Owner samples, not page polling')
+                sent=[(row[0],row[5][10])for row in samples if row[5]is not None]
+                dt=np.diff([row[0]for row in sent]);velocity=np.diff([row[1]for row in sent])/dt
+                acceleration=np.diff(velocity)/((dt[:-1]+dt[1:])/2.)
+                self.assertLessEqual(np.max(np.abs(velocity)),speed+.001)
+                self.assertLessEqual(np.max(np.abs(acceleration)),5.03)
+                json.dumps(record,allow_nan=False)
+
+    def test_selected_arm_preview_rejects_invalid_bounds_and_mixed_targets(self):
+        good=dict(action='preview',active_arm='right',q_active=[0.]*6,max_velocity=.5)
+        for update in ({'active_arm':'both'},{'max_velocity':.5001},{'max_velocity':True},
+                       {'max_velocity':float('nan')},{'q_active':[0.]*5},{'q_active':[float('inf')]*6},
+                       {'q_target':[0.]*14}):
+            with self.subTest(update=update),self.assertRaises(ValueError):self.owner.submit(dict(good,**update))
+        self.assertFalse(any(e[0] in ('begin','send') for e in self.owner.backend.events))
+
+    def test_manual_feedback_margin_keeps_original_command_gate_and_latches_fault_once(self):
+        self.owner.position_environment='physical'
+        self.owner.backend.q[0]=-3.17
+        for _ in range(10):self.advance(.01)
+        value=self.owner.snapshot();raw=value['calibration_feedback']
+        self.assertTrue(value['feedback_healthy']);self.assertEqual(raw['qpos'][0],-3.17)
+        self.assertFalse(raw['position_boundary']['command_projection_allowed'])
+        with self.assertRaises(ValueError):feedback_to_command(raw['qpos'],value['joint_limits'],environment='physical')
+        self.owner.backend.q[0]=-3.18;self.advance(.01);epoch=self.owner.epoch
+        faults=sum(a==('fault',)for a,k in self.events)
+        for _ in range(10):self.advance(.01)
+        self.assertEqual(self.owner.epoch,epoch,'latched feedback fault must not revoke identity every tick')
+        self.assertEqual(sum(a==('fault',)for a,k in self.events),faults,'same latched fault must not log at 100Hz')
+
     def setUp(self):
         self.now=10000.; self.clock=patch('time.monotonic', side_effect=lambda:self.now); self.clock.start(); self.addCleanup(self.clock.stop)
         self.events=[]; self.owner=Owner(SimulatedBackend(), Safety, event=lambda *a,**k:self.events.append((a,k)))
@@ -439,6 +493,41 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(self.owner.runner.status, 'READY')
         self.assertAlmostEqual(self.owner.snapshot()['calibration_feedback']['qpos'][13], .0777)
 
+    def test_disabled_left_jaw_does_not_block_home_or_waypoint_capture(self):
+        from arx_env.joint_head_jaw_mapping import command_gap_mm, interpolate, GAP_MM, FEEDBACK
+        self.owner.backend.passive_jaws = ('left',)
+        def send(side, q):
+            a,b = (0,6) if side == 'left' else (7,13)
+            self.owner.backend.q[a:b] = q[a:b]
+            if side == 'right':
+                gap = command_gap_mm(side, q[b])
+                self.owner.backend.q[b] = interpolate(gap, GAP_MM[side], FEEDBACK[side])
+            else:
+                self.assertEqual(q[b], 0., 'disabled jaw target must stay unchanged')
+        with patch.object(self.owner.backend, 'send', send):
+            for command in (
+                dict(action='preview_both_home'),
+                dict(action='preview_workbench',waypoints=[
+                    dict(q12=[v]*12,speeds12=[.1]*12,jaw_gap_mm=[83.,83.],capture=True,sample_id=f'p{n}')
+                    for n,v in enumerate((.01,.02))])):
+                preview = self.owner.submit(command)
+                self.assertEqual(preview['disabled_grippers'], ['left'])
+                self.confirm(preview['token']); self.owner.tick()
+                captured = []
+                for _ in range(1200):
+                    self.advance(.04)
+                    self.assertNotEqual(self.owner.runner.status, 'FAULT', self.owner.runner.reason)
+                    if self.owner.capture_wait:
+                        captured.append(self.owner.capture_wait['sample_id'])
+                        self.capture_ack(); self.advance(.04)
+                    if self.owner.runner.status == 'READY' and not self.owner.sequence_remaining and self.owner.capture_sample is None:
+                        break
+                self.assertEqual(self.owner.runner.status, 'READY')
+                self.assertNotIn('left', self.owner.runner.target_error['jaw_mm'])
+                self.assertEqual(self.owner.runner.target_error['disabled_grippers'], ['left'])
+                if command['action'] == 'preview_workbench':
+                    self.assertEqual(captured, ['p0','p1'])
+
     def test_stop_invalidates_preview_and_replay(self):
         s=self.owner.snapshot(); target=s['calibration_feedback']['qpos'][:]; target[7]=.01
         p=self.owner.submit({'action':'preview','active_arm':'right','q_target':target})
@@ -560,6 +649,15 @@ class OwnerTest(unittest.TestCase):
         module=ModuleType('arx_env.backends.arx5_backend'); module.Arx5Backend=Base; module.Arx5BackendConfig=lambda **kw:SimpleNamespace(**kw)
         with patch.dict(sys.modules, {'arx_env.backends.arx5_backend':module}):
             b=hardware_backend()
+            trial=hardware_backend(disabled_grippers=('right',),right_j4_diagnostic_kp=60.)
+            trial80=hardware_backend(disabled_grippers=('right',),right_j4_diagnostic_kp=80.)
+            trial80d=hardware_backend(disabled_grippers=('right',),right_j4_diagnostic_kp=80.,right_j4_diagnostic_kd=1.6)
+            for gain in (True,30.,60.1,float('nan')):
+                with self.assertRaises(ValueError):hardware_backend(disabled_grippers=('right',),right_j4_diagnostic_kp=gain)
+            with self.assertRaises(ValueError):hardware_backend(right_j4_diagnostic_kp=60.)
+            for kp,kd in ((None,1.6),(60.,1.6),(80.,True),(80.,float('nan')),(80.,1.7)):
+                with self.assertRaises(ValueError):
+                    hardware_backend(disabled_grippers=('right',),right_j4_diagnostic_kp=kp,right_j4_diagnostic_kd=kd)
         b.command_guard=lambda:None
         q=[0.]*14; q[6]=q[13]=.02
         b._controllers['left'].state.p[0]=.0001
@@ -593,6 +691,52 @@ class OwnerTest(unittest.TestCase):
         b.command_guard=blocked
         with self.assertRaises(RuntimeError): b.send('left',q)
         self.assertEqual(len(b._controllers['left'].calls),count)
+        trial.command_guard=lambda:None
+        trial.set_damping_hold(manual=True)
+        for controller in trial._controllers.values():controller.calls.clear()
+        trial.begin('right',q)
+        self.assertEqual(trial._controllers['left'].calls,[])
+        gain=trial._controllers['right'].calls[-1][1]
+        np.testing.assert_allclose(gain.kp(),[80,70,70,60,30,20])
+        np.testing.assert_allclose(gain.kd(),[2,2,2,1,1,.7])
+        self.assertEqual(gain.gripper_kp,0.)
+        self.assertEqual(trial._controller_configs['right'].default_kp[3],30.)
+        count=len(trial._controllers['right'].calls)
+        with self.assertRaisesRegex(ValueError,'exactly one'):trial.begin('right',q)
+        with self.assertRaisesRegex(ValueError,'exactly one'):trial.begin('left',q)
+        with self.assertRaises(ValueError):trial.enable_collection_arm('right',q)
+        self.assertEqual(len(trial._controllers['right'].calls),count)
+        self.assertTrue(trial._joint_diagnostic_gain_active)
+        trial.set_damping_hold(manual=False)
+        self.assertFalse(trial._joint_diagnostic_gain_active)
+        self.assertEqual(trial._controllers['right'].calls[-1][1].kp()[3],9.)
+        trial80.command_guard=lambda:None
+        trial80.set_damping_hold(manual=True)
+        for controller in trial80._controllers.values():controller.calls.clear()
+        trial80.begin('right',q)
+        self.assertEqual(trial80._controllers['left'].calls,[])
+        np.testing.assert_allclose(trial80._controllers['right'].calls[-1][1].kp(),[80,70,70,80,30,20])
+        np.testing.assert_allclose(trial80._controllers['right'].calls[-1][1].kd(),[2,2,2,1,1,.7])
+        self.assertEqual(trial80._controllers['right'].calls[-1][1].gripper_kp,0.)
+        with self.assertRaisesRegex(ValueError,'exactly one'):trial80.begin('right',q)
+        trial80.set_damping_hold(manual=False)
+        self.assertFalse(trial80._joint_diagnostic_gain_active)
+        self.assertEqual(trial80._controllers['right'].calls[-1][1].kp()[3],9.)
+        trial80d.command_guard=lambda:None
+        trial80d.set_damping_hold(manual=True)
+        for controller in trial80d._controllers.values():controller.calls.clear()
+        trial80d.begin('right',q)
+        self.assertEqual(trial80d._controllers['left'].calls,[])
+        gain=trial80d._controllers['right'].calls[-1][1]
+        np.testing.assert_allclose(gain.kp(),[80,70,70,80,30,20])
+        np.testing.assert_allclose(gain.kd(),[2,2,2,1.6,1,.7])
+        self.assertEqual((gain.gripper_kp,gain.gripper_kd),(0.,0.))
+        self.assertEqual(trial80d._controller_configs['right'].default_kd[3],1.)
+        with self.assertRaisesRegex(ValueError,'exactly one'):trial80d.begin('right',q)
+        trial80d.set_damping_hold(manual=False)
+        self.assertFalse(trial80d._joint_diagnostic_gain_active)
+        self.assertEqual(trial80d._controllers['right'].calls[-1][1].kp()[3],9.)
+        self.assertAlmostEqual(trial80d._controllers['right'].calls[-1][1].kd()[3],1.1)
 
     def test_fault_pedal_releases_jaws_without_clearing_fault(self):
         self.owner.control.state=Safety.TakeoverState.FAULT

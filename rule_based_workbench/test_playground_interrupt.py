@@ -28,6 +28,7 @@ def main():
     with TemporaryDirectory() as folder:
         bridge=Bridge();service=Playground(folder,bridge,lambda:{'status':'ready'})
         service.state['environment']={'ready':True,'checks':[dict(key='dsw',status='ready')]}
+        service.state['warmup']={'status':'ready','message':'model initialized'}
         service.state.update(status='failed',plan={'validated':False,'timeline_digest':'old'})
         service.checkpoint(dict(validated=True,timeline_digest='old'),execution_pending=True,execution_output=Path(folder)/'jobs/old')
         assert service.start({'action':'interrupt'})=={'status':'ready'}
@@ -46,10 +47,10 @@ def main():
         assert not service.thread.is_alive() and service.state['status']=='ready'
         assert not service.state['busy'] and not service.state['plan']['validated']
         assert service.state['environment']['ready'] and service.state['progress']['stage_status']=='interrupted'
-        # The stopped client must not leave a persistent GPU request running.
+        # The stopped client waits for its bounded request without discarding a healthy worker.
         recovering=Event();allow_recovery=Event();callbacks=[]
         def recover(*,progress):
-            callbacks.append('stop-owned-planner');recovering.set()
+            callbacks.append('wait-owned-planner');recovering.set()
             assert allow_recovery.wait(2)
             callbacks.append('planner-ready')
         service.recover_planner=recover;entered.clear()
@@ -58,7 +59,8 @@ def main():
             service.start({'action':'interrupt'});assert recovering.wait(1)
             assert service.busy and not service.snapshot()['can_execute']
             allow_recovery.set();service.thread.join(2)
-        assert callbacks==['stop-owned-planner','planner-ready'] and service.state['status']=='ready'
+        assert callbacks==['wait-owned-planner','planner-ready'] and service.state['status']=='ready'
+        assert service.state['warmup']['status']=='ready'
         assert bridge.commands==[] and not service.state['plan']['validated']
         # Transport/receipt code may wrap InterruptedError as RuntimeError.
         def wrapped_plan(cfg,out,bridge,speed,progress=None,cancel=None):
@@ -68,7 +70,7 @@ def main():
         with patch('playground_pipeline.plan',wrapped_plan):
             service.start({'action':'plan','speed_scale':.3});assert entered.wait(1)
             service.start({'action':'interrupt'});service.thread.join(2)
-        assert callbacks==['stop-owned-planner','planner-ready'] and service.state['status']=='ready'
+        assert callbacks==['wait-owned-planner','planner-ready'] and service.state['status']=='ready'
         def failed_recovery(**kwargs):raise RuntimeError('owned planner recovery failed')
         service.recover_planner=failed_recovery;entered.clear()
         with patch('playground_pipeline.plan',pending_plan):
@@ -80,9 +82,12 @@ def main():
         # a failed recovery. Existing camera/control owners are left connected.
         init={'status':'failed','planner':{'status':'failed'}}
         service.initialization=lambda:dict(init)
-        def prepare_recovery(**kwargs):init.update(status='ready',planner={'status':'ready'})
+        def prepare_recovery(**kwargs):init.update(status='ready',planner={'status':'ready','model_initialized':False})
+        def warmup(*args,**kwargs):
+            init['planner']['model_initialized']=True
+            return {'model_initialized':True}
         service.recover_planner=prepare_recovery
-        with patch('playground_pipeline.prepare_environment',return_value=[dict(key='dsw',status='ready')]),patch('playground_pipeline.restore_plan',return_value=None):
+        with patch('playground_pipeline.prepare_environment',return_value=[dict(key='dsw',status='ready')]),patch('playground_pipeline.restore_plan',return_value=None),patch('playground_pipeline.warmup',warmup):
             service.start({'action':'prepare'});service.thread.join(2)
         assert service.state['status']=='ready' and service.snapshot()['environment']['ready']
         assert bridge.commands==[] and not service.state['plan']['validated']

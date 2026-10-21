@@ -19,6 +19,74 @@ from test_frozen_executor import fixture
 
 
 class UnifiedRuntimeTest(unittest.TestCase):
+    def test_release_waits_for_feedback_cycle_and_keeps_stop_independent(self):
+        runtime,creds=self.create();entered=threading.Event();release=threading.Event();result=[]
+        runtime.owner.backend.read_delay=lambda:(entered.set(),release.wait(1))
+        tick=threading.Thread(target=lambda:self.advance(runtime));tick.start();self.assertTrue(entered.wait(1))
+        self.assertTrue(runtime.snapshot(creds['calibration'])['allowed_operations']['release']['allowed'])
+        def request():
+            try:result.append(runtime.request_release(creds['calibration']))
+            except Exception as error:result.append(error)
+        worker=threading.Thread(target=request);worker.start()
+        time.sleep(.01);self.assertTrue(worker.is_alive())
+        runtime.request_stop();release.set();tick.join(1);worker.join(1)
+        self.assertFalse(worker.is_alive());self.assertEqual(len(result),1)
+        self.assertIsInstance(result[0],dict);self.assertEqual(runtime.release_receipt['status'],'requested')
+
+    def test_protected_worker_retirement_keeps_failed_close_evidence_and_revokes_old_commands(self):
+        runtime,creds=self.create()
+        backend=runtime.owner.backend._backend
+        backend.terminal_failure='CPU SDK worker heartbeat lost'
+        backend.is_connected=False
+        backend.protection_snapshot=lambda:dict(event=dict(id='cpu-protection',reason=backend.terminal_failure),worker_exit_confirmed=True)
+        disposed=[];backend.dispose=lambda:disposed.append(True)
+        with patch.object(backend,'close',side_effect=AssertionError('fault retirement is not normal SDK close')):
+            runtime.owner.commands.put(('cpu-stale-command',runtime.owner.epoch,None))
+            self.assertFalse(runtime.tick())
+            self.assertTrue(runtime.owner.commands.empty())
+            runtime.begin_maintenance()
+            result=runtime.retire_protected()
+        self.assertIsNone(runtime.fd);self.assertEqual(disposed,[True])
+        self.assertTrue(result['worker_exit_confirmed']);self.assertFalse(result['sdk_close_confirmed'])
+        self.assertEqual(result['mechanical_state'],'not_verified');self.assertFalse(result['motion_resumed'])
+        with self.assertRaises(PermissionError):runtime.submit(creds['calibration'],dict(action='stop'))
+
+    def test_idle_readiness_ignores_normal_tick_but_keeps_feedback_and_motion_guards(self):
+        runtime,creds=self.create()
+        runtime.tick_lock.acquire()
+        try:
+            state=runtime.snapshot(creds['calibration'])
+            self.assertTrue(state['allowed_operations']['handoff']['allowed'])
+            self.assertTrue(state['allowed_operations']['preview']['allowed'])
+            self.assertTrue(state['execution_settings']['update_allowed'])
+            self.assertTrue(state['idle_readiness']['allowed']);self.assertTrue(state['idle_readiness']['control_cycle_in_flight'])
+            runtime.owner.feedback_healthy=False
+            self.assertFalse(runtime.snapshot(creds['calibration'])['idle_readiness']['allowed'])
+            runtime.owner.feedback_healthy=True
+            runtime.owner.commands.put(('fixture',0,None))
+            self.assertIn('pending',runtime.snapshot(creds['calibration'])['idle_readiness']['reason'])
+            runtime.owner.commands.get_nowait()
+            runtime.owner.control.state=runtime.owner.states.FAULT
+            self.assertFalse(runtime.snapshot(creds['calibration'])['idle_readiness']['allowed'])
+            runtime.owner.control.state=runtime.owner.states.READY
+        finally:runtime.tick_lock.release()
+
+    def test_handoff_waits_for_one_cycle_and_checks_cancellation_at_boundary(self):
+        runtime,creds=self.create();entered=threading.Event();release=threading.Event();result=[]
+        runtime.owner.backend.read_delay=lambda:(entered.set(),release.wait(1))
+        tick=threading.Thread(target=lambda:self.advance(runtime));tick.start();self.assertTrue(entered.wait(1))
+        active=[True]
+        def handoff():
+            try:result.append(runtime.handoff(creds['calibration'],'collection',active=lambda:active[0]))
+            except Exception as error:result.append(error)
+        worker=threading.Thread(target=handoff);worker.start()
+        time.sleep(.01);self.assertTrue(worker.is_alive());active[0]=False;release.set()
+        tick.join(1);worker.join(1);self.assertFalse(worker.is_alive())
+        self.assertIsInstance(result[0],ValueError);self.assertIn('revoked',str(result[0]));self.assertEqual(runtime.holder,'calibration')
+        runtime.owner.backend.read_delay=lambda:None
+        runtime.handoff(creds['calibration'],'collection',active=lambda:True)
+        self.assertEqual(runtime.holder,'collection')
+
     def setUp(self):
         jaw.configure_mapping(None)
         self.directory = TemporaryDirectory()
@@ -276,13 +344,13 @@ class UnifiedRuntimeTest(unittest.TestCase):
         runtime.owner.source_validator(plan,source)
         runtime.handoff(creds['calibration'], 'collection')
         entered, resume = threading.Event(), threading.Event()
-        original, result = runtime.owner.source_validator, []
+        original, result = runtime.collection.compile_frozen, []
         def slow(*args):
             entered.set(); self.assertTrue(resume.wait(2.)); return original(*args)
         def preview():
             try:result.append(runtime.submit(creds['collection'], dict(action='preview_frozen', source=source, plan=plan)))
             except Exception as error:result.append(error)
-        with patch.object(runtime.owner, 'source_validator', slow):
+        with patch.object(runtime.collection, 'compile_frozen', slow):
             worker = threading.Thread(target=preview); worker.start()
             self.assertTrue(entered.wait(1.))
             runtime.handoff(creds['collection'], 'calibration')
@@ -316,7 +384,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
                     for _ in range(42):
                         runtime.tick(); time.sleep(.01)
                 entered, resume, compiled, publish = (threading.Event() for _ in range(4))
-                original, submit, result = runtime.owner.source_validator, runtime.collection.submit, []
+                original, submit, result = runtime.collection.compile_frozen, runtime.collection.submit, []
                 events = list(runtime.owner.backend.events)
                 stamp = runtime.owner.cache['calibration_feedback']['sample_time_s']
                 def slow(*args):
@@ -330,7 +398,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
                 def preview():
                     try:result.append(runtime.submit(creds['collection'], command))
                     except Exception as error:result.append(error)
-                with patch.object(runtime.owner, 'source_validator', slow), \
+                with patch.object(runtime.collection, 'compile_frozen', slow), \
                      patch.object(runtime.collection, 'submit', hold_compiled):
                     worker = threading.Thread(target=preview); worker.start()
                     try:
@@ -354,8 +422,12 @@ class UnifiedRuntimeTest(unittest.TestCase):
                         elif case == 'pedal':runtime.owner.pedal_snapshot = lambda:(1, False, True)
                         elif case == 'revision':runtime.preview_revision += 1
                         resume.set()
-                        if case in ('source','wall','pedal','revision'):
-                            self.assertTrue(compiled.wait(1.))
+                        if case in ('source','wall','pedal'):
+                            deadline=time.monotonic()+3
+                            while not compiled.wait(.005) and time.monotonic()<deadline:
+                                if case=='wall':runtime.tick()
+                            self.assertTrue(compiled.is_set())
+                            live=runtime.owner.cache['calibration_feedback']['sample_time_s']
                             self.assertFalse(runtime.owner.pending, 'compiler published before the final runtime gate')
                             self.assertFalse(runtime.owner.frozen_payloads)
                     finally:
@@ -533,7 +605,9 @@ class UnifiedRuntimeTest(unittest.TestCase):
         runner = runtime.owner.runner
         self.assertTrue(hasattr(runner, 'frozen'), 'accepted collection degraded to a calibration runner')
         payload = deepcopy(runner.payload)
-        self.assertEqual(payload, command)
+        from robot_workbench.control_plan import load_artifact
+        self.assertEqual(load_artifact(payload['plan_ref']['source']),command['source'])
+        self.assertEqual(load_artifact(payload['plan_ref']['plan']),command['plan'])
         for _ in range(2000):
             self.advance(runtime)
             if runner.status == 'READY':break

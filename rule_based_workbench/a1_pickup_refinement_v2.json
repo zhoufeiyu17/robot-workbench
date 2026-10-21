@@ -1,0 +1,21 @@
+{
+  "schema": "a1_pickup_refinement.v2",
+  "profile": "pickup-c11-v1",
+  "parent_effective_recipe_sha256": "18a0bf5b004a69d9bf18227c6d139812cddbd77ad864bc044913a03b5a2e2476",
+  "extra_refine_cells": {
+    "/ac_one_A1_pending_calibration_r2/left_link6/collisions/left_link6/node_STL_BINARY_/mesh": [
+      "15/0/0/0",
+      "3/1/1/0/1/1"
+    ]
+  },
+  "source_parts_sha256": "c00f4285d0381e8b7fc9188016074cb878ccc6a9e8fc349af276e0e4efa86818",
+  "left_sphere_cap": 1147,
+  "total_sphere_cap": 1819,
+  "offline_generation_digest": "1cf3e30547f968fb9dc904cc246e5b7cccee3a801891a5e2ddad914ca77a4d67",
+  "eligible_recorded_candidate_indices": [
+    0
+  ],
+  "diagnostic_eligibility": "one carry-compatible native-free, source-closing-proven and strict-proxy-clear retained GPU pose",
+  "pregrasp_diagnosis_digest": "61e3d25cf10ef7cbd61a52fff74756d14a8108f334a606afd73cec108969a240",
+  "parent_c10_failed_result_digest": "9a12fa4b1eb8874617cde0d4d166eea75ca74bbd43056cc7d7edf2729f13569e"
+}

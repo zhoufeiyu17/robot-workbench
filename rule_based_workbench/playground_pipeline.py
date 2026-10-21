@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 import hashlib
 import json
+import math
 import re
 import shlex
 import shutil
@@ -11,12 +12,13 @@ import subprocess
 import time
 
 from integration import _digest
-from run_pipeline import load_config, python_command, ssh, transport, lane, bounded_command, AFFINITY_EXEC, isaac_environment
+from run_pipeline import load_config, python_command, ssh, transport, lane, bounded_command, AFFINITY_EXEC, isaac_environment,execution_context,write_pipeline_config
 from detector_service import gpu_check_command
 from real_contract import namespace, validate_namespace, owner_matches_environment
 from launch_environment import HOST_PYTHON,clean_command
 
 NATIVE_STAGE_STATUS = {'playground-geometry-inputs':'geometry-inputs-ready',
+                       'playground-warmup':'motiongen-warm-ready',
                        'playground-first-frame':'first-frame-ready',
                        'playground-plan':'geometric-plan-ready','playground-replay':'completed'}
 
@@ -61,7 +63,7 @@ def prepare_environment(config,progress=None,cancel=None):
         if (not isinstance(units,list) or any(not isinstance(u,str) or
                 not u.startswith('collection-preview-') or not u.endswith('.service') or '/' in u for u in units)):
             raise ValueError('only task-owned collection preview units are allowed')
-        subprocess.run(['systemctl','--user','start',*units],check=True,timeout=30,capture_output=True)
+        subprocess.run(['systemctl','--user','is-active',*units],check=True,timeout=30,capture_output=True)
     for side in ('simulated-real','dsw-scene'):
         if cancel is not None and cancel():raise InterruptedError('环境准备已中断')
         if progress: progress('检查 '+side+' 与候选代码', next_label='检查仿真 DSW' if side=='simulated-real' else '等待检测器、控制与三路相机就绪')
@@ -77,12 +79,26 @@ def prepare_environment(config,progress=None,cancel=None):
         run(transport(cfg,side,python_command(script,*paths),timeout=25),check=True,timeout=25,capture_output=True,cancel=cancel)
         channel='本机' if cfg.get('execution') else 'SSH'
         checks.append(dict(key=side,label=('检测 DSW' if side=='simulated-real' else '仿真 DSW')+' · 连接与资产预检',
-                           status='ready',message=(channel+'、候选代码、资产与 cuRobo 依赖可读；GPU 规划在规划步骤初始化，尚未常驻预热'
-                               if gpu_planning else channel+'、候选代码与资产可用；Isaac 在规划步骤初始化，尚未常驻预热')))
+                           status='ready',message=channel+'连接、冻结资产与依赖预检通过；模型预热状态单独核验'))
     return checks
 
 
 def native_stage(cfg, mode, output, *, speed=.3, plan_path=None, execution_timeline_path=None, timeout_s=600):
+    if mode=='geometry-inputs' and cfg.get('scene_service'):
+        from scene_service import private_spec_arguments
+        private=private_spec_arguments(cfg);root=cfg['remote_run_root'];wb=cfg['workbench_code']
+        request=dict(source=root+'/detection-bridge/source.json',suite=root+'/detection-bridge/suite.json',
+            physical_binding=root+'/detection-bridge/hardware-binding.json',output=output)
+        args=['/isaac-sim/python.sh','-u','-B',wb+'/scene_worker.py','--request',json.dumps(request),
+            '--service-spec-file',private['spec_path'],'--spec-sha256',private['spec_sha256']]
+        environment={'PYTHONPATH':wb+':'+str(Path(wb).parent),'PYTHONNOUSERSITE':'1','PYTHONDONTWRITEBYTECODE':'1'}
+        command=shlex.join(clean_command(args,environment))
+        return dict(name='playground-geometry-inputs',side='dsw-scene',timeout_s=timeout_s,
+            label='更新本轮场景与首帧 · 常驻服务',result_path=output+'/result.json',
+            **({'execution_config':execution_context(cfg),
+                'terminate_grace_s':25,'failure_result':output+'/result.json'} if cfg.get('execution') else {}),
+            argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30',str(timeout_s),'bash','-c',command]),timeout=timeout_s,
+                **({'failure_result':output+'/result.json'} if cfg.get('execution') else {})))
     root=cfg['remote_run_root']; wb=cfg['workbench_code']
     args=['/isaac-sim/python.sh','-u','-B',wb+'/playground_sim.py','--mode',mode,
           '--source',root+'/detection-bridge/source.json','--suite',root+'/detection-bridge/suite.json',
@@ -101,15 +117,18 @@ def native_stage(cfg, mode, output, *, speed=.3, plan_path=None, execution_timel
     command=gpu_check_command(cfg,'dsw-scene')+' && '+shlex.join(clean_command([HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,*args],environment))
     return dict(name='playground-'+mode,side='dsw-scene',timeout_s=seconds,
                 result_path=output+'/result.json',
-                **({'execution_config':{'execution':cfg['execution'],'workbench_code':cfg['workbench_code']},
+                **({'execution_config':execution_context(cfg),
                     'terminate_grace_s':25,'failure_result':output+'/result.json'} if cfg.get('execution') else {}),
                 argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30',str(seconds),'bash','-c',command]),timeout=seconds,
                     **({'failure_result':output+'/result.json'} if cfg.get('execution') else {})))
 
 
-def geometry_stage(cfg,output,*,speed=.3,initial=None):
+def geometry_stage(cfg,output,*,speed=.3,initial=None,operation='plan'):
     root=cfg['remote_run_root'];wb=cfg['workbench_code']
     backend=cfg.get('planning_backend','native');gpu=backend in ('curobo','motiongen') and not initial
+    if operation not in ('plan','warmup'):raise ValueError('unsupported geometry operation')
+    if operation=='warmup' and (backend!='motiongen' or initial or not cfg.get('planner_service')):
+        raise ValueError('explicit model warmup requires the owned MotionGen service')
     args=['/isaac-sim/python.sh','-u','-B',wb+'/playground_geometry.py',
           '--input',root+'/playground-scene/planning-input.json','--source',root+'/detection-bridge/source.json',
           '--native-code',cfg['native_code'],'--assets',cfg['assets'],'--output',output,'--speed-scale',str(speed),
@@ -124,6 +143,7 @@ def geometry_stage(cfg,output,*,speed=.3,initial=None):
             private=private_spec_arguments(cfg)
             request=dict(input=root+'/playground-scene/planning-input.json',source=root+'/detection-bridge/source.json',
                          output=output,speed_scale=speed,physical_binding=binding)
+            if operation=='warmup':request['operation']='warmup';expected='motiongen-warm-ready'
             if cfg.get('environment')=='fake':request['environment']='fake'
             args=['/isaac-sim/python.sh','-u','-B',wb+'/curobo_worker.py','--request',json.dumps(request),
                   '--service-spec-file',private['spec_path'],'--spec-sha256',private['spec_sha256']]
@@ -147,12 +167,12 @@ def geometry_stage(cfg,output,*,speed=.3,initial=None):
             MAX_JOBS='4',TORCH_CUDA_ARCH_LIST='12.0')
     command=shlex.join(clean_command([HOST_PYTHON,'-I','-B','-c',AFFINITY_EXEC,*args],environment))
     if gpu:command=gpu_check_command(cfg,'dsw-scene')+' && '+command
-    return dict(name='playground-plan',side='dsw-scene',timeout_s=600,
+    return dict(name='playground-warmup' if operation=='warmup' else 'playground-plan',side='dsw-scene',timeout_s=600,
                 expected_native_status=expected,
-                label=('GPU 碰撞检查与规则轨迹规划' if gpu else '复用已验证轨迹并调整速度'
-                       if backend=='curobo' and initial else stage_label('playground-plan')),
+                label=('初始化并预热规划模型 · 不规划、不运动' if operation=='warmup' else 'GPU 碰撞检查与规则轨迹规划' if gpu else '复用已验证轨迹并调整速度（限速核验）'
+                       if backend in ('curobo','motiongen') and initial else stage_label('playground-plan')),
                 result_path=output+'/result.json',
-                **({'execution_config':{'execution':cfg['execution'],'workbench_code':cfg['workbench_code']}} if cfg.get('execution') else {}),
+                **({'execution_config':execution_context(cfg)} if cfg.get('execution') else {}),
                 argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30','600','bash','-c',command]),timeout=600))
 
 
@@ -170,6 +190,20 @@ def fetch(remote, local, *, limit=64*1024*1024, cancel=None, execution_config=No
         raise
 
 
+def preparation_failure(producer_stage,outcome,result_path,output,error):
+    """Keep producer evidence; missing native facts are never inferred from text."""
+    outcome=outcome if isinstance(outcome,dict) else {}
+    def text(key):
+        value=outcome.get(key)
+        return value if isinstance(value,str) and value else 'unknown'
+    return dict(stage={'playground-geometry-inputs':'scene_setup','playground-warmup':'model_init',
+        'detect':'detection'}.get(producer_stage,'unknown'),producer_stage=producer_stage or 'unknown',
+        native_phase=text('phase'),native_status=text('status'),
+        native_reason=text('reason') if text('reason')!='unknown' else text('error'),
+        error=str(error),native_result_path=str(result_path) if result_path is not None else None,
+        job_output=str(output))
+
+
 def run_stages(stages,output,contract,progress=None,cancel=None):
     output=Path(output); (output/'logs').mkdir(parents=True,exist_ok=True)
     deadline=time.monotonic()+contract['resources']['max_wall_time_minutes']*60
@@ -183,7 +217,7 @@ def run_stages(stages,output,contract,progress=None,cancel=None):
                               stages=rows+[dict(label=label,status='running',elapsed_s=0)])
         started=time.monotonic(); argv,seconds=bounded_command(stage,deadline-time.monotonic())
         receipt=dict(stage=stage['name'],label=label,status='running')
-        failure_announced=False
+        failure_announced=False;outcome=None
         def poll_failure():
             nonlocal failure_announced
             if failure_announced:return
@@ -222,10 +256,16 @@ def run_stages(stages,output,contract,progress=None,cancel=None):
                 expected=stage.get('expected_native_status',NATIVE_STAGE_STATUS[stage['name']])
                 if not isinstance(outcome,dict) or outcome.get('status')!=expected:
                     detail=outcome.get('error',outcome.get('status')) if isinstance(outcome,dict) else 'not an object'
+                    failure=outcome.get('failure') if isinstance(outcome,dict) else None
+                    if isinstance(failure,dict) and failure.get('kind')=='motion_limit' and isinstance(failure.get('message'),str):
+                        from control_motion import MotionLimitError
+                        raise MotionLimitError(failure,f'{stage["name"]} native result did not complete: {detail}; see {local_result}')
                     raise RuntimeError(f'{stage["name"]} native result did not complete: {detail}; see {local_result}')
             if result.returncode: raise RuntimeError(f'{stage["name"]} failed ({result.returncode}); see {destination}')
             receipt['status']='completed'
         except Exception as error:
+            error.preparation_failure=preparation_failure(stage['name'],outcome,
+                receipt.get('native_result_path'),output,error)
             receipt.update(status='failed',error=str(error)); raise
         finally:
             receipt['actual_s']=time.monotonic()-started; receipts.append(receipt)
@@ -235,11 +275,7 @@ def run_stages(stages,output,contract,progress=None,cancel=None):
     return receipts
 
 
-def plan(config,output,bridge,speed_scale,progress=None,cancel=None):
-    from real_acquisition import prepare_inputs
-    from real_pipeline import preparation_stages
-    from real_contract import validate_real_plan
-    from frozen_executor import validate_plan_evidence
+def _new_scene_context(config,output,bridge):
     output=Path(output); output.mkdir(parents=True,exist_ok=True)
     cfg,contract,_=load_config(Path(config['pipeline_config']))
     active,_,_=load_config(Path(bridge.config['preparation']['pipeline_config']))
@@ -258,24 +294,67 @@ def plan(config,output,bridge,speed_scale,progress=None,cancel=None):
         contract['detector_service']=deepcopy(active_service)
     if cfg.get('planning_backend')=='motiongen' and cfg.get('planner_service')!=active.get('planner_service'):
         raise ValueError('candidate 与当前工作台规划进程身份不一致；尚未开始采集观测')
+    if cfg.get('scene_service')!=active.get('scene_service'):
+        raise ValueError('candidate 与当前工作台场景服务身份不一致；尚未开始采集观测')
     previous=cfg['remote_run_root']; cfg['remote_run_root']=previous+'-playground-'+uuid4().hex
     contract['filesystem']['writable_roots']=[cfg['remote_run_root'] if p==previous else p for p in contract['filesystem']['writable_roots']]
-    cfg.update(render_replay=False,contract_path=str(output/'contract.json'))
-    save(output/'config.json',cfg)
-    if 'config_sha256' in contract.get('provenance',{}):
-        contract['provenance']['config_sha256']={'config.json':hashlib.sha256((output/'config.json').read_bytes()).hexdigest()}
-    save(output/'contract.json',contract)
+    cfg['render_replay']=False
+    return cfg,contract,environment
+
+
+def prepare_scene(config,output,bridge,progress=None,cancel=None):
+    from real_acquisition import prepare_inputs
+    from real_pipeline import preparation_stages
+    output=Path(output)
+    cfg,contract,environment=_new_scene_context(config,output,bridge)
+    write_pipeline_config(cfg,contract,output,cancel=cancel)
     acquisition=deepcopy(bridge.config['preparation'])
     acquisition['environment']=environment
     acquisition['pipeline_config']=str(output/'config.json')
     if progress: progress('采集观测并冻结实测起点',next_label='导入观测并检测杯子与咖啡机')
+    def observation_progress(state):
+        if progress:
+            reset = state.get('last_reset')
+            cause = {'detection_missing':'检出失败','cup_position_span':'杯子位置波动达到6mm',
+                     'capture_gap':'观测采样中断','track_or_asset_changed':'目标身份改变'}.get((reset or {}).get('reason'),'')
+            detail = f'连续有效观测 {state["span_s"]:.2f}/3.00 源秒 · {state["frame_count"]}/9 帧'
+            if state['reobserve_count']:
+                detail += f' · 已重新计时 {state["reobserve_count"]} 次（{cause}）'
+            progress(detail,next_label='冻结有效窗口与实测起点')
     prepared=prepare_inputs(acquisition,output,read_snapshot=lambda:bridge.camera('base_0','snapshot.zip')[0],
-                            read_owner=bridge.owner,cancel=cancel)
+                            read_owner=bridge.owner,cancel=cancel,progress=observation_progress)
     cfg,contract,_=load_config(Path(prepared['pipeline_config']))
     # No previous full rollout, no duplicate geometry solve, and no replay before execution.
-    stages=preparation_stages(cfg,contract,prepared['capture_dir'],prepared['physical_binding'],scene_only=True)
-    remote=cfg['remote_run_root']+'/playground-plan'
+    stages=preparation_stages(cfg,contract,prepared['capture_dir'],prepared['physical_binding'],scene_only=True,online_detection=prepared.get('online_detection',False))
     stages.append(native_stage(cfg,'geometry-inputs',cfg['remote_run_root']+'/playground-scene'))
+    return cfg,contract,prepared,stages,environment
+
+
+def warmup(config,output,bridge,progress=None,cancel=None):
+    """Fresh observed scene -> explicit model preparation; no policy or motor command."""
+    output=Path(output)
+    cfg,contract,prepared,stages,_=prepare_scene(config,output,bridge,progress,cancel)
+    remote=cfg['remote_run_root']+'/playground-warmup'
+    stages.append(geometry_stage(cfg,remote,operation='warmup'))
+    run_stages(stages,output,contract,progress,cancel)
+    fetch(remote+'/result.json',output/'warmup-result.json',cancel=cancel,execution_config=cfg)
+    result=json.loads((output/'warmup-result.json').read_text())
+    if (result.get('status')!='motiongen-warm-ready' or result.get('model_initialized') is not True
+            or result.get('policy_planned') is not False or result.get('motion_requested') is not False):
+        raise ValueError('模型预热未完成：'+str(result.get('error','missing initialized model receipt')))
+    return dict(result,config_path=prepared['pipeline_config'])
+
+
+def plan(config,output,bridge,speed_scale,progress=None,cancel=None):
+    output=Path(output)
+    cfg,contract,prepared,stages,environment=prepare_scene(config,output,bridge,progress,cancel)
+    return _finish_plan(cfg,contract,prepared,stages,environment,output,speed_scale,progress,cancel)
+
+
+def _finish_plan(cfg,contract,prepared,stages,environment,output,speed_scale,progress,cancel):
+    from real_contract import validate_real_plan
+    from frozen_executor import validate_plan_evidence
+    remote=cfg['remote_run_root']+'/playground-plan'
     stages.append(geometry_stage(cfg,remote,speed=speed_scale))
     run_stages(stages,output,contract,progress,cancel)
     if progress: progress('读取并校验规划产物',next_label='核对首帧后点击 action 真机执行')
@@ -296,11 +375,107 @@ def plan(config,output,bridge,speed_scale,progress=None,cancel=None):
                 summary=f'{len(result["ticks"])} 个目标，{result["duration_s"]:.2f} 秒；几何检查通过，动态仿真尚未执行')
 
 
+def plan_assisted(config,output,bridge,speed_scale,assisted_directory,progress=None,cancel=None):
+    """Explicit one-run artifact input. No automatic detection fallback or motion."""
+    from artifact_transport import manifest,transfer
+    from real_contract import validate_real_source
+    from real_observation import read_initial_sample
+    from joint_space import state_near
+    from run_pipeline import absolute,below,build_plan,pinned_files
+    if type(speed_scale) not in (int,float) or not .3<=speed_scale<=1.7:
+        raise ValueError('运动速度必须在 30% 至 170% 之间')
+    if cancel is not None and cancel():raise InterruptedError('辅助定位规划已中断')
+    directory=Path(assisted_directory).resolve()
+    names=('source.json','suite.json','hardware-binding.json')
+    contents={}
+    for name in names:
+        path=directory/name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size>4*1024*1024:
+            raise ValueError('bounded regular assisted source/suite/binding files required')
+        contents[name]=path.read_bytes()
+    source,suite,binding=(json.loads(contents[name]) for name in names)
+    if source.get('adapter')!='operator_assisted_rgbd':
+        raise ValueError('plan_assisted requires an explicitly accepted operator-assisted source')
+    validate_real_source(source,binding,environment='physical')
+    initial=source['initial_state'];episode=(suite.get('episodes') or [None])[0]
+    if (len(suite.get('episodes',[]))!=1 or not isinstance(episode,dict)
+            or any(episode.get(key)!=value for key,value in source['scene']['episode_scene'].items())
+            or (episode.get('metadata') or {}).get('initial_robot_state')!=initial['model']
+            or episode['metadata'].get('initial_robot_state_digest')!=_digest(initial['model'])
+            or set(episode['metadata'])!={'initial_robot_state','initial_robot_state_digest'}):
+        raise ValueError('assisted suite differs from its accepted scene/initial state/cup geometry')
+    preparation=bridge.config['preparation']
+    installed_path=bridge.config.get('trusted_binding_path') or preparation['acquisition']['acquisition_binding_path']
+    installed=json.loads(Path(installed_path).read_text())
+    if any(installed.get(key)!=binding.get(key) for key in ('robot_id','camera_serials','calibration_profile_digest')):
+        raise ValueError('current robot/calibration differs from the assisted source')
+    def check_owner():
+        if cancel is not None and cancel():raise InterruptedError('辅助定位规划已中断')
+        current,evidence=read_initial_sample(bridge.owner,environment='physical')
+        previous=initial['owner_samples'][-1];disabled=initial.get('disabled_grippers',[])
+        if (any(evidence[key]!=previous[key] for key in ('pid','command_epoch'))
+                or evidence['sample_wall_ns']<previous['sample_wall_ns']
+                or evidence.get('disabled_grippers',[])!=disabled
+                or not state_near(current,initial['measured_reported'],joint_rad=.01,disabled_grippers=disabled)):
+            raise ValueError('current Owner or measured joints changed; rebind the assisted scene to fresh measured state')
+        return evidence
+    check_owner()
+    output=Path(output)
+    cfg,contract,environment=_new_scene_context(config,output,bridge)
+    if (environment!='physical' or cfg.get('planning_backend')!='motiongen'
+            or any(cfg.get(key) for key in ('force_diagnostic','planned_input_root','observation_input_root','detection_input_root'))):
+        raise ValueError('assisted planning requires a new physical MotionGen run, not replay/reused detection')
+    channel=preparation['acquisition']['transport'];remote_root=absolute(channel['remote_root'])
+    if (below(remote_root,cfg['remote_run_root']) or not all(any(below(remote_root,root)
+            for root in contract['filesystem'].get(key,[])) for key in ('readonly_roots','writable_roots'))):
+        raise ValueError('assisted upload must remain in the existing authorized acquisition root')
+    package=output/('assisted-inputs-'+uuid4().hex);package.mkdir()
+    for name,data in contents.items():(package/name).write_bytes(data)
+    expected=manifest(package,names);remote=remote_root+'/'+package.name
+    if progress:progress('绑定本次人工辅助定位与实测起点',next_label='构造场景并规划；不执行机械臂')
+    transfer(direction='upload',local_root=str(output.resolve()),local_directory=package.name,
+        remote_root=remote_root,remote_directory=package.name,expected=expected,endpoint=channel['endpoint'],cancel=cancel)
+    pins=contract.setdefault('provenance',{}).setdefault('input_sha256',{})
+    pins.update({remote+'/'+name:row['sha256'] for name,row in expected['files'].items()})
+    config_path=write_pipeline_config(cfg,contract,output,cancel=cancel)
+    cfg,contract,_=load_config(Path(config_path))
+    check_owner()  # Upload/config work must not silently replace the reviewed start.
+    stages=[stage for stage in build_plan(cfg,contract)
+            if stage['name'].startswith('preflight-') or stage['name'] in ('initialize','shared-storage')]
+    script='''import json,pathlib,shutil,sys
+sys.path[:0]=[sys.argv[1],str(pathlib.Path(sys.argv[1]).parent)]
+from artifact_transport import verify
+from real_contract import validate_real_source
+from a1_asset_validation import validate_assets
+origin=pathlib.Path(sys.argv[2]);expected=json.loads(sys.argv[3]);verify(origin,expected)
+source=json.loads((origin/'source.json').read_text());binding=json.loads((origin/'hardware-binding.json').read_text())
+validate_real_source(source,binding,environment='physical')
+validate_assets(sys.argv[5],source['calibration_profile'],json.loads(sys.argv[6]))
+target=pathlib.Path(sys.argv[4]);target.mkdir()
+for name in expected['files']:shutil.copyfile(origin/name,target/name)
+verify(target,expected)
+'''
+    all_pins={key:value for group in pinned_files(contract) for key,value in group.items()}
+    command=python_command(script,cfg['workbench_code'],remote,json.dumps(expected),
+        cfg['remote_run_root']+'/detection-bridge',cfg['assets'],json.dumps(all_pins))
+    stages.append(dict(name='operator-assisted-source-import',label='导入本次辅助定位并核对标定资产',
+        side='dsw-scene',timeout_s=60,group=None,
+        argv=transport(cfg,'dsw-scene',shlex.join(['timeout','-k','30','60','bash','-c',command]),timeout=60)))
+    stages.append(native_stage(cfg,'geometry-inputs',cfg['remote_run_root']+'/playground-scene'))
+    result=_finish_plan(cfg,contract,dict(pipeline_config=str(config_path)),stages,environment,
+                        output,speed_scale,progress,cancel)
+    if (json.loads(Path(result['source_path']).read_text())!=source
+            or json.loads(Path(result['hardware_binding']).read_text())!=binding):
+        raise ValueError('returned plan source differs from this explicit assisted request')
+    result.update(observation_mode='operator_assisted_rgbd',operator_assistance_digest=binding['operator_assistance_digest'])
+    result['summary']+='；本次人工辅助定位，未声明自动连续观测通过'
+    return result
+
+
 def restore_plan(config,directory,bridge):
     """Restore a checked pre-action checkpoint, never resume physical commands."""
     from real_contract import validate_real_plan
     from frozen_executor import validate_plan_evidence
-    from real_recording import verify_raw
     directory=Path(directory).resolve()
     checkpoint=directory/'prepared-plan.json'
     if not checkpoint.is_file():return None
@@ -327,9 +502,10 @@ def restore_plan(config,directory,bridge):
     if any(installed.get(key)!=binding.get(key) for key in
            ('robot_id','camera_serials','calibration_profile_digest')):
         raise ValueError('真机或标定版本已改变，需要重新规划')
-    if saved.get('execution_pending'):
-        # An interrupted execution is recoverable only with a sealed zero-command
-        # receipt. Unknown/mid-motion outcomes cannot become a fresh action button.
+    if saved.get('execution_pending') or saved.get('execution_output'):
+        # Only a failure before confirm is recoverable. Zero recorded commands
+        # can mean recorder failure, including after completed physical motion.
+        # Check old refunded checkpoints too when their execution output remains.
         execution=Path(saved['execution_output']).resolve()
         if not execution.is_relative_to(directory/'jobs'):raise ValueError('执行记录目录无效')
         phase=execution/'execution-phase.json'
@@ -338,18 +514,7 @@ def restore_plan(config,directory,bridge):
             save(checkpoint,saved)
             prepared['validated']=True
             return prepared
-        receipt=execution/'recording-directory.json'
-        if not receipt.is_file():return None
-        raw=Path(json.loads(receipt.read_text())['directory']).resolve()
-        if not raw.is_relative_to(Path(bridge.config['local_recording_root']).resolve()):
-            raise ValueError('录制回执不在当前真机录制目录')
-        if not (raw/'manifest.json').is_file():return None
-        manifest,_,recorded_plan=verify_raw(raw,environment=environment)
-        if recorded_plan['timeline_digest']!=prepared['timeline_digest']:
-            raise ValueError('恢复回执属于另一条轨迹')
-        if type(manifest.get('command_count')) is not int or manifest['command_count']!=0:return None
-        saved['execution_pending']=False
-        save(checkpoint,saved)
+        return None
     prepared['validated']=True
     return prepared
 
@@ -392,10 +557,18 @@ def motion_outcome(owner):
 
 def resident_wait_budget(config,contract):
     """An absolute wall budget; simulated trajectory duration is not a wall ETA."""
+    from launch_environment import persistent_service
+    budget=contract['resources']['max_wall_time_minutes']*60
+    if type(budget) not in (int,float) or not math.isfinite(budget) or not 0<budget<=7200:
+        raise ValueError('resident operation requires a finite wall-time budget up to 120 minutes')
     deadline=config['resident_deadline_wall_ns']
+    if persistent_service(contract['resources']):
+        if deadline is not None or 'resident_deadline_wall_ns' not in contract['resources']:
+            raise ValueError('persistent resident must freeze null deadlines')
+        return budget
     if type(deadline) is not int or deadline!=contract['resources'].get('resident_deadline_wall_ns'):
         raise ValueError('resident deadline differs from the frozen execution contract')
-    seconds=min(contract['resources']['max_wall_time_minutes']*60,(deadline-time.time_ns())/1e9-45)
+    seconds=min(budget,(deadline-time.time_ns())/1e9-45)
     if seconds<=0:raise TimeoutError('resident lifetime cannot cover execution and 45 s shutdown reserve')
     return seconds
 
@@ -531,7 +704,8 @@ def prepare_remote_runtime(cfg,parent_path,timeline,*,cancel=None):
 sys.path[:0]=[sys.argv[1],sys.argv[1].rsplit("/",1)[0]]
 from execution_timeline import prepare,initialize,validate
 plan=json.loads(pathlib.Path(sys.argv[2]).read_text());init=json.loads(sys.argv[3]);p=pathlib.Path(sys.argv[4])
-runtime=initialize(prepare(plan),init['actual_start'],init['command_limits'],environment=init['environment'])
+runtime=initialize(prepare(plan),init['actual_start'],init['command_limits'],environment=init['environment'],
+    disabled_grippers=init.get('disabled_grippers',()),held_arms=init.get('held_arms',()))
 assert runtime['timeline_digest']==sys.argv[5],'shared execution derivation differs'
 if p.exists():
  assert validate(json.loads(p.read_text()),plan)['timeline_digest']==sys.argv[5]
@@ -579,6 +753,55 @@ print(result['timeline_digest'])
     if response.stdout.strip()!=plan['timeline_digest']:raise ValueError('DSW remaining timeline receipt differs')
     return destination
 
+def stop_physical_execution(bridge, output):
+    """One bounded stop request for this execution only; never a physical-stop claim."""
+    import fcntl
+    output=Path(output);receipt=output/'execution-stop-request.json'
+    phase=output/'execution-phase.json'
+    if not phase.exists() or json.loads(phase.read_text()).get('phase')!='confirm_requested':
+        return dict(status='not_requested',reason='confirmation_not_requested',physical_stop='unverified')
+    with (output/'execution-stop.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        if receipt.exists():return json.loads(receipt.read_text())
+        result=dict(status='unknown',physical_stop='unverified',automatic_retry=False,stop_attempted=False)
+        try:
+            identity=json.loads((output/'execution-control-identity.json').read_text())
+            owner=bridge.owner()
+            pid=owner.get('owner_pid',owner.get('pid'))
+            if (type(identity.get('owner_pid')) is not int or identity.get('command_epoch') is None
+                    or identity.get('preview_owner_pid')!=identity['owner_pid']
+                    or identity.get('preview_command_epoch')!=identity['command_epoch']
+                    or not identity.get('preview_token_sha256') or owner.get('holder')!='collection'
+                    or identity.get('holder')!='collection'
+                    or pid!=identity['owner_pid'] or owner.get('command_epoch')!=identity['command_epoch']
+                    or identity.get('runtime_nonce') is not None and owner.get('runtime_nonce')!=identity['runtime_nonce']):
+                result['reason']='owner_identity_or_holder_changed_or_unavailable'
+            else:
+                frozen=owner.get('frozen') or {};motion=owner.get('motion') or {}
+                instance=owner.get('execution_instance_id')
+                pending=(instance==identity.get('before_execution_instance_id')
+                    and frozen==identity['before_frozen'] and motion==identity['before_motion']
+                    and not owner.get('automatic_enabled'))
+                same=(instance is not None and instance!=identity.get('before_execution_instance_id')
+                    and frozen.get('timeline_digest')==identity['timeline_digest']
+                    and (not identity.get('execution_instance_id') or instance==identity['execution_instance_id'])
+                    and (not identity.get('confirmed_plan_sha256')
+                         or motion.get('plan_sha256')==identity['confirmed_plan_sha256']))
+                if same and not owner.get('automatic_enabled') and frozen.get('status') in ('completed','failed','stopped'):
+                    result.update(status='already_terminal',reason='same_execution_terminal',execution_status=frozen['status'])
+                elif pending or same:
+                    # Persist before HTTP: a lost stop reply must never cause a second request.
+                    result.update(status='request_pending',stop_attempted=True,
+                        reason='revoke_same_owner_pending_confirmation' if pending else 'same_owner_and_execution')
+                    save(receipt,result)
+                    result['reply']=bridge.control(dict(action='stop'))
+                    result['status']='requested'
+                else:result['reason']='execution_changed_or_this_confirmation_not_identified'
+        except Exception as error:result.update(status='unknown',error=str(error))
+        save(receipt,result)
+        return result
+
+
 def execute(config,output,bridge,prepared,progress=None,cancel=None):
     from real_bridge import RealBridge
     from real_contract import validate_real_plan
@@ -595,13 +818,19 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
     scratch_root=contract.get('camera_spool_root') if resident else None
     if scratch_root is not None:
         from robot_workbench.collection_setup import validated_spool_directories
+        from local_execution import owner_scope
         validated_spool_directories({name:row.get('recording_directory','') for name,row in bridge.config.get('cameras',{}).items()},
-                                   contract,cfg['execution']['plant']['scope'])
+                                   contract,owner_scope(cfg['execution']))
     original=json.loads(Path(prepared['plan_path']).read_text())
     source=json.loads(Path(prepared['source_path']).read_text()); binding=json.loads(Path(prepared['hardware_binding']).read_text())
     remote_plan=cfg['remote_run_root']+'/playground-plan/plan.json'
     speed=prepared['speed_scale']
-    if speed != original.get('execution_derivation',{}).get('speed_scale',1):
+    # Each planner keeps speed in its existing, validated derivation receipt.
+    derivation=(original.get('execution_derivation')
+        or original.get('physical_gpu_conversion',{}).get('model_validation',{}).get('derivation')
+        or original.get('planning_validation',{}).get('derivation') or {})
+    speed_changed=speed != derivation.get('speed_scale',1)
+    if speed_changed:
         # Reuse the frozen observed scene; never silently change speed on a checked timeline.
         adjusted=cfg['remote_run_root']+'/playground-speed-'+uuid4().hex
         run_stages([geometry_stage(cfg,adjusted,speed=speed,initial=cfg['remote_run_root']+'/playground-plan/initial-plan.json')],output,contract,progress,cancel)
@@ -612,7 +841,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         fetch(adjusted+'/plan.json',output/'plan.json',cancel=cancel,execution_config=cfg); remote_plan=adjusted+'/plan.json'
     else: shutil.copyfile(prepared['plan_path'],output/'plan.json')
     plan_value=json.loads((output/'plan.json').read_text())
-    if original.get('execution_resume') and speed != original.get('execution_derivation',{}).get('speed_scale',1):
+    if original.get('execution_resume') and speed_changed:
         from half_speed_plan import resume_initial_open
         plan_value=resume_initial_open(plan_value,source,binding,original['execution_resume']['measured_metal_gap_mm'],environment=environment)
         save(output/'plan.json',plan_value)
@@ -635,6 +864,16 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
     preview=lane.control(dict(action='preview_frozen'))
     if preview.get('timeline_digest')!=plan_value['timeline_digest']: raise ValueError('preview timeline differs')
     before=lane.owner()
+    if (preview.get('owner_pid',before.get('owner_pid',before.get('pid')))!=before.get('owner_pid',before.get('pid'))
+            or preview.get('command_epoch',before.get('command_epoch'))!=before.get('command_epoch')):
+        raise ValueError('Owner changed after preview; confirmation was not requested')
+    control_identity=dict(owner_pid=before.get('owner_pid',before.get('pid')),command_epoch=before.get('command_epoch'),
+        preview_owner_pid=preview.get('owner_pid'),preview_command_epoch=preview.get('command_epoch'),
+        runtime_nonce=before.get('runtime_nonce'),timeline_digest=plan_value['timeline_digest'],
+        before_execution_instance_id=before.get('execution_instance_id'),holder=before.get('holder'),
+        before_frozen=deepcopy(before.get('frozen') or {}),before_motion=deepcopy(before.get('motion') or {}),
+        preview_token_sha256=hashlib.sha256(preview['token'].encode()).hexdigest())
+    save(output/'execution-control-identity.json',control_identity)
     previous=(before.get('recording') or {}).get('directory')
     previous_runtime=(before.get('execution_timeline') or {}).get('path')
     runtime_enabled='compiled_tick_count_before_initialization' in preview
@@ -658,13 +897,6 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
                     simulation_scope=simulation_scope,
                     execution_wait=resident_wait_progress(owner,execution_started,execution_budget)
                     if execution_started is not None else None)
-    def stop_resident():
-        if resident:
-            state=lane.owner()
-            if execution_identity and state.get('execution_instance_id')!=execution_identity['execution_instance_id']:
-                raise ValueError('Owner now has a different execution instance; it was not stopped')
-            if state.get('automatic_enabled') or confirmation_requested and execution_identity is None:
-                lane.control(dict(action='stop'))
     try:
         if cancel is not None and cancel():raise InterruptedError('执行准备已中断')
         if resident:
@@ -673,9 +905,15 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         # Both lanes start from one click; there is deliberately no per-tick barrier.
         if not runtime_enabled:
             process,simulation,simulation_started=start_simulation()
-        save(output/'execution-phase.json',dict(phase='confirm_requested',timeline_digest=prepared['timeline_digest']))
-        confirmation_requested=True
-        confirmation=lane.control(dict(action='confirm',token=preview['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+        if cancel is not None and cancel():raise InterruptedError('执行确认前已中断')
+        def mark_confirmation():
+            nonlocal confirmation_requested
+            save(output/'execution-phase.json',dict(phase='confirm_requested',timeline_digest=prepared['timeline_digest']))
+            confirmation_requested=True
+        confirmation=lane.control(dict(action='confirm',token=preview['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True),
+            cancel=cancel,before_confirm=mark_confirmation)
+        control_identity['confirmed_plan_sha256']=confirmation.get('plan_sha256')
+        save(output/'execution-control-identity.json',control_identity)
         if resident:
             execution_identity=resident_execution_identity(lane,confirmation,before,execution_deadline,cancel=cancel)
             save(output/'execution-instance.json',execution_identity)
@@ -697,9 +935,13 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         deadline=execution_deadline if resident else time.monotonic()+(runtime or {}).get('duration_s',plan_value['duration_s'])+60
         while time.monotonic()<deadline:
             if cancel is not None and cancel():
-                if not resident and lane.owner().get('automatic_enabled'):lane.control(dict(action='stop'))
                 raise InterruptedError('fake 同 plant 采集已中断' if resident else '真机采集已中断')
             owner=lane.owner(); candidate=owner.get('recording') or {}
+            if (not control_identity.get('execution_instance_id')
+                    and owner.get('execution_instance_id')!=control_identity['before_execution_instance_id']
+                    and (owner.get('frozen') or {}).get('timeline_digest')==plan_value['timeline_digest']):
+                control_identity['execution_instance_id']=owner.get('execution_instance_id')
+                save(output/'execution-control-identity.json',control_identity)
             if resident and progress:
                 progress('fake 同 plant 采集运行中；独立目标回放为 L3 辅助',**resident_evidence())
             if candidate.get('directory') and candidate['directory']!=previous and not (output/'recording-directory.json').exists():
@@ -823,11 +1065,11 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
                     errors=errors,error='; '.join(f'{key}: {value}' for key,value in errors.items()) if errors else None,
                     recording=recording,**resident_evidence())
     except InterruptedError:
-        stop_resident()
+        if confirmation_requested:stop_physical_execution(lane,output)
         raise
     except Exception as error:
-        if resident and not isinstance(error,ConfirmationRejected):
-            try:stop_resident()
+        if confirmation_requested and (environment=='physical' or not isinstance(error,ConfirmationRejected)):
+            try:stop_physical_execution(lane,output)
             except Exception as stop_error:errors['controller_stop']=str(stop_error)
         # Preserve already-exported videos on a simulation failure, never label raw complete.
         if videos or errors:

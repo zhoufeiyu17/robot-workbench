@@ -132,22 +132,25 @@ class X5MeshCheck(unittest.TestCase):
         with self.assertRaises(KeyError):
             model.frames_with_feedback({'q_reported_rad':np.zeros(12)}, {}, np.zeros(12))
         with self.assertRaises(ValueError):
-            model.frames_with_feedback({**row,'jaw_gap_mm':[85.001,40]}, {}, offsets)
+            model.frames_with_feedback({**row,'jaw_gap_mm':[89.001,40]}, {}, offsets)
 
     def test_measured_endpoint_error_is_retained_but_not_commandable(self):
-        from arx_env.joint_head_jaw_mapping import measured_jaw_gaps, command_sdk
+        from arx_env.joint_head_jaw_mapping import measured_jaw_gaps, command_sdk, hold_command_sdk
         from arx_env.joint_head_workbench_geometry import jaw_gaps
         model = X5MeshModel(self.geometry())
-        row = {'q_reported_rad': np.zeros(12), 'jaw_gap_mm': [-2., 85.]}
+        row = {'q_reported_rad': np.zeros(12), 'jaw_gap_mm': [-2., 87.]}
         fk = model.frames_with_feedback(row, {}, np.zeros(12))
         self.assertAlmostEqual(fk['left/link6/1'][1,3], (-.002-.06)/2)
-        self.assertAlmostEqual(fk['right/link6/1'][1,3], (.085-.06)/2)
-        np.testing.assert_array_equal(measured_jaw_gaps([-2,85]), [-2,85])
-        for value in ([-2.001,0], [0,85.001], [0,float('nan')], [0,float('inf')], [0]):
+        self.assertAlmostEqual(fk['right/link6/1'][1,3], (.087-.06)/2)
+        np.testing.assert_array_equal(measured_jaw_gaps([-2,87]), [-2,87])
+        for value in ([-2.001,0], [0,89.001], [0,float('nan')], [0,float('inf')], [0]):
             with self.assertRaises(ValueError): measured_jaw_gaps(value)
-        with self.assertRaises(ValueError): jaw_gaps([-2,85])
-        for side, gap in [('left',-2),('right',85)]:
+        with self.assertRaises(ValueError): jaw_gaps([-2,87])
+        for side, gap in [('left',-2),('right',87)]:
             with self.assertRaises(ValueError): command_sdk(side,gap)
+        for side in ('left','right'):
+            self.assertEqual(hold_command_sdk(side,87),command_sdk(side,83))
+            with self.assertRaises(ValueError): command_sdk(side,83.001)
 
     def test_real_fit_passes_dataset_provenance_to_solver(self):
         from unittest.mock import patch

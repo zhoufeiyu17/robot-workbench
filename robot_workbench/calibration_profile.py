@@ -30,9 +30,12 @@ def _inside(path, root):
     return path.resolve()
 
 
-def _capture_evidence(config,capture_root,records,expected_install):
+def _capture_evidence(config,capture_root,records,expected_install,*,environment='fake'):
     """Same origin checks for fresh C and a pinned diagnostic C source."""
-    batches={};pins={};resume=_resume_receipt(config,capture_root.parent)
+    from robot_workbench.sample_clock import clock_for_source
+    simulated=environment=='fake'
+    batches={};pins={};resume=_resume_receipt(config,capture_root.parent) if simulated else None
+    expected_clock=clock_for_source(config,environment)
     if resume:pins[config['calibration_resume']['path']]=config['calibration_resume']['sha256']
     for kind in ('head','wrist'):
         record=records[kind]
@@ -45,13 +48,19 @@ def _capture_evidence(config,capture_root,records,expected_install):
         origin=(resume or {}).get('capture_origins',{}).get(str(path.parent.relative_to(capture_root)))
         if origin and (_sha(path)!=origin['dataset_sha256'] or _sha(completion)!=origin['completion_sha256']):
             raise ValueError('imported capture differs from its pinned original batch')
-        if (data.get('runtime_environment')!='fake' or data.get('simulation_only') is not True
-                or data.get('robot_source')!='simulated' or data.get('robot_id')!=config['robot_id']
+        runtime_environment=data.get('runtime_environment')
+        if (environment=='physical' and 'runtime_environment' not in data
+                and data.get('environment')=='hardware' and data.get('robot_source')=='physical'
+                and data.get('simulation_only') is False and data.get('robot_id')==config['robot_id']):
+            runtime_environment='physical'  # Legacy schema interpretation; retain original bytes and clocks.
+        if (runtime_environment!=environment or data.get('simulation_only') is not simulated
+                or data.get('robot_source')!=('simulated' if simulated else 'physical') or data.get('robot_id')!=config['robot_id']
                 or data.get('asset_geometry_id')!=config['asset_geometry_id']
                 or data.get('asset_seal_sha256')!=config['asset_seal_sha256']
-                or data.get('clock')!=(origin['clock'] if origin else config['clock'])
+                or clock_for_source(data,environment)!=(origin['clock'] if origin else expected_clock)
                 or not data.get('frames') or _json(completion).get('passed') is not True):
-            raise ValueError(kind+' must come from a completed current-run fake capture')
+            raise ValueError(kind+(' must come from a completed current-run fake capture' if simulated
+                                  else ' must come from a completed physical capture of this device'))
         batches[kind]=data;pins.update({str(path):_sha(path),str(completion):_sha(completion)})
     contract=records['wrist']['payload']['contract']
     if (contract.get('head_snapshot',{}).get('id')!=records['head']['id']
@@ -62,6 +71,13 @@ def _capture_evidence(config,capture_root,records,expected_install):
 
 
 def build_fake_profile(config_path, capture_root, template, registration, output, *, expected_install,diagnostic_source=None):
+    """Compatibility entry retaining all fake provenance and isolation checks."""
+    return build_device_profile(config_path,capture_root,template,registration,output,
+        expected_install=expected_install,diagnostic_source=diagnostic_source,environment='fake')
+
+
+def build_device_profile(config_path, capture_root, template, registration, output, *, expected_install,
+                         diagnostic_source=None,environment=None):
     """Create new files only; all arguments identify caller-owned current-run inputs.
 
     config_path is the resident run's calibration-config.json; its parent is the
@@ -71,6 +87,8 @@ def build_fake_profile(config_path, capture_root, template, registration, output
     T_environment_calibration_world (the plant base_link registration).
     """
     if diagnostic_source is not None:
+        if environment not in (None,'fake'):
+            raise ValueError('fake diagnostic provenance cannot authorize physical calibration')
         return _build_diagnostic_profile(config_path,template,registration,output,expected_install,diagnostic_source)
     from a1_cal import build, canonical, read_active
     from integration import _digest
@@ -81,11 +99,18 @@ def build_fake_profile(config_path, capture_root, template, registration, output
     config_path=Path(config_path).resolve();run_root=config_path.parent
     capture_root=Path(capture_root).resolve();output=Path(output).resolve()
     config=_json(config_path)
-    if (config.get('environment')!='fake' or config.get('simulation_only') is not True
-            or config.get('robot_source')!='simulated' or not str(config.get('robot_id','')).startswith('fake-')):
-        raise ValueError('explicit current fake calibration configuration required')
-    capture_clock=clock_for_source(config,'fake')
-    if not capture_root.is_dir() or not capture_root.is_relative_to(run_root):
+    environment=environment or config.get('environment')
+    simulated=environment=='fake'
+    if (environment not in ('fake','physical') or config.get('environment')!=environment
+            or config.get('simulation_only') is not simulated
+            or config.get('robot_source')!=('simulated' if simulated else 'physical')
+            or bool(str(config.get('robot_id','')).startswith('fake-'))!=simulated
+            or not str(config.get('robot_id','')).strip()):
+        raise ValueError('explicit current '+str(environment)+' calibration configuration required')
+    if not simulated and config.get('calibration_resume'):
+        raise ValueError('fake resume provenance cannot authorize physical calibration')
+    capture_clock=clock_for_source(config,environment)
+    if not capture_root.is_dir() or simulated and not capture_root.is_relative_to(run_root):
         raise ValueError('capture_root must be the current resident run Workbench output')
     if (not isinstance(expected_install,dict) or set(expected_install)!={'head_id','wrist_id','manifest_sha256'}
             or any(not isinstance(v,str) or not v for v in expected_install.values())):
@@ -95,11 +120,11 @@ def build_fake_profile(config_path, capture_root, template, registration, output
         raise ValueError('explicit T_environment_calibration_world with metre units required')
     transform=rigid(registration['T_environment_calibration_world'])
     root=Path(config['calibration_root'])
-    if (not root.is_absolute() or not root.resolve().is_relative_to(run_root)
-            or root.resolve().is_relative_to(Path('/var/lib/anyverse/calibration').resolve())):
-        raise ValueError('fake installation must be isolated below this current run')
+    if (not root.is_absolute() or root.is_symlink() or simulated and (not root.resolve().is_relative_to(run_root)
+            or root.resolve().is_relative_to(Path('/var/lib/anyverse/calibration').resolve()))):
+        raise ValueError('fake installation must be isolated below this current run' if simulated else 'explicit physical calibration root required')
     active=root/'hardware'/'active'  # Legacy C business namespace, never physical authorization.
-    active_paths={name:_inside(active/(name+'.json'),run_root) for name in ('head','wrist','manifest')}
+    active_paths={name:_inside(active/(name+'.json'),run_root if simulated else root) for name in ('head','wrist','manifest')}
     active_sha={name+'.json':_sha(path) for name,path in active_paths.items()}
     if active_sha['manifest.json']!=expected_install['manifest_sha256']:
         raise ValueError('active manifest differs from the current installation receipt')
@@ -114,18 +139,18 @@ def build_fake_profile(config_path, capture_root, template, registration, output
         raise ValueError('current C geometry must be the sealed nominal A1, with no baked calibration')
     if Path(config['urdf']).resolve()!=nominal/'robot.urdf':
         raise ValueError('nominal A1 robot.urdf is required')
-    records=read_active(active,contract['geometry_id'],asset_seal=config['asset_seal_sha256'],environment='fake')
+    records=read_active(active,contract['geometry_id'],asset_seal=config['asset_seal_sha256'],environment=environment)
     if records['manifest']['robot_id']!=config['robot_id']:
-        raise ValueError('installed group belongs to another fake robot')
+        raise ValueError('installed group belongs to another '+environment+' robot')
     pins={str(config_path):_sha(config_path),str(nominal/'SHA256SUMS.json'):digest(nominal/'SHA256SUMS.json')}
-    batches,capture_pins=_capture_evidence(config,capture_root,records,expected_install);pins.update(capture_pins)
+    batches,capture_pins=_capture_evidence(config,capture_root,records,expected_install,environment=environment);pins.update(capture_pins)
     wrist_contract=records['wrist']['payload']['contract']
-    camera_path=_inside(config['camera'],run_root);head_camera=_json(camera_path)
+    camera_path=_inside(config['camera'],run_root if simulated else Path(config['camera']).resolve().parent);head_camera=_json(camera_path)
     if head_camera!=batches['head'].get('camera'):
         raise ValueError('head intrinsics differ from the actual current-run capture')
     cameras={'head':head_camera,**wrist_contract['cameras']}
     if {key:value.get('serial') for key,value in cameras.items()}!=config.get('hardware_camera_serials'):
-        raise ValueError('installed camera identities differ from the current fake producer')
+        raise ValueError('installed camera identities differ from the current '+environment+' producer')
     mapping=Path(config['jaw_mapping_file']).resolve()
     if _sha(mapping)!=digest(nominal/'jaw-mapping.json'):
         raise ValueError('runtime jaw mapping differs from nominal A1 evidence')
@@ -135,9 +160,9 @@ def build_fake_profile(config_path, capture_root, template, registration, output
     if any(output.is_relative_to(path.resolve()) for path in (nominal,capture_root,active)):
         raise ValueError('output must be separate from nominal model, captures and active installation')
     output.parent.mkdir(parents=True,exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.fake-calibration-profile-',dir=output.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix='.'+environment+'-calibration-profile-',dir=output.parent) as temporary:
         stage=Path(temporary)/'bridge';stage.mkdir()
-        build(nominal,active,head_camera,template,transform,stage/'model',environment='fake')
+        build(nominal,active,head_camera,template,transform,stage/'model',environment=environment)
         # Verify that a concurrent install did not change the group consumed by build().
         for name,record in records.items():
             if _json(stage/'model'/'calibration_sources'/(name+'.json'))!=record:
@@ -151,29 +176,38 @@ def build_fake_profile(config_path, capture_root, template, registration, output
         parents={role:dict(parent=parent,T_parent_reference=[[float(i==j) for j in range(4)] for i in range(4)])
                  for role,parent in contract['camera_parents'].items()}
         offsets=camera_offsets(profile,parents)
-        binding=dict(environment='fake',runtime_environment='fake',simulation_only=True,robot_source='simulated',
-            evidence_source='fake_device_rgbd',robot_id=config['robot_id'],camera_serials=config['hardware_camera_serials'],
+        binding=dict(environment=environment,runtime_environment=environment,simulation_only=simulated,robot_source='simulated' if simulated else 'physical',
+            evidence_source='fake_device_rgbd' if simulated else 'physical_rgbd',robot_id=config['robot_id'],camera_serials=config['hardware_camera_serials'],
             calibration_accepted=True,calibration_profile_digest=_digest(profile),
             calibration_snapshot_id=active_sha['manifest.json'],active_sha256=active_sha,
             head_id=records['head']['id'],wrist_id=records['wrist']['id'],model_binding=deepcopy(profile['model_binding']))
-        planner=dict(schema='fake_calibration_planning_model.v1',environment='fake',simulation_only=True,
+        planner=dict(schema=environment+'_calibration_planning_model.v1',environment=environment,simulation_only=simulated,
             urdf=str(output/'model'/'robot.urdf'),urdf_sha256=_sha(stage/'model'/'robot.urdf'),
             bundle=str(output/'model'),bundle_seal_sha256=_sha(stage/'model'/'SHA256SUMS.json'),
             reported_to_model='q_model = q_reported + zero_offsets_rad',joint_zero_offsets_baked_into_urdf=False,
             zero_offsets_rad=profile['joints']['zero_offsets_rad'],camera_offsets=offsets,registration=registration,
             asset_status='URDF_ready_USD_conversion_and_native_asset_binding_required',runtime_allowed=False,
-            target_only=True,actual_plant_unchanged=True)
-        configuration=dict(environment='fake',acquisition=dict(profile_path=str(output/'profile.json'),
+            target_only=True,actual_device_configuration_unchanged=True)
+        if simulated:planner['actual_plant_unchanged']=True
+        configuration=dict(environment=environment,acquisition=dict(profile_path=str(output/'profile.json'),
             acquisition_binding_path=str(output/'acquisition-binding.json'),measured_initial_state=True),
             planning_model_path=str(output/'planning-model.json'))
-        receipt=dict(schema='installed_fake_calibration_bridge.v1',runtime_environment='fake',simulation_only=True,
-            robot_source='simulated',calibration_snapshot_id=binding['calibration_snapshot_id'],
+        receipt=dict(schema='installed_'+environment+'_calibration_bridge.v1',runtime_environment=environment,simulation_only=simulated,
+            robot_source='simulated' if simulated else 'physical',calibration_snapshot_id=binding['calibration_snapshot_id'],
             calibration_capture_clock=capture_clock,
             head_id=records['head']['id'],wrist_id=records['wrist']['id'],active_sha256=active_sha,
             input_sha256=pins,registration=registration,profile_digest=_digest(profile),
             planning_bundle_seal_sha256=planner['bundle_seal_sha256'],runtime_allowed=False,
             qualification='offline configuration only; no calibration accuracy or GPU execution claim')
-        resume=_resume_receipt(config,run_root)
+        legacy={kind:dict(source_batch=records[kind]['source_batch'],environment=data['environment'],
+                robot_source=data['robot_source'],simulation_only=data['simulation_only'],robot_id=data['robot_id'],
+                runtime_environment_field_present=False,clock_field_present='clock' in data)
+                for kind,data in batches.items() if environment=='physical' and 'runtime_environment' not in data}
+        if legacy:
+            receipt['legacy_capture_schema']=dict(schema='hardware_physical_without_runtime_environment',captures=legacy,
+                interpretation='physical from explicit hardware/physical/false provenance and matching robot identity',
+                original_datasets_modified=False,original_timestamps_modified=False)
+        resume=_resume_receipt(config,run_root) if simulated else None
         if resume:
             origins={kind:deepcopy(resume['capture_origins'].get(str(
                 _inside(Path(record['source_batch'])/'dataset.json',capture_root).parent.relative_to(capture_root))))
@@ -191,7 +225,57 @@ def build_fake_profile(config_path, capture_root, template, registration, output
         verify(nominal);verify(stage/'model');stage.rename(output)
     return dict(output=str(output),profile_path=str(output/'profile.json'),
         acquisition_binding_path=str(output/'acquisition-binding.json'),planning_model_path=str(output/'planning-model.json'),
-        calibration_snapshot_id=binding['calibration_snapshot_id'],simulation_only=True,runtime_allowed=False)
+        calibration_snapshot_id=binding['calibration_snapshot_id'],simulation_only=simulated,runtime_allowed=False)
+
+
+def load_device_profile(profile_path, *, environment, robot_id=None):
+    """CPU-only frozen profile/binding lookup for infer; no USD conversion or warmup."""
+    from integration import _digest
+    from real_observation import validate_binding
+    path=Path(profile_path)
+    if path.name!='profile.json' or path.is_symlink():raise ValueError('canonical frozen profile.json required')
+    root=path.resolve().parent
+    profile=_json(root/'profile.json');binding=_json(root/'acquisition-binding.json');receipt=_json(root/'bridge.json')
+    if (receipt.get('runtime_environment')!=environment or receipt.get('simulation_only') is not (environment=='fake')
+            or binding.get('calibration_profile_digest')!=_digest(profile)
+            or receipt.get('profile_digest')!=_digest(profile)
+            or robot_id is not None and binding.get('robot_id')!=robot_id):
+        raise ValueError('frozen device profile identity differs')
+    for path,expected in receipt['input_sha256'].items():
+        if _sha(path)!=expected:raise ValueError('installed profile input changed: '+path)
+    validate_binding(profile,binding,environment=environment)
+    return profile,binding
+
+
+def installed_profile_provider(*,config_path,capture_root,registration,profile_template,output,
+                               installed_snapshot,environment,diagnostic_source=None):
+    """Shared CPU-only C -> Infer profile cache, independent of D/GPU preparation."""
+    import secrets
+    import threading
+    if environment not in ('fake','physical') or not callable(installed_snapshot):
+        raise ValueError('explicit device environment and current C installation reader required')
+    cached={};lock=threading.Lock()
+    def current():
+        snapshot=installed_snapshot()
+        if not snapshot or snapshot.get('verified') is not True:
+            raise ValueError('推理需要正式安装的头部与双腕标定')
+        config=_json(config_path)
+        if config.get('environment')!=environment:raise ValueError('calibration environment changed')
+        manifest=Path(config['calibration_root'])/'hardware/active/manifest.json'
+        return config,dict(head_id=snapshot['head_id'],wrist_id=snapshot['wrist_id'],manifest_sha256=_sha(manifest))
+    def profile():
+        with lock:
+            config,expected=current()
+            if expected!=cached.get('installation'):
+                value=build_device_profile(config_path,capture_root,_json(profile_template),_json(registration),
+                    Path(output)/('inference-profile-'+secrets.token_hex(8)),expected_install=expected,
+                    environment=environment,diagnostic_source=diagnostic_source)
+                if current()[1]!=expected:raise ValueError('calibration changed while building the inference profile')
+                cached.update(installation=expected,path=value['profile_path'])
+            result=load_device_profile(cached['path'],environment=environment,robot_id=config['robot_id'])
+            if current()[1]!=expected:raise ValueError('calibration changed while reading the inference profile')
+            return result
+    return profile
 
 
 def _fixture_identity(base):
@@ -516,7 +600,8 @@ def diagnostic_mesh_view(workbench,source):
         wrist_contract=lambda row:deepcopy(contract))
     view.wrist_overlay_error=lambda row:type(workbench).wrist_overlay_error(view,row)
     candidates=[dict(id=row['id'],kind=kind,label='复用标定诊断 · '+kind,status='diagnostic_readonly',
-        details={'diagnostic_origin':diagnostic_metadata(source)}) for kind,row in rows.items()]
+        details={'diagnostic_origin':diagnostic_metadata(source),
+                 **({'head_result_id':contract['head_snapshot']['id']} if kind=='wrist' else {})}) for kind,row in rows.items()]
     return view,candidates
 
 

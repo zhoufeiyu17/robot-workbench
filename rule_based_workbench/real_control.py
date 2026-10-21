@@ -152,11 +152,17 @@ def classes(ref, *, jaw_mapping_file=None):
         def __init__(self, owner, proxy, payload, frozen, base):
             super().__init__(proxy, begin=owner.begin_collection, send=lambda q: owner.send('both', q),
                              stop=owner.motion_fault, consumed=owner.consumed, arm_tolerance=owner.arm_tolerance,
-                             environment=owner.environment or 'physical')
+                             environment=owner.environment or 'physical',
+                             execution_settings=getattr(owner, 'execution_error_settings', None),
+                             disabled_grippers=getattr(owner.backend, 'passive_jaws', ()))
             self.owner = owner
             self.payload, self.base = payload, base
             self.recording = None
-            self.preparation_complete=owner.environment!='fake' or owner.recording_factory is None
+            from cup_return_replay import is_replay
+            self.maintenance_replay=(payload['plan_ref']['maintenance_replay'] if 'plan_ref' in payload else is_replay(payload['plan']))
+            self.deferred_recording=bool(owner.recording_factory is not None and not self.maintenance_replay
+                and getattr(owner.recording_factory,'supports_deferred_preparation',False))
+            self.preparation_complete=not self.deferred_recording
             self.preparation_closed=False
             self.preparation_thread=None
             self.preparation_error=None
@@ -175,6 +181,7 @@ def classes(ref, *, jaw_mapping_file=None):
             # Preview already validated this private, single-use executor. Repeating
             # the full scan here blocks the owner feedback loop before its first tick.
             self.frozen = frozen
+            self.shared_reference = None
             self.frozen.sink = self.submit_target
             self.frozen.gate = self.gate
             self.frozen.stop = lambda reason: self._fault(MotionTrackingError(reason))
@@ -208,7 +215,7 @@ def classes(ref, *, jaw_mapping_file=None):
                                 preparation_active=self.preparation_current,preparation_deadline_monotonic=self.preparation_deadline)),
                             self.preparation_fault)
                         if not hasattr(candidate,'bind_execution') or not hasattr(candidate,'prepared'):
-                            raise ValueError('fake recording factory must support deferred execution binding')
+                            raise ValueError('channel recording factory must support deferred execution binding')
                         with self.owner.lock:
                             current=self.preparation_current()
                             if current:self.recording=self.owner.recording=candidate
@@ -227,7 +234,7 @@ def classes(ref, *, jaw_mapping_file=None):
             if not prepared and not failed and time.monotonic()<self.preparation_deadline:return False
             if not prepared:
                 self.preparation_closed=True
-                reason=self.preparation_error or (recording.error if recording is not None else None) or 'fake recording preparation exceeded 1 wall second'
+                reason=self.preparation_error or (recording.error if recording is not None else None) or 'camera recording preparation exceeded 1 wall second'
                 self.preparation_fault(reason)
                 if recording is not None:recording.fail(reason)
             self.preparation_complete=True
@@ -249,8 +256,20 @@ def classes(ref, *, jaw_mapping_file=None):
                 lo, hi = limits[slot]
                 physical_limits[side+'_gripper'] = [max(0., jaw.command_gap_mm(side, lo)),
                                                     min(maximum, jaw.command_gap_mm(side, hi))]
+            if 'plan_ref' in self.payload:
+                from robot_workbench.control_plan import initialize as compile_initialize
+                context=self.owner.plan_context(limits)
+                context.update(current_state=physical_feedback(q),physical_limits=physical_limits,held_arms=self.frozen.held_arms)
+                epoch=self.owner.epoch
+                timeline=compile_initialize(self.payload['plan_ref'],context,
+                    current=lambda:(self.owner.runner is self and self.owner.epoch==epoch
+                        and not self.owner.stop_requested and not self.owner.release_requested
+                        and self.status not in ('STOPPED','FAULT')))
+                self.runtime_path=Path(timeline['execution_timeline_ref']['path'])
+                return timeline
             timeline = initialize(self.base, current_state=physical_feedback(q), limits=physical_limits,
-                environment=self.owner.environment or 'physical')
+                environment=self.owner.environment or 'physical',disabled_grippers=self.disabled_grippers,
+                held_arms=self.frozen.held_arms)
             # The immutable suffix was checked at preview; only new return commands
             # need SDK conversion and limits checks in the compilation worker.
             for command in timeline['commands']:
@@ -274,6 +293,14 @@ def classes(ref, *, jaw_mapping_file=None):
                 def compile_commands():
                     try:
                         self.runtime = self.compile_runtime(tuple(q))
+                        if self.owner.shared_target_profile:
+                            from robot_workbench.target_interpreter import prepare_samples
+                            timeline=self.runtime
+                            times=list(timeline['times'])
+                            targets=[sdk_target(row['target'])for row in timeline['commands']]
+                            self.shared_reference=prepare_samples(times,targets,self.owner.cache['joint_limits'],
+                                source_sha256=timeline['timeline_digest'],kind='rule_collection',
+                                timing_policy='strict_duration',source_semantics='command_intervals',duration_s=timeline['duration_s'])
                     except Exception as error:
                         self.runtime_error = error
                     finally:
@@ -285,14 +312,22 @@ def classes(ref, *, jaw_mapping_file=None):
                 raise self.runtime_error
             timeline = self.runtime
             self.frozen.configure_runtime(timeline)
+            if self.shared_reference is not None:
+                def reference(elapsed):
+                    target=self.shared_reference.sample([elapsed])[0][0]
+                    return dict(schema_version='physical14.v1',encoding='absolute',units=dict(joints='rad',grippers='mm'),
+                        left_arm_joints=target[:6].tolist(),right_arm_joints=target[7:13].tolist(),
+                        left_gripper=jaw.command_gap_mm('left',float(target[6])),
+                        right_gripper=jaw.command_gap_mm('right',float(target[13])))
+                self.frozen.continuous_reference=reference
             self.owner.event('execution_initialized', initialization=timeline['initialization'],
                              execution_timeline_digest=timeline['timeline_digest'])
             try:
-                if self.owner.environment=='fake':
+                if self.deferred_recording:
                     if self.recording is not None and not self.recording.error and not self.preparation_closed:
                         self.recording.bind_execution(timeline,execution_instance_id=self.execution_instance_id,
                             execution_owner=self.recording_owner)
-                elif self.owner.recording_factory:
+                elif self.owner.recording_factory and not self.maintenance_replay:
                     self.recording = self.owner.recording_factory(
                         dict(self.payload, execution_timeline=timeline), self.owner.recording_failed)
             except Exception as error:
@@ -301,8 +336,16 @@ def classes(ref, *, jaw_mapping_file=None):
             return True
 
         def _check_start_drift(self, q):
-            # Collection returns to the reviewed start; calibration retains its drift gate.
-            pass
+            # The active arm may return to its reviewed start. The inactive arm
+            # stays where this observation froze it; drifting needs a new plan.
+            from robot_workbench.joint_bounds import position_noise_rad
+            measured=physical_feedback(q)
+            for side in self.frozen.held_arms:
+                key=side+'_arm_joints'
+                target=self.frozen.plan['ticks'][0]['target'][key]
+                if any(abs(a-b)>position_noise_rad(self.owner.environment or 'physical')+1e-12
+                       for a,b in zip(measured[key],target)):
+                    raise ValueError('inactive right arm changed; reobserve and replan before execution')
 
         def _feedback(self, now, state):
             # Keep the raw measured pose, including values outside command limits.
@@ -334,7 +377,7 @@ def classes(ref, *, jaw_mapping_file=None):
             # Both lanes preserve the 30 Hz sequence; submit each target once.
             self.index = self.frozen.command_index
             if self.index != self.last_sent_index:
-                self.send(sdk_target(target))
+                if self.target_interpreter is None:self.send(sdk_target(target))
                 self.last_submission_s = self.owner.control_time()
                 send_wall_ns=time.time_ns()
                 self.last_sent_index = self.index
@@ -346,9 +389,11 @@ def classes(ref, *, jaw_mapping_file=None):
                         feedback_at_send={key:current.get(key) for key in
                             ('clock_domain','source_clock_id','source_time_ns','physics_step','sample_wall_ns')},
                         owner_pid=os.getpid(),command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce)
+                if self.target_interpreter is not None:
+                    timing['execution_semantics']='source_reference_knot'
                 if self.recording:
                     self.owner.timing_probe.call('recording_command_submit', self.owner.recording_call, 'submit', 'command',tick=self.index,target=target,send_monotonic_s=self.last_submission_s,send_wall_ns=send_wall_ns,**timing)
-                self.owner.event('command', timeline_digest=self.frozen.plan['timeline_digest'], tick=self.index,
+                self.owner.event('source_target'if self.target_interpreter is not None else'command', timeline_digest=self.frozen.plan['timeline_digest'], tick=self.index,
                                  execution_timeline_digest=self.runtime['timeline_digest'],
                                  source_tick=self.frozen.ticks[self.index]['source_tick'],
                                  stage=self.frozen.ticks[self.index]['stage'],
@@ -373,6 +418,7 @@ def classes(ref, *, jaw_mapping_file=None):
                 # below remains required; the frozen schedule resumes in order.
                 self.maximum_control_gap_s=max(getattr(self,'maximum_control_gap_s',0.),now-self.previous)
                 q, v = self._feedback(now, state)
+                if self.target_interpreter is not None:self.submit_reference(now,state)
                 if self.status == 'READY':
                     self.frozen._feedback(now, dict(sample_monotonic_s=state['sample_time_s'], state=physical_feedback(q)))
                     if self.recording_waits_for_endpoint:
@@ -385,6 +431,7 @@ def classes(ref, *, jaw_mapping_file=None):
                     self.previous = now
                     return self.status
                 if self.status == 'VERIFYING':
+                    self._check_start_drift(q)
                     if not self.prepare_recording(now):
                         self.previous=now
                         return self.status
@@ -398,6 +445,9 @@ def classes(ref, *, jaw_mapping_file=None):
                         return self.status
                     self.begin(tuple(q))
                     self.started = self.owner.control_time()
+                    if self.shared_reference is not None:
+                        self.target_interpreter=self.owner.make_target_interpreter(self.shared_reference,'both',self.started)
+                        self.submit_reference(self.started,state)
                     self.status = 'RUNNING'
                     now = self.started
                 feedback = dict(sample_monotonic_s=state['sample_time_s'], state=physical_feedback(q))
@@ -417,8 +467,23 @@ def classes(ref, *, jaw_mapping_file=None):
             except Exception as error:
                 return self._fault(error)
 
+        def submit_reference(self,now,state):
+            result=self.target_interpreter.tick(now,state)
+            if result is None:return
+            packet=result['packet'];first=packet['host_times_s'][0]-self.started
+            target=self.frozen.continuous_reference(first)
+            metadata=dict(reference_id=packet['reference_id'],frames=len(packet['host_times_s']),
+                first_source_s=packet['host_times_s'][0],last_source_s=packet['host_times_s'][-1],
+                controller_profile=packet['controller_profile'],admission=result['admission'],
+                command_semantics='native_future_window_admission_not_source_knot_send')
+            self.owner.event('native_reference_window',**metadata)
+            if self.recording and self.status!='READY':
+                self.owner.recording_call('submit','native_window',packet=packet,admission=result['admission'],
+                    send_monotonic_s=result['submitted_monotonic_s'],send_wall_ns=time.time_ns())
+
     class CollectionOwner(ref.Owner):
-        def __init__(self, *args, hardware_binding=None, recording_factory=None, alignment_profile=None, timing_probe=None, execution_root=None, environment=None, source_clock_id=None, runtime_nonce=None, **kwargs):
+        def __init__(self, *args, hardware_binding=None, recording_factory=None, alignment_profile=None, timing_probe=None, execution_root=None, environment=None, source_clock_id=None, runtime_nonce=None, isolated_plans=False, **kwargs):
+            self.isolated_plans=isolated_plans
             self.execution_root=Path(execution_root) if execution_root is not None else None
             self.timing_probe = timing_probe or LoopTimingProbe()
             super().__init__(*args, **kwargs)
@@ -470,6 +535,7 @@ def classes(ref, *, jaw_mapping_file=None):
 
         def cached_snapshot_fields(self, result):
             """Derive collection fields from copied feedback; no SDK or recorder IO."""
+            if self.runtime_nonce is not None:result['runtime_nonce']=self.runtime_nonce
             raw = result.get('calibration_feedback')
             if raw:
                 result['sample_age_s'] = max(0., self.control_time()-raw['sample_time_s'])
@@ -509,11 +575,23 @@ def classes(ref, *, jaw_mapping_file=None):
         def begin_collection(self, measured):
             """Enable existing reviewed gains at a legal command, retaining raw feedback."""
             self.command_gate()
+            self.runner._check_start_drift(measured)
             target = sdk_target(self.runner.frozen.ticks[0]['target'])
             if not self.hardware:
                 self.begin('both', target)
                 return tuple(measured)
             backend = self.backend
+            isolated_enable=getattr(backend,'enable_collection_arm',None)
+            if callable(isolated_enable):
+                for side in ('left','right'):
+                    self.command_gate()
+                    receipt=isolated_enable(side,target)
+                    self.event('collection_gain_enable_hold',side=side,
+                        target=self.runner.frozen.ticks[0]['target'],send_monotonic_s=receipt['send_monotonic_s'])
+                self.control.auto_aborted=False
+                self.control.state=self.states.READY
+                self.control.reason='new explicitly reviewed collection motion'
+                return tuple(measured)
             backend._require_connected()
             for side in ('left', 'right'):
                 self.command_gate()
@@ -566,6 +644,68 @@ def classes(ref, *, jaw_mapping_file=None):
             if (jaw_mapping_file is not None and source['calibration_profile'].get('model_binding', {}).get('jaw_mapping_sha256')
                     != mapping_identity['source_sha256']):
                 raise ValueError('calibration profile jaw mapping artifact digest differs from collection controller')
+            if self.hardware:
+                initial=source.get('initial_state') or {}
+                disabled=list(getattr(self.backend,'passive_jaws',()))
+                if (initial.get('disabled_grippers',[])!=disabled
+                        or disabled and initial.get('held_arms')!=['right']):
+                    raise ValueError('device disabled channels or inactive-arm hold differ; take a new observation')
+
+        def _compile_frozen_local(self, command, limits):
+            """Existing full checks, executed only by the CPU compiler in production."""
+            payload = deepcopy(command)
+            # Full existing timeline/source/calibration/digest checks, without SDK calls.
+            frozen = FrozenExecutor(payload['plan'], payload['source'], sink=lambda _:None, gate=lambda:True,
+                                    stop=lambda _:None, source_validator=self.source_validator, execution_policy='observation',
+                                    execution_settings=getattr(self, 'execution_error_settings', None),
+                                    disabled_grippers=getattr(self.backend, 'passive_jaws', ()))
+            if self.hardware:
+                receipt = payload['plan'].get('planning_validation', {})
+                gpu=receipt.get('schema_version')=='physical_curobo_motiongen_path_validation.v1'
+                if (not gpu and (not isinstance(receipt, dict) or receipt.get('schema_version') != 'geometric_path_validation.v1'
+                        or receipt.get('passed') is not True
+                        or not isinstance(receipt.get('collision_coverage'), list)
+                        or not all(name in receipt['collision_coverage'] for name in ('base_link', 'left', 'right')))):
+                    raise ValueError('旧轨迹未通过含立柱的完整几何检查，请在 Playground 重新规划')
+                # A prior rollout success must not short-circuit the new geometry
+                # receipt's timeline/source/density verification.
+                geometry_plan = dict(payload['plan'], simulation={'validated': False, 'outcome': 'not_run'})
+                validate_plan_evidence(geometry_plan, payload['source'])
+            control = frozen.plan['control']
+            if control['physics_hz'] / control['substeps'] != 30:
+                raise ValueError('physical collection requires the frozen 30 Hz cadence')
+            if not limits:
+                raise ValueError('joint limits unavailable for preview')
+            for tick in frozen.ticks:
+                target = sdk_target(tick['target'])
+                if any(not lo <= q <= hi for q,(lo,hi) in zip(target, limits)):
+                    raise ValueError('frozen target exceeds SDK joint limits')
+            from execution_timeline import prepare
+            base = prepare(payload['plan'])
+            return payload, frozen, base
+
+        def plan_context(self, limits):
+            check_mapping()
+            return dict(calibration_root=str(Path(ref.__file__).resolve().parents[3]),
+                jaw_mapping_file=str(Path(jaw_mapping_file).resolve()) if jaw_mapping_file is not None else None,
+                mapping_identity=mapping_identity,hardware=self.hardware,environment=self.environment,
+                hardware_binding=str(Path(self.hardware_binding).resolve()) if self.hardware_binding is not None else None,
+                sample_clock=deepcopy(self.sample_clock),execution_error_settings=deepcopy(getattr(self,'execution_error_settings',None)),
+                native_task_fixture=deepcopy(getattr(self,'native_task_fixture',None)),
+                disabled_grippers=list(getattr(self.backend,'passive_jaws',())),limits=deepcopy(limits),
+                owner_pid=os.getpid(),runtime_nonce=self.runtime_nonce,epoch=self.epoch)
+
+        def compile_frozen(self, command, limits):
+            if not self.isolated_plans:
+                from robot_workbench.control_plan import validate_python_input
+                validate_python_input(command)
+                return self._compile_frozen_local(command,limits)
+            from robot_workbench.control_plan import compile_preview
+            guard=getattr(self,'_preview_live_owner',self);epoch=self.epoch
+            def current():
+                return (guard.epoch==epoch and not guard.stop_requested and not guard.release_requested
+                    and getattr(self,'_preview_current',lambda:True)())
+            return compile_preview(self,command,self.plan_context(limits),current=current)
 
         def submit(self, command):
             if not isinstance(command, dict):
@@ -608,38 +748,13 @@ def classes(ref, *, jaw_mapping_file=None):
                 if command.get('action') in ('stop','release') and self.recording:
                     self.recording_call('finish', 'stopped','operator '+command['action'])
                 return result
-            if set(command) != {'action','plan','source'}:
+            from robot_workbench.control_plan import RawPreview,ArtifactPreview
+            if not isinstance(command,(RawPreview,ArtifactPreview)) and set(command) != {'action','plan','source'}:
                 raise ValueError('preview_frozen requires plan and source')
             with self.lock:
                 preview_epoch=self.epoch
                 limits=deepcopy(self.cache.get('joint_limits'))
-            payload = deepcopy(command)
-            # Full existing timeline/source/calibration/digest checks, without SDK calls.
-            frozen = FrozenExecutor(payload['plan'], payload['source'], sink=lambda _:None, gate=lambda:True,
-                                    stop=lambda _:None, source_validator=self.source_validator, execution_policy='observation')
-            if self.hardware:
-                receipt = payload['plan'].get('planning_validation', {})
-                gpu=receipt.get('schema_version')=='physical_curobo_motiongen_path_validation.v1'
-                if (not gpu and (not isinstance(receipt, dict) or receipt.get('schema_version') != 'geometric_path_validation.v1'
-                        or receipt.get('passed') is not True
-                        or not isinstance(receipt.get('collision_coverage'), list)
-                        or not all(name in receipt['collision_coverage'] for name in ('base_link', 'left', 'right')))):
-                    raise ValueError('旧轨迹未通过含立柱的完整几何检查，请在 Playground 重新规划')
-                # A prior rollout success must not short-circuit the new geometry
-                # receipt's timeline/source/density verification.
-                geometry_plan = dict(payload['plan'], simulation={'validated': False, 'outcome': 'not_run'})
-                validate_plan_evidence(geometry_plan, payload['source'])
-            control = frozen.plan['control']
-            if control['physics_hz'] / control['substeps'] != 30:
-                raise ValueError('physical collection requires the frozen 30 Hz cadence')
-            if not limits:
-                raise ValueError('joint limits unavailable for preview')
-            for tick in frozen.ticks:
-                target = sdk_target(tick['target'])
-                if any(not lo <= q <= hi for q,(lo,hi) in zip(target, limits)):
-                    raise ValueError('frozen target exceeds SDK joint limits')
-            from execution_timeline import prepare
-            base = prepare(payload['plan'])
+            payload, frozen, base = self.compile_frozen(command,limits)
             # A shared-runtime compiler owns frozen inputs, not a ticking feedback cache.
             guard = getattr(self, '_preview_live_owner', self)
             with guard.lock:
@@ -657,6 +772,13 @@ def classes(ref, *, jaw_mapping_file=None):
                 if press[1:] != (False, True):
                     raise ValueError('pedal must be released and healthy')
                 first = frozen.ticks[0]['target']
+                from robot_workbench.joint_bounds import position_noise_rad
+                measured=physical_feedback(raw['qpos'])
+                for side in frozen.held_arms:
+                    key=side+'_arm_joints'
+                    if any(abs(a-b)>position_noise_rad(self.environment or 'physical')+1e-12
+                           for a,b in zip(measured[key],first[key])):
+                        raise ValueError('inactive right arm changed; reobserve and replan before preview')
                 # The first absolute command initializes the planned start.
                 # Ordinary tracking protection applies after command submission.
                 proxy = make_plan('both', sdk_target(first), sdk_target(first), limits,
@@ -670,12 +792,16 @@ def classes(ref, *, jaw_mapping_file=None):
                 self.review_wall_deadline = time.monotonic() + 30.
                 self.frozen_payloads[proxy.sha256] = (payload, frozen, base)
                 return dict(token=token, owner_pid=os.getpid(), command_epoch=self.epoch, expires_in_s=30,
+                            control_plan_storage=getattr(frozen.ticks,'immutability','bounded_legacy_fixture'),
+                            validation_worker_pid=(payload.get('plan_ref') or {}).get('validation_worker_pid'),
                             timeline_digest=frozen.plan['timeline_digest'], ticks=len(frozen.ticks), tick_count=len(frozen.ticks), duration_s=frozen.duration_s,
                             source_control_hz=30, source_tick_count=len(frozen.ticks),
                             compiled_tick_count_before_initialization=len(base['commands']),
                             initial_target=first, initialization_target='reviewed frozen initial_target',
                             initialization='smooth return from current measured pose; commands clipped to SDK limits, raw feedback retained',
                             final_target=frozen.ticks[-1]['target'], control_hz=base['control_hz'],
+                            disabled_grippers=list(frozen.disabled_grippers),
+                            held_arms=list(frozen.held_arms),
                             clearance='Operator must review complete swept path; no collision certification')
 
         def pedal(self):
@@ -690,7 +816,7 @@ def classes(ref, *, jaw_mapping_file=None):
             runner = self.timing_probe.call('runner_init', Runner, self, plan, payload, frozen, base)
             with self.lock:
                 self.runner=runner
-                if self.environment=='fake':self.recording=None
+                if runner.deferred_recording or runner.maintenance_replay:self.recording=None
             self.runner.start(self.control_time(), feedback, review_age_s=self.review_age())
 
         def cache_state(self, feedback, limits):
@@ -704,7 +830,8 @@ def classes(ref, *, jaw_mapping_file=None):
                 self.cache['capabilities'] = ['collection_execution_v2']
                 if self.runner and hasattr(self.runner, 'frozen'):
                     self.cache['frozen'] = self.timing_probe.call('frozen_snapshot', self.runner.frozen.snapshot, include_history=False)
-                    self.cache['frozen']['validation_scope'] = 'hardware' if self.hardware else 'sim/mock'
+                    if not self.runner.maintenance_replay:
+                        self.cache['frozen']['validation_scope'] = 'hardware' if self.hardware else 'sim/mock'
                     self.cache['frozen']['submitted_command_ticks'] = self.runner.last_sent_index + 1
                     self.cache['frozen']['execution_tick_count'] = len(self.runner.frozen.ticks)
                     # No claim of task success: even a completed command stream requires acceptance.
@@ -806,6 +933,7 @@ def controller_conflicts():
         except (OSError, ValueError):
             continue
         if (('joint_head_real_owner.py' in text and '--connect-hardware' in text)
+                or any(value.endswith('/serve_sdk_control.py') for value in argv_as_strings(argv))
                 or ('real_control.py' in text and '--hardware' in argv_as_strings(argv))
                 or any(value == 'prometheus.web' for value in argv_as_strings(argv))):
             conflicts.append(int(path.parent.name))
@@ -844,14 +972,14 @@ def main():
     fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
     recording_factory = None
     if args.recording_root:
-        from real_recording import RecordingSession
+        from robot_workbench.recording_process import ProcessRecordingSession
         def recording_factory(payload,on_fault):
-            binding = json.loads(args.hardware_binding.read_text()) if args.hardware_binding else {}
-            directories = json.loads(args.camera_recording_dirs.read_text())
-            destination = args.recording_root / f'run-{time.time_ns()}' / 'raw'
-            return RecordingSession(destination,payload['source'],payload['plan'],binding,
-                                    camera_directories=directories,on_fault=on_fault,
-                                    execution_timeline=payload.get('execution_timeline'))
+            destination = (args.recording_root / f'run-{time.time_ns()}' / 'raw').resolve()
+            return ProcessRecordingSession(destination,plan_ref=payload['plan_ref'],
+                camera_directories_path=args.camera_recording_dirs,on_fault=on_fault,
+                execution_owner=payload.get('execution_owner'),
+                **payload.get('recording_preparation',{}))
+        recording_factory.supports_deferred_preparation=True
     lifecycle = Lifecycle()
     events = queue.Queue(maxsize=4096)
     log_failed = threading.Event()
@@ -895,7 +1023,8 @@ def main():
                 if not 0 < length <= 16*1024*1024 or self.headers.get_content_type() != 'application/json':
                     raise ValueError('bounded JSON required')
                 self.connection.settimeout(2)
-                command = json.loads(self.rfile.read(length))
+                from robot_workbench.control_plan import preview_request
+                command = preview_request(self.rfile.read(length))
                 if not isinstance(command, dict): raise ValueError('command object required')
                 result = lifecycle.submit(command)
                 self.reply(202,result)
@@ -932,7 +1061,10 @@ def main():
                         from arx_env.pedal_stop import PedalStopListener
                         listener = PedalStopListener()
                         listener.start()
-                    new_owner = Owner(backend,safety,listener=listener,hardware=args.hardware,event=event,hardware_binding=args.hardware_binding,recording_factory=recording_factory,alignment_profile=args.alignment_profile,timing_probe=timing_probe,execution_root=args.output)
+                    new_owner = Owner(backend,safety,listener=listener,hardware=args.hardware,event=event,hardware_binding=args.hardware_binding,
+                        recording_factory=recording_factory,alignment_profile=args.alignment_profile,timing_probe=timing_probe,
+                        execution_root=args.output,isolated_plans=True,environment='physical' if args.hardware else None,
+                        runtime_nonce=secrets.token_hex(24))
                     if lifecycle.install(new_owner):
                         try:
                             if args.hardware:

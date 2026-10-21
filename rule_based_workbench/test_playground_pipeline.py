@@ -13,7 +13,61 @@ from unittest.mock import Mock, patch
 import playground_pipeline as pipeline
 
 
+def check_frozen_motiongen_speed(plan=None, source=None, binding=None):
+    """Real validators; external effects stop at bridge construction or speed-stage dispatch."""
+    from physical_motiongen import freeze_physical
+    if plan is None:
+        from test_physical_motiongen import fake_inputs
+        source, model, binding = fake_inputs()
+        model['planning_validation']['derivation']=dict(method='uniform_source_time_stage_scale',speed_scale=.3)
+        plan=freeze_physical(model,source,binding)
+    assert 'execution_derivation' not in plan
+    speed=plan['physical_gpu_conversion']['model_validation']['derivation']['speed_scale']
+    class ReachedBridge(Exception):pass
+    class ReachedSpeedStage(Exception):pass
+    with TemporaryDirectory() as folder, ExitStack() as stack:
+        root=Path(folder)
+        for name,value in (('plan',plan),('source',source),('binding',binding)):
+            (root/(name+'.json')).write_text(json.dumps(value))
+        prepared=dict(plan_path=str(root/'plan.json'),source_path=str(root/'source.json'),hardware_binding=str(root/'binding.json'),
+            config_path=str(root/'config.json'),speed_scale=speed,timeline_digest=plan['timeline_digest'],environment='physical')
+        bridge=SimpleNamespace(config=dict(environment='physical',local_recording_root=str(root/'recordings')))
+        stack.enter_context(patch.object(pipeline,'load_config',return_value=(dict(remote_run_root='/frozen/run',environment='physical'),{},{})))
+        geometry=stack.enter_context(patch.object(pipeline,'geometry_stage',side_effect=ReachedSpeedStage))
+        run=stack.enter_context(patch.object(pipeline,'run_stages'))
+        fetch=stack.enter_context(patch.object(pipeline,'fetch'))
+        launch=stack.enter_context(patch.object(pipeline.subprocess,'Popen'))
+        lane=stack.enter_context(patch('real_bridge.RealBridge',side_effect=ReachedBridge))
+        publish=stack.enter_context(patch.object(pipeline,'publish_binding'))
+        # No mocked validation: the complete physical/model proof must pass first.
+        try:pipeline.execute({},root/'same-speed',bridge,prepared)
+        except ReachedBridge:pass
+        else:raise AssertionError('same-speed plan did not reach the checked execution boundary')
+        assert lane.call_count==1 and not geometry.called and not run.called and not fetch.called
+        assert json.loads((root/'same-speed/plan.json').read_text())==plan
+        assert not publish.called and not launch.called
+        # Changing speed still dispatches the explicit speed-adjustment path before any bridge.
+        lane.reset_mock()
+        try:pipeline.execute({},root/'new-speed',bridge,dict(prepared,speed_scale=.5))
+        except ReachedSpeedStage:pass
+        else:raise AssertionError('different speed skipped its checked adjustment stage')
+        assert geometry.call_count==1 and geometry.call_args.kwargs['speed']==.5
+        assert geometry.call_args.kwargs['initial']=='/frozen/run/playground-plan/initial-plan.json'
+        assert not lane.called and not run.called and not publish.called and not launch.called
+        # Same-speed reuse does not bypass digest/evidence validation.
+        bad=deepcopy(plan);bad['physical_gpu_conversion']['model_target_vectors'][0][0]+=.01
+        (root/'plan.json').write_text(json.dumps(bad));geometry.reset_mock()
+        try:pipeline.execute({},root/'tampered',bridge,prepared)
+        except ValueError:pass
+        else:raise AssertionError('same-speed reuse accepted a changed conversion proof')
+        assert not geometry.called and not lane.called and not publish.called and not launch.called
+    return dict(ticks=len(plan['ticks']),duration_s=plan['duration_s'],frozen_speed=speed,
+        same_speed_geometry_calls=0,same_speed_bridge_boundary_reached=True,control_calls=0,
+        changed_speed_dispatched=True,tampered_plan_rejected=True)
+
+
 def main():
+    check_frozen_motiongen_speed()
     real_popen=subprocess.Popen
     from run_pipeline import isaac_environment
     gpu_cfg=dict(remote_run_root='/run',workbench_code='/wb',native_code='/native',assets='/assets',deps='/deps',
@@ -57,6 +111,16 @@ def main():
             pass
         assert events[-1]['stage_status'] == 'failed' and events[-1]['stages'][-1]['status'] == 'failed'
     # A silent native exit 0 is failure until its own completion receipt is present.
+    from control_motion import MotionLimitError
+    failure=dict(kind='motion_limit',message='左 J2 加速度 6.368 超过上限 5',recovery='降低速度后重新规划',details={})
+    with TemporaryDirectory() as folder, patch.object(pipeline,'bounded_command',return_value=(['fake'],1)), \
+            patch.object(pipeline.subprocess,'run',return_value=SimpleNamespace(returncode=1)), \
+            patch.object(pipeline,'fetch',side_effect=lambda remote,local,**kw:Path(local).write_text(json.dumps(
+                dict(status='failed',error='raw technical failure',failure=failure)))):
+        try:pipeline.run_stages([dict(name='playground-plan',result_path='/native/result.json')],folder,{'resources':{'max_wall_time_minutes':1}})
+        except MotionLimitError as error:
+            assert error.failure==failure and 'raw technical failure' in str(error)
+        else:raise AssertionError('native failure details were discarded')
     for payload in (None, 'broken json', '[]', '{"status":"failed","error":"renderer stopped"}', '{"status":"first-frame-ready"}'):
         with TemporaryDirectory() as folder, patch.object(pipeline,'bounded_command',return_value=(['fake'],1)), \
                 patch.object(pipeline.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as command:
@@ -66,12 +130,23 @@ def main():
             events=[]
             with patch.object(pipeline,'fetch',side_effect=fetched):
                 try:pipeline.run_stages([dict(name='playground-geometry-inputs',result_path='/native/result.json'),dict(name='next')],folder,{'resources':{'max_wall_time_minutes':1}},lambda label,**kw:events.append(kw))
-                except RuntimeError:pass
+                except RuntimeError as error:
+                    failure=error.preparation_failure
+                    assert failure['stage']=='scene_setup' and failure['producer_stage']=='playground-geometry-inputs'
+                    assert failure['job_output']==str(folder)
+                    if payload is None or payload=='broken json':
+                        assert failure['native_status']=='unknown' and failure['native_result_path']is None
                 else:raise AssertionError('missing/failed/wrong native receipt accepted')
             receipts=json.loads((Path(folder)/'timings.json').read_text())
             assert len(receipts)==1 and receipts[0]['status']=='failed'
             assert command.call_count==1, 'downstream stage ran despite missing native result'
             assert events[-1]['stage_status']=='failed'
+    raw_reason='reset characterization rejected: cup_table_recontact_or_invalid_support'
+    failure=pipeline.preparation_failure('playground-geometry-inputs',
+        dict(status='failed',phase='setup',error=raw_reason),'/existing/result.json','/existing/job',RuntimeError('native failed'))
+    assert failure['native_reason']==raw_reason and failure['native_phase']=='setup'
+    assert failure['native_status']=='failed' and failure['native_result_path']=='/existing/result.json'
+    assert pipeline.preparation_failure(None,None,None,'/job',RuntimeError('missing'))['stage']=='unknown'
     for name,status in pipeline.NATIVE_STAGE_STATUS.items():
         with TemporaryDirectory() as folder, patch.object(pipeline,'bounded_command',return_value=(['fake'],1)), \
                 patch.object(pipeline.subprocess,'run',return_value=SimpleNamespace(returncode=0)), \
@@ -126,7 +201,7 @@ def main():
         transport = stack.enter_context(patch.object(pipeline, 'fetch', side_effect=fetch_plan))
         prepared = pipeline.plan(configured, root/'planning', bridge, .3)
         assert acquire.call_count == 1
-        assert preparation.call_args.kwargs == {'scene_only': True}
+        assert preparation.call_args.kwargs == {'scene_only': True, 'online_detection': False}
         selected = [s['name'] for s in run.call_args.args[0]]
         assert selected == stage_names[:8] + ['playground-geometry-inputs','playground-plan'], selected
         assert not any(n in selected for n in stage_names[8:]), 'planning must never run old rollout/replay'
@@ -181,14 +256,22 @@ def main():
                 acceptance=self.config.get('environment')=='fake' and self.confirmed and not self.acceptance_read
                 if acceptance:self.acceptance_read=True
                 elif self.confirmed and owner_sequence:status.update(owner_sequence.pop(0))
+                if self.config.get('environment')=='fake':
+                    status.update(pid=4242,holder='collection')
+                    if self.confirmed:
+                        status['frozen']=dict(status.get('frozen') or {},timeline_digest=plan['timeline_digest'])
+                        status['motion']=dict(plan_sha256='a'*64)
                 return dict(connected=True, **status,recording=dict(directory=str(raw) if self.confirmed else '/previous/raw', done=self.confirmed)|recording_fields)
 
-            def control(self, command):
+            def control(self, command, *, cancel=None, before_confirm=None):
                 actions.append(command['action'])
                 if command['action'] == 'confirm':
+                    if before_confirm is not None:before_confirm()
                     self.confirmed = True
                     return {'queued':'confirm','plan_sha256':'a'*64,'sequence_id':'a'*64}
-                return dict(token='single-use-preview', timeline_digest=plan['timeline_digest'],**preview_fields)
+                result=dict(token='single-use-preview', timeline_digest=plan['timeline_digest'],**preview_fields)
+                if self.config.get('environment')=='fake':result.update(owner_pid=4242,command_epoch=3)
+                return result
 
         stack.enter_context(patch('real_bridge.RealBridge', Lane))
         publication = stack.enter_context(patch.object(pipeline, 'publish_binding'))
@@ -208,6 +291,25 @@ def main():
         process.poll.return_value = 0
         popen = stack.enter_context(patch.object(pipeline.subprocess, 'Popen', return_value=process))
         upload = stack.enter_context(patch.object(pipeline.subprocess, 'run', return_value=SimpleNamespace(returncode=0)))
+
+        # Native model derivations and resumed physical proofs use their own speed receipt too.
+        class CheckedBoundary(Exception):pass
+        plan_file=Path(prepared['plan_path'])
+        for label,metadata in (
+            ('model',dict(planning_validation=dict(derivation=dict(speed_scale=.3)))),
+            ('physical',dict(physical_gpu_conversion=dict(model_validation=dict(derivation=dict(speed_scale=.3)))))):
+            checked=deepcopy(plan);checked.pop('execution_derivation');checked.update(metadata)
+            checked['execution_resume']={'fixture':'existing checked suffix'};plan_file.write_text(json.dumps(checked))
+            count=geometry.call_count
+            with patch('real_bridge.RealBridge',side_effect=CheckedBoundary), \
+                 patch.object(pipeline,'prepare_remote_resume',return_value='/checked/suffix') as remote_resume, \
+                 patch('half_speed_plan.resume_initial_open') as resume:
+                try:pipeline.execute(configured,root/('same-speed-'+label),bridge,prepared)
+                except CheckedBoundary:pass
+                else:raise AssertionError('same frozen speed did not reach checked bridge boundary')
+            assert geometry.call_count==count and not resume.called and remote_resume.call_count==1
+            assert json.loads((root/('same-speed-'+label)/'plan.json').read_text())==checked
+        plan_file.write_text(json.dumps(plan))
 
         # Speed changes must check their native receipt before binding publication or any preview/motion.
         transport.side_effect = failed_receipt

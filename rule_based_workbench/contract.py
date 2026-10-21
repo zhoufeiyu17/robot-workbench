@@ -47,14 +47,14 @@ def validate_physical14(payload: Any, *, kind: str = "state", gripper_max_mm: fl
 
 
 def validate_physical_feedback(payload, profile=None, *, enforce_range=True):
-    """Measured jaw envelope: -1..84 mm for the 83 mm ARX command range.
+    """Measured jaw envelope: -1..87 mm for the 83 mm ARX command range.
 
     Keep raw measurements; this allowance never expands command targets.
     """
     if not enforce_range:
         return validate_physical14(payload,kind='feedback',gripper_min_mm=-math.inf)
     maximum=profile['gripper']['max_opening_mm'] if profile is not None else 83.
-    return validate_physical14(payload,kind='feedback',gripper_min_mm=-1.,gripper_max_mm=maximum+1.)
+    return validate_physical14(payload,kind='feedback',gripper_min_mm=-1.,gripper_max_mm=87. if maximum==83. else maximum+1.)
 
 
 def validate_command(payload: Any, *, gripper_max_mm: float | None = None) -> dict[str, Any]:

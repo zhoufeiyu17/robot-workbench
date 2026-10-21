@@ -15,6 +15,30 @@ HEIGHT_RESERVE_M = .002
 NUMERICAL_M = 1e-9
 
 
+def original_mesh_sections(mesh, region, *, mesh_sha256, metal_gap_mm, opening_mm, rubber_thickness_m):
+    """Compare actual OBJ sections with the existing jaw geometry, not physical force."""
+    import trimesh
+    low,high=region['contact_height_interval_m']
+    axis=np.asarray(region['centering_axis_cup'],dtype=float)
+    if (axis.shape!=(3,) or not np.isfinite(axis).all()or abs(np.linalg.norm(axis)-1)>1e-8
+            or not all(math.isfinite(v)for v in (low,high,metal_gap_mm,opening_mm,rubber_thickness_m))
+            or not 0<=low<=high or not 0<metal_gap_mm<opening_mm or rubber_thickness_m<=0):
+        raise ValueError('original mesh section requires the qualified jaw axis')
+    closed=metal_gap_mm/1000-2*rubber_thickness_m
+    opened=opening_mm/1000-2*rubber_thickness_m
+    rows=[]
+    for height in sorted({low,(low+high)/2,high}):
+        segments=trimesh.intersections.mesh_plane(mesh,[0.,0.,1.],[0.,0.,height])
+        if segments is None or len(segments)==0 or not np.isfinite(segments).all():
+            raise ValueError('original object mesh cross-section unavailable')
+        width=float(np.ptp(segments.reshape(-1,3)@axis))
+        rows.append(dict(height_m=height,segments=len(segments),jaw_axis_width_m=width,
+                         within_existing_jaw_span=closed<=width<=opened))
+    return dict(mesh_sha256=mesh_sha256,passed=all(r['within_existing_jaw_span']for r in rows),
+        sections=rows,inner_commanded_gap_m=closed,inner_opening_m=opened,
+        axis_cup=axis.tolist(),scope='original OBJ horizontal section width along the qualified centering axis versus existing rubber jaw span; not force, compliance or full contact proof')
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+from functools import lru_cache
 import json
 import math
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -15,7 +17,7 @@ import time
 
 from integration import DualGpuPipeline, PIPELINE_LANES
 from runtime_progress import estimates
-from launch_environment import HOST_PYTHON,clean_command,owned_command
+from launch_environment import HOST_PYTHON,clean_command,owned_command,persistent_service
 from live_preview import PREVIEW_CAMERAS, camera_frame_path, receive_stream
 from playback import FILES as PLAYBACK_FILES, validate as validate_playback
 
@@ -35,16 +37,34 @@ def absolute(value):
     return str(PurePosixPath(value))
 
 
+@lru_cache(maxsize=8192)
+def _path_parts(path):return PurePosixPath(path).parts
+
+
 def below(path, root):
-    return PurePosixPath(path) == PurePosixPath(root) or PurePosixPath(root) in PurePosixPath(path).parents
+    path,root=_path_parts(path),_path_parts(root)
+    if not root:return not path or path[0] not in ('/','//')
+    return path[:len(root)]==root
+
+
+_control_config_validation=False
+
+
+def isolate_control_config_validation():
+    """Called by the shared control-side collection lifecycle, never standalone CLI."""
+    global _control_config_validation
+    _control_config_validation=bool(os.environ.get('WORKBENCH_CPU_PYTHON'))
 
 
 def load_config(path):
+    if _control_config_validation and not os.environ.get('ROBOT_WORKBENCH_COLLECTION_CPU_WORKER'):
+        from robot_workbench.collection_setup import load_collection_pipeline_process
+        return load_collection_pipeline_process(path)
     data = path.read_bytes()
     config = json.loads(data)
-    allowed = {*PATH_KEYS, "environment", "execution", "resident_deadline_wall_ns", "contract_path", "finger_envelope_sha256", "prompt_file", "opening_mm",
+    allowed = {*PATH_KEYS, "environment", "execution", "compute_transport", "resident_deadline_wall_ns", "contract_path", "finger_envelope_sha256", "prompt_file", "opening_mm",
                "remote_run_root", "record_raw", "render_replay", "motion_profile", "force_diagnostic", "diagnostic_input_root", "detector_service",
-               "planning_backend", "curobo_root", "detection_runtime_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service"}
+               "planning_backend", "curobo_root", "detection_runtime_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service", "scene_service"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("unknown pipeline configuration field")
     from real_contract import namespace
@@ -52,8 +72,8 @@ def load_config(path):
     for key in (*PATH_KEYS, "remote_run_root", "contract_path"):
         config[key] = absolute(config.get(key))
     speed=config.get('simulation_speed_scale',1.)
-    if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1.:
-        raise ValueError('simulation_speed_scale must be within0.1..1.0')
+    if type(speed) not in (int,float) or not math.isfinite(speed) or not .3<=speed<=1.7:
+        raise ValueError('simulation_speed_scale must be within 0.3..1.7')
     config['simulation_speed_scale']=float(speed)
     planning_backend = config.get('planning_backend', 'native')
     if config.get('cup_contact_preset') is not None:
@@ -68,12 +88,12 @@ def load_config(path):
     if planning_backend in ('curobo', 'motiongen') and not config.get('curobo_root'):
         raise ValueError('curobo planning_backend requires curobo_root')
     root = config["remote_run_root"]
-    from local_execution import validate as validate_local
+    from local_execution import validate as validate_local,owner_scope
     execution=validate_local(config)
     if execution:
-        scope=execution['plant']['scope']
+        scope=owner_scope(execution)
         if root==scope or not below(root,scope):
-            raise ValueError('local output must be a strict child of the frozen resident plant scope')
+            raise ValueError('local output must be a strict child of the frozen compute owner scope')
     elif not below(root, "/mnt/data/feiyu.zhou/runs") or len(PurePosixPath(root).parts) < 7:
         raise ValueError("remote output must be a unique personal project/run directory")
     if type(config.get("render_replay", True)) is not bool:
@@ -97,14 +117,19 @@ def load_config(path):
         raise ValueError("opening_mm must be finite and within (0, 88]")
     if not re.fullmatch("[0-9a-f]{64}", config.get("finger_envelope_sha256", "")):
         raise ValueError("finger envelope SHA256 is required")
-    contract_bytes = Path(config["contract_path"]).read_bytes()
+    contract_bytes = read_contract_bytes(config)
     contract = json.loads(contract_bytes)
     fs, resources = contract["filesystem"], contract["resources"]
     execution=validate_local(config,contract)
-    if execution and config.get('environment')=='fake':
+    persistent=persistent_service(resources)
+    if persistent and config.get('resident_deadline_wall_ns') is not None:
+        raise ValueError('persistent service cannot declare a resident wall deadline')
+    if execution:
         deadline=config.get('resident_deadline_wall_ns')
-        if type(deadline) is not int or deadline<=0 or resources.get('resident_deadline_wall_ns')!=deadline:
-            raise ValueError('local fake execution requires the same frozen resident wall deadline in config and contract')
+        if (persistent and ('resident_deadline_wall_ns' not in config or 'resident_deadline_wall_ns' not in resources
+                or deadline is not None)) or (not persistent and (type(deadline) is not int or deadline<=0
+                or resources.get('resident_deadline_wall_ns')!=deadline)):
+            raise ValueError('local compute execution requires the same frozen resident wall deadline in config and contract')
     lanes = ({execution['instance_id']:[execution['gpu_index']]} if execution else
              {v["instance_id"]: [v["gpu"]] for v in PIPELINE_LANES.values()})
     if (contract.get("schema_version") != "anyverse.dsw-codex-experiment.v1"
@@ -117,6 +142,8 @@ def load_config(path):
     if type(budget) not in (int, float) or not math.isfinite(budget) or not 0 < budget <= 120:
         raise ValueError("contract needs a finite wall-time budget up to 120 minutes")
     service_lifetime=resources.get('service_lifetime_seconds')
+    if not persistent and 'service_lifetime_seconds' in resources and service_lifetime is None:
+        raise ValueError('null service lifetime requires explicit persistent service')
     if service_lifetime is not None and (type(service_lifetime) is not int or not 0<service_lifetime<=172800):
         raise ValueError('service lifetime must be a positive integer up to48hours; each job retains its own wall-time budget')
     planning_budget = resources.get("max_planning_time_seconds")
@@ -128,7 +155,7 @@ def load_config(path):
     if type(resources.get("max_cpu_threads")) is not int or resources["max_cpu_threads"] < 4:
         raise ValueError("native pipeline requires a contract CPU budget of at least four threads")
     read_roots = [absolute(p) for p in fs.get("readonly_roots", [])]
-    if execution:
+    if execution or config.get('detection_runtime_root') is not None:
         runtime=absolute(config.get('detection_runtime_root'))
         if not any(below(runtime,p) for p in read_roots):raise ValueError('detector runtime root must be declared readonly')
         config['detection_runtime_root']=runtime
@@ -164,6 +191,9 @@ def load_config(path):
     validate_config(config, contract)
     from planner_service import validate_config as validate_planner
     validate_planner(config, contract)
+    if config.get('scene_service'):
+        from scene_service import validate_config as validate_scene
+        validate_scene(config,contract)
     return config, contract, {"config_sha256": digest(data), "contract_sha256": digest(contract_bytes)}
 
 
@@ -252,6 +282,65 @@ def lane(config, side):
     return dict(instance_id=execution['instance_id'],gpu=execution['gpu_index']) if execution else PIPELINE_LANES[side]
 
 
+def compute_transport(config):
+    value=config.get('compute_transport')
+    if value is None:return None
+    from artifact_transport import validate_endpoint
+    from local_execution import validate,owner_scope
+    if not isinstance(value,dict) or set(value)!={'endpoint','contract_file','contract_sha256','config_root'} or validate(config) is None:
+        raise ValueError('remote compute requires explicit endpoint, local contract mirror and declared local execution on compute host')
+    validate_endpoint(value['endpoint'])
+    absolute(value['contract_file']);absolute(value['config_root'])
+    if value['config_root']==owner_scope(config['execution']) or not below(value['config_root'],owner_scope(config['execution'])):
+        raise ValueError('remote configuration upload root escaped compute owner scope')
+    if not re.fullmatch('[0-9a-f]{64}',value.get('contract_sha256','')):raise ValueError('remote contract mirror SHA256 required')
+    return value
+
+
+def contract_file(config):
+    remote=compute_transport(config)
+    path=Path(remote['contract_file'] if remote else config['contract_path'])
+    if remote and path.is_symlink():
+        raise ValueError('remote compute contract mirror changed')
+    return path
+
+
+def read_contract_bytes(config):
+    raw=contract_file(config).read_bytes();remote=compute_transport(config)
+    if remote and digest(raw)!=remote['contract_sha256']:raise ValueError('remote compute contract mirror changed')
+    return raw
+
+
+def write_pipeline_config(config,contract,output,*,config_name='config.json',contract_name='contract.json',transfer=None,cancel=None):
+    """Freeze the same per-job contract locally and, when explicit, on its compute host."""
+    from copy import deepcopy
+    from uuid import uuid4
+    from artifact_transport import manifest,transfer as send
+    output=Path(output);output.mkdir(parents=True,exist_ok=True)
+    config,contract=deepcopy(config),deepcopy(contract);remote=compute_transport(config)
+    if remote:
+        name='configuration-'+uuid4().hex;package=output/name;package.mkdir()
+        config.pop('compute_transport');config['contract_path']=remote['config_root']+'/'+name+'/'+contract_name
+    else:package=output;config['contract_path']=str(output/contract_name)
+    config_bytes=(json.dumps(config,indent=2,allow_nan=False)+'\n').encode()
+    if 'config_sha256' in contract.get('provenance',{}):contract['provenance']['config_sha256']={config_name:digest(config_bytes)}
+    contract_bytes=(json.dumps(contract,indent=2,allow_nan=False)+'\n').encode()
+    (package/config_name).write_bytes(config_bytes);(package/contract_name).write_bytes(contract_bytes)
+    (package/config_name).chmod(0o600);(package/contract_name).chmod(0o600)
+    if remote:
+        (transfer or send)(direction='upload',local_root=str(output),local_directory=name,remote_root=remote['config_root'],
+            remote_directory=name,expected=manifest(package,[config_name,contract_name]),endpoint=remote['endpoint'],cancel=cancel)
+        (output/contract_name).write_bytes(contract_bytes)
+        config['compute_transport']={**remote,'contract_file':str(output/contract_name),'contract_sha256':digest(contract_bytes)}
+        (output/config_name).write_text(json.dumps(config,indent=2,allow_nan=False)+'\n')
+        (output/config_name).chmod(0o600);(output/contract_name).chmod(0o600)
+    return output/config_name
+
+
+def execution_context(config):
+    return {key:config[key] for key in ('execution','workbench_code','compute_transport') if key in config}
+
+
 def transport(config, side, command, *, timeout=None,failure_result=None):
     """One stage API; a declared local deployment never falls back to SSH."""
     from local_execution import validate
@@ -259,11 +348,17 @@ def transport(config, side, command, *, timeout=None,failure_result=None):
     if validate(config) is None:
         if failure_result is not None:raise ValueError('failure-result monitoring requires declared local owned execution')
         return ssh(side,command)
+    remote=compute_transport(config)
     argv=['bash','-c',command]
     if timeout is not None:
-        return owned_command(config['workbench_code'],argv,timeout,failure_result=failure_result)
-    if failure_result is not None:raise ValueError('failure-result monitoring requires a bounded owned command')
-    return clean_command(argv)
+        argv=owned_command(config['workbench_code'],argv,timeout,failure_result=failure_result)
+    else:
+        if failure_result is not None:raise ValueError('failure-result monitoring requires a bounded owned command')
+        argv=clean_command(argv)
+    if remote:
+        from artifact_transport import ssh_command
+        return ssh_command(remote['endpoint'],'exec '+shlex.join(argv))
+    return argv
 
 
 def python_command(script, *args):
@@ -273,10 +368,11 @@ def python_command(script, *args):
         return command
     # Large SHA manifests exceed Linux's per-argument limit; decode inside Python.
     import base64
-    import zlib
-    payload = base64.b64encode(zlib.compress(json.dumps([script, values]).encode())).decode()
-    bootstrap = ("import base64,json,sys,zlib; "
-                 "s,a=json.loads(zlib.decompress(base64.b64decode(sys.argv[1]))); "
+    import lzma
+    # Contracts repeat frozen pin maps farther apart than zlib's 32KiB window.
+    payload = base64.b64encode(lzma.compress(json.dumps([script, values]).encode(),preset=1)).decode()
+    bootstrap = ("import base64,json,sys,lzma; "
+                 "s,a=json.loads(lzma.decompress(base64.b64decode(sys.argv[1]))); "
                  "sys.argv=['-c',*a]; exec(compile(s,'<remote>','exec'))")
     return shlex.join(clean_command([HOST_PYTHON, "-I", "-B", "-c", bootstrap, payload]))
 
@@ -402,9 +498,10 @@ def build_plan(config, contract):
         if wall_budget is not None:
             if type(wall_budget) is not int or wall_budget<=45:raise ValueError('stage wall budget must reserve shutdown time')
             timeout_s=min(timeout_s,wall_budget-45)
+        transport_command=f"timeout -k 30 {timeout_s} " + shlex.join(["bash", "-c" if output else "-lc", command])
         stages.append({"name": name, "side": side, "timeout_s": timeout_s,"wall_budget_s":wall_budget,
-                       "argv": transport(c,side, f"timeout -k 30 {timeout_s} " +
-                       shlex.join(["bash", "-c" if output else "-lc", command]),timeout=timeout_s), "output": output, "group": group})
+                       "transport_command":transport_command,
+                       "argv": transport(c,side,transport_command,timeout=timeout_s), "output": output, "group": group})
 
     def env(side):
         return isaac_environment(c,side)
@@ -529,7 +626,7 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
     fp_env = {"PYTHONPATH": "", "CUDA_HOME": c["detection_cuda_home"], "TORCH_EXTENSIONS_DIR": root + "/cache/torch-extensions",
               "XDG_CACHE_HOME": root + "/cache", "PATH": c["detection_cuda_home"] + "/bin:" +
               str(PurePosixPath(c["detection_python"]).parent) + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-    if c.get('execution'):
+    if c.get('detection_runtime_root'):
         from local_execution import detector_environment
         fp_env.update(detector_environment(c,contract))
     detection = c.get('detection_input_root') or root+'/detection'
@@ -670,10 +767,18 @@ def bounded_command(stage, remaining):
         raise TimeoutError("contract wall-time budget exhausted before command start (45s shutdown reserve)")
     argv = list(stage["argv"])
     remote = shlex.split(argv[-1])
+    nested=remote and remote[0]=='exec' and any(value.endswith('/owned_process.py') for value in remote)
+    wrapper=remote if nested else None
+    if nested:remote=shlex.split(wrapper[-1])
     if remote[:4] != ["timeout", "-k", "30", str(limit)]:
         raise ValueError("unexpected remote timeout wrapper")
     remote[3] = str(seconds)
-    argv[-1] = shlex.join(remote)
+    if nested:
+        wrapper[-1]=shlex.join(remote)
+        for index,value in enumerate(wrapper[:-2]):
+            if value.endswith('/owned_process.py') and wrapper[index+1]=='--timeout':wrapper[index+2]=str(seconds)
+        argv[-1]=shlex.join(wrapper)
+    else:argv[-1] = shlex.join(remote)
     for index,value in enumerate(argv[:-2]):
         if value.endswith('/owned_process.py') and argv[index+1]=='--timeout':argv[index+2]=str(seconds)
     return argv, seconds

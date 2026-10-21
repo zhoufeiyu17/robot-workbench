@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT/'scripts'), str(ROOT/'rule_based_workbench')]
 from detector_adapter.preflight_release import preflight_release
 from rule_based_workbench.launch_environment import clean_environment
+from local_execution import TARGET
 import serve_physx_device
 import setup_resident_collection
 
@@ -45,6 +46,10 @@ class PreflightOrderingTest(unittest.TestCase):
     def test_setup_rejects_before_preparation_and_output(self):
         with TemporaryDirectory() as temp:
             root = Path(temp).resolve();output = root/'setup'
+            (root/'contract.json').write_text(json.dumps(dict(
+                identity={'dsw_instance_id':TARGET['instance_id']},
+                resources=dict(gpu_index=TARGET['gpu_index'],cuda_visible_devices=[TARGET['gpu_index']],
+                    gpu_uuid=TARGET['gpu_uuid']))))
             spec = dict(collection_setup={'detection_runtime_root': str(root/'runtime')})
             parent = dict(service={}, execution={}, base={'pipeline_config': {}})
             for run in (False, True):

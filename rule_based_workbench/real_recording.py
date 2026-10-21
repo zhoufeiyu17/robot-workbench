@@ -13,6 +13,9 @@ from itertools import islice
 import json
 import math
 import os
+import pickle
+import queue
+import sys
 import uuid
 from pathlib import Path
 import statistics
@@ -178,7 +181,17 @@ def validate_rgbd_metadata(meta,serial,*,environment,clock):
 
 
 class RealRecorder:
-    def __init__(self, root, source, plan, binding, *, clock_ns=time.time_ns, execution_timeline=None, environment='physical', clock_domain=None, source_clock_id=None, execution_owner=None):
+    def __init__(self, root, source, plan, binding, *, clock_ns=time.time_ns, execution_timeline=None, environment='physical', clock_domain=None, source_clock_id=None, execution_owner=None, storage_format='zip', defer_execution=False):
+        started=time.monotonic()
+        if type(defer_execution) is not bool or defer_execution and execution_timeline is not None:
+            raise ValueError('pre-roll binds its final execution timeline once')
+        self.defer_execution=defer_execution
+        self.startup_timings={}
+        if storage_format not in ('zip','segments'):raise ValueError('known RGB-D storage format required')
+        self.storage_format=storage_format
+        self.segment_writers={}
+        self.index_streams={}
+        self.segment_executor=ThreadPoolExecutor(max_workers=len(CAMERAS),thread_name_prefix='rgbd-commit') if storage_format=='segments' else None
         self.namespace=namespace(environment)
         self.environment=environment
         self.execution_owner=owner_identity(execution_owner) if execution_owner is not None else None
@@ -186,14 +199,18 @@ class RealRecorder:
         if (clock_domain is not None or source_clock_id is not None) and clock_spec(environment,
                 clock_domain=clock_domain,source_clock_id=source_clock_id)!=self.clock:
             raise ValueError('recorder clock differs from sealed source')
-        validate_real_plan(plan,source,binding,environment=environment)
+        # FrozenExecutor invokes this same complete source/plan validator below.
+        # Do not rescan a multi-thousand-tick plan once more before constructing it.
         self.frozen = FrozenExecutor(plan,source,sink=lambda _:None,gate=lambda:True,stop=lambda _:None,
                                     source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment),
-                                    execution_policy='observation' if execution_timeline else 'strict')
+                                    disabled_grippers=(source.get('initial_state') or {}).get('disabled_grippers',()),
+                                    execution_policy='observation' if execution_timeline or defer_execution else 'strict')
         if execution_timeline is not None:
             from execution_timeline import validate
             validate(execution_timeline,plan)
             self.frozen.configure_runtime(execution_timeline)
+        validated=time.monotonic()
+        self.startup_timings['validate_wall_s']=validated-started
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True,exist_ok=False)
         self.source,self.plan = deepcopy(source),deepcopy(plan)
@@ -206,12 +223,31 @@ class RealRecorder:
         self.write_json('plan.json',plan)
         self.write_json('binding.json',binding)
         if execution_timeline is not None:self.write_json('execution-timeline.json',execution_timeline)
+        self.startup_timings.update(storage_setup_wall_s=time.monotonic()-validated,
+                                   total_wall_s=time.monotonic()-started)
+        self.first_camera_timings={}
+
+    def bind_execution(self,timeline):
+        """Add the actual timeline after pre-roll; never replace captured images."""
+        if not self.defer_execution or self.closed or self.commands or self.feedback:
+            raise ValueError('one final timeline before execution events required')
+        from execution_timeline import validate
+        validate(timeline,self.plan)
+        self.frozen.configure_runtime(timeline)
+        self.write_json('execution-timeline.json',timeline)
+        self.defer_execution=False
 
     def write_json(self,name,value):
         (self.root/name).write_text(json.dumps(value,allow_nan=False,indent=2)+'\n')
 
     def append(self,name,row):
         if self.closed: raise ValueError('recording sealed')
+        if self.storage_format=='segments':
+            # One append stream per index; line buffering persists each record
+            # without the CPFS open/close roundtrip for every frame or feedback.
+            if name not in self.index_streams:self.index_streams[name]=(self.root/name).open('x',buffering=1)
+            self.index_streams[name].write(json.dumps(row,allow_nan=False)+'\n')
+            return
         with (self.root/name).open('a') as stream:
             stream.write(json.dumps(row,allow_nan=False)+'\n')
 
@@ -231,7 +267,8 @@ class RealRecorder:
         if self.execution_owner is not None and identity!=self.execution_owner:
             raise ValueError('sample Owner instance/epoch differs from this execution')
 
-    def record_command(self,tick,target,send_monotonic_s,send_wall_ns,*,clock_domain=None,source_clock_id=None,send_source_time_ns=None,physics_step=None,feedback_at_send=None,owner_pid=None,command_epoch=None,runtime_nonce=None):
+    def record_command(self,tick,target,send_monotonic_s,send_wall_ns,*,clock_domain=None,source_clock_id=None,send_source_time_ns=None,physics_step=None,feedback_at_send=None,owner_pid=None,command_epoch=None,runtime_nonce=None,execution_semantics='SDK_point_send'):
+        if self.defer_execution:raise ValueError('execution timeline not bound')
         if self.environment=='physical' and any(value is not None for value in
                 (clock_domain,source_clock_id,send_source_time_ns,physics_step,feedback_at_send,owner_pid,command_epoch,runtime_nonce)):
             raise ValueError('simulation command-clock fields cannot enter physical recording')
@@ -242,6 +279,9 @@ class RealRecorder:
                                        or send_wall_ns <= self.commands[-1]['send_wall_ns'])):
             raise ValueError('ordered unchanged frozen command and advancing timestamps required')
         row = dict(tick=tick,target=deepcopy(target),send_monotonic_s=send_monotonic_s,send_wall_ns=send_wall_ns)
+        if execution_semantics not in ('SDK_point_send','source_reference_knot'):
+            raise ValueError('explicit command evidence semantics required')
+        if execution_semantics=='source_reference_knot':row['execution_semantics']=execution_semantics
         if self.environment=='fake':
             row.update(clock_domain=clock_domain,source_clock_id=source_clock_id,send_source_time_ns=send_source_time_ns,physics_step=physics_step)
             row.update(owner_pid=owner_pid,command_epoch=command_epoch,runtime_nonce=runtime_nonce)
@@ -259,7 +299,20 @@ class RealRecorder:
         self.append('commands.jsonl',row)
         self.commands.append(row)
 
+    def record_native_window(self,packet,admission,send_monotonic_s,send_wall_ns):
+        from robot_workbench.target_interpreter import SCHEMA
+        if (not isinstance(packet,dict)or packet.get('schema')!=SCHEMA
+                or not 2<=len(packet.get('host_times_s',[]))<=32
+                or not finite(send_monotonic_s)or type(send_wall_ns)is not int
+                or not isinstance(admission,dict)):
+            raise ValueError('bounded actual native-window evidence required')
+        self.append('native-windows.jsonl',dict(packet=deepcopy(packet),admission=deepcopy(admission),
+            send_monotonic_s=send_monotonic_s,send_wall_ns=send_wall_ns,
+            evidence='native_queue_return_not_firmware_ACK'))
+        self.native_window_count=getattr(self,'native_window_count',0)+1
+
     def record_feedback(self,tick,state,sample_monotonic_s,sample_wall_ns,raw=None,*,clock_domain=None,source_clock_id=None,source_time_ns=None,physics_step=None,owner_pid=None,command_epoch=None,runtime_nonce=None):
+        if self.defer_execution:raise ValueError('execution timeline not bound')
         if self.environment=='physical' and any(value is not None for value in
                 (clock_domain,source_clock_id,source_time_ns,physics_step,owner_pid,command_epoch,runtime_nonce)):
             raise ValueError('simulation feedback-clock fields cannot enter physical recording')
@@ -284,7 +337,26 @@ class RealRecorder:
 
     def record_rgbd(self,camera,blob):
         if self.closed or camera not in CAMERAS: raise ValueError('open recording and known camera required')
-        meta,_,_ = bundle(blob,self.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+        meta,color,depth = bundle(blob,self.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+        return self._record_rgbd(camera,meta,color,depth,blob=blob)
+
+    def record_rgbd_frame(self,camera,meta,color_png,depth_png):
+        if self.closed or camera not in CAMERAS:raise ValueError('open recording and known camera required')
+        validate_rgbd_metadata(meta,self.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+        if png_shape(color_png)!=png_shape(depth_png,depth=True):raise ValueError('RGB and aligned depth dimensions differ')
+        return self._record_rgbd(camera,meta,color_png,depth_png)
+
+    def record_rgbd_pixels(self,camera,meta,rgb,depth,width,height):
+        if self.closed or camera not in CAMERAS:
+            raise ValueError('open recording and known camera required')
+        validate_rgbd_metadata(meta,self.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+        if self.storage_format=='zip':
+            from rgbd_segments import _png
+            return self._record_rgbd(camera,meta,_png(rgb,width,height,False),_png(depth,width,height,True))
+        return self._record_rgbd(camera,meta,rgb,depth,pixel_shape=(width,height))
+
+    def _record_rgbd(self,camera,meta,color,depth,*,blob=None,pixel_shape=None):
+        started=time.monotonic()
         if self.environment=='fake':self._check_owner(meta,frame=True)
         rows = self.frames[camera]
         if rows and meta['pair_id'] == rows[-1]['pair_id']: return False
@@ -293,13 +365,33 @@ class RealRecorder:
                      or meta['frame_number'] <= rows[-1]['frame_number']
                      or meta['depth_frame_number'] <= rows[-1]['depth_frame_number']):
             raise ValueError('camera pair timestamps/frame counters regressed')
-        directory = self.root/'camera'/camera
-        directory.mkdir(parents=True,exist_ok=True)
-        path = directory/f'{len(rows):08d}.zip'
-        path.write_bytes(blob)
-        row = dict(meta,path=str(path.relative_to(self.root)))
+        if self.storage_format=='segments':
+            from rgbd_segments import SegmentWriter
+            detail=None
+            if not rows:
+                detail=self.first_camera_timings.setdefault(camera,
+                    dict(stage='writer_setup',status='started',started_wall_ns=time.time_ns()))
+            if camera not in self.segment_writers:
+                self.segment_writers[camera]=SegmentWriter(self.root/'camera',camera,commit_executor=self.segment_executor)
+            writer_ready=time.monotonic()
+            if detail is not None:detail.update(writer_setup_wall_s=writer_ready-started,stage='encode')
+            writer=self.segment_writers[camera]
+            ref=(writer.add_pixels(meta,color,depth,*pixel_shape) if pixel_shape else writer.add(meta,color,depth))
+            encoded=time.monotonic()
+            if detail is not None:detail.update(encode_wall_s=encoded-writer_ready,stage='index_append')
+            row=dict(meta,segment='camera/'+ref['segment'],segment_frame=ref['frame'])
+        else:
+            from real_rgbd import snapshot_bundle
+            directory = self.root/'camera'/camera
+            directory.mkdir(parents=True,exist_ok=True)
+            path = directory/f'{len(rows):08d}.zip'
+            path.write_bytes(blob if blob is not None else snapshot_bundle(meta,color,depth))
+            row = dict(meta,path=str(path.relative_to(self.root)))
         self.append(f'{camera}-pairs.jsonl',row)
         rows.append(row)
+        if self.storage_format=='segments' and len(rows)==1:
+            detail.update(index_append_wall_s=time.monotonic()-encoded,
+                total_wall_s=time.monotonic()-started,status='written',stage='complete',finished_wall_ns=time.time_ns())
         return True
 
     def seal(self,status,reason=None):
@@ -307,16 +399,35 @@ class RealRecorder:
         if self.closed or status not in ('completed','failed','stopped','recording_failed'):
             raise ValueError('one explicit terminal outcome required')
         problems = []
-        pairings=[]
-        if len(self.commands) != len(self.frozen.ticks): problems.append('not every execution command recorded')
+        if self.storage_format=='segments':
+            try:
+                for writer in self.segment_writers.values():writer.finish()
+            finally:
+                self.segment_executor.shutdown(wait=True)
+                for stream in self.index_streams.values():stream.close()
+                self.index_streams.clear()
+        self.write_json('recording-timings.json',dict(startup=self.startup_timings,
+            first_camera=self.first_camera_timings,
+            segments={camera:writer.timings for camera,writer in self.segment_writers.items()}))
+        pairings=[];duration_coverage=None
+        streaming=getattr(self,'streaming',False)
+        shared=(self.source.get('target_execution')=='shared_reference_windows'
+                or any(row.get('execution_semantics')=='source_reference_knot'for row in self.commands))
+        if shared and not getattr(self,'native_window_count',0):
+            problems.append('shared target execution has no actual native-window evidence')
+        if not streaming and len(self.commands) != len(self.frozen.ticks): problems.append('not every execution command recorded')
         if not self.feedback or not self.commands:
             problems.append('command or measured feedback stream missing')
         else:
             commands=[self._stamp(row,'command') for row in self.commands]
             feedback=[self._stamp(row,'feedback') for row in self.feedback]
-            endpoint = (commands[0][0]/1e9 if self.environment=='fake' else self.commands[0]['send_monotonic_s'])+self.frozen.duration_s
+            duration=self.source['duration_s'] if streaming else self.frozen.duration_s
+            endpoint = (commands[0][0]/1e9 if self.environment=='fake' else self.commands[0]['send_monotonic_s'])+duration
             last_feedback = feedback[-1][0]/1e9 if self.environment=='fake' else self.feedback[-1]['sample_monotonic_s']
-            if last_feedback+1e-9 < endpoint:
+            if streaming:
+                from robot_workbench.sample_clock import policy_duration_coverage
+                duration_coverage=policy_duration_coverage(duration,last_feedback-(endpoint-duration))
+            if (not duration_coverage['passed'] if streaming else last_feedback+1e-9 < endpoint):
                 problems.append('feedback does not cover complete command duration')
             feedback_gap = (any(b[0]-a[0]>100_000_000 for a,b in zip(feedback,feedback[1:])) if self.environment=='fake'
                 else any(b['sample_monotonic_s']-a['sample_monotonic_s']>.1 for a,b in zip(self.feedback,self.feedback[1:])))
@@ -350,8 +461,11 @@ class RealRecorder:
         files = _raw_file_index(self.root,(str(path.relative_to(self.root)) for path in self.root.rglob('*')))
         self.seal_timings=dict(semantic_wall_s=semantics_finished-started,
             file_integrity_wall_s=time.monotonic()-semantics_finished,files=len(files),bytes=sum(v['size_bytes'] for v in files.values()))
+        self.seal_timings.update(startup=self.startup_timings,first_camera=self.first_camera_timings)
+        if self.storage_format=='segments':
+            self.seal_timings['segments']={camera:getattr(writer,'timings',{}) for camera,writer in self.segment_writers.items()}
         manifest = dict(schema_version=self.namespace['raw_schema'],evidence_source=self.namespace['evidence'],
-                        source_run_id=self.source['run_id'],plan_run_id=self.plan['run_id'],timeline_digest=self.plan['timeline_digest'],
+                        source_run_id=self.source['execution_instance_id'] if streaming else self.source['run_id'],
                         robot_id=self.source['robot_id'],camera_serials=self.source['camera_serials'],
                         created_wall_ns=self.created_ns,sealed_wall_ns=self.clock_ns(),
                         command_count=len(self.commands),feedback_count=len(self.feedback),
@@ -362,17 +476,72 @@ class RealRecorder:
                         controller_reason=None if status=='recording_failed' else reason,
                         recording_error=reason if status=='recording_failed' else None,
                         task_outcome='unverified',files=files)
+        if getattr(self,'native_window_count',0):
+            semantics=('source_reference_knots'if any(row.get('execution_semantics')=='source_reference_knot'for row in self.commands)
+                else'native_window_admissions'if self.commands and all(row.get('command_kind')=='native_future_window'for row in self.commands)
+                else'SDK_point_sends')
+            manifest.update(native_window_count=self.native_window_count,
+                native_windows_sha256=files.get('native-windows.jsonl',{}).get('sha256'),
+                command_semantics=semantics,
+                native_evidence_scope='bounded native queue returns; firmware ACK unsupported')
+        if streaming:
+            manifest.update(recording_kind='streaming_policy',source_digest=_digest(self.source),duration_coverage=duration_coverage,
+                execution_instance_id=self.source['execution_instance_id'],scheduled_duration_s=self.source['duration_s'],
+                actual_commands_sha256=files.get('commands.jsonl',{}).get('sha256'),
+                command_scope='actual submitted commands; no planned future timeline',
+                actual_duration_s=((self._stamp(self.feedback[-1],'feedback')[0]-self._stamp(self.commands[0],'command')[0])/1e9
+                    if self.feedback and self.commands else 0.))
+        else:manifest.update(plan_run_id=self.plan['run_id'],timeline_digest=self.plan['timeline_digest'])
+        if self.storage_format=='segments':manifest['rgbd_storage']='lossless_segments_v1'
         if self.environment=='fake':manifest.update(environment='fake',simulation_only=True,clock=self.clock,source_clock='simulation',
             source_clock_id=self.clock['source_clock_id'],execution_owner=self.execution_owner,
             frame_feedback_association='exact samples or explicit same-clock brackets')
-        if self.frozen.runtime_timeline:
+        if not streaming and self.frozen.runtime_timeline:
             manifest.update(execution_timeline_digest=self.frozen.runtime_timeline['timeline_digest'],
                 execution_hz=self.frozen.runtime_timeline['control_hz'],
                 execution_duration_s=self.frozen.duration_s)
         self.write_json('manifest.json',manifest)
         self.closed = True
         self.seal_timings['total_wall_s']=time.monotonic()-started
+        # Timings are diagnostics outside the frozen raw file set, not data.
+        (self.root.parent/'recording-seal-timings.json').write_text(json.dumps(self.seal_timings,indent=2)+'\n')
         return manifest
+
+    def abort(self):
+        for writer in self.segment_writers.values():writer.abort()
+        if self.segment_executor is not None:self.segment_executor.shutdown(wait=True,cancel_futures=True)
+        for stream in self.index_streams.values():stream.close()
+        self.index_streams.clear()
+
+
+def validate_policy_source(source,binding,environment):
+    from integration import validate_profile
+    from robot_workbench.sample_clock import POLICY_DURATION_TOLERANCE_S
+    if (source.get('schema_version')!='policy_execution_source.v1' or source.get('environment')!=environment
+            or not isinstance(source.get('execution_instance_id'),str) or not source['execution_instance_id']
+            or type(source.get('duration_s')) not in (int,float) or not 0<source['duration_s']<=40
+            or source.get('duration_tolerance_s',POLICY_DURATION_TOLERANCE_S)!=POLICY_DURATION_TOLERANCE_S
+            or binding.get('calibration_accepted') is not True or binding.get('robot_id')!=source.get('robot_id')
+            or binding.get('camera_serials')!=source.get('camera_serials')
+            or set(source.get('camera_serials',{}))!={'head','left','right'}
+            or len(set(source['camera_serials'].values()))!=3):
+        raise ValueError('current device/calibration identity and bounded policy execution source required')
+    clock_for_source(source,environment);validate_profile(source['calibration_profile'])
+    if binding.get('calibration_profile_digest')!=_digest(source['calibration_profile']):
+        raise ValueError('policy recording calibration differs from accepted installed snapshot')
+    if bool(source['calibration_profile']['source'].get('simulation_only'))!=(environment=='fake'):
+        raise ValueError('policy recording calibration environment differs')
+    return source
+
+
+def _recording_identity(root,environment):
+    from rgbd_segments import _safe
+    for name in ('source.json','binding.json'):_safe(root,name)
+    source,binding=[json.loads((root/name).read_text()) for name in ('source.json','binding.json')]
+    if source.get('schema_version')=='policy_execution_source.v1':
+        validate_policy_source(source,binding,environment);return source,None,binding
+    plan=json.loads(_safe(root,'plan.json').read_text());validate_real_plan(plan,source,binding,environment=environment)
+    return source,plan,binding
 
 
 def verify_raw(root, *, environment='physical', _consume_rgbd=None):
@@ -382,15 +551,22 @@ def verify_raw(root, *, environment='physical', _consume_rgbd=None):
     if manifest.get('schema_version') != namespace(environment)['raw_schema']:
         raise ValueError('physical raw manifest required')
     validate_namespace(manifest, environment)
-    if not {'source.json','plan.json','binding.json'} <= set(manifest.get('files',{})):
+    streaming=manifest.get('recording_kind')=='streaming_policy'
+    if not ({'source.json','binding.json'} | (set() if streaming else {'plan.json'})) <= set(manifest.get('files',{})):
         raise ValueError('raw identity files must be sealed')
-    _raw_file_index(root,manifest['files'],expected=manifest['files'],consume_rgbd=_consume_rgbd)
-    source,plan,binding = [json.loads((root/name).read_text()) for name in ('source.json','plan.json','binding.json')]
-    validate_real_plan(plan,source,binding,environment=environment)
+    storage=manifest.get('rgbd_storage','zip')
+    if storage not in ('zip','lossless_segments_v1'):raise ValueError('unknown raw RGB-D storage')
+    _raw_file_index(root,manifest['files'],expected=manifest['files'],consume_rgbd=_consume_rgbd if storage=='zip' else None)
+    source,plan,binding=_recording_identity(root,environment)
+    if streaming!=(plan is None):raise ValueError('recording kind differs from source identity')
     if environment=='fake' and (manifest.get('clock')!=clock_for_source(source,environment)
             or manifest.get('source_clock')!='simulation' or manifest.get('source_clock_id')!=source['clock']['source_clock_id']):
         raise ValueError('raw clock differs from sealed source')
-    if manifest.get('source_run_id') != source['run_id'] or manifest.get('plan_run_id') != plan['run_id'] or manifest.get('timeline_digest') != plan['timeline_digest']:
+    if streaming:
+        if (manifest.get('source_digest')!=_digest(source) or manifest.get('source_run_id')!=source['execution_instance_id']
+                or manifest.get('actual_commands_sha256')!=manifest['files'].get('commands.jsonl',{}).get('sha256')):
+            raise ValueError('actual policy execution identity or command hash differs')
+    elif manifest.get('source_run_id') != source['run_id'] or manifest.get('plan_run_id') != plan['run_id'] or manifest.get('timeline_digest') != plan['timeline_digest']:
         raise ValueError('raw identity differs')
     if manifest.get('execution_timeline_digest'):
         from execution_timeline import validate
@@ -399,7 +575,128 @@ def verify_raw(root, *, environment='physical', _consume_rgbd=None):
         if (timeline['timeline_digest']!=manifest['execution_timeline_digest']
                 or len(timeline['commands'])!=manifest['command_count'] and manifest['capture_status']=='complete'):
             raise ValueError('raw execution timeline differs')
+    if storage=='lossless_segments_v1' and _consume_rgbd is not None:
+        from real_rgbd import snapshot_bundle
+        for camera in CAMERAS:
+            for row,meta,color,depth in iter_rgbd(root,camera,environment=environment):
+                _consume_rgbd(_frame_key(row),snapshot_bundle(meta,color,depth))
     return manifest,source,plan
+
+
+def _frame_key(row):
+    return row['path'] if 'path' in row else row['segment']+'#'+str(row['segment_frame'])
+
+
+def iter_rgbd(root,camera,*,environment='physical'):
+    """Read old ZIP or lossless segments in order, with only one frame buffered.
+
+    Call verify_raw before treating an entire recording as valid. This reader
+    also checks the actual image bytes and their metadata/index association.
+    """
+    if camera not in CAMERAS:raise ValueError('known camera required')
+    root=Path(root).resolve()
+    source=json.loads((root/'source.json').read_text())
+    clock=clock_for_source(source,environment)
+    rows=[json.loads(line) for line in (root/f'{camera}-pairs.jsonl').read_text().splitlines()]
+    if not rows:return
+    if 'path' in rows[0]:
+        from rgbd_segments import _safe
+        for row in rows:
+            path=_safe(root,row['path'])
+            meta,color,depth=bundle(path.read_bytes(),source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
+            if meta!={k:v for k,v in row.items() if k!='path'}:raise ValueError('RGB-D index differs from stored frame')
+            yield row,meta,color,depth
+        return
+    from rgbd_segments import iter_segment
+    from itertools import groupby
+    seen=set()
+    for segment,group in groupby(rows,key=lambda row:row['segment']):
+        if segment in seen:raise ValueError('repeated or noncontiguous segment')
+        seen.add(segment)
+        part=Path(segment)
+        if len(part.parts)!=3 or part.parts[:2]!=('camera',camera):raise ValueError('RGB-D segment belongs to another camera')
+        expected=list(group)
+        count=0
+        for count,(meta,color,depth) in enumerate(iter_segment(root/'camera',str(part.relative_to('camera'))),1):
+            if count>len(expected):raise ValueError('segment has unindexed frames')
+            row=expected[count-1]
+            if row.get('segment_frame')!=count-1 or meta!={k:v for k,v in row.items() if k not in ('segment','segment_frame')}:
+                raise ValueError('RGB-D index differs from stored segment frame')
+            validate_rgbd_metadata(meta,source['camera_serials'][SIDES[camera]],environment=environment,clock=clock)
+            yield row,meta,color,depth
+        if count!=len(expected):raise ValueError('indexed segment frames missing')
+
+
+def recover_raw(root,output,*,environment='physical'):
+    """Publish a separate read-only prefix report; never resume motion or edit raw."""
+    from rgbd_segments import recover,iter_segment,_safe
+    root=Path(root)
+    if root.is_symlink():raise ValueError('symlink raw root forbidden')
+    root=root.resolve()
+    for name in ('source.json','binding.json'):_safe(root,name)
+    source,plan,binding=_recording_identity(root,environment)
+    identity_names=('source.json','binding.json') if plan is None else ('source.json','plan.json','binding.json')
+    report=dict(schema='rgbd_recovered_prefix_v1',raw_root=str(root),environment=environment,
+        status='incomplete',episode_complete=False,motion_resumed=False,cameras={})
+    report['identity_files']={name:dict(size_bytes=(root/name).stat().st_size,sha256=sha256(root/name))
+        for name in identity_names}
+    report['event_streams']={}
+    for name in ('commands.jsonl','feedback.jsonl'):
+        path=root/name;count=0;last_complete_offset=0;truncated=False;digest=hashlib.sha256()
+        if path.is_symlink():raise ValueError('symlink event stream forbidden')
+        if path.exists():
+            with path.open('rb') as stream:
+                while line:=stream.readline(64*1024+1):
+                    if len(line)>64*1024:raise ValueError('bounded event record required')
+                    if not line.endswith(b'\n'):truncated=True;break
+                    if not isinstance(json.loads(line),dict):raise ValueError('event object required')
+                    count+=1;last_complete_offset+=len(line);digest.update(line)
+        report['event_streams'][name]=dict(complete_records=count,complete_bytes=last_complete_offset,
+            complete_prefix_sha256=digest.hexdigest(),truncated_tail=truncated)
+    for camera in CAMERAS:
+        recovered=recover(root/'camera',camera)
+        # Fully consume each committed segment to check lossless pixel evidence,
+        # source/Owner identity and strictly advancing original source stamps.
+        count=0;previous=None;verified=[]
+        for segment in recovered['segments']:
+            ref=segment.get('commit_path')
+            if ref is None:ref=f"{camera}/{segment['segment']:06d}.commit.json"
+            before=count
+            try:
+                for meta,_,_ in iter_segment(root/'camera',ref):
+                    validate_rgbd_metadata(meta,source['camera_serials'][SIDES[camera]],environment=environment,clock=clock_for_source(source,environment))
+                    stamp=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},clock_for_source(source,environment))
+                    assert_progress(previous,stamp);previous=stamp;count+=1
+            except (ValueError,RuntimeError,OSError,TimeoutError) as error:
+                recovered['errors'].append(str(error));count=before;break
+            verified.append(segment)
+        recovered['segments']=verified
+        recovered['frame_count']=count
+        report['cameras'][camera]=dict(recovered,verified_frame_count=count)
+    output=Path(output)
+    if output.resolve().is_relative_to(root):raise ValueError('recovery report must stay outside original raw')
+    output.parent.mkdir(parents=True,exist_ok=True)
+    with output.open('x') as stream:json.dump(report,stream,indent=2,allow_nan=False)
+    return report
+
+
+def iter_recovered_rgbd(report_path,camera):
+    """Read only the explicitly recovered prefix; no complete-dataset claim."""
+    if camera not in CAMERAS:raise ValueError('known camera required')
+    from rgbd_segments import _safe,iter_segment,verify_segment
+    report=json.loads(Path(report_path).read_text())
+    if report.get('schema')!='rgbd_recovered_prefix_v1' or report.get('episode_complete') is not False:
+        raise ValueError('explicit incomplete-prefix recovery report required')
+    root=Path(report['raw_root'])
+    for name,pin in report['identity_files'].items():
+        path=_safe(root,name)
+        if path.stat().st_size!=pin['size_bytes'] or sha256(path)!=pin['sha256']:
+            raise ValueError('recovered identity changed')
+    for expected in report['cameras'][camera]['segments']:
+        ref=f"{camera}/{expected['segment']:06d}.commit.json"
+        if verify_segment(root/'camera',ref)!=expected:raise ValueError('recovered segment changed')
+        for index,(meta,color,depth) in enumerate(iter_segment(root/'camera',ref)):
+            yield dict(meta,segment='camera/'+ref,segment_frame=index),meta,color,depth
 
 
 def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run,environment='physical',scratch_root=None):
@@ -416,7 +713,11 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     spec=namespace(environment)
     # These provisional identities only prepare the export. The complete frozen
     # verifier below checks every input while extracting the same verified bytes.
-    raw,source,plan = [json.loads((raw_root/name).read_text()) for name in ('manifest.json','source.json','plan.json')]
+    raw=json.loads((raw_root/'manifest.json').read_text())
+    source=json.loads((raw_root/'source.json').read_text())
+    plan=None if raw.get('recording_kind')=='streaming_policy' else json.loads((raw_root/'plan.json').read_text())
+    if plan is None and target_manifest_path is not None:raise ValueError('policy execution has no planned target replay')
+    if plan is None and raw.get('rgbd_storage')!='lossless_segments_v1':raise ValueError('policy video export requires common segment storage')
     target = json.loads(target_manifest_path.read_text()) if target_manifest_path is not None else None
     if target is not None and target.get('execution_timeline_digest') != raw.get('execution_timeline_digest'):
         raise ValueError('physical and simulation execution commands differ')
@@ -431,6 +732,20 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
         if path.is_symlink() or path.stat().st_size != pin['size_bytes'] or sha256(path) != pin['sha256']:
             raise ValueError('target replay integrity differs')
         target_paths[name] = path
+    if raw.get('rgbd_storage')=='lossless_segments_v1':
+        from segmented_playback import export_segments
+        verifying=time.monotonic()
+        verified=verify_raw(raw_root,environment=environment)
+        if verified!=(raw,source,plan):raise ValueError('raw identity changed during export')
+        verified_elapsed=time.monotonic()-verifying
+        result=export_segments(raw_root,raw,source,plan,output,runner=runner,environment=environment,
+            target=target,target_paths=target_paths,target_manifest_path=target_manifest_path)
+        path=Path(output)/'export-timings.json';timings=json.loads(path.read_text())
+        timings.update(verify_raw_wall_s=verified_elapsed,export_total_wall_s=time.monotonic()-started)
+        path.write_text(json.dumps(timings,indent=2)+'\n')
+        from robot_workbench.recording_quality import for_export
+        for_export(raw_root,output,raw,source,environment=environment)
+        return result
     frames = {c:[json.loads(line) for line in (raw_root/f'{c}-pairs.jsonl').read_text().splitlines()] for c in CAMERAS}
     if any(not rows for rows in frames.values()): raise ValueError('all three physical streams needed for replay')
     output = Path(output).resolve()
@@ -513,6 +828,8 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
     (output/'manifest.json').write_text(json.dumps(manifest,allow_nan=False,indent=2)+'\n')
     diagnostics.update(video_verify_wall_s=time.monotonic()-before,total_wall_s=time.monotonic()-started)
     (output/'export-timings.json').write_text(json.dumps(diagnostics,allow_nan=False,indent=2)+'\n')
+    from robot_workbench.recording_quality import for_export
+    for_export(raw_root,output,raw,source,environment=environment)
     return manifest
 
 
@@ -537,6 +854,51 @@ def _renew_recording_lease(request,token,previous_deadline,new_deadline,*,clock_
         temporary.unlink(missing_ok=True)
 
 
+class RecordingEventQueue(queue.Queue):
+    """Immutable event snapshots bounded by stored bytes, not control tick count.
+
+    Pickle is only an internal snapshot of locally submitted events; no external
+    pickle input is accepted. Accounting includes each bytes object's allocation
+    and 64 bytes for its deque slot/block overhead. The writer decodes one event
+    at a time; camera pixels normally use their separate shared byte budget.
+    """
+    def __init__(self, *, max_bytes=64*1024**2, capacity=None):
+        if type(max_bytes) is not int or max_bytes<=0 or (capacity is not None and (type(capacity) is not int or capacity<=0)):
+            raise ValueError('positive event byte budget and optional explicit event capacity required')
+        super().__init__(maxsize=capacity or 0)
+        self.max_bytes=max_bytes
+        self.queued_bytes=self.peak_bytes=self.peak_events=self.accepted_events=self.largest_event_bytes=0
+
+    def put(self,event,block=True,timeout=None):
+        # Serialize once before acquiring the queue mutex. This also prevents a
+        # caller mutating nested SDK feedback while the writer is initializing.
+        payload=pickle.dumps(event,protocol=5)
+        return super().put(payload,block=block,timeout=timeout)
+
+    def _put(self,payload):
+        size=sys.getsizeof(payload)+64
+        if self.queued_bytes+size>self.max_bytes:raise queue.Full
+        super()._put(payload)
+        self.queued_bytes+=size;self.accepted_events+=1
+        self.peak_bytes=max(self.peak_bytes,self.queued_bytes)
+        self.peak_events=max(self.peak_events,len(self.queue))
+        self.largest_event_bytes=max(self.largest_event_bytes,size)
+
+    def _get(self):
+        payload=super()._get()
+        self.queued_bytes-=sys.getsizeof(payload)+64
+        return pickle.loads(payload)
+
+    def snapshot(self,*,include_oldest=False):
+        with self.mutex:
+            result=dict(depth=len(self.queue),capacity=self.maxsize or None,queued_bytes=self.queued_bytes,
+                max_bytes=self.max_bytes,peak_bytes=self.peak_bytes,peak_events=self.peak_events,
+                accepted_events=self.accepted_events,largest_event_bytes=self.largest_event_bytes,
+                accounting='serialized_bytes_object_plus_64_bytes_per_queue_entry',scope='pending_control_events')
+            if include_oldest:result['oldest_event']=pickle.loads(self.queue[0]) if self.queue else None
+            return result
+
+
 class RecordingSession:
     """Bounded nonblocking owner input; this worker alone writes recording files.
 
@@ -544,9 +906,10 @@ class RecordingSession:
     An exclusive bounded lease enables full-frame spooling only for this session.
     Tests may omit directories and submit paired bundles through the same queue.
     """
-    def __init__(self,root,source,plan,binding,*,camera_directories=None,clock_ns=time.time_ns,
-                 capacity=512,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None,
-                 resident_deadline_wall_ns=None,defer_execution=False,execution_instance_id=None,
+    def __init__(self,root,source,plan,binding,*,camera_directories=None,camera_channels=None,storage_format='zip',clock_ns=time.time_ns,
+                 capacity=None,event_budget_bytes=64*1024**2,on_fault=lambda reason:None,recorder_factory=RealRecorder,execution_timeline=None,environment='physical',clock_domain=None,source_clock_id=None,execution_owner=None,
+                 resident_deadline_wall_ns=None,persistent_service=False,max_wall_time_seconds=None,
+                 defer_execution=False,execution_instance_id=None,
                  preparation_active=None,preparation_deadline_monotonic=None):
         import queue
         import threading
@@ -557,11 +920,20 @@ class RecordingSession:
             raise ValueError('recording session clock differs from source')
         self.execution_owner=execution_owner
         if type(defer_execution) is not bool:raise ValueError('deferred execution must be explicit boolean')
-        if defer_execution and (environment!='fake' or execution_timeline is not None
+        if defer_execution and (execution_timeline is not None
                 or not isinstance(execution_instance_id,str) or not execution_instance_id
                 or not callable(preparation_active) or not finite(preparation_deadline_monotonic)
-                or camera_directories is None):
-            raise ValueError('deferred recording requires a fake execution instance and bounded active preparation')
+                or camera_directories is None and camera_channels is None):
+            raise ValueError('deferred recording requires an execution instance and bounded active preparation')
+        if camera_channels is not None and (camera_directories is not None
+                or set(camera_channels)!=set(CAMERAS) or not defer_execution):
+            raise ValueError('shared cameras require one deferred execution and three channels')
+        if storage_format not in ('zip','segments'):raise ValueError('known RGB-D storage format required')
+        self.storage_format=storage_format
+        self.camera_channels=camera_channels
+        self.channel_tokens={}
+        self.channel_receipts={}
+        self.channel_cutoffs={}
         if defer_execution:owner_identity(execution_owner)
         self.defer_execution=defer_execution
         self.execution_instance_id=execution_instance_id
@@ -571,7 +943,7 @@ class RecordingSession:
         self.preparation_started_wall_ns=clock_ns()
         self.prepared_wall_ns=self.bound_wall_ns=None
         self.lease_tokens=set()
-        self.events=queue.Queue(maxsize=capacity)
+        self.events=RecordingEventQueue(max_bytes=event_budget_bytes,capacity=capacity)
         self.ready,self.done=threading.Event(),threading.Event()
         self.lock=threading.Lock()
         self.error,self.manifest,self.terminal=None,None,None
@@ -580,6 +952,11 @@ class RecordingSession:
         self.clock_ns=clock_ns
         self.camera_directories=camera_directories
         self.resident_deadline_wall_ns=resident_deadline_wall_ns
+        if type(persistent_service) is not bool or (persistent_service and (resident_deadline_wall_ns is not None or not finite(max_wall_time_seconds)
+                or not 0<max_wall_time_seconds<=7200)):
+            raise ValueError('persistent recording requires a separate finite budget up to 120 minutes')
+        self.persistent_service=persistent_service
+        self.max_wall_time_seconds=max_wall_time_seconds
         self.recorder=None
         self.execution_timeline=execution_timeline
         self.feedback_progress=None
@@ -608,7 +985,7 @@ class RecordingSession:
             and (self.prepared.is_set() or time.monotonic()<self.preparation_deadline_monotonic))
 
     def check_preparation(self):
-        if not self.preparation_current():raise ValueError('fake recording preparation expired or execution was revoked')
+        if not self.preparation_current():raise ValueError('recording preparation expired or execution was revoked')
 
     def lease_active(self,lease):
         """Fake producer admission also fences a cancelled in-flight os.link."""
@@ -629,7 +1006,7 @@ class RecordingSession:
             self.execution_bound.set()
 
     def preparation_receipt(self):
-        return dict(schema='fake_recording_preparation.v1',execution_instance_id=self.execution_instance_id,
+        return dict(schema='recording_preparation.v2',environment=self.environment,execution_instance_id=self.execution_instance_id,
             execution_owner=self.execution_owner,clock=self.clock,started_wall_ns=self.preparation_started_wall_ns,
             prepared_wall_ns=self.prepared_wall_ns,bound_wall_ns=self.bound_wall_ns,
             preparation_deadline_monotonic_s=self.preparation_deadline_monotonic,
@@ -641,7 +1018,7 @@ class RecordingSession:
         error=None
         with self.lock:
             if self.terminal or self.error or self.done.is_set():raise ValueError('recording is closing or failed')
-            if kind not in ('command','feedback','rgbd'):raise ValueError('unknown recording input')
+            if kind not in ('command','feedback','rgbd','native_window'):raise ValueError('unknown recording input')
             try:
                 if self.environment=='fake' and kind=='feedback':
                     # Latest actual Owner submission, not writer progress or an
@@ -657,7 +1034,7 @@ class RecordingSession:
                     assert_progress(self.feedback_progress[0] if self.feedback_progress else None,stamp)
                     self.feedback_progress=(stamp,self.clock_ns(),time.monotonic())
                 self.events.put_nowait((kind,fields,self.clock_ns(),time.monotonic()))
-            except queue.Full:error='bounded recording queue overflow'
+            except queue.Full:error='bounded recording event queue overflow: '+json.dumps(self.events.snapshot(),sort_keys=True)
             except ValueError as exc:error=str(exc)
         if error:
             self.fail(error)
@@ -691,6 +1068,14 @@ class RecordingSession:
         return stamp
 
     def spool_head(self,camera,directory):
+        if self.camera_channels is not None:
+            meta=directory.latest(self.channel_tokens[camera])
+            if meta is None:return None
+            validate_rgbd_metadata(meta,self.recorder.source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+            if self.environment=='fake':self.recorder._check_owner(meta,frame=True)
+            previous=dict(index=meta['recorded_frames'],metadata=meta,observed_wall_ns=self.clock_ns(),observed_monotonic_s=time.monotonic())
+            self.spool_heads[camera]=previous
+            return previous
         # Only this writer reclaims ZIPs; the producer atomically adds them.
         # Read metadata, not PNGs, and keep the last committed watermark after
         # consuming it. Historical frames still pass full validation in order.
@@ -703,7 +1088,7 @@ class RecordingSession:
                 meta=json.loads(archive.read('metadata.json'))
             validate_rgbd_metadata(meta,self.recorder.source['camera_serials'][SIDES[camera]],
                 environment=self.environment,clock=self.clock)
-            self.recorder._check_owner(meta,frame=True)
+            if self.environment=='fake':self.recorder._check_owner(meta,frame=True)
             if meta.get('recording_run_id')!=directory.name or meta.get('recording_enabled') is not True:
                 raise ValueError(camera+': raw recording lease differs')
             if previous:assert_progress(self.recorder._stamp(previous['metadata'],'rgbd'),self.recorder._stamp(meta,'rgbd'))
@@ -720,11 +1105,11 @@ class RecordingSession:
                 'frame_number','depth_frame_number','recording_run_id','path')}
         with self.lock:latest_reference=self.feedback_progress
         now=self.clock_ns();mono=time.monotonic()
-        with self.events.mutex:
-            pending=list(self.events.queue)
+        queue_status=self.events.snapshot(include_oldest=True)
+        pending=queue_status.pop('oldest_event')
         oldest=None
         if pending:
-            kind,fields,wall,queued=pending[0]
+            kind,fields,wall,queued=pending
             raw=fields.get('raw') or {}
             oldest=dict(kind=kind,tick=fields.get('tick'),queued_wall_ns=wall,queued_monotonic_s=queued,
                 queue_wait_wall_s=(now-wall)/1e9,queue_wait_monotonic_s=mono-queued,
@@ -734,8 +1119,10 @@ class RecordingSession:
             rows=self.recorder.frames[camera] if self.recorder else []
             head=self.spool_heads.get(camera)
             waiting=self.pending_reference.get(camera)
-            pending_indices=sorted(int(p.stem) for p in directory.glob('[0-9]'*9+'.zip'))
+            memory=directory.snapshot() if self.camera_channels is not None else None
+            pending_indices=[] if memory is not None else sorted(int(p.stem) for p in directory.glob('[0-9]'*9+'.zip'))
             cameras[camera]=dict(next_archive_index=index,archived_count=len(rows),
+                memory=memory,
                 archived_first=frame(rows[0]) if rows else None,archived_tail=frame(rows[-1]) if rows else None,
                 checked_spool_index=head['index'] if head else None,checked_spool_head=frame(head['metadata']) if head else None,
                 checked_spool_observed_wall_ns=head['observed_wall_ns'] if head else None,
@@ -745,11 +1132,14 @@ class RecordingSession:
                 spool_last_index=pending_indices[-1] if pending_indices else None)
         return dict(schema='recording_failure_diagnostics.v1',error=self.error,writer_stage=self.writer_stage,
             captured_wall_ns=now,captured_monotonic_s=mono,checked_reference=reference(self.checked_reference),
-            latest_submitted_reference=reference(latest_reference),queue=dict(depth=len(pending),capacity=self.events.maxsize,oldest=oldest),
+            latest_submitted_reference=reference(latest_reference),queue=dict(queue_status,oldest=oldest),
             last_event_write=self.last_event_write,last_event_batch=self.last_event_batch,
             last_nonempty_event_batch=self.last_nonempty_event_batch,
             command_count=len(self.recorder.commands) if self.recorder else 0,
-            feedback_count=len(self.recorder.feedback) if self.recorder else 0,cameras=cameras)
+            feedback_count=len(self.recorder.feedback) if self.recorder else 0,cameras=cameras,
+            startup_timings=getattr(self.recorder,'startup_timings',None),
+            first_camera_timings=getattr(self.recorder,'first_camera_timings',None),
+            segments={camera:writer.timings for camera,writer in self.recorder.segment_writers.items()} if self.recorder else {})
 
     def save_failure_diagnostics(self,cursors):
         if self.error:
@@ -805,7 +1195,51 @@ class RecordingSession:
                     diagnostics=deepcopy(self.diagnostics),
                     diagnostics_error=self.diagnostics_error,seal_error=self.seal_error,
                     preparation=self.preparation_receipt() if self.defer_execution else None,
+                    storage_format=self.storage_format,
+                    event_queue=self.events.snapshot(),
+                    memory_channels=self.channel_receipts or ({c:deepcopy(ch.cached_snapshot) if hasattr(ch,'cached_snapshot') else ch.snapshot()
+                        for c,ch in self.camera_channels.items()} if self.camera_channels else None),
+                    camera_admission_cutoffs=deepcopy(self.channel_cutoffs),
+                    seal_timings=getattr(self.recorder,'seal_timings',None),
                     manifest={k:v for k,v in self.manifest.items() if k!='files'} if self.manifest else None)
+
+    def _camera_available(self,camera,directory,index):
+        return (directory.peek(self.channel_tokens[camera]) is not None if self.camera_channels is not None
+                else (directory/f'{index:09d}.zip').is_file())
+
+    def _consume_memory_frame(self,camera,channel):
+        self.writer_stage='camera:'+camera
+        token=self.channel_tokens[camera]
+        frame=channel.peek(token)
+        if frame is None:return False
+        try:
+            if frame.get('pixel_format')=='rgb8-depth16le':
+                self.recorder.record_rgbd_pixels(camera,frame['metadata'],frame['rgb'],frame['depth'],frame['width'],frame['height'])
+            else:self.recorder.record_rgbd_frame(camera,frame['metadata'],frame['color_png'],frame['depth_png'])
+        except Exception as error:
+            detail=self.recorder.first_camera_timings.get(camera)
+            if detail is not None and detail['status']=='started':
+                detail.update(status='failed',error=str(error),finished_wall_ns=time.time_ns())
+            raise
+        if hasattr(channel,'ack'):channel.ack(token,frame['metadata']['pair_id'])
+        else:channel.pop(token)
+        return True
+
+    def _end_channels(self):
+        if self.camera_channels is not None:
+            for camera,channel in self.camera_channels.items():
+                token=self.channel_tokens.get(camera)
+                if token is not None:
+                    self.channel_receipts.setdefault(camera,channel.snapshot())
+                    channel.end(token)
+
+    def _stop_camera_admission(self,terminal):
+        if not terminal or not self.events.empty() or self.camera_channels is None:return
+        endpoint=(self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0]
+                  if terminal[0]=='completed' and self.recorder.feedback else 0)
+        for camera,channel in self.camera_channels.items():
+            if camera not in self.channel_cutoffs:
+                self.channel_cutoffs[camera]=channel.stop_after(self.channel_tokens[camera],endpoint)
 
     def _run(self,source,plan,binding,factory):
         cursors={}
@@ -813,43 +1247,63 @@ class RecordingSession:
         leases=[]
         lease_deadline_wall_ns=None
         recording_deadline_wall_ns=None;recording_deadline_monotonic=None;renew_at_wall_ns=None
+        deadline_reason=('recording reached its fixed per-job wall-time budget' if self.persistent_service else
+                         'recording reached fixed resident wall deadline minus cleanup reserve')
         tail_wait_started=None;tail_wait_elapsed=0.
-        def create_recorder():
+        def create_recorder(*,defer_timeline=False):
             return factory(self.root,source,plan,binding,clock_ns=self.clock_ns,
-                **({'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
+                **({'storage_format':self.storage_format} if self.storage_format!='zip' else {}),
+                **({'defer_execution':True} if defer_timeline else
+                   {'execution_timeline':self.execution_timeline} if self.execution_timeline is not None else {}),
                 **({'environment':self.environment,'clock_domain':self.clock['clock_domain'],'source_clock_id':self.clock['source_clock_id'],
                     'execution_owner':self.execution_owner} if self.environment=='fake' else {}))
         try:
             if not self.defer_execution:self.recorder=create_recorder()
-            if self.camera_directories is not None:
-                if set(self.camera_directories)!=set(CAMERAS):raise ValueError('three native RGB-D spool directories required')
+            sources=self.camera_channels if self.camera_channels is not None else self.camera_directories
+            if sources is not None:
+                if set(sources)!=set(CAMERAS):raise ValueError('three native RGB-D sources required')
                 if self.environment=='fake':
-                    if type(self.resident_deadline_wall_ns) is not int:
+                    if not self.persistent_service and type(self.resident_deadline_wall_ns) is not int:
                         raise ValueError('fake recording requires the fixed resident wall deadline')
-                    now=self.clock_ns();recording_deadline_wall_ns=self.resident_deadline_wall_ns-45_000_000_000
+                    now=self.clock_ns()
+                    recording_deadline_wall_ns=(now+int(self.max_wall_time_seconds*1e9) if self.persistent_service
+                        else self.resident_deadline_wall_ns-45_000_000_000)
                     if now>=recording_deadline_wall_ns:raise ValueError('resident recording budget exhausted; 45 s cleanup reserve required')
                     recording_deadline_monotonic=time.monotonic()+(recording_deadline_wall_ns-now)/1e9
                     lease_deadline_wall_ns=min(recording_deadline_wall_ns,now+600_000_000_000)
                     renew_at_wall_ns=now+(lease_deadline_wall_ns-now)//2
                 else:
-                    duration=self.recorder.frozen.duration_s+15
+                    duration=(self.recorder.frozen.duration_s if self.recorder else plan['duration_s'])+15
                     if not 0 < duration <= 600:raise ValueError('raw recording supports at most 585 seconds of execution')
-                for camera,value in self.camera_directories.items():
+                    now=self.clock_ns();recording_deadline_wall_ns=now+round(duration*1e9)
+                    recording_deadline_monotonic=time.monotonic()+duration
+                    lease_deadline_wall_ns=recording_deadline_wall_ns
+                for camera,value in sources.items():
                     if self.defer_execution:self.check_preparation()
-                    directory=Path(value).resolve(strict=True)
-                    if json.loads((directory/'recording-service.json').read_text()).get('schema') != 'rgbd_lease.v1':
-                        raise ValueError(camera+': on-demand recording service required')
+                    directory=value if self.camera_channels is not None else Path(value).resolve(strict=True)
+                    if self.camera_channels is None:
+                        service=json.loads((directory/'recording-service.json').read_text())
+                        if (service.get('schema') != 'rgbd_lease.v1'
+                                or service.get('transport','filesystem') != 'filesystem'):
+                            raise ValueError(camera+': on-demand recording service required')
                     start=self.clock_ns()
                     deadline_wall_ns=lease_deadline_wall_ns if self.environment=='fake' else start+round(duration*1e9)
                     lease_deadline_wall_ns=min(lease_deadline_wall_ns or deadline_wall_ns,deadline_wall_ns)
                     token=uuid.uuid4().hex
-                    request=directory/'recording-request.json'
-                    temporary=directory/(token+'.request.tmp')
                     lease=dict(run_id=token,start_wall_ns=start,deadline_wall_ns=deadline_wall_ns,
                         admission_start_wall_ns=start)
                     if self.defer_execution:
-                        lease.update(execution_instance_id=self.execution_instance_id,execution_owner=self.execution_owner)
+                        lease.update(execution_instance_id=self.execution_instance_id,execution_owner=self.execution_owner,environment=self.environment)
                         self.lease_tokens.add(token)
+                    if self.camera_channels is not None:
+                        directory.begin(lease)
+                        self.channel_tokens[camera]=token
+                        leases.append((directory,token))
+                        cursors[camera]=(directory,1)
+                        self.check_preparation()
+                        continue
+                    request=directory/'recording-request.json'
+                    temporary=directory/(token+'.request.tmp')
                     temporary.write_text(json.dumps(lease))
                     leases.append((request,token))
                     try:
@@ -862,28 +1316,42 @@ class RecordingSession:
                     self.check_preparation()
                     self.prepared_wall_ns=self.clock_ns()
                     self.prepared.set()
+                    if self.camera_channels is not None:
+                        # Lease readiness still releases the Owner immediately.
+                        # Persist its pre-roll now instead of leaving every camera
+                        # queued throughout the stationary/initialization window.
+                        self.recorder=create_recorder(defer_timeline=True)
                     while not self.execution_bound.wait(.01):
                         self.check_preparation()
                         if self.clock_ns()>=recording_deadline_wall_ns or time.monotonic()>=recording_deadline_monotonic:
-                            raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                            raise ValueError(deadline_reason)
                         if self.clock_ns()>=lease_deadline_wall_ns:
                             raise ValueError('recording lease actual wall deadline exceeded')
+                        if self.camera_channels is not None:
+                            for camera,(channel,index) in list(cursors.items()):
+                                for _ in range(4):
+                                    if self.execution_bound.is_set() or not self._consume_memory_frame(camera,channel):break
+                                    index+=1
+                                cursors[camera]=(channel,index)
                     self.check_preparation()
-                    self.recorder=create_recorder()
+                    if self.camera_channels is not None:self.recorder.bind_execution(self.execution_timeline)
+                    else:self.recorder=create_recorder()
                     self.recorder.write_json('recording-preparation.json',self.preparation_receipt())
                 ready_deadline=time.monotonic()+5
                 while True:
                     self.writer_stage='awaiting_first_frames'
                     if recording_deadline_wall_ns is not None and (self.clock_ns()>=recording_deadline_wall_ns
                             or time.monotonic()>=recording_deadline_monotonic):
-                        raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                        raise ValueError(deadline_reason)
                     with self.lock:self.checked_reference=self.feedback_progress
                     first=[];first_referenced=True
                     for camera,(directory,index) in cursors.items():
-                        path=directory/f'{index:09d}.zip'
-                        if path.is_file():
-                            meta,_,_=bundle(path.read_bytes(),source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
-                            if meta.get('recording_run_id') != directory.name or not meta.get('recording_enabled'):
+                        stored=self.recorder.frames[camera]
+                        if stored or self._camera_available(camera,directory,index):
+                            if stored:meta=stored[0]
+                            elif self.camera_channels is not None:meta=directory.peek(self.channel_tokens[camera])['metadata']
+                            else:meta,_,_=bundle((directory/f'{index:09d}.zip').read_bytes(),source['camera_serials'][SIDES[camera]],environment=self.environment,clock=self.clock)
+                            if meta.get('recording_run_id') != (self.channel_tokens[camera] if self.camera_channels is not None else directory.name) or not meta.get('recording_enabled'):
                                 raise ValueError(camera+': raw recording lease differs')
                             first.append(meta)
                             if self.environment=='fake':
@@ -903,14 +1371,16 @@ class RecordingSession:
                         raise ValueError('three native raw streams did not start within 5 seconds'
                             + (' with actual Owner source feedback' if self.environment=='fake' else ''))
                     time.sleep(.01)
-                if self.environment!='fake' and any(not 0 <= self.clock_ns()-int(meta['host_receive_ns']) <= 500_000_000 for meta in first):
+                fresh=( [directory.latest(self.channel_tokens[camera]) for camera,(directory,_) in cursors.items()]
+                    if self.camera_channels is not None else first )
+                if self.environment!='fake' and any(not 0 <= self.clock_ns()-int(meta['host_receive_ns']) <= 500_000_000 for meta in fresh):
                     raise ValueError('native raw stream absent or stale')
             self.ready.set()
             while True:
                 now=self.clock_ns()
                 if recording_deadline_wall_ns is not None and (now>=recording_deadline_wall_ns
                         or time.monotonic()>=recording_deadline_monotonic):
-                    raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
+                    raise ValueError(deadline_reason)
                 if lease_deadline_wall_ns is not None and now>=lease_deadline_wall_ns:
                     raise ValueError('recording lease actual wall deadline exceeded')
                 if self.environment=='fake' and cursors and self.terminal is None:
@@ -921,7 +1391,10 @@ class RecordingSession:
                         and now>=renew_at_wall_ns and self.terminal is None):
                     renewed=min(recording_deadline_wall_ns,now+600_000_000_000)
                     for request,token in leases:
-                        if not _renew_recording_lease(request,token,lease_deadline_wall_ns,renewed,
+                        if self.camera_channels is not None:
+                            self.check_preparation()
+                            if not request.renew(token,lease_deadline_wall_ns,renewed):break
+                        elif not _renew_recording_lease(request,token,lease_deadline_wall_ns,renewed,
                                 clock_ns=self.clock_ns,active=lambda:self.terminal is None
                                     and (not self.defer_execution or self.preparation_current())):break
                     else:
@@ -933,27 +1406,34 @@ class RecordingSession:
                 with self.lock:
                     self.checked_reference=self.feedback_progress
                     terminal_round=self.terminal
+                self._stop_camera_admission(terminal_round)
                 endpoint=(self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0)
-                tail_endpoint=endpoint if self.environment=='fake' and terminal_round and self.events.empty() else None
+                tail_endpoint=endpoint if terminal_round and self.events.empty() else None
                 for camera,(directory,index) in list(cursors.items()):
                     self.writer_stage='camera:'+camera
                     rows=self.recorder.frames[camera]
-                    head=self.spool_head(camera,directory) if self.environment=='fake' and terminal_round is None else None
+                    head=self.spool_head(camera,directory) if terminal_round is None else None
                     # Bounded batch prevents a fast camera from starving command evidence.
                     for _ in range(4):
                         if tail_endpoint is not None and rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=tail_endpoint:break
-                        path=directory/f'{index:09d}.zip'
-                        if not path.is_file():break
+                        if not self._camera_available(camera,directory,index):break
                         if tail_wait_started is not None:
                             tail_wait_elapsed+=time.monotonic()-tail_wait_started;tail_wait_started=None
-                        self.recorder.record_rgbd(camera,path.read_bytes())
-                        # The recorder has persisted both frame and index before reclaiming our spool copy.
-                        path.unlink()
+                        if self.camera_channels is not None:
+                            self._consume_memory_frame(camera,directory)
+                        else:
+                            path=directory/f'{index:09d}.zip'
+                            self.recorder.record_rgbd(camera,path.read_bytes())
+                            # Only reclaim the spool after the recorder accepted it.
+                            path.unlink()
                         index+=1
                         cursors[camera]=(directory,index)
                     cursors[camera]=(directory,index)
                     rows=self.recorder.frames[camera]
-                    if rows and (self.environment!='fake' or terminal_round is None):
+                    # After execution ends, these are historical queued frames.
+                    # Freshness is a live-producer check; terminal draining is
+                    # instead qualified by complete indices and end coverage.
+                    if rows and terminal_round is None:
                         if self.environment=='fake':
                             # A frame ahead of the last Owner tick remains pending
                             # that feedback; its actual source advance is still
@@ -966,28 +1446,38 @@ class RecordingSession:
                             progress=camera_progress[camera]
                             if self.clock_ns()-progress[1]>=30_000_000_000 or time.monotonic()-progress[2]>=30:
                                 raise ValueError(camera+': native RGB-D source stalled for 30 wall seconds')
-                        elif self.clock_ns()-int(rows[-1]['host_receive_ns'])>500_000_000:
-                            raise ValueError(camera+': native RGB-D recording stalled')
+                        else:
+                            # Disk/codec work above may outlast the original head
+                            # sample while ingress continues. Judge the current
+                            # producer, not the queued frame captured before IO.
+                            current_head=self.spool_head(camera,directory)
+                            age=self.clock_ns()-int((current_head['metadata'] if current_head else rows[-1])['host_receive_ns'])
+                            if age>500_000_000:
+                                with self.lock:still_live=self.terminal is None
+                                if still_live:raise ValueError(camera+': native RGB-D recording stalled')
                 with self.lock:terminal=self.terminal
                 if terminal and self.events.empty():
                     status,reason,requested=terminal
                     endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
                     covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
-                    expired=time.monotonic()-requested>=1
                     if self.environment=='fake':
                         if recording_deadline_wall_ns is not None and (self.clock_ns()>=recording_deadline_wall_ns
                                 or time.monotonic()>=recording_deadline_monotonic):
-                            raise ValueError('recording reached fixed resident wall deadline minus cleanup reserve')
-                        available=any((not self.recorder.frames[camera] or self.recorder._stamp(self.recorder.frames[camera][-1],'rgbd')[0]<endpoint)
-                            and (directory/f'{index:09d}.zip').is_file() for camera,(directory,index) in cursors.items())
-                        if available:
-                            if tail_wait_started is not None:tail_wait_elapsed+=time.monotonic()-tail_wait_started
-                            tail_wait_started=None
-                        elif tail_wait_started is None:tail_wait_started=time.monotonic()
-                        waited=tail_wait_elapsed+(time.monotonic()-tail_wait_started if tail_wait_started is not None else 0.)
-                        expired=not available and waited>=1
+                            raise ValueError(deadline_reason)
+                    # Both devices may finish while valid camera frames remain
+                    # queued behind startup/encoding. Only an empty producer
+                    # tail consumes the bounded wait, never time spent draining.
+                    available=any((not self.recorder.frames[camera] or self.recorder._stamp(self.recorder.frames[camera][-1],'rgbd')[0]<endpoint)
+                        and self._camera_available(camera,directory,index) for camera,(directory,index) in cursors.items())
+                    if available:
+                        if tail_wait_started is not None:tail_wait_elapsed+=time.monotonic()-tail_wait_started
+                        tail_wait_started=None
+                    elif tail_wait_started is None:tail_wait_started=time.monotonic()
+                    waited=tail_wait_elapsed+(time.monotonic()-tail_wait_started if tail_wait_started is not None else 0.)
+                    expired=not available and waited>=1
                     if not cursors or covered or expired:
                         self.save_failure_diagnostics(cursors)
+                        self._end_channels()
                         self.manifest=self.recorder.seal('recording_failed' if self.error and self.execution_timeline else status,reason)
                         break
         except Exception as error:
@@ -998,18 +1488,150 @@ class RecordingSession:
                     self.manifest=self.recorder.seal('recording_failed' if self.execution_timeline else 'failed',self.error)
                 except Exception as seal_error:self.seal_error=f'{type(seal_error).__name__}: {seal_error}'
         finally:
+            self._end_channels()
             for request,token in leases:
+                if self.camera_channels is not None:continue
                 try:
                     if json.loads(request.read_text()).get('run_id')==token:request.unlink()
                     try:(request.parent/token).rmdir()  # Only empty, fully consumed session spools.
                     except (FileNotFoundError,OSError):pass
                 except FileNotFoundError:pass
                 except Exception as error:self.fail('recording lease cleanup failed: '+str(error))
+            if self.recorder is not None and not self.recorder.closed:self.recorder.abort()
             if self.defer_execution and self.recorder is None:
                 try:
                     self.root.parent.mkdir(parents=True,exist_ok=True)
                     (self.root.parent/'recording-preparation.json').write_text(json.dumps(self.preparation_receipt(),allow_nan=False))
                 except Exception as error:self.diagnostics_error=f'preparation receipt: {type(error).__name__}: {error}'
+            self.done.set()
+
+
+class StreamingRecorder(RealRecorder):
+    """Same RGB-D writer, with actual policy events instead of a future plan."""
+    def __init__(self,root,source,binding,*,execution_owner,clock_ns=time.time_ns,storage_format='segments'):
+        started=time.monotonic();environment=source['environment']
+        validate_policy_source(source,binding,environment)
+        self.execution_owner=owner_identity(execution_owner)
+        if any(source.get(k)!=execution_owner[k] for k in ('runtime_nonce','command_epoch')):
+            raise ValueError('policy recording source differs from execution Owner')
+        self.streaming=True;self.defer_execution=False;self.frozen=self.plan=None
+        self.environment=environment;self.namespace=namespace(environment);self.clock=clock_for_source(source,environment)
+        self.source=deepcopy(source);self.root=Path(root).resolve();self.root.mkdir(parents=True,exist_ok=False)
+        self.clock_ns=clock_ns;self.created_ns=clock_ns();self.closed=False
+        if storage_format not in ('zip','segments'):raise ValueError('known RGB-D storage format required')
+        self.storage_format=storage_format;self.commands=[];self.feedback=[];self.frames={camera:[] for camera in CAMERAS}
+        self.segment_writers={};self.index_streams={};self.first_camera_timings={}
+        self.segment_executor=ThreadPoolExecutor(max_workers=len(CAMERAS),thread_name_prefix='rgbd-commit')
+        self.write_json('source.json',source);self.write_json('binding.json',binding)
+        self.startup_timings=dict(total_wall_s=time.monotonic()-started)
+
+    def record_command(self,tick,target,send_monotonic_s,send_wall_ns,**fields):
+        validate_physical14(target)
+        if type(tick) is not int or tick!=len(self.commands) or not finite(send_monotonic_s):
+            raise ValueError('contiguous actual command index and finite send time required')
+        row=dict(fields,tick=tick,target=deepcopy(target),send_monotonic_s=send_monotonic_s,send_wall_ns=send_wall_ns)
+        self._check_owner(row);stamp=self._stamp(row,'command')
+        if self.environment=='fake' and abs(round(send_monotonic_s*1e9)-stamp[0])>1:
+            raise ValueError('command control time differs from source time')
+        if self.commands:
+            if send_monotonic_s<=self.commands[-1]['send_monotonic_s'] or send_wall_ns<=self.commands[-1]['send_wall_ns']:
+                raise ValueError('actual command timestamps regressed')
+            assert_progress(self._stamp(self.commands[-1],'command'),stamp)
+            if stamp[0]-self._stamp(self.commands[0],'command')[0]>round(self.source['duration_s']*1e9):
+                raise ValueError('actual policy command exceeds bounded source duration')
+        preceding=fields.get('feedback_at_send')
+        if not isinstance(preceding,dict):raise ValueError('actual preceding Owner feedback required for command evidence')
+        seen=sample_stamp(preceding,self.clock,wall_key='sample_wall_ns')
+        if not 0<=stamp[0]-seen[0]<=100_000_000 or preceding['sample_wall_ns']>send_wall_ns:
+            raise ValueError('command does not have fresh preceding measured feedback')
+        self.append('commands.jsonl',row);self.commands.append(row)
+
+    def record_feedback(self,tick,state,sample_monotonic_s,sample_wall_ns,raw=None,**fields):
+        validate_physical_feedback(state,self.source['calibration_profile'],enforce_range=False)
+        if type(tick) is not int or tick<0 or not finite(sample_monotonic_s):
+            raise ValueError('actual feedback index and finite sample time required')
+        identity={key:(fields[key] if key in fields else (raw or {}).get(key))
+            for key in ('clock_domain','source_clock_id','source_time_ns','physics_step','owner_pid','command_epoch','runtime_nonce')}
+        row=dict(identity,tick=tick,state=deepcopy(state),sample_monotonic_s=sample_monotonic_s,
+                 sample_wall_ns=sample_wall_ns,raw=deepcopy(raw))
+        self._check_owner(row);stamp=self._stamp(row,'feedback')
+        if self.environment=='fake' and abs(round(sample_monotonic_s*1e9)-stamp[0])>1:
+            raise ValueError('feedback control time differs from source time')
+        if self.feedback:
+            if sample_monotonic_s<=self.feedback[-1]['sample_monotonic_s'] or sample_wall_ns<=self.feedback[-1]['sample_wall_ns']:
+                raise ValueError('actual feedback timestamps regressed')
+            assert_progress(self._stamp(self.feedback[-1],'feedback'),stamp)
+        self.append('feedback.jsonl',row);self.feedback.append(row)
+
+
+class StreamingRecordingSession(RecordingSession):
+    """Bounded camera subscription and nonblocking actual-event append for policy runs."""
+    def __init__(self,root,source,binding,*,camera_channels,execution_owner,on_fault=lambda reason:None,
+                 preparation_active=lambda:True,clock_ns=time.time_ns,max_wall_time_seconds=600,storage_format='segments'):
+        if not finite(max_wall_time_seconds) or not 0<max_wall_time_seconds<=7200:
+            raise ValueError('bounded policy recording wall budget required')
+        self.stream_wall_budget=max_wall_time_seconds
+        super().__init__(root,source,None,binding,camera_channels=camera_channels,storage_format=storage_format,
+            execution_owner=execution_owner,environment=source['environment'],on_fault=on_fault,clock_ns=clock_ns,
+            defer_execution=True,execution_instance_id=source['execution_instance_id'],
+            preparation_active=preparation_active,preparation_deadline_monotonic=time.monotonic()+1)
+
+    def start(self):return self
+    def append_command(self,**fields):
+        if not self.execution_bound.is_set():self.bound_wall_ns=self.clock_ns();self.execution_bound.set()
+        return self.submit('command',**deepcopy(fields))
+    def append_feedback(self,**fields):return self.submit('feedback',**deepcopy(fields))
+
+    def append_native_window(self,**fields):return self.submit('native_window',**deepcopy(fields))
+    def status(self):return self.snapshot()
+
+    def _run(self,source,_plan,binding,_factory):
+        cursors={};deadline=time.monotonic()+self.stream_wall_budget;empty_tail_started=None
+        try:
+            self.recorder=StreamingRecorder(self.root,source,binding,execution_owner=self.execution_owner,clock_ns=self.clock_ns,storage_format=self.storage_format)
+            for camera,channel in self.camera_channels.items():
+                self.check_preparation();token=uuid.uuid4().hex;now=self.clock_ns()
+                lease=dict(run_id=token,start_wall_ns=now,admission_start_wall_ns=now,
+                    deadline_wall_ns=now+round(min(self.stream_wall_budget,600)*1e9),environment=self.environment,
+                    execution_instance_id=self.execution_instance_id,execution_owner=self.execution_owner)
+                self.lease_tokens.add(token);channel.begin(lease);self.channel_tokens[camera]=token;cursors[camera]=(channel,1)
+            self.prepared_wall_ns=self.clock_ns();self.prepared.set()
+            while True:
+                if time.monotonic()>=deadline:raise TimeoutError('policy recording wall budget expired')
+                self._drain_events()
+                with self.lock:terminal=self.terminal
+                self._stop_camera_admission(terminal)
+                endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
+                for camera,(channel,index) in list(cursors.items()):
+                    for _ in range(4):
+                        rows=self.recorder.frames[camera]
+                        if terminal and rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint:break
+                        if not self._consume_memory_frame(camera,channel):break
+                        index+=1
+                    cursors[camera]=(channel,index)
+                if all(self.recorder.frames.values()):self.ready.set()
+                with self.lock:terminal=self.terminal
+                if terminal and self.events.empty():
+                    status,reason,finished=terminal
+                    endpoint=self.recorder._stamp(self.recorder.feedback[-1],'feedback')[0] if self.recorder.feedback else 0
+                    covered=all(rows and self.recorder._stamp(rows[-1],'rgbd')[0]>=endpoint for rows in self.recorder.frames.values())
+                    available=any((not self.recorder.frames[camera] or self.recorder._stamp(self.recorder.frames[camera][-1],'rgbd')[0]<endpoint)
+                        and self._camera_available(camera,channel,index) for camera,(channel,index) in cursors.items())
+                    if available:empty_tail_started=None
+                    elif empty_tail_started is None:empty_tail_started=time.monotonic()
+                    if covered or status!='completed' or empty_tail_started is not None and time.monotonic()-empty_tail_started>=5:
+                        self._end_channels();self.save_failure_diagnostics(cursors)
+                        self.manifest=self.recorder.seal('recording_failed' if self.error else status,self.error or reason);break
+        except Exception as error:
+            self.fail(error)
+            if self.recorder and not self.recorder.closed:
+                try:
+                    self.save_failure_diagnostics(cursors);self._end_channels()
+                    self.manifest=self.recorder.seal('recording_failed',self.error)
+                except Exception as seal_error:self.seal_error=str(seal_error)
+        finally:
+            self._end_channels()
+            if self.recorder and not self.recorder.closed:self.recorder.abort()
             self.done.set()
 
 
@@ -1021,8 +1643,14 @@ def main():
     export.add_argument('--raw-root',type=Path,required=True)
     export.add_argument('--target-manifest',type=Path,required=True)
     export.add_argument('--output',type=Path,required=True)
+    recovery=commands.add_parser('recover',help='verify committed RGB-D prefix after interruption; never resume motion')
+    recovery.add_argument('--raw-root',type=Path,required=True)
+    recovery.add_argument('--output',type=Path,required=True)
+    recovery.add_argument('--environment',choices=('fake','physical'),required=True)
     args=parser.parse_args()
-    print(json.dumps(export_playback(args.raw_root,args.target_manifest,args.output),allow_nan=False))
+    result=(recover_raw(args.raw_root,args.output,environment=args.environment) if args.command=='recover'
+        else export_playback(args.raw_root,args.target_manifest,args.output))
+    print(json.dumps(result,allow_nan=False))
 
 
 if __name__=='__main__':main()

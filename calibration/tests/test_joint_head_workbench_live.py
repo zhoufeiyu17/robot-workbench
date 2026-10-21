@@ -187,8 +187,11 @@ class LiveProtocol(unittest.TestCase):
         np.testing.assert_array_equal(s.jaw_mm,[0.,83.])
         self.assertEqual(s.mirror['measured_jaw_gap_mm'],body['jaw_gap_mm'])
         self.assertEqual(s.mirror['display_jaw_gap_mm'],[0.,83.])
+        s.command('/mirror',{**body,'sequence':2,'jaw_gap_mm':[-2.,87.]})
+        self.assertEqual(s.mirror['measured_jaw_gap_mm'],[-2.,87.])
+        np.testing.assert_array_equal(s.jaw_mm,[0.,83.])
         with self.assertRaises(ValueError):
-            s.command('/mirror',{**body,'sequence':2,'jaw_gap_mm':[0.,85.001]})
+            s.command('/mirror',{**body,'sequence':3,'jaw_gap_mm':[0.,89.001]})
         with self.assertRaises(ValueError):
             s.command('/preview',{'q':[0.]*12,'jaw_gap_mm':[0.,83.001]})
 

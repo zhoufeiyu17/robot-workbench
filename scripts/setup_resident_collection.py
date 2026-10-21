@@ -25,7 +25,8 @@ def save(path,value):Path(path).write_text(json.dumps(value,allow_nan=False,inde
 
 
 def live_parent(root,contract,*,proc_root='/proc',now_ns=None):
-    from local_execution import TARGET,validate
+    from local_execution import contract_compute_resource,validate
+    from launch_environment import persistent_service
     root=Path(root).resolve();service=read(root/'service.json');run=read(root/'run.json')
     pid=service.get('pid')
     if type(pid) is not int or pid!=run.get('pid') or service.get('environment')!='fake':
@@ -42,14 +43,23 @@ def live_parent(root,contract,*,proc_root='/proc',now_ns=None):
     session=contract['identity']['session_id']
     if original['identity']['session_id']!=session or contract['resources'].get('max_workers')!=4:
         raise ValueError('setup-only keeps the original Session and four-role deployment')
+    target=contract_compute_resource(contract)
+    if contract_compute_resource(original)!=target or argument('--gpu')!=str(target['gpu_index']):
+        raise ValueError('setup-only must retain the original declared compute target')
     deadline=service.get('resident_deadline_wall_ns')
-    if (type(deadline) is not int or deadline!=run.get('resident_deadline_wall_ns')
+    persistent=persistent_service(contract['resources'])
+    if persistent:
+        if (not persistent_service(original.get('resources',{})) or '--persistent' not in argv
+                or any(row.get('persistent_service') is not True or 'resident_deadline_wall_ns' not in row
+                       or row['resident_deadline_wall_ns'] is not None for row in (service,run))):
+            raise ValueError('persistent setup requires the same explicitly persistent live parent')
+    elif (type(deadline) is not int or deadline!=run.get('resident_deadline_wall_ns')
             or deadline-(time.time_ns() if now_ns is None else now_ns)<=60_000_000_000):
         raise ValueError('original resident deadline has no setup/cleanup time; it cannot be extended')
     base_path=Path(argument('--base'))
     if sha(base_path)!=run['base_sha256']:raise ValueError('parent base changed after startup')
     details=contract['collection_setup']
-    execution=dict(TARGET,session_id=session,max_processes=4,min_free_memory_mib=details['min_free_memory_mib'],
+    execution=dict(target,session_id=session,max_processes=4,min_free_memory_mib=details['min_free_memory_mib'],
         plant=dict(session_id=session,pid=pid,process_start_ticks=(proc/'stat').read_text().rsplit(')',1)[1].split()[19],
             scope=str(root),script=script,script_sha256=sha(script),argv=argv,max_memory_mib=details['plant_max_memory_mib']))
     validate({'execution':execution})
@@ -71,21 +81,22 @@ def verify_parent(parent,*,proc_root='/proc'):
         raise ValueError('resident PID was reused')
     argv=[value.decode() for value in (proc/'cmdline').read_bytes().split(b'\0') if value]
     if argv!=plant['argv']:raise ValueError('resident process command changed')
-    if time.time_ns()>=parent['deadline']-45_000_000_000:raise TimeoutError('original resident deadline reached')
+    if parent['deadline'] is not None and time.time_ns()>=parent['deadline']-45_000_000_000:
+        raise TimeoutError('original resident deadline reached')
 
 
 def run(args):
     from robot_workbench.resident_collection import load_collection_contract
     from robot_workbench.collection_setup import prepare_collection_setup,finalize_collection_setup
     from launch_environment import owned_command,clean_command,clean_environment
-    from local_execution import gpu_check
+    from local_execution import gpu_check,contract_compute_resource
     from run_pipeline import load_config
     root=args.resident.resolve();output=args.output.resolve()
     if output==root or not output.is_relative_to(root) or output.exists():
         raise ValueError('a new output directory strictly inside the current resident scope is required')
     # Validate policy before any output or process creation. The original deadline
     # is read from the resident; this command cannot create a new lifetime.
-    contract=load_collection_contract(args.contract,output,1,0)
+    contract=load_collection_contract(args.contract,output,contract_compute_resource(read(args.contract))['gpu_index'],0)
     parent=live_parent(root,contract);service=parent['service'];execution=parent['execution']
     from detector_adapter.preflight_release import preflight_release
     release=preflight_release(parent['base']['pipeline_config'],
@@ -112,7 +123,8 @@ def run(args):
     detector=planner=None;process=None
     try:
         verify_parent(parent);gpu_check({'execution':execution})
-        conversion=setup['conversion'];budget=min(600.,(parent['deadline']-time.time_ns())/1e9-60)
+        conversion=setup['conversion'];budget=600.
+        if parent['deadline'] is not None:budget=min(budget,(parent['deadline']-time.time_ns())/1e9-60)
         if budget<=0:raise TimeoutError('no original resident budget remains for conversion')
         command=owned_command(ROOT/'rule_based_workbench',clean_command(conversion['argv'],conversion['env']),budget)
         with (output/'conversion.log').open('xb') as stream:
@@ -131,7 +143,8 @@ def run(args):
         for name,worker in (('detector',detector),('planner',planner)):
             verify_parent(parent)
             worker.start(configured['pipeline_config'],configured['worker_state_directory'])
-            end=min(time.monotonic()+args.readiness_seconds,time.monotonic()+(parent['deadline']-time.time_ns())/1e9-45)
+            end=time.monotonic()+args.readiness_seconds
+            if parent['deadline'] is not None:end=min(end,time.monotonic()+(parent['deadline']-time.time_ns())/1e9-45)
             while time.monotonic()<end:
                 state=worker.status()
                 save(output/(name+'-readiness.json'),state)

@@ -74,6 +74,34 @@ def sync_locked_joint_metadata(model, positions):
     state.position.copy_(state.position.new_tensor(values).reshape_as(state.position))
 
 
+def locked_transform_config(config, values):
+    """Ask native FK for locked transforms without rebuilding collision tables."""
+    result=deepcopy(config)
+    result['kinematics'].update(lock_joints=dict(values),collision_link_names=[],collision_spheres=None,
+        collision_sphere_buffer=0.,self_collision_buffer=None,self_collision_ignore=None,
+        extra_collision_spheres=None)
+    return result
+
+
+def checked_locked_transforms(current, updated, torch):
+    """Only values may change: captured FK topology and sphere buffers stay fixed."""
+    if (current.link_name_to_idx_map!=updated.link_name_to_idx_map
+            or current.joint_names!=updated.joint_names
+            or current.fixed_transforms.shape!=updated.fixed_transforms.shape
+            or any(not torch.equal(getattr(current,key),getattr(updated,key)) for key in
+                   ('link_map','joint_map','joint_map_type','joint_offset_map'))
+            or not torch.isfinite(updated.fixed_transforms).all().item()):
+        raise ValueError('locked-joint update changed native FK topology')
+    return updated.fixed_transforms
+
+
+def current_link_goals(generator, state, ee_link, target):
+    """Overwrite warmup's fixed-link goals after a new locked right-arm pose."""
+    goals=dict(generator.compute_kinematics(state).link_pose)
+    if ee_link in goals:goals[ee_link]=target
+    return goals
+
+
 def linear_hold_weights(hold_orientation, linear_approach=False, linear_axis=None):
     if linear_axis is not None and type(linear_axis) is not int:raise ValueError('linear axis must be an integer')
     if linear_approach:
@@ -178,7 +206,8 @@ def continuous_path(path, velocity_limit, acceleration_limit, *, positions=None,
 class MotionGenerator:
     """One GPU solver, reused for the stages of one simulation planning request."""
 
-    def __init__(self, robot_config, world_config, *, use_cuda_graph=True, model_report=None):
+    def __init__(self, robot_config, world_config, *, use_cuda_graph=True, model_report=None,
+                 prepared_cup_envelope=None):
         import torch
         import curobo
         from curobo.types.base import TensorDeviceType
@@ -229,7 +258,7 @@ class MotionGenerator:
                 seen_pose_costs.add(id(cost));cost.run_weight=RUNNING_POSE_WEIGHT
                 cost.update_run_weight(run_weight=RUNNING_POSE_WEIGHT)
         self._locked_models = {tuple(sorted(self.config['kinematics']['lock_joints'].items())):
-                               deepcopy(self.generator.kinematics.kinematics_config)}
+                               self.generator.kinematics.kinematics_config.fixed_transforms.clone()}
         self.locked_joint_updates = []
         self.initialization_breakdown = dict(native_setup_seconds=time.perf_counter()-started)
         section = time.perf_counter()
@@ -244,7 +273,8 @@ class MotionGenerator:
         self.initialization_breakdown['region_install_seconds'] = time.perf_counter()-section
         section = time.perf_counter()
         from cup_contact import CupContact
-        self.cup_contact = CupContact(self.generator,self.config,world_config,model_report)
+        self.cup_contact = CupContact(self.generator,self.config,world_config,model_report,
+                                      prepared_cup_envelope=prepared_cup_envelope)
         if tuple(self.generator.joint_names) != LEFT_JOINTS:
             raise ValueError('MotionGen active joint order differs from the six left model joints')
         torch.cuda.synchronize()
@@ -301,6 +331,8 @@ class MotionGenerator:
         # Keep goalset mode without padding each solve to seven duplicate goals.
         method = 'plan_goalset'
         target = Pose(position=positions.unsqueeze(0),quaternion=quaternions.unsqueeze(0))
+        link_goals=current_link_goals(self.generator,state,self.config['kinematics']['ee_link'],
+            Pose(position=positions,quaternion=quaternions))
         if hold_orientation:
             # 0.7.8's start validation needs a 2-D Pose even in goalset mode.
             # Use its public metric setter, then keep the normal goalset solver.
@@ -311,7 +343,7 @@ class MotionGenerator:
         self._reset_region_counters()
         started = time.perf_counter()
         try:
-            result = getattr(self.generator, method)(state, target, config)
+            result = getattr(self.generator, method)(state, target, config,link_poses=link_goals)
             self.torch.cuda.synchronize()
         finally:
             if hold_orientation:
@@ -544,11 +576,31 @@ class MotionGenerator:
                     # Failure-only diagnostics, never an alternate acceptance test.
                     from motiongen_self_collision import enabled_pairs
                     q=ik.solution.detach().reshape(-1,6)[:1]
+                    receipt['failed_ik_joints']=q.cpu().tolist()
                     spheres=self.generator.kinematics.get_state(q).get_link_spheres().unsqueeze(1)
                     rollout=self.generator.rollout_fn
                     receipt['failed_ik_constraints']=dict(
                         self=rollout.robot_self_collision_constraint(spheres).detach().cpu().tolist(),
                         world=rollout.primitive_collision_constraint(spheres).detach().cpu().tolist())
+                    receipt['failure_locked_joints']=deepcopy(self.config['kinematics']['lock_joints'])
+                    receipt['failed_ik_world_parts']=[]
+                    try:
+                        from curobo.rollout.cost.primitive_collision_cost import PrimitiveCollisionCost,PrimitiveCollisionCostConfig
+                        world_query=PrimitiveCollisionCost(PrimitiveCollisionCostConfig(weight=1.,tensor_args=self.tensor_args,
+                            world_coll_checker=self.generator.world_coll_checker,activation_distance=0.,return_loss=True))
+                        for alias in self.config['kinematics']['collision_link_names']:
+                            indices=self.generator.kinematics.kinematics_config.get_sphere_index_from_link_name(alias)
+                            if not len(indices):continue
+                            query_spheres=spheres.index_select(2,indices)
+                            if not (query_spheres[...,3]>0).any().item():continue
+                            value=world_query(query_spheres).detach()
+                            if not self.torch.isfinite(value).all().item():raise ValueError('nonfinite world-part failure diagnostic')
+                            if value.max().item()>0:
+                                receipt['failed_ik_world_parts'].append(dict(alias=alias,
+                                    link=self.config['kinematics']['extra_links'][alias]['parent_link_name'],
+                                    cost=float(value.max()),base_frame_spheres=query_spheres[0,0].cpu().tolist()))
+                    except Exception as error:
+                        receipt['world_failure_diagnostic_error']=f'{type(error).__name__}: {error}'
                     cost=rollout.primitive_collision_constraint
                     if hasattr(cost,'_cup_contact_children'):
                         receipt['failed_ik_cup_parts']=[]
@@ -616,13 +668,14 @@ class MotionGenerator:
         self.generator.update_world(world)
         self.cup_contact.update(world)
 
-    def update_locked_joints(self, values):
+    def update_locked_joints(self, values, *, update_right=False):
         expected = self.config['kinematics']['lock_joints']
         if set(values) != set(expected) or not all(math.isfinite(v) for v in values.values()):
             raise ValueError('complete finite locked joint state required')
-        if any(values[name] != expected[name] for name in expected if name.startswith('right_')):
+        if not update_right and any(values[name] != expected[name] for name in expected if name.startswith('right_')):
             raise ValueError('inactive right arm/jaws are frozen in the planning world')
-        if abs(values['left_joint7']-values['left_joint8'])>1e-9:
+        if any(abs(values[a]-values[b])>1e-9 for a,b in
+               (('left_joint7','left_joint8'),('right_joint17','right_joint18'))):
             raise ValueError('mechanically linked jaws require symmetric model positions')
         if values==expected:return
         self.cup_contact.assert_unattached(self)
@@ -634,12 +687,12 @@ class MotionGenerator:
             # Only the initial opening and latest contact geometry are retained.
             if len(self._locked_models)>=2:
                 self._locked_models.pop(next(reversed(self._locked_models)))
-            config=deepcopy(self.config)
-            config['kinematics']['lock_joints']=dict(values)
-            self._locked_models[key]=RobotConfig.from_dict(config,self.tensor_args).kinematics.kinematics_config
-        # Reuse the native tensor-copy path. Rebuilding URDF/self-pair tables on
-        # every return to the same open/closed geometry is initialization work.
-        self.generator.kinematics.update_kinematics_config(self._locked_models[key])
+            updated=RobotConfig.from_dict(locked_transform_config(self.config,values),self.tensor_args).kinematics.kinematics_config
+            self._locked_models[key]=checked_locked_transforms(
+                self.generator.kinematics.kinematics_config,updated,self.torch).clone()
+        # Native locked FK changes only these values. Keep graph-bound collision
+        # buffers, self-pair tables and attachment slots at their original addresses.
+        self.generator.kinematics.kinematics_config.fixed_transforms.copy_(self._locked_models[key])
         sync_locked_joint_metadata(self.generator.kinematics, values)
         self.cup_contact.restore_world_proxy()
         self.torch.cuda.synchronize()

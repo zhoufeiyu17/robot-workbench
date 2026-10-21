@@ -51,8 +51,8 @@ def validate_capture(capture, binding, *, environment='physical'):
             or manifest.get('camera_serials') != cameras or environment == 'physical' and manifest.get('source_clock') == 'simulation'):
         raise ValueError('capture manifest must identify this physical robot and cameras')
     frames = manifest.get('frames')
-    if not isinstance(frames,list) or len(frames) < 6:
-        raise ValueError('physical capture requires at least six RGB-D frames spanning five seconds')
+    if not isinstance(frames,list) or len(frames) < 9:
+        raise ValueError('physical capture requires at least nine RGB-D frames spanning three seconds')
     previous_stamp = previous_sequence = -1
     previous_clock=None
     paths=set()
@@ -75,8 +75,8 @@ def validate_capture(capture, binding, *, environment='physical'):
         if type(stamp) is not int or type(sequence) is not int or stamp <= previous_stamp or sequence <= previous_sequence:
             raise ValueError('physical frame timestamps and sequence must increase')
         previous_stamp, previous_sequence = stamp, sequence
-    if (frames[-1]['source_stamp_ns']-frames[0]['source_stamp_ns']) < 5_000_000_000:
-        raise ValueError('physical capture is shorter than five seconds')
+    if (frames[-1]['source_stamp_ns']-frames[0]['source_stamp_ns']) < 3_000_000_000:
+        raise ValueError('physical capture is shorter than three seconds')
     return manifest
 
 
@@ -92,6 +92,14 @@ def import_capture(capture, binding_path, destination, environment='physical'):
         shutil.copyfile(capture/name,target)
     (destination/'acquisition-binding.json').write_text(json.dumps(binding,allow_nan=False))
     validate_capture(destination,binding,environment=environment)
+    if binding.get('detection_files'):
+        target = destination.parent/'detection'
+        target.mkdir(exist_ok=False)
+        for name,key in (('summary.json','summary_sha256'),('observations.jsonl','observations_sha256')):
+            original = capture/'detection'/name
+            if original.is_symlink() or not original.resolve().is_relative_to(capture.resolve()) or file_sha(original)!=binding['detection_files'].get(key):
+                raise ValueError('sealed online detection evidence differs from acquisition receipt')
+            shutil.copyfile(original, target/name)
 
 
 def canonical_sha(value):
@@ -115,7 +123,7 @@ def bind_detection(root, environment='physical'):
         json.dump(binding,stream,allow_nan=False)
 
 
-def preparation_stages(config, contract, capture_dir, physical_binding, *, scene_only=False):
+def preparation_stages(config, contract, capture_dir, physical_binding, *, scene_only=False, online_detection=False):
     """Bind physical inputs; Playground supplies its own planner after scene setup.
 
     The full native CLI still owns rollout/export/replay. Its dual-DSW MotionGen
@@ -134,6 +142,10 @@ def preparation_stages(config, contract, capture_dir, physical_binding, *, scene
         raise ValueError('physical preparation requires raw target recording and a pinned prompt for three-camera replay')
     read_roots = contract['filesystem']['readonly_roots']
     pins = {name:sha for group in pinned_files(contract) for name,sha in group.items()}
+    sealed_detection = all(capture_dir+'/detection/'+name in pins for name in ('summary.json','observations.jsonl'))
+    if online_detection and not sealed_detection:
+        raise ValueError('online detection must be SHA-pinned with the sealed capture')
+    online_detection = sealed_detection
     for path in (capture_dir+'/profile.json', capture_dir+'/rgbd-manifest.json', physical_binding):
         if below(path,config['remote_run_root']) or not any(below(path,root) for root in read_roots) or path not in pins:
             raise ValueError('physical capture/profile/binding must be contract-declared and SHA-pinned readonly inputs')
@@ -147,9 +159,16 @@ def preparation_stages(config, contract, capture_dir, physical_binding, *, scene
     def cpu(script,*args):
         return python_command('import sys; sys.path[:0] = '+repr([wb,str(PurePosixPath(wb).parent)])+';\n'+script, *args)
 
+    def replace_command(item,wrapped):
+        command=shlex.join(wrapped)
+        return {**item,'transport_command':command,
+                'argv':transport(config,item['side'],command,timeout=item['timeout_s'])}
+
     result=[]
     for item in stages:
         name=item['name']
+        if name == 'detect' and online_detection:
+            continue  # Already detected during acquisition; import exact hash-bound evidence.
         if name == 'observe':
             result.append(stage('physical-capture-import','simulated-real',cpu(
                 'from real_pipeline import import_capture; import sys; import_capture(*sys.argv[1:])',
@@ -158,14 +177,13 @@ def preparation_stages(config, contract, capture_dir, physical_binding, *, scene
             result.append(stage('physical-detection-bind','simulated-real',cpu(
                 'from real_pipeline import bind_detection; import sys; bind_detection(*sys.argv[1:])',root,environment)))
             # Keep the original environment and bind this physical observation.
-            argv=list(item['argv']); wrapped=shlex.split(argv[-1])
+            wrapped=shlex.split(item['transport_command'])
             # MotionGen's dual-DSW bridge adds a simulation start; the physical
             # measured start is already sealed by acquisition and must stand alone.
             wrapped[-1] = wrapped[-1].replace(' --simulation-initial-suite '+shlex.quote(config['initial_suite']),'')
             wrapped[-1] += ' --physical-binding '+shlex.quote(root+'/physical-detection-binding.json')
             if environment == 'fake':wrapped[-1] += ' --environment fake'
-            argv[-1]=shlex.join(wrapped)
-            result.append({**item,'argv':argv})
+            result.append(replace_command(item,wrapped))
             result.append(stage('physical-model-bind','dsw-scene',cpu(
                 'import json,sys; from a1_asset_validation import validate_assets; '
                 'print(json.dumps(validate_assets(sys.argv[1],sys.argv[2],json.loads(sys.argv[3]))))',
@@ -173,7 +191,7 @@ def preparation_stages(config, contract, capture_dir, physical_binding, *, scene
             if scene_only:
                 return result
         elif name == 'export':
-            argv=list(item['argv']); wrapped=shlex.split(argv[-1])
+            wrapped=shlex.split(item['transport_command'])
             old="export(root/'detection-bridge/source.json',root/'place/scene-000'/episode,root/'plan.json')"
             new="export(root/'detection-bridge/source.json',root/'place/scene-000'/episode,root/'plan.json',hardware_binding=root/'detection-bridge/hardware-binding.json',environment="+repr(environment)+")"
             # The nested shell command is tokenized to avoid replacing shell-escaped Python.
@@ -183,15 +201,13 @@ def preparation_stages(config, contract, capture_dir, physical_binding, *, scene
                     wrapped[-1]=wrapped[-1].replace(shlex.quote(token),shlex.quote(token.replace(old,new)),1)
                     found=True
             if not found: raise ValueError('native export invocation changed; physical binding was not applied')
-            argv[-1]=shlex.join(wrapped)
-            result.append({**item,'argv':argv})
+            result.append(replace_command(item,wrapped))
         elif name == 'replay-target' and render_replay:
-            argv=list(item['argv']); wrapped=shlex.split(argv[-1])
+            wrapped=shlex.split(item['transport_command'])
             wrapped[-1]=wrapped[-1].replace(' --barrier '+shlex.quote(root+'/barrier'),'')
             wrapped[-1]+=' --independent-replay --hardware-binding '+shlex.quote(root+'/detection-bridge/hardware-binding.json')
             if environment == 'fake':wrapped[-1]+=' --environment fake'
-            argv[-1]=shlex.join(wrapped)
-            result.append({**item,'name':'physical-target-replay','group':None,'argv':argv})
+            result.append({**replace_command(item,wrapped),'name':'physical-target-replay','group':None})
         elif name == 'export-playback' and render_replay:
             result.append(stage('export-target-playback','dsw-scene',shlex.join([
                 'env','CUDA_VISIBLE_DEVICES=-1','PYTHONDONTWRITEBYTECODE=1','python3','-B',

@@ -4,12 +4,14 @@ The caller must check hardware_access before invoking capture(). This module
 has no network or controller access; read_snapshot returns one atomic ZIP body.
 """
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import hashlib
 import io
 import json
 import math
 from pathlib import Path
+import subprocess
 import sys
 import time
 import zipfile
@@ -17,6 +19,8 @@ import zipfile
 from integration import _digest, validate_profile
 from real_contract import namespace, validate_namespace, owner_matches_environment
 from robot_workbench.sample_clock import clock_spec, clock_for_source, sample_stamp, assert_progress, owner_identity
+
+PHYSICAL_STREAM_TIMEOUT_S = 300.
 
 
 def sha(path):
@@ -44,6 +48,14 @@ def read_initial_sample(read_owner, *, wall_ns=time.time_ns, environment='physic
     evidence = dict(pid=owner.get('pid'), command_epoch=owner.get('command_epoch'),
                     sample_time_s=feedback.get('sample_time_s'), sample_wall_ns=stamp,
                     received_wall_ns=received, sample_age_s=age)
+    valid=feedback.get('gripper_feedback_valid')
+    if valid is not None:
+        if not isinstance(valid,list) or len(valid)!=2 or any(type(v) is not bool for v in valid):
+            raise ValueError('explicit per-gripper feedback validity required')
+        disabled=[side for side,ok in zip(('left','right'),valid) if not ok]
+        if disabled!=list((feedback.get('can_output_guard') or {}).get('disabled_grippers',())):
+            raise ValueError('unavailable gripper feedback is not explicitly disabled')
+        if disabled:evidence['disabled_grippers']=disabled
     if owner.get('joint_limits') is not None:
         limits=owner['joint_limits']
         if len(limits)!=14:raise ValueError('fourteen Owner command limits required')
@@ -63,15 +75,23 @@ def read_initial_sample(read_owner, *, wall_ns=time.time_ns, environment='physic
 def seal_initial_state(before, after, profile):
     from joint_space import convert_state, gripper_offset_mm, validate_initial_state
     measured, evidence = before
+    disabled=evidence.get('disabled_grippers',[])
+    if disabled!=after[1].get('disabled_grippers',[]):
+        raise ValueError('disabled gripper configuration changed during observation')
     planned = deepcopy(measured)
     for side in ('left', 'right'):
         key = side+'_gripper'
-        planned[key] = min(max(planned[key], max(0., gripper_offset_mm(profile))), profile['gripper']['max_opening_mm'])
+        planned[key] = (profile['gripper']['max_opening_mm'] if side in disabled else
+            min(max(planned[key], max(0., gripper_offset_mm(profile))), profile['gripper']['max_opening_mm']))
     value = dict(schema_version='physical_initial_state.v1', calibration_profile_digest=_digest(profile),
                  measured_reported=measured, planned_reported=planned,
                  model=convert_state(planned, profile, to_reported=False),
                  jaw_normalization='clamp_to_model_command_limits_within_2mm',
                  owner_samples=[evidence, after[1]], after_observation_reported=after[0])
+    if disabled:
+        value.update(disabled_grippers=deepcopy(disabled),
+            disabled_gripper_model='profile_max_opening_mm_assumption_not_measured')
+    if evidence.get('clock_domain')!='simulation':value['held_arms']=['right']
     if 'reported_joint_limits' in evidence:
         value['reported_joint_limits']=deepcopy(evidence['reported_joint_limits'])
     if evidence.get('clock_domain')=='simulation':
@@ -259,10 +279,10 @@ def decode_snapshot(body, serial, profile, *, environment='physical', clock=None
     return metadata,stamp,frame,depth_frame,arrays
 
 
-def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
+def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=.375,
             timeout_s=30.0, monotonic=time.monotonic, sleep=time.sleep, cancel=None, environment='physical',
-            wall_deadline_ns=None, wall_ns=time.time_ns):
-    """Read at least nine unique atomic pairs covering >=8s (tracking warmup included); seal only on success.
+            wall_deadline_ns=None, wall_ns=time.time_ns, detect_frame=None, progress=None):
+    """Continuously sample while a serial detector validates three seconds; seal only the accepted prefix.
 
     Physical timeout/cadence remain wall-clock based. Fake cadence uses the
     sealed source clock; timeout_s bounds source stalls, and an explicit absolute
@@ -275,15 +295,50 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
     validate_binding(profile,accepted_binding,environment=environment)
     clock=clock_for_source(accepted_binding,environment)
     if (type(interval_s) not in (int,float) or type(timeout_s) not in (int,float)
-            or not 0 < interval_s <= 1 or not 8 < timeout_s <= 120):
+            or not 0 < interval_s <= 1 or not 8 < timeout_s <= (PHYSICAL_STREAM_TIMEOUT_S if environment=='physical' else 120)):
         raise ValueError('capture cadence must be <=1s with bounded timeout >8s')
     if environment=='fake' and (type(wall_deadline_ns) is not int or wall_deadline_ns<=0):
         raise ValueError('fake observation requires an explicit bounded wall deadline')
+    if wall_deadline_ns is not None and (type(wall_deadline_ns) is not int or wall_deadline_ns<=0):
+        raise ValueError('observation wall deadline must be a positive integer')
     output=Path(output);output.mkdir(parents=True,exist_ok=False)
     start=monotonic();started_wall_ns=wall_ns();last_progress=start
     deadline=start+max(0.,(wall_deadline_ns-started_wall_ns)/1e9) if environment=='fake' else start+timeout_s
+    if environment=='physical' and wall_deadline_ns is not None:
+        deadline=min(deadline,start+max(0.,(wall_deadline_ns-started_wall_ns)/1e9))
     rows=[];previous=None;previous_clock=None;previous_meta=None;previous_arrays=None;seen=set();intrinsics=None;domain=None;original_intrinsics=None
     polls=0;last_observed=None;first_observed=None
+    from robot_workbench.observation_window import ContinuousObservationWindow, WINDOW_NS
+    window = ContinuousObservationWindow()
+    observed_count = 0
+    detector = ThreadPoolExecutor(max_workers=1, thread_name_prefix='observation-detect') if detect_frame else None
+    pending = None
+    def report():
+        if progress:
+            state = window.status()
+            progress(state)
+    def process_detection():
+        nonlocal pending, observed_count
+        if pending is not None and pending.done():
+            check_budget()  # A late detector result cannot qualify an expired window.
+            observation = pending.result()  # Fatal identity/provider/process errors propagate.
+            expected = rows[observed_count]
+            if (observation.get('source_stamp_ns') != expected['source_stamp_ns'] or
+                    observation.get('capture_sequence_id') != expected['capture_sequence_id']):
+                raise ValueError('detector observation differs from sampled frame')
+            window.add(observation)
+            observed_count += 1
+            pending = None
+            report()
+        if detector and pending is None and observed_count < len(rows) and not window.status()['ready']:
+            remaining = max(0., deadline-monotonic())
+            if remaining <= 0:check_budget()
+            pending = detector.submit(detect_frame, output, deepcopy(rows[observed_count]), remaining)
+        # Physical frames are already on disk; its wall budget bounds this
+        # metadata queue. Faster-than-wall fake sources retain a backlog bound.
+        if environment=='fake' and len(rows)-observed_count > 256:
+            raise RuntimeError('observation detector backlog exceeded 256 captured frames')
+
     interval_ns=round(interval_s*1e9)
     poll_wall_s=min(interval_s,.25) if environment=='fake' else interval_s
 
@@ -293,17 +348,20 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
         now=monotonic()
         if environment=='fake':
             if now>=deadline or wall_ns()>=wall_deadline_ns:
-                raise TimeoutError('fake observation reached its fixed resident wall budget before nine pairs spanning eight source seconds')
+                raise TimeoutError('fake observation reached its fixed resident wall budget before three continuously valid source seconds')
             if now-last_progress>=timeout_s:
                 raise TimeoutError(f'fake observation source did not advance for {timeout_s:g} wall seconds')
-        elif now>=deadline:
-            raise TimeoutError('physical observation did not produce nine pairs spanning eight seconds')
+        elif now>=deadline or wall_deadline_ns is not None and wall_ns()>=wall_deadline_ns:
+            raise TimeoutError('physical observation did not produce three continuously valid seconds')
 
     try:
         while True:
             check_budget()
+            process_detection()
+            if detector and window.status()['ready']:
+                break
             body=read_snapshot();polls+=1
-            if environment=='fake':check_budget()  # A late callback cannot exceed the resident budget.
+            check_budget()  # A late callback cannot exceed the task/resident budget.
             meta,stamp,frame,depth_frame,arrays=decode_snapshot(body,accepted_binding['camera_serials']['head'],profile,
                 environment=environment,clock=clock,expected_owner=accepted_binding.get('capture_owner'))
             current_clock=sample_stamp({**meta,'host_receive_ns':int(meta['host_receive_ns'])},clock)
@@ -330,7 +388,7 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
             intrinsics,domain=meta['intrinsics'],meta['timestamp_domain'];original_intrinsics=meta['original_intrinsics']
             previous=current;previous_clock=current_clock;seen.add(meta['pair_id'])
             if environment=='fake':previous_arrays=arrays;previous_meta=meta
-            if not same and (environment!='fake' or not rows or stamp-rows[-1]['source_stamp_ns']>=interval_ns):
+            if not same and (not rows or stamp-rows[-1]['source_stamp_ns']>=interval_ns):
                 name=f'rgbd-{len(rows):04d}.npz';np.savez_compressed(output/name,**arrays)
                 rows.append(dict(path=name,sha256=sha(output/name),source_stamp_ns=stamp,capture_sequence_id=len(rows),
                     host_receive_ns=int(meta['host_receive_ns']),pair_id=meta['pair_id'],frame_number=frame,depth_frame_number=depth_frame,
@@ -339,18 +397,33 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
                     rows[-1].update(clock_domain=clock['clock_domain'],source_clock_id=clock['source_clock_id'],
                         source_time_ns=stamp,physics_step=meta['physics_step'],timestamp_domain=meta['timestamp_domain'],
                         **owner_identity(meta,require_available=True))
-            if environment=='fake':check_budget()
-            if len(rows)>=9 and rows[-1]['source_stamp_ns']-rows[0]['source_stamp_ns']>=8_000_000_000:
+            check_budget()
+            process_detection()
+            if detector and window.status()['ready']:
                 break
-            sleep(min(poll_wall_s,max(0.,deadline-monotonic())) if environment=='fake' else interval_s)
+            if not detector and len(rows)>=9 and rows[-1]['source_stamp_ns']-rows[0]['source_stamp_ns']>=WINDOW_NS:
+                break
+            sleep(min(poll_wall_s,max(0.,deadline-monotonic())))
     except BaseException as error:
+        failure=error
+        if environment=='physical' and isinstance(error,(TimeoutError,subprocess.TimeoutExpired)):
+            status=window.status();last=status['last_reset'] or {}
+            cause={'detection_missing':'检出失败','cup_position_span':'杯位波动达到6mm',
+                   'capture_gap':'采样间隔超过1秒','track_or_asset_changed':'目标身份改变'}.get(last.get('reason'),'无')
+            if last.get('displacement_m') is not None:cause+=f'（{last["displacement_m"]*1000:.2f}mm）'
+            exhausted=monotonic()>=deadline or wall_deadline_ns is not None and wall_ns()>=wall_deadline_ns
+            stage='累计时间预算已用尽' if exhausted else getattr(error,'stage','观测处理')+'超时'
+            failure=TimeoutError(f'真机观测失败：{stage}；已采 {len(rows)} 帧，已判定 {observed_count} 帧，'
+                f'当前连续有效 {status["span_s"]:.3f}/3.000 秒，重新计时 {status["reobserve_count"]} 次，最近原因：{cause}')
         diagnostic=dict(schema='rgbd_capture_failure.v1',status='failed',environment=environment,clock=clock,
-            error_type=type(error).__name__,error=str(error),started_wall_ns=started_wall_ns,finished_wall_ns=wall_ns(),
+            error_type=type(failure).__name__,error=str(failure),started_wall_ns=started_wall_ns,finished_wall_ns=wall_ns(),
             elapsed_wall_s=max(0.,monotonic()-start),timeout_s=timeout_s,
             timeout_meaning='source_no_progress_wall_watchdog' if environment=='fake' else 'total_wall_watchdog',
-            wall_deadline_ns=wall_deadline_ns,minimum_pairs=9,minimum_source_span_ns=8_000_000_000,
+            wall_deadline_ns=wall_deadline_ns,minimum_pairs=9,minimum_source_span_ns=WINDOW_NS,
+            observation_window=window.status(),reobserve_events=window.events,
             sampling_interval_s=interval_s,sampling_clock=clock['clock_domain'],poll_wall_s=poll_wall_s,
             poll_count=polls,retained_frame_count=len(rows),first_observed=first_observed,last_observed=last_observed,
+            processed_frame_count=observed_count,
             source_stamp_range_ns=[rows[0]['source_stamp_ns'],rows[-1]['source_stamp_ns']] if rows else None,
             host_receive_range_ns=[rows[0]['host_receive_ns'],rows[-1]['host_receive_ns']] if rows else None,
             retained_source_span_ns=rows[-1]['source_stamp_ns']-rows[0]['source_stamp_ns'] if rows else 0,
@@ -360,7 +433,17 @@ def capture(read_snapshot, profile, accepted_binding, output, *, interval_s=1.0,
             note='Could not save capture diagnostics: '+str(diagnostic_error)
             if hasattr(error,'add_note'):error.add_note(note)
             else:print(note,file=sys.stderr)
+        if failure is not error:raise failure from error
         raise
+    finally:
+        if detector:
+            # A late result cannot enter a subsequent acquisition. The RPC itself
+            # has the same bounded wall budget and observes cancellation.
+            detector.shutdown(wait=True, cancel_futures=True)
+    if detect_frame:
+        (output/'observation-window.json').write_text(json.dumps(dict(window.status(),
+            reobserve_events=window.events, captured_frames=len(rows), processed_frames=observed_count), indent=2)+'\n')
+        rows = rows[:observed_count]
     manifest=dict(frame_id='d405_base_0_color_optical_frame',evidence_source=spec['evidence'],
                   robot_id=accepted_binding['robot_id'],camera_serials=deepcopy(accepted_binding['camera_serials']),
                   source_clock='host_receive_wall_ns',capture_hz=1/interval_s,

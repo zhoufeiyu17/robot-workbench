@@ -124,7 +124,7 @@ class FakeDeviceContractTest(unittest.TestCase):
             stages=[dict(name=name,start_tick=i,motiongen_receipt_index=0) for name,i in
                 [('initial_hold',0),('approach_pre',1),('close_and_hold',4),('home_hold',5)]])
         model['gripper_distance_control']['geometry_derivation']=dict(open_travel_mm=82.992,
-            closed_travel_mm=64.992,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
+            closed_travel_mm=64.992,closed_metal_gap_mm=65.,rubber_gap_mm=62.,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
         from cup_presets import bind_plan_preset
         model['native_identity']['physical_configuration']={'fixture_physics':'unchanged'}
         preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,diagnostic_claw_compression=True)

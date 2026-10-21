@@ -498,11 +498,14 @@ class Session:
             view=self.overview_view;self.overview_view=None
         if view is not None:
             renderer.set_overview_view(view[0])
+            self.top_view=view[0].get('top_view',False)
             self.overview_revision=view[1]
             if preview is None and not self.display_only:preview=self.last_preview_pose
             render_actual=not self.display_only or self.active_display_view=='overview'
         overview_revision=self.overview_revision
         if self.display_only:
+            if self.active_display_view=='overview'and self.last_preview_pose is not None:
+                q,gaps=self.last_preview_pose[0].copy(),self.last_preview_pose[2].copy()
             if self.active_display_view!='target':preview=None
             if hasattr(renderer,'actual_updates'):renderer.actual_updates(render_actual)
             if hasattr(renderer,'preview_updates'):renderer.preview_updates(preview is not None)
@@ -634,6 +637,7 @@ class Session:
             target_revision=sequence if view=='preview' else None,overview_revision=overview_revision,
             frame_id=f'{self.renderer_instance_id}:{view}:{sequence}:{stamp}',source_timestamp_ns=stamp,
             timestamp_basis='renderer host wall publication; not an actual camera observation',
+            top_view=getattr(self,'top_view',False),
             q_reported_rad=q.tolist(),jaw_gap_mm=gaps.tolist(),display_only=True,measurement_qualified=False)
 
     def update_wrist_calibration(self, renderer, images, q, gaps, candidates, contract, revision, sequence, timestamp):
@@ -781,7 +785,9 @@ def validate_overview_view(body):
         raise ValueError('invalid overview camera')
     pan=float(body.get('pan_y',0.))
     if not np.isfinite(pan) or abs(pan)>2:raise ValueError('invalid overview pan')
-    return {**dict(zip(('yaw','pitch','zoom'),values.tolist())),'pan_y':pan}
+    top=body.get('top_view',False)
+    if type(top)is not bool:raise ValueError('top view must be boolean')
+    return {**dict(zip(('yaw','pitch','zoom'),values.tolist())),'pan_y':pan,**({'top_view':True}if top else{})}
 
 
 def overview_camera(geometry, view=None):

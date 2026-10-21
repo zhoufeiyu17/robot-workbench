@@ -17,6 +17,16 @@ from integration import DualGpuPipeline, _digest, _finite
 
 
 def validate_plan_evidence(plan, source):
+    from physical_cup_maintenance import is_maintenance
+    if is_maintenance(plan):
+        from physical_cup_maintenance import validate_evidence
+        validate_evidence(plan,source)
+        return
+    from cup_return_replay import is_replay
+    if is_replay(plan):
+        from cup_return_replay import validate_evidence
+        validate_evidence(plan, source)
+        return
     if plan.get('planning_validation',{}).get('schema_version')=='physical_curobo_motiongen_path_validation.v1':
         from physical_motiongen import validate_evidence
         validate_evidence(plan,source)
@@ -41,10 +51,24 @@ def validate_plan_evidence(plan, source):
 
 
 class FrozenExecutor:
-    def __init__(self, plan, source, *, sink, gate, stop, feedback_timeout_s=.1, source_validator=None, execution_policy='strict'):
+    def __init__(self, plan, source, *, sink, gate, stop, feedback_timeout_s=.1, source_validator=None, execution_policy='strict', execution_settings=None, disabled_grippers=()):
         if execution_policy not in ('strict','observation'):
             raise ValueError('unknown execution policy')
         self.execution_policy=execution_policy
+        from robot_workbench.execution_settings import validate
+        self.error_settings = validate(execution_settings) if execution_settings is not None else None
+        self.disabled_grippers = tuple(disabled_grippers)
+        if any(side not in ('left','right') for side in self.disabled_grippers):
+            raise ValueError('disabled grippers must name left or right')
+        if source.get('schema_version')=='physical_cup_maintenance_source.v1' and self.disabled_grippers!=('right',):
+            raise ValueError('physical maintenance requires runtime right gripper disabled')
+        from real_contract import fixed_right_collision_policy
+        if fixed_right_collision_policy(source) is not None and 'right' not in self.disabled_grippers:
+            raise ValueError('fixed-right static exception requires the runtime right gripper to remain disabled')
+        self.enabled_gripper_keys = tuple(key for key in GRIPPER_KEYS if key.split('_')[0] not in self.disabled_grippers)
+        self.bad_tracking_since = None
+        self.arrival_error = None
+        self.arrival_qualified = False
         if source_validator is None:
             bridge = DualGpuPipeline()
             bridge.ingest_source(source)
@@ -53,6 +77,7 @@ class FrozenExecutor:
             source_validator(plan, source)
         validate_plan_evidence(plan, source)
         self.plan = deepcopy(plan)
+        self.held_arms=tuple((source.get('initial_state') or {}).get('held_arms',()))
         self.profile = deepcopy(source["calibration_profile"])
         self.profile_digest = _digest(self.profile)
         self.limits = self.profile["divergence_thresholds"]
@@ -69,6 +94,12 @@ class FrozenExecutor:
         from gripper_distance_plan import validate_distance_control, validate_release_control
         self.holding_ticks = validate_distance_control(self.plan, source)
         self.unloading_ticks = validate_release_control(self.plan)
+        for side in self.disabled_grippers:
+            key = side+'_gripper'
+            if any(abs(tick['target'][key]-self.ticks[0]['target'][key]) > 1e-9 for tick in self.ticks):
+                raise ValueError('frozen plan requires movement of disabled '+side+' gripper')
+            if side == 'left' and (any(self.holding_ticks) or any(self.unloading_ticks)):
+                raise ValueError('frozen plan requires contact control of disabled left gripper')
         if (type(hz) is not int or hz <= 0 or type(nominal) is not int or nominal <= 0
                 or not isinstance(steps, list) or len(steps) != len(self.ticks)
                 or any(type(n) is not int or not 1 <= n <= nominal for n in steps)
@@ -98,6 +129,7 @@ class FrozenExecutor:
         self.tracking_exceeded_samples=0
         self.maximum_errors={'joint_rad':0.,'gripper_mm':0.}
         self.runtime_timeline=None
+        self.continuous_reference=None
 
     def configure_runtime(self, timeline):
         """Bind the privately compiled preview/initialization result, without rescanning it."""
@@ -106,6 +138,8 @@ class FrozenExecutor:
                 or timeline.get('schema_version')!='execution_timeline.v1'
                 or timeline.get('parent_timeline_digest')!=self.plan['timeline_digest']
                 or timeline.get('control_hz')!=30 or not timeline.get('commands')
+                or tuple((timeline.get('initialization') or {}).get('disabled_grippers',()))!=self.disabled_grippers
+                or tuple((timeline.get('initialization') or {}).get('held_arms',()))!=self.held_arms
                 or not timeline.get('timeline_digest')):
             raise ValueError('one private runtime derived from this preview required')
         self.runtime_timeline=timeline
@@ -117,15 +151,22 @@ class FrozenExecutor:
 
     def snapshot(self, *, include_history=True):
         result = {"status": self.status, "reason": self.reason,
-                "validation_scope": "geometric_path_only" if self.plan['simulation']['outcome']=='not_run' else "sim/mock",
+                "validation_scope": (("exact_parent_reverse_without_new_collision_check" if self.plan['replay_derivation']['method']=='reverse_existing_arm_targets'
+                    else "parent_reverse_with_local_cartesian_offset_without_collision_check") if 'replay_derivation' in self.plan
+                    else "geometric_path_only" if self.plan['simulation']['outcome']=='not_run' else "sim/mock"),
                 "hardware_validated": False, "timeline_digest": self.plan["timeline_digest"],
                 "calibration_profile_digest": self.profile_digest, "duration_s": self.duration_s,
                 "scheduling_delay_s": self.scheduling_delay_s, "schedule_slips": self.schedule_slips,
                 "last_tick": self.last_tick, "send_count": self.send_count,
+                "submission_semantics":'source_reference_knot_evaluations'if self.continuous_reference is not None else'SDK_point_submissions',
                 "targets_submitted": self.last_tick == len(self.ticks) - 1,
                 "timeline_elapsed": self.timeline_elapsed, "final_feedback_qualified": self.final_feedback_qualified,
                 "tracking_error": deepcopy(self.errors), "stop_invoked": self.stop_invoked,
                 "tracking_policy":self.execution_policy,"tracking_exceeded_samples":self.tracking_exceeded_samples,
+                "execution_settings":deepcopy(self.error_settings),"arrival_error":deepcopy(self.arrival_error),
+                "disabled_grippers":list(self.disabled_grippers),
+                "held_arms":list(self.held_arms),
+                "arrival_qualified":self.arrival_qualified,
                 "maximum_tracking_error":dict(self.maximum_errors),
                 "execution_timeline_digest":(self.runtime_timeline or {}).get('timeline_digest'),
                 "execution_hz":(self.runtime_timeline or {}).get('control_hz'),
@@ -180,20 +221,39 @@ class FrozenExecutor:
         # Compare against the command effective at the sample time, not a target about to be sent.
         reference_index = max(0, bisect_right(self.first_sends, sample) - 1)
         target = self.ticks[reference_index]["target"]
-        jaw_errors = {key: abs(measured[key]-target[key]) for key in GRIPPER_KEYS}
-        if self.execution_policy=='strict' and (self.holding_ticks[reference_index] or self.unloading_ticks[reference_index]):
+        if self.continuous_reference is not None:
+            elapsed=sample-self.start_s
+            reference_index=max(0,bisect_right(self.times,elapsed)-1)
+            target=self.continuous_reference(elapsed)
+        jaw_errors = {key: abs(measured[key]-target[key]) for key in self.enabled_gripper_keys}
+        enforce_tracking = self.error_settings['tracking_enabled'] if self.error_settings else self.execution_policy == 'strict'
+        if enforce_tracking and 'left_gripper' in jaw_errors and (self.holding_ticks[reference_index] or self.unloading_ticks[reference_index]):
             # This is an allowed position residual, not evidence of contact or force.
             jaw_errors['left_gripper'] = max(0.0, target['left_gripper']-measured['left_gripper'])
         self.errors = {
             "joint_rad": max(abs(a-b) for key in ARM_KEYS for a,b in zip(measured[key], target[key])),
-            "gripper_mm": max(jaw_errors.values())}
-        exceeded={key:dict(error=value,limit=self.limits[key]) for key,value in self.errors.items() if value>self.limits[key]}
+            "gripper_mm": max(jaw_errors.values(), default=0.)}
+        limits = (dict(joint_rad=self.error_settings['tracking_joint_rad'], gripper_mm=self.error_settings['tracking_jaw_mm'])
+                  if self.error_settings else self.limits)
+        exceeded={key:dict(error=value,limit=limits[key]) for key,value in self.errors.items() if value>limits[key]}
         for key,value in self.errors.items():self.maximum_errors[key]=max(self.maximum_errors[key],value)
         if exceeded:self.tracking_exceeded_samples+=1
-        if exceeded and self.execution_policy=='strict':
-            raise ValueError(f"feedback tracking error exceeds the frozen profile tolerance at tick {reference_index}: {exceeded}")
+        if exceeded:
+            if self.bad_tracking_since is None:
+                self.bad_tracking_since = now
+            duration = self.error_settings['tracking_duration_s'] if self.error_settings else 0.
+            if enforce_tracking and now-self.bad_tracking_since+1e-12 >= duration:
+                raise ValueError(f"feedback tracking error exceeds the execution tolerance at tick {reference_index}: {exceeded}")
+        else:
+            self.bad_tracking_since = None
+        endpoint = self.ticks[-1]['target']
+        self.arrival_error = dict(joints_rad=[abs(a-b) for key in ARM_KEYS for a,b in zip(measured[key],endpoint[key])],
+                                 jaw_mm=[abs(measured[key]-endpoint[key]) if key in self.enabled_gripper_keys else None for key in GRIPPER_KEYS])
+        self.arrival_qualified = (not self.error_settings or not self.error_settings['arrival_enabled'] or
+            all(error <= limit for error,limit in zip(self.arrival_error['joints_rad'], self.error_settings['arrival_tolerances_rad']))
+            and max((v for v in self.arrival_error['jaw_mm'] if v is not None), default=0.) <= self.error_settings['arrival_jaw_mm'])
         self.last_sample_s = sample
-        if self.timeline_elapsed and sample+1e-12>=self.start_s+self.duration_s+self.scheduling_delay_s:
+        if self.timeline_elapsed and self.arrival_qualified and sample+1e-12>=self.start_s+self.duration_s+self.scheduling_delay_s:
             self.final_feedback_qualified=True
         return sample
 
@@ -211,7 +271,7 @@ class FrozenExecutor:
             sample = self._feedback(now, feedback)
             elapsed = now - self.start_s - self.scheduling_delay_s
             index = min(len(self.ticks)-1, bisect_right(self.times, elapsed + 1e-12)-1)
-            if index > self.last_tick + 1:
+            if index > self.last_tick + 1 and self.continuous_reference is None:
                 index = self.last_tick + 1
                 delay = elapsed - self.times[index]
                 if delay > self.limits['timing_s'] + 1e-12 and self.execution_policy=='strict':
@@ -230,23 +290,28 @@ class FrozenExecutor:
                     raise ValueError("timeline ended before every target was submitted")
                 if elapsed - self.duration_s > self.limits["timing_s"] + 1e-12 and self.execution_policy=='strict':
                     raise ValueError("final feedback deadline exceeded")
-                if sample + 1e-12 >= self.start_s + self.duration_s + self.scheduling_delay_s:
+                enforce_arrival = bool(self.error_settings and self.error_settings['arrival_enabled'])
+                if enforce_arrival and not self.arrival_qualified and elapsed-self.duration_s > 3.:
+                    raise ValueError(f'final arrival error exceeds configured tolerance after 3 s: {self.arrival_error}')
+                if self.arrival_qualified and sample + 1e-12 >= self.start_s + self.duration_s + self.scheduling_delay_s:
                     self.final_feedback_qualified = True
                     self.status = "completed"
                     self.previous_s = now
                     return self.snapshot()
-                if self.execution_policy=='observation':
+                if self.execution_policy=='observation' and not enforce_arrival:
                     self.status='completed'
                     self.previous_s=now
                     return self.snapshot()
                 self.status = "awaiting_final_feedback"
             if self.gate() is not True:
                 raise ValueError("owner command gate closed before target submission")
-            self.command_index = index
-            sent_at=self.sink(deepcopy(self.ticks[index]["target"]))
-            if index > self.last_tick:
-                self.first_sends.append(now if sent_at is None else _finite(sent_at,'target submitted time'))
-                self.last_tick = index
+            indices=range(self.last_tick+1,index+1)if self.continuous_reference is not None else(index,)
+            for current_index in indices:
+                self.command_index = current_index
+                sent_at=self.sink(deepcopy(self.ticks[current_index]["target"]))
+                if current_index > self.last_tick:
+                    self.first_sends.append(now if sent_at is None else _finite(sent_at,'target submitted time'))
+                    self.last_tick = current_index
             self.send_count += 1
             self.previous_s = now
             return self.snapshot(include_history=False)

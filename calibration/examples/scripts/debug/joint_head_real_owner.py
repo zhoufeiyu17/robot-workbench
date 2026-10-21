@@ -21,9 +21,9 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'infra'))
-from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity
-from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command, project_arm_positions
-from robot_workbench.joint_bounds import position_noise_rad
+from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity, FEEDBACK_MAX_MM
+from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command, observe_arm_positions
+from robot_workbench.joint_bounds import position_noise_rad, feedback_position_margin_rad
 
 
 def legacy_modules(source):
@@ -39,10 +39,33 @@ def legacy_modules(source):
     return importlib.import_module('arx_env.coffee_safety')
 
 
-def hardware_backend(*, passive_left_jaw=False):
+def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_diagnostic_kp=None, right_j4_diagnostic_kd=None, left_j6_diagnostic=False, prepared_reference_enabled=False, target_interpreter_profile=None):
     # Importing this factory does not initialize CAN; only connect() does.
     from arx_env.backends.arx5_backend import Arx5Backend, Arx5BackendConfig
     import numpy as np
+    if any(side not in ('left','right') for side in disabled_grippers):
+        raise ValueError('disabled grippers must name left or right')
+    disabled = tuple(side for side in ('left','right')
+                     if side in disabled_grippers or side == 'left' and passive_left_jaw)
+    if right_j4_diagnostic_kp is not None and (
+            type(right_j4_diagnostic_kp) not in (int,float) or right_j4_diagnostic_kp not in (60.,80.)
+            or disabled!=('right',)):
+        raise ValueError('diagnostic profile permits only reviewed right J4 kp60/80 with right jaw disabled')
+    if right_j4_diagnostic_kd is not None and (
+            type(right_j4_diagnostic_kd) not in (int,float) or right_j4_diagnostic_kp is None
+            or (right_j4_diagnostic_kp,right_j4_diagnostic_kd) not in ((60.,1.),(80.,1.),(80.,1.6))):
+        raise ValueError('diagnostic kd requires the reviewed kp/kd pair: 60/1, 80/1 or 80/1.6')
+    if type(left_j6_diagnostic)is not bool or left_j6_diagnostic and (disabled!=('right',)or right_j4_diagnostic_kp is not None):
+        raise ValueError('left J6 diagnostic requires only its fixed 40/1 profile and disabled right jaw')
+    diagnostic_kp=40. if left_j6_diagnostic else right_j4_diagnostic_kp
+    diagnostic_kd=1. if left_j6_diagnostic or right_j4_diagnostic_kd is None else right_j4_diagnostic_kd
+    diagnostic_side,diagnostic_joint=('left',5)if left_j6_diagnostic else('right',3)
+    if type(prepared_reference_enabled)is not bool or prepared_reference_enabled and diagnostic_kp is not None:
+        raise ValueError('prepared reference requires a normal, explicitly enabled hardware profile')
+    from robot_workbench.target_interpreter import PROFILES, gains as motion_gains
+    if target_interpreter_profile is not None and (target_interpreter_profile not in PROFILES
+            or not prepared_reference_enabled or diagnostic_kp is not None):
+        raise ValueError('shared target interpreter requires a reviewed common motion profile, not one-shot gains')
 
     class PassiveJawController:
         def __init__(self, controller, release=lambda: True):
@@ -57,9 +80,110 @@ def hardware_backend(*, passive_left_jaw=False):
             if self.release():cmd.gripper_vel = cmd.gripper_torque = 0.
             return self.controller.set_joint_cmd(cmd)
 
+    motion_profile = target_interpreter_profile
+
     class SingleArmBackend(Arx5Backend):
-        passive_jaws = ('left',) if passive_left_jaw else ()
+        passive_jaws = disabled
         manual_jaws = frozenset()
+        target_interpreter_profile = motion_profile
+
+        def motion_gains(self, side):
+            return motion_gains(target_interpreter_profile or 'normal_X5', side)
+
+        def _import_arx5(self):
+            sdk=super()._import_arx5()
+            from robot_workbench.arx_output_guard import require_guard
+            contract=getattr(require_guard(),'sdk_contract',None)
+            if contract:
+                from robot_workbench.sdk_quiesce import verify_module
+                verify_module(sdk,contract)
+            if not disabled:return sdk
+            interfaces={getattr(self.config,side+'_can') for side in disabled}
+            class WithoutDisabledGrippers:
+                def __getattr__(self,name):return getattr(sdk,name)
+                def Arx5JointController(self,robot,controller,interface):
+                    if interface in interfaces:
+                        # Native NONE skips clear, enable and every gripper CAN
+                        # output; zero Python gains alone would still transmit.
+                        robot.gripper_motor_type=sdk.MotorType.NONE
+                    return sdk.Arx5JointController(robot,controller,interface)
+            return WithoutDisabledGrippers()
+
+        def connect(self):
+            from robot_workbench.arx_output_guard import require_guard
+            if self.is_connected:return
+            guard=require_guard()
+            if set(guard.disabled_grippers) != set(disabled):
+                raise ValueError('SDK disabled channels differ from the independent CAN guard')
+            # Independent CAN protection must acknowledge before the native
+            # constructor, which already enables motors and starts output.
+            admission=guard.call('begin')
+            self.sdk_generation=(admission or {}).get('generation')
+            self.output_guard=guard
+            try:
+                super().connect()
+                if getattr(guard,'sdk_contract',None):
+                    for side,controller in self._controllers.items():
+                        guard.call('register_sdk',side=side,identity=dict(
+                            library_build_id=guard.sdk_contract['library_build_id'],
+                            controller_instance_id=controller.controller_instance_id()))
+                return guard.call('activate')
+            except BaseException as error:
+                # Existing private trip RPC carries bounded error evidence;
+                # the supervisor still terminates before writing any log.
+                guard.call('trip',detail=f'{type(error).__name__}: {error}'[:512])
+                raise
+
+        def close(self):
+            self.release_steps=deque(maxlen=32)
+            collecting=False
+            def mark(step,status):
+                stamp=time.monotonic()
+                self.release_steps.append(dict(step=step,status=status,monotonic_s=stamp))
+                if collecting:release_trace.mark(step,status,int(stamp*1e9))
+            guard=getattr(self,'output_guard',None)
+            release_trace=getattr(guard,'release_trace',None)
+            if guard is None:
+                if self._controllers:raise RuntimeError('unprotected SDK controller cannot be released normally')
+                return super().close()
+            mark('guard_releasing','started')
+            guard.call('releasing')
+            if release_trace is not None:
+                release_trace.begin();collecting=release_trace.enabled
+            mark('guard_releasing','returned')
+            try:
+                mark('set_to_damping','started')
+                self.set_to_damping()
+                mark('set_to_damping','returned')
+                for side in ('left','right'):
+                    mark('pop_'+side,'started')
+                    controller=self._controllers.pop(side,None)
+                    mark('pop_'+side,'returned')
+                    if getattr(guard,'sdk_contract',None):
+                        from robot_workbench.sdk_quiesce import quiesce_report
+                        mark('quiesce_'+side,'started')
+                        report=quiesce_report(controller,self.sdk_generation)
+                        mark('quiesce_'+side,'returned')
+                        mark('retire_'+side,'started')
+                        guard.call('retire_'+side,report=report)
+                        mark('retire_'+side,'returned')
+                    mark('destroy_'+side,'started')
+                    del controller
+                    mark('destroy_'+side,'returned')
+                    if not getattr(guard,'sdk_contract',None):
+                        mark('retire_'+side,'started')
+                        guard.call('retire_'+side)
+                        mark('retire_'+side,'returned')
+                self._robot_configs.clear();self._controller_configs.clear()
+                self._control_mode=None;self._closed=True
+            except BaseException:
+                mark('close','failed')
+                guard.call('trip')
+                raise
+            if self._controllers:raise RuntimeError('native controllers remain after close')
+            mark('guard_disarm','started')
+            guard.call('disarm');self.output_guard=None
+            mark('guard_disarm','returned')
 
         def set_damping_hold(self, *, manual=False, **kwargs):
             # Keep both jaw position gains off throughout manual gravity mode.
@@ -70,6 +194,8 @@ def hardware_backend(*, passive_left_jaw=False):
                     self._controllers[side] = PassiveJawController(
                         self._controllers[side], lambda side=side: side in self.manual_jaws or side in self.passive_jaws)
             result = super().set_damping_hold(manual=manual, **kwargs)
+            self._prepared_reference=None
+            self._prepared_bias_windows={}
             if not manual:
                 # User-reviewed per-joint stop profile; passive motion restriction remains separate.
                 for side in self.sides:
@@ -77,16 +203,20 @@ def hardware_backend(*, passive_left_jaw=False):
                     gain.kp()[:] = np.asarray(self._controller_configs[side].default_kp)*.3
                     gain.kd()[:] = np.minimum(np.asarray(self._controller_configs[side].default_kd)*self.config.teach_kd_scale+1.,4.5)
                     gain.gripper_kp, gain.gripper_kd = .12, .15
-                    self._controllers[side].controller.set_gain(gain)
+                    self._controllers[side].set_gain(gain)
+            self._joint_diagnostic_gain_active=False
             return result
 
         def set_control_mode(self, mode):
-            if passive_left_jaw and not isinstance(self._controllers['left'], PassiveJawController):
-                self._controllers['left'] = PassiveJawController(self._controllers['left'])
+            for side in disabled:
+                if not isinstance(self._controllers[side], PassiveJawController):
+                    self._controllers[side] = PassiveJawController(self._controllers[side])
             return super().set_control_mode(mode)
 
         def begin(self, side, physical14):
             self._require_connected()
+            if diagnostic_kp is not None and (side!=diagnostic_side or getattr(self,'_joint_diagnostic_consumed',False)):
+                raise ValueError('diagnostic profile permits exactly one '+diagnostic_side+'-arm begin; no replay')
             self.manual_jaws = set(self.manual_jaws) - {side}
             start, end = ARM_SLICES[side]
             cfg = self._controller_configs[side]
@@ -100,7 +230,7 @@ def hardware_backend(*, passive_left_jaw=False):
             q, jaw = list(map(float, measured.pos())), float(measured.gripper_pos)
             if (len(q) != 6 or not all(math.isfinite(x) for x in q + [jaw])
                     or max(abs(a-b) for a, b in zip(q, physical14[start:end])) > .01
-                    or abs(feedback_gaps([jaw if i==end else physical14[i] for i in range(14)])[0 if side=='left' else 1]-feedback_gaps(physical14)[0 if side=='left' else 1]) > 2.):
+                    or side not in disabled and abs(feedback_gaps([jaw if i==end else physical14[i] for i in range(14)])[0 if side=='left' else 1]-feedback_gaps(physical14)[0 if side=='left' else 1]) > 2.):
                 raise ValueError('measured begin pose changed')
             exact = list(physical14)
             exact[start:end], exact[end] = q, jaw
@@ -109,23 +239,86 @@ def hardware_backend(*, passive_left_jaw=False):
                 environment='physical',corrections=corrections))
             self.last_begin_position_boundary=dict(raw_qpos=list(exact),command_qpos=hold[:],corrections=corrections,
                 environment='physical',position_noise_rad=position_noise_rad('physical'))
-            self.send(side, hold)  # Hold the measured physical gap in command units before position gains.
+            if diagnostic_kp is not None:self._joint_diagnostic_consumed=True
+            self._send_fixed(side, hold)  # Lifecycle hold before position gains, never ordinary point execution.
             gain = self._arx5.Gain(6)
-            gain.kp()[:], gain.kd()[:] = cfg.default_kp, cfg.default_kd
+            gain.kp()[:], gain.kd()[:] = self.motion_gains(side)
+            if diagnostic_kp is not None:
+                gain.kp()[diagnostic_joint]=diagnostic_kp
+                gain.kd()[diagnostic_joint]=diagnostic_kd
             gain.gripper_kp, gain.gripper_kd = 5., .2
             self.command_guard()
             self._controllers[side].set_gain(gain)
+            self._joint_diagnostic_gain_active=diagnostic_kp is not None
             self._control_mode = f'{side}_calibration_position_other_unchanged'
             return tuple(exact)
 
         def read_calibration_state(self):
             result=super().read_calibration_state()
+            heartbeat=self.output_guard.call('heartbeat')
+            result['gripper_feedback_valid']=[side not in disabled for side in ('left','right')]
+            result['gripper_feedback_reason']=['operator_disabled_no_feedback' if side in disabled else None for side in ('left','right')]
+            result['can_output_guard']=dict(state='armed',feedback_timeout_ms=100,
+                heartbeat_monotonic_s=(heartbeat or {}).get('heartbeat_monotonic_s'),
+                disabled_grippers=list(disabled),loss_action='latched_native_process_exit')
             result['gripper_torque']=[float(self._controllers[side].get_joint_state().gripper_torque) for side in self.sides]
             result['gripper_contact_detection']='unvalidated; torque telemetry only'
             result['last_begin_position_boundary']=getattr(self,'last_begin_position_boundary',None)
+            if diagnostic_kp is not None:
+                result['left_j6_diagnostic'if left_j6_diagnostic else'right_j4_diagnostic']=dict(kp=diagnostic_kp,kd=diagnostic_kd,
+                    consumed=getattr(self,'_joint_diagnostic_consumed',False),
+                    gain_active=getattr(self,'_joint_diagnostic_gain_active',False),normal_default_kp=20. if left_j6_diagnostic else 30.)
+            result['prepared_reference']=getattr(self,'_prepared_reference',None)
+            # Sample diagnostics at 10 Hz; never tune gains or alter commands here.
+            now=time.monotonic()
+            if now-getattr(self,'_telemetry_time',-math.inf)>=.1:
+                self._telemetry_time=now
+                telemetry=dict(sample_wall_ns=time.time_ns(),sample_time_s=now,
+                    scope='native output before CAN encoding; not firmware acknowledgement',arms={})
+                try:
+                    for side,controller in self._controllers.items():
+                        state,cmd,gain=controller.get_joint_state(),controller.get_joint_cmd(),controller.get_gain()
+                        row=dict(qpos=list(map(float,state.pos())),effort=list(map(float,state.torque())),
+                            output_qpos=list(map(float,cmd.pos())),output_qvel=list(map(float,cmd.vel())),output_torque=list(map(float,cmd.torque())),
+                            kp=list(map(float,gain.kp())),kd=list(map(float,gain.kd())))
+                        if any(len(values)!=6 or not all(math.isfinite(x) for x in values) for values in row.values()):
+                            raise ValueError('invalid native controller telemetry')
+                        telemetry['arms'][side]=row
+                    telemetry['status']='observed'
+                except Exception as error:
+                    telemetry.update(status='unavailable',error=str(error)[:256])
+                self._controller_telemetry=telemetry
+            result['controller_telemetry']=self._controller_telemetry
             return result
 
+        def enable_collection_arm(self, side, target):
+            """The existing collection gain transition, entirely inside the SDK worker."""
+            if diagnostic_kp is not None:
+                raise ValueError('single-motion diagnostic profile does not permit collection/inference')
+            self._require_connected()
+            cfg=self._controller_configs[side]
+            if (self._robot_configs[side].robot_model!='X5' or not self.config.gravity_compensation
+                    or not np.allclose(cfg.default_kp,[80,70,70,30,30,20],rtol=0,atol=1e-9)
+                    or not np.allclose(cfg.default_kd,[2,2,2,1,1,.7],rtol=0,atol=1e-9)
+                    or not np.isclose(cfg.default_gripper_kp,5.,rtol=0,atol=1e-6)
+                    or not np.isclose(cfg.default_gripper_kd,.2,rtol=0,atol=1e-7)):
+                raise ValueError('X5 gain identity changed')
+            self.manual_jaws=set(self.manual_jaws)-{side}
+            self._send_fixed(side,target)
+            stamp=time.monotonic()
+            gain=self._arx5.Gain(6)
+            gain.kp()[:],gain.kd()[:]=self.motion_gains(side)
+            gain.gripper_kp,gain.gripper_kd=5.,.2
+            self.command_guard();self._controllers[side].set_gain(gain)
+            self._control_mode='both_collection_position'
+            return dict(send_monotonic_s=stamp)
+
         def send(self, side, physical14):
+            if target_interpreter_profile is not None:
+                raise ValueError('ordinary motion requires the shared target interpreter; point-send is disabled')
+            return self._send_fixed(side,physical14)
+
+        def _send_fixed(self, side, physical14):
             self._require_connected()
             start, end = ARM_SLICES[side]
             q, jaw = np.asarray(physical14[start:end], dtype=float), float(physical14[end])
@@ -139,6 +332,112 @@ def hardware_backend(*, passive_left_jaw=False):
             cmd.gripper_pos, cmd.gripper_vel, cmd.gripper_torque = jaw, 0., 0.
             self.command_guard()
             self._controllers[side].set_joint_cmd(cmd)
+            # Native fixed output replaced this arm's future torque window.
+            getattr(self,'_prepared_bias_windows',{}).pop(side,None)
+
+        def queue_reference(self, packet):
+            """Admit a short, epoch-gated window; native SDK alone executes it."""
+            self._require_connected()
+            if not prepared_reference_enabled:raise ValueError('prepared reference output is not enabled')
+            required={'schema','reference_id','host_times_s','q_sdk14','dq_sdk14','active_arm'}
+            from robot_workbench.target_interpreter import SCHEMA as common_schema
+            common=isinstance(packet,dict)and packet.get('schema')==common_schema
+            fields=required|{'controller_profile','torque_bias_sdk14'} if common else required
+            if not isinstance(packet,dict)or (set(packet)!=fields if common else set(packet)not in(fields,fields|{'torque_bias_sdk6'})):
+                raise ValueError('exact prepared reference packet required')
+            if common:
+                if (target_interpreter_profile is None or packet['controller_profile']!=target_interpreter_profile
+                        or packet['active_arm']not in ('left','right','both')):
+                    raise ValueError('shared reference arm or trusted controller profile differs')
+            elif target_interpreter_profile is not None:
+                raise ValueError('legacy reference packets are disabled by the shared target profile')
+            elif packet['schema']!='prepared_motion_reference.v1'or packet['active_arm']!='left':
+                raise ValueError('current prepared-reference qualification is left arm only')
+            sides=('left','right')if packet['active_arm']=='both'else(packet['active_arm'],)
+            if any(self._controller_configs[side].interpolation_method!='linear'for side in sides):
+                raise ValueError('only the qualified native linear interpolator is permitted')
+            if (not isinstance(packet['reference_id'],str)or len(packet['reference_id'])!=64
+                    or any(c not in '0123456789abcdef'for c in packet['reference_id'])):
+                raise ValueError('prepared reference identity required')
+            times=np.asarray(packet['host_times_s'],dtype=float);q=np.asarray(packet['q_sdk14'],dtype=float);dq=np.asarray(packet['dq_sdk14'],dtype=float)
+            now=time.monotonic()
+            if (times.ndim!=1 or not 2<=len(times)<=32 or q.shape!=(len(times),14)or dq.shape!=q.shape
+                    or not all(np.isfinite(a).all()for a in (times,q,dq))or np.any(np.diff(times)<=0)
+                    or times[0]<now+.003 or times[-1]>now+.35 or times[-1]-times[0]>.3):
+                raise ValueError('bounded, ordered future reference window required')
+            from robot_workbench.motion_reference import TORQUE_BIAS_LIMITS,FEEDFORWARD_SLEW_LIMITS
+            bias=np.asarray(packet['torque_bias_sdk14']if common else
+                np.c_[packet.get('torque_bias_sdk6',np.zeros((len(times),6))),np.zeros((len(times),8))],dtype=float)
+            bound=np.asarray([*TORQUE_BIAS_LIMITS,0.,*TORQUE_BIAS_LIMITS,0.])
+            slew=np.asarray([*FEEDFORWARD_SLEW_LIMITS,0.,*FEEDFORWARD_SLEW_LIMITS,0.])
+            if bias.shape!=(len(times),14)or not np.isfinite(bias).all()or np.any(np.abs(bias)>bound+1e-12):
+                raise ValueError('reference torque bias exceeds qualified bounded shape or SDK units')
+            inactive=[i for side in ('left','right')if side not in sides for i in range(*ARM_SLICES[side])]
+            if inactive and (np.any(bias[:,inactive]!=0.)or np.any(dq[:,inactive]!=0.)):
+                raise ValueError('inactive arm reference must not add velocity or torque')
+            if np.any(np.abs(np.diff(bias,axis=0))>np.diff(times)[:,None]*slew+1e-8):
+                raise ValueError('reference torque bias exceeds intra-window slew bound')
+            previous_windows=getattr(self,'_prepared_bias_windows',{})
+            for side in sides:
+                start,end=ARM_SLICES[side];previous=previous_windows.get(side)
+                current=(np.array([np.interp(now,previous[0],previous[1][:,j])for j in range(6)])if previous else np.zeros(6))
+                if np.any(np.abs(bias[0,start:end]-current)>max(0.,times[0]-now)*slew[start:end]+1e-4):
+                    raise ValueError('reference torque bias exceeds admission slew bound')
+            for side in sides:
+                start,end=ARM_SLICES[side];limits=np.asarray(self.get_joint_position_limits(side))[:6]
+                if (np.any(q[:,start:end]<limits[:,0])or np.any(q[:,start:end]>limits[:,1])
+                        or np.max(np.abs(dq[:,start:end]))>2.
+                        or np.any(q[:,end]<0)or np.any(q[:,end]>self.config.gripper_width_m+1e-8)
+                        or np.any(dq[:,[6,13]]!=0)):
+                    raise ValueError('prepared reference exceeds SDK command bounds')
+                if common and np.any(np.abs(np.diff(dq[:,start:end],axis=0))>5.*np.diff(times)[:,None]+1e-7):
+                    raise ValueError('shared reference exceeds acceleration admission bound')
+            try:self.command_guard()
+            except BaseException:
+                self.set_damping_hold(manual=False)
+                self.reference_cancel_sequence=getattr(self,'reference_cancel_sequence',0)+1
+                raise
+            windows={};clocks={}
+            for side in sides:
+                controller=self._controllers[side];observations=[]
+                for _ in range(3):
+                    before=time.monotonic();sdk_now=controller.get_timestamp();after=time.monotonic()
+                    observations.append((after-before,before,sdk_now,after))
+                _,before,sdk_now,after=min(observations)
+                if not math.isfinite(sdk_now)or sdk_now<=.11 or after-before>.002:
+                    raise ValueError('SDK clock observation invalid or exceeded2ms; no window queued')
+                offset=sdk_now-(before+after)/2;clocks[side]=dict(offset_s=offset,uncertainty_s=(after-before)/2)
+                start,end=ARM_SLICES[side];frames=[]
+                for stamp,row,velocity,torque in zip(times,q,dq,bias):
+                    cmd=self._arx5.JointState(6);cmd.timestamp=float(stamp+offset)
+                    cmd.pos()[:]=row[start:end];cmd.vel()[:]=velocity[start:end];cmd.torque()[:]=torque[start:end]
+                    cmd.gripper_pos=float(row[end]);cmd.gripper_vel=cmd.gripper_torque=0.;frames.append(cmd)
+                windows[side]=frames
+            try:
+                for side,frames in windows.items():
+                    if times[0]<time.monotonic()+.003:
+                        raise ValueError('future reference expired during multi-arm admission')
+                    self.command_guard();self._controllers[side].set_joint_traj(frames)
+                self.command_guard()
+            except BaseException:
+                # Covers epoch revocation racing with admission. The existing
+                # measured-zero-velocity stop also clears pending interpolation.
+                self.set_damping_hold(manual=False)
+                self.reference_cancel_sequence=getattr(self,'reference_cancel_sequence',0)+1
+                raise
+            first=clocks[sides[0]]
+            self._prepared_reference=dict(reference_id=packet['reference_id'],active_arm=packet['active_arm'],
+                queued_until_host_s=float(times[-1]),host_to_sdk_offset_s=first['offset_s'],
+                clock_uncertainty_s=first['uncertainty_s'],clock_mappings=clocks,frames=len(times),queued_host_s=time.monotonic(),
+                controller_profile=target_interpreter_profile or 'normal_X5',firmware_ack=False)
+            if 'torque_bias_sdk6'in packet:self._prepared_reference['torque_bias_last_sdk6']=bias[-1,:6].tolist()
+            if common:self._prepared_reference['torque_bias_last_sdk14']=bias[-1].tolist()
+            self._prepared_bias_windows=dict(previous_windows)
+            for side in sides:
+                start,end=ARM_SLICES[side]
+                self._prepared_bias_windows[side]=(times.copy(),bias[:,start:end].copy())
+            self._control_mode=packet['active_arm']+'_shared_target_reference'if common else'left_prepared_reference_right_hold'
+            return dict(self._prepared_reference)
 
     return SingleArmBackend(Arx5BackendConfig(
         control_mode='damping', left_can='can3', right_can='can1',
@@ -223,6 +522,7 @@ class Owner:
         self.cache = {'pid': os.getpid(), 'state': 'INITIALIZING', 'connected': False}
         self.last_sdk = None
         self.sdk_progress = None
+        self.local_gains_cache=None;self.local_gains_checked=0.;self.local_gains_key=None;self.local_gains_wall_ns=None
         self.feedback_healthy = False
         self.stationary_window = StationaryWindow()
         self.stationary = False
@@ -317,6 +617,8 @@ class Owner:
                 return {'queued':'capture_ack','sample_id':wait['sample_id'],'capture_ready_wall_ns':wait['ready_wall_ns']}
             if action in ('preview', 'preview_home', 'preview_arm_home', 'preview_jaw_target', 'preview_both_home', 'preview_workbench'):
                 expected = {'action'} if action == 'preview_both_home' else {'action', 'active_arm'} if action != 'preview' else {'action', 'active_arm', 'q_target'}
+                if action == 'preview' and 'q_active' in command:
+                    expected = {'action', 'active_arm', 'q_active', 'max_velocity'}
                 if action == 'preview_workbench':
                     expected = {'action', 'waypoints'}
                 if action == 'preview_jaw_target':
@@ -391,14 +693,29 @@ class Owner:
                                      kind=kind, created_at_s=self.control_time(),environment=self.position_environment)
                     plans = (plan,)
                 else:
-                    plan = make_plan(command['active_arm'], q_start, command['q_target'], current['joint_limits'],
-                                     created_at_s=self.control_time(),environment=self.position_environment)
+                    options = {}
+                    target = command.get('q_target')
+                    if 'q_active' in command:
+                        if command['active_arm'] not in ARM_SLICES:
+                            raise ValueError('one active arm required')
+                        q_active, speed = command['q_active'], command['max_velocity']
+                        if (not isinstance(q_active, list) or len(q_active) != 6
+                                or any(type(v) not in (int,float) or not math.isfinite(v) for v in q_active)
+                                or type(speed) not in (int,float) or not math.isfinite(speed) or not 0 < speed <= .5):
+                            raise ValueError('six finite active-arm positions and speed in (0, 0.5] required')
+                        target = list(feedback_to_command(q_start,current['joint_limits'],environment=self.position_environment))
+                        a,b = ARM_SLICES[command['active_arm']]
+                        target[a:b] = q_active
+                        options['max_velocity'] = speed
+                    plan = make_plan(command['active_arm'], q_start, target, current['joint_limits'],
+                                     created_at_s=self.control_time(),environment=self.position_environment,**options)
                     plans = (plan,)
                 token = secrets.token_urlsafe(24)
                 self.pending.clear()
                 self.pending[token] = (plans, self.epoch, press[0], os.getpid(), samples or [None]*len(plans))
                 self.review_wall_deadline = time.monotonic() + 30.
                 return dict(token=token, plan=asdict(plans[0]), plans=[asdict(p) for p in plans],
+                            disabled_grippers=list(getattr(self.backend, 'passive_jaws', ())),
                             capture_samples=samples, capture_timeout_s=10., capture_hold_s=.5,
                             sequence_id=plans[0].sha256, total_motion_duration_s=sum(p.duration_s for p in plans),
                             owner_pid=os.getpid(), command_epoch=self.epoch,
@@ -430,6 +747,8 @@ class Owner:
                     and self.pedal_snapshot()[1:] == (False, True))
 
     def invalidate(self):
+        interpreter=getattr(getattr(self,'runner',None),'target_interpreter',None)
+        if interpreter is not None:interpreter.revoke()
         with self.lock:
             self.arrival_pending = None
             self.epoch += 1
@@ -459,7 +778,8 @@ class Owner:
         self.control.state = self.states.FAULT
         self.backend.set_damping_hold(manual=False, experimental_stop_scale=self.stop_scale)
         self.control.state = self.states.FAULT if was_fault else self.states.STOPPED
-        self.event('stop', reason=str(reason), epoch=self.epoch)
+        self.event('stop', reason=str(reason), epoch=self.epoch,
+                   motion_record=self.runner.motion_record() if isinstance(self.runner,MotionRunner) else None)
 
     def motion_fault(self, reason):
         diagnostic = self.diagnostic_sample(self.current_feedback)
@@ -563,7 +883,8 @@ class Owner:
                     feedback_healthy=self.feedback_healthy,stationary=self.stationary,
                     stationary_check=getattr(self.stationary_window,'last_diagnostic',None),
                     runner_stationary_check=getattr(runner.stationary,'last_diagnostic',None) if runner else None,
-                    arm_arrival_tolerances_rad=list(arrival_tolerances(self.arm_tolerance,self.arm_tolerances)),
+                    arm_arrival_tolerances_rad=list(self.motion_error_settings()['arrival_tolerances_rad']),
+                    execution_settings=self.motion_error_settings(),
                     feedback=feedback,tick_gap_s=self.tick_gap_s,feedback_read_duration_s=self.feedback_read_duration_s,
                     sdk_progress_age_s=[None if t is None else now-t for t in (self.sdk_progress or [])],
                     capture_ready_wall_ns=self.capture_wait['ready_wall_ns'] if self.capture_wait else None,
@@ -606,9 +927,12 @@ class Owner:
             if hasattr(limits, 'tolist'):
                 limits = limits.tolist()
             corrections=[]
-            bounded=project_arm_positions(feedback['qpos'],limits,environment=self.position_environment,corrections=corrections)
+            bounded=observe_arm_positions(feedback['qpos'],limits,environment=self.position_environment,corrections=corrections)
             feedback['position_boundary']=dict(environment=self.position_environment,
-                position_noise_rad=position_noise_rad(self.position_environment),corrections=corrections,
+                position_noise_rad=position_noise_rad(self.position_environment),
+                feedback_margin_rad=feedback_position_margin_rad(self.position_environment),
+                command_projection_allowed=all(abs(row['delta_rad'])<=position_noise_rad(self.position_environment)+1e-12 for row in corrections),
+                corrections=corrections,
                 command_joint_positions_rad=[bounded[i] for i in active_indices('both')])
             capture_ack = None
             while not self.commands.empty():
@@ -662,13 +986,15 @@ class Owner:
                 self.accepted_review_age_s = accepted_age
                 try:self.start_motion(plan, feedback)
                 finally:self.accepted_review_age_s = None
-                self.event('motion_confirmed', plan=asdict(plan), status=self.runner.status)
+                self.event('motion_confirmed', plan=asdict(plan), status=self.runner.status,
+                           execution_settings=self.motion_error_settings())
             if self.runner and self.runner.status not in ('ARMED', 'STOPPED', 'FAULT'):
                 # begin/send check the live press counter immediately before writes.
                 before = self.runner.status
                 self.runner.tick(self.control_time(), feedback)
                 if before != self.runner.status:
-                    self.event('motion_state', status=self.runner.status, reason=self.runner.reason)
+                    self.event('motion_state', status=self.runner.status, reason=self.runner.reason,
+                               motion_record=self.runner.motion_record() if isinstance(self.runner,MotionRunner) and self.runner.status=='READY' else None)
             self.record_arrival(feedback)
             self.diagnostic_history.append(self.diagnostic_sample(feedback))
             if self.capture_sample and self.runner:
@@ -681,10 +1007,12 @@ class Owner:
                     if not self.feedback_healthy:guard_reasons.append('feedback_unhealthy')
                     target = self.runner.execution_target
                     from arx_env.joint_head_real_motion import command_gap
-                    if (target is None or any(abs(feedback['qpos'][i]-target[i]) > tolerance
-                            for i,tolerance in zip(active_indices('both'),arrival_tolerances(self.arm_tolerance,self.arm_tolerances)))
-                            or any(abs(gap-command_gap(side,target[i])) > 2.
-                                   for gap,side,i in zip(feedback_gaps(feedback['qpos']),('left','right'),(6,13)))):
+                    settings = self.motion_error_settings()
+                    if settings['arrival_enabled'] and (target is None or any(abs(feedback['qpos'][i]-target[i]) > tolerance
+                            for i,tolerance in zip(active_indices('both'), settings['arrival_tolerances_rad']))
+                            or any(abs(gap-command_gap(side,target[i])) > settings['arrival_jaw_mm']
+                                   for gap,side,i in zip(feedback_gaps(feedback['qpos']),('left','right'),(6,13))
+                                   if i in self.runner.enabled_jaws)):
                         guard_reasons.append('target_outside_arrival_tolerance')
                     if self.runner.status not in ('READY','HOLD_UNSETTLED'):guard_reasons.append('motion_not_ready')
                     if guard_reasons:
@@ -727,8 +1055,10 @@ class Owner:
                 actual_gap=feedback_gaps(feedback['qpos'])
                 from arx_env.joint_head_jaw_mapping import command_gap_mm
                 target_gap=[command_gap_mm(side,next_plan.q_start[i]) for side,i in [('left',6),('right',13)]]
-                if (any(abs(feedback['qpos'][i]-next_plan.q_start[i]) > tolerance for i,tolerance in zip(active_indices('both'),arrival_tolerances(self.arm_tolerance,self.arm_tolerances)))
-                        or any(abs(a-b)>2. for a,b in zip(actual_gap,target_gap))):
+                settings = self.motion_error_settings()
+                if settings['arrival_enabled'] and (any(abs(feedback['qpos'][i]-next_plan.q_start[i]) > tolerance for i,tolerance in zip(active_indices('both'), settings['arrival_tolerances_rad']))
+                        or any(abs(a-b)>settings['arrival_jaw_mm'] for side,a,b in zip(('left','right'),actual_gap,target_gap)
+                               if side not in getattr(self.backend, 'passive_jaws', ()))):
                     raise ValueError('waypoint outside arrival tolerance')
                 self.command_gate()
                 self.sequence_remaining.pop(0)
@@ -744,7 +1074,7 @@ class Owner:
             if diagnostic is not None:
                 diagnostic.update(reasons=guard_reasons or ['owner_exception'],error=str(error))
             self.recoverable_fault = None
-            self.invalidate()
+            if first_fault:self.invalidate()
             if self.runner:
                 self.runner.status, self.runner.reason = 'FAULT', str(error)
                 self.record_arrival(feedback)
@@ -758,7 +1088,7 @@ class Owner:
                 self.event('fault_diagnostic',diagnostic=diagnostic,
                            history=list(self.diagnostic_history),history_capacity=200,
                            epoch_after=self.epoch)
-            self.event('fault', reason=self.control.reason)
+            if first_fault:self.event('fault', reason=self.control.reason)
             with self.lock:
                 self.cache.update(state=self.control.state.value, reason=self.control.reason,
                                   automatic_enabled=False, feedback_healthy=False, stationary=False,
@@ -782,17 +1112,54 @@ class Owner:
         self.event('confirm_rejected', **self.last_confirm_rejection)
 
     def start_motion(self, plan, feedback, *, reviewed_deadline=None):
+        previous=getattr(getattr(self,'runner',None),'target_interpreter',None)
+        reuse=bool(previous is not None and not previous.cancelled and previous.epoch==self.epoch
+            and previous.active_arm==plan.active_arm and previous.feedforward is None
+            and previous.profile==self.shared_target_profile)
+        def begin(measured):
+            return tuple(measured)if reuse else self.begin(plan.active_arm,measured)
+        def command_start():
+            if not reuse:return None
+            return previous.reference.sample([self.control_time()-previous.start_s])[0][0].tolist()
         self.plan_sequence += 1
         epoch = self.active_epoch
         self.arrival_pending = dict(event_id=f'{os.getpid()}:{self.arrival_nonce}:{epoch}:{self.plan_sequence}',
                                     owner_pid=os.getpid(), command_epoch=epoch,
                                     plan_sha256=plan.sha256, sample_id=self.capture_sample) if plan.kind == 'workbench' else None
-        self.runner = MotionRunner(plan, begin=lambda q: self.begin(plan.active_arm, q),
+        self.runner = MotionRunner(plan, begin=begin,
                                    send=lambda q: self.send(plan.active_arm, q),
                                    stop=self.motion_fault, consumed=self.consumed, arm_tolerance=self.arm_tolerance, arm_tolerances=self.arm_tolerances,
-                                   environment=self.position_environment)
+                                   environment=self.position_environment,
+                                   execution_settings=getattr(self, 'execution_error_settings', None),
+                                   disabled_grippers=getattr(self.backend, 'passive_jaws', ()),
+                                   interpreter_factory=(lambda reference,side,stamp:self.make_target_interpreter(reference,side,stamp,previous=previous))if self.shared_target_profile else None,
+                                   command_start_factory=command_start if reuse else None)
         self.runner.start(self.control_time(), feedback, reviewed_deadline=reviewed_deadline,
                           review_age_s=self.review_age())
+
+    @property
+    def shared_target_profile(self):
+        return getattr(self.backend,'target_interpreter_profile',None)
+
+    def make_target_interpreter(self,reference,active_arm,start_s,*,integral=None,feedforward=None,previous=None):
+        from robot_workbench.target_interpreter import TargetInterpreter
+        profile=self.shared_target_profile
+        if profile is None:raise ValueError('shared target interpreter is not configured')
+        interpreter=TargetInterpreter(self.backend,reference,active_arm=active_arm,start_s=start_s,
+            epoch=self.epoch,current_epoch=lambda:self.epoch,gate=self.command_gate,clock=self.control_time,
+            profile=profile,integral=profile=='x5_shared_precision_v1'if integral is None else integral,
+            feedforward=feedforward)
+        interpreter.inherit_hold(previous,self.control_time())
+        if reference.metadata.get('kind')=='point'and self.sequence_deadline is not None:
+            self.sequence_deadline+=max(0.,reference.duration_s-reference.metadata['source_duration_s'])
+        self.event('target_interpreter_bound',reference=reference.metadata,active_arm=active_arm,
+            controller_profile=profile,command_epoch=self.epoch,source_time_origin_s=start_s)
+        return interpreter
+
+    def motion_error_settings(self):
+        from robot_workbench.execution_settings import defaults
+        return getattr(self, 'execution_error_settings', None) or defaults('calibration',
+            arrival_tolerances(self.arm_tolerance, self.arm_tolerances))
 
     def record_arrival(self, feedback):
         if self.runner and self.runner.status in ('STOPPED', 'FAULT'):
@@ -801,6 +1168,8 @@ class Owner:
             return
         target = self.runner.execution_target if self.runner.execution_target is not None else self.runner.plan.q_target
         event = dict(self.arrival_pending, status='success',
+                     arrival_enforced=self.motion_error_settings()['arrival_enabled'],
+                     execution_settings=self.motion_error_settings(),
                      q_target_rad=[float(q) for i,q in enumerate(target) if i not in (6,13)],
                      q_actual_rad=[float(q) for i,q in enumerate(feedback['qpos']) if i not in (6,13)],
                      timestamp_ns=time.time_ns(), reason=self.runner.reason)
@@ -812,6 +1181,10 @@ class Owner:
 
     def cache_state(self, feedback, limits):
         press, down, healthy = self.pedal_snapshot()
+        now=time.monotonic();gains_key=(self.epoch,self.control.state.value,self.backend.is_connected)
+        if self.backend.is_connected and (gains_key!=self.local_gains_key or now-self.local_gains_checked>=1.):
+            self.local_gains_cache=self.backend.read_gains()
+            self.local_gains_checked=now;self.local_gains_wall_ns=time.time_ns();self.local_gains_key=gains_key
         value = dict(pid=os.getpid(), mode='hardware' if self.hardware else 'simulation',
                      arrival_events=list(self.arrival_events),
                      capture_diagnostics_schema='joint-head-capture-diagnostic-v1',
@@ -822,6 +1195,8 @@ class Owner:
                      last_confirm_rejection=self.last_confirm_rejection,
                      simulation_only=not self.hardware,
                      jaw_mapping=mapping_identity(),
+                     feedback_limits=dict(joint_position_margin_rad=feedback_position_margin_rad(self.position_environment),
+                                          jaw_range_mm=[-2.,FEEDBACK_MAX_MM],command_limits_unchanged=True),
                      evidence_source='physical_hardware' if self.hardware else 'simulated_owner',
                      control_clock='wall_monotonic' if self.control_clock is None else 'injected',
                      motion_protocol='reviewed-single-arm-v1',
@@ -834,11 +1209,12 @@ class Owner:
                      automatic_enabled=bool(self.capture_sample or self.runner and self.runner.status in ('VERIFYING', 'RUNNING', 'SETTLING')),
                      receive_ns=time.time_ns(), calibration_feedback=feedback, joint_limits=limits,
                      feedback_healthy=self.feedback_healthy,
-                     arm_arrival_tolerance_rad=self.arm_tolerance if self.arm_tolerances is None else None,
-                     arm_arrival_tolerances_rad=list(arrival_tolerances(self.arm_tolerance,self.arm_tolerances)),
+                     arm_arrival_tolerance_rad=self.arm_tolerance if self.arm_tolerances is None and not getattr(self,'execution_error_settings',None) else None,
+                     arm_arrival_tolerances_rad=list(self.motion_error_settings()['arrival_tolerances_rad']),
                      position_noise_rad=position_noise_rad(self.position_environment),position_environment=self.position_environment,
                      stationary=self.stationary,
-                     local_gains=self.backend.read_gains() if self.backend.is_connected else None,
+                     local_gains=self.local_gains_cache if self.backend.is_connected else None,
+                     local_gains_sample_wall_ns=self.local_gains_wall_ns,
                      release_requires='ARMS_SUPPORTED_RELEASE', stop_damping_scale=self.stop_scale,
                      pedal=dict(input_healthy=healthy, physically_down=down, last_press_ns=press,
                                 latched=bool(self.listener and self.listener.requested.is_set())),
@@ -859,6 +1235,17 @@ class Owner:
                                                                  target_error=self.runner.target_error),
                      sdk_stop_limit='Software stop cannot interrupt a blocked native SDK call')
         with self.lock:
+            # Publish state and its command generation together. A Stop/recover
+            # after acquisition must not make the old feedback look current.
+            from robot_workbench.state_contract import fact
+            self.state_revision=getattr(self,'state_revision',0)+1
+            feedback_epoch=(feedback or {}).get('command_epoch',self.epoch)
+            value.update(state=self.control.state.value,reason=self.control.reason,
+                recoverable_fault=self.recoverable_fault,command_epoch=self.epoch)
+            value['control_publication']=fact('control','Runtime.Owner',getattr(self,'runtime_nonce',None),
+                self.state_revision,(feedback or {}).get('sample_wall_ns'),
+                dependencies=dict(command_epoch=self.epoch,feedback_epoch=feedback_epoch),
+                valid=feedback_epoch==self.epoch,reason=None if feedback_epoch==self.epoch else 'feedback_precedes_control_transition')
             self.cache = value
 
 

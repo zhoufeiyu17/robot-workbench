@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import time
 import traceback
+from types import SimpleNamespace
 
 from integration import _digest, PIPELINE_LANES
 from gripper_distance_plan import NATIVE_DISTANCE_ENCODING, validate_distance_control
@@ -24,13 +25,48 @@ from isaac_lane import (apply_whitebox_materials, bind_effective_gripper_identit
                         close_runtime, file_sha256, preview_sensors, write)
 
 
+def reset_failure_context(env):
+    """Preserve existing simulator evidence; never step, read sensors, or change acceptance."""
+    runtime=getattr(env,'_m2_runtime',None)
+    if runtime is None:return dict(status='unavailable',reason='runtime_not_created')
+    try:
+        evaluator=runtime.evaluator;contacts=runtime.latest_contacts;audit=deepcopy(evaluator.last_audit)
+        value=dict(status='recorded',physics_step=audit.get('physics_step'),
+            audit=audit,history=deepcopy(evaluator.history),
+            contacts=[{key:getattr(contact,key) for key in
+                ('actors','shapes','position','normal','impulse','separation_m')} for contact in contacts[:64]],
+            contact_count=len(contacts),contacts_truncated=len(contacts)>64)
+        value['maintenance_audit']=deepcopy(getattr(runtime,'maintenance_initial_audit',None))
+        value['maintenance_audit_trace']=deepcopy(getattr(runtime,'maintenance_audit_trace',[]))
+        event=getattr(evaluator,'event',None)
+        value['task_event']=asdict(event) if event is not None else None
+        json.dumps(value,allow_nan=False)
+        return value
+    except Exception as error:
+        return dict(status='unavailable',reason='diagnostic_snapshot_failed',error=str(error))
+
+
+def rectified_calibration(env,camera):
+    calibration=deepcopy(env.cfg.d405_rig['device_calibrations'][camera])
+    calibration['distortion']['coefficients']=[0.]*len(calibration['distortion']['coefficients'])
+    return calibration
+
+
 def camera_frame(env,camera):
-    """Calibrated rectified pixels; the scene RGB tensor is overscan, not output."""
+    """Sample the raw overscan once at the original K, without distorting first."""
     from robot_sim.tasks.manager_based.coffee_make.d405_camera import color_observation
-    calibration=env.cfg.d405_rig['device_calibrations'][camera]
-    if any(abs(value)>1e-12 for value in calibration['distortion']['coefficients']):
-        raise ValueError('Playground rectified output requires zero-distortion rig coefficients')
-    frame=color_observation(env,camera)[0].cpu().numpy()
+    calibration=rectified_calibration(env,camera)
+    cache=getattr(env,'_playground_rectified_d405_cache',None)
+    if cache is None:cache=env._playground_rectified_d405_cache={}
+    identity=_digest(calibration)
+    if cache.get(camera,{}).get('identity')!=identity:
+        cache[camera]=dict(identity=identity,grids={})
+    # Native color_observation owns the pixel-centre convention and grid_sample.
+    # Give it a separate view/cache: never alter the real rig or distorted cache.
+    view=SimpleNamespace(scene=env.scene,
+        cfg=SimpleNamespace(d405_rig={'device_calibrations':{camera:calibration}}),
+        _d405_grid_cache=cache[camera]['grids'])
+    frame=color_observation(view,camera)[0].cpu().numpy()
     if frame.shape!=(calibration['height'],calibration['width'],3) or str(frame.dtype)!='uint8':
         raise ValueError('calibrated camera output shape or dtype differs')
     return frame
@@ -49,14 +85,18 @@ def camera_metadata(env,sensors,source,world_from_environment):
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     result={}
     for camera,sensor in sensors.items():
-        calibration=env.cfg.d405_rig['device_calibrations'][camera]
-        if any(abs(value)>1e-12 for value in calibration['distortion']['coefficients']):
-            raise ValueError('rectified camera metadata requires zero-distortion rig coefficients')
+        source_calibration=env.cfg.d405_rig['device_calibrations'][camera]
+        calibration=rectified_calibration(env,camera)
         k=calibration['intrinsics'];world_pose=sensor_pose(sensor)
         pose=world_from_environment.inverse().compose(RigidTransform(**world_pose))
         result[camera]=dict(image_domain='rectified',width=calibration['width'],height=calibration['height'],
             serial=calibration['serial'],K=[[k['fx'],0,k['cx']],[0,k['fy'],k['cy']],[0,0,1]],
             distortion_coefficients=list(calibration['distortion']['coefficients']),
+            source_distortion=deepcopy(source_calibration['distortion']),
+            rectification=dict(source_domain='raw_overscan_pinhole',output_domain='rectified',
+                method='native sampling_map/grid_sample with copied zero coefficients',
+                output_intrinsics='unchanged calibrated K',resampling_passes=1,
+                source_calibration_sha256=_digest(source_calibration)),
             world_from_optical=world_pose,environment_from_optical=asdict(pose),
             overscan_K=sensor.data.intrinsic_matrices[0].cpu().tolist(),
             pose_source='actual Isaac sensor.data.pos_w / quat_w_ros')
@@ -269,6 +309,7 @@ def setup(args,source,suite,plan,execution_timeline=None):
         normalization=dict(source_initial_digest=_digest(source['initial_state']['model']),
               input_initial_digest=_digest(original),reset_initial_digest=_digest(initial),
               source_environment=environment,limit_allowance_rad=position_noise_rad(environment),adjustments=adjustments)
+        normalization.update(getattr(args,'scene_reset_identity',{}))
         if execution_timeline is not None:
             normalization.update(execution_timeline_digest=execution_timeline['timeline_digest'],
                 initialization=deepcopy(execution_timeline.get('initialization')),
@@ -293,7 +334,16 @@ def setup(args,source,suite,plan,execution_timeline=None):
             write(args.output/'cup-contact-preset.json',dict(preset=preset,material=material,
                 default_selected=False,scope='frozen fake configuration; actual material applied before reset'))
         bind_effective_gripper_identity(runtime,acceptance.open_position_m,env.action_manager.get_term('guarded').gripper_limits())
-        _,info=env.reset(options={'episode':episode})
+        if args.mode=='maintenance-geometry-inputs':
+            from functools import partial
+            from maintenance_geometry import PURPOSE,audit_initial_support
+            _,info=runtime.maintenance_geometry_reset(purpose=PURPOSE,
+                audit=partial(audit_initial_support,support=args.maintenance_scope['support']),options={'episode':episode},
+                orientation_tolerance_rad=args.maintenance_scope.get('error_acceptance',{}).get('max_error_rad',.01))
+            write(args.output/'maintenance-initialization-audit.json',dict(task_characterization='not_run',
+                audits=info['maintenance_audit_trace'],history=runtime.evaluator.history))
+        else:
+            _,info=env.reset(options={'episode':episode})
         observed,_=runtime.read(runtime.loop.physics_steps)
         # Projection was checked above; readback independently retains the reset tracking gate.
         if max(abs(a-b) for a,b in zip(observed.arm_positions,
@@ -305,12 +355,70 @@ def setup(args,source,suite,plan,execution_timeline=None):
         # Kit shutdown may terminate the interpreter; preserve the cause first.
         traceback.print_exc()
         write(args.output/'result.json',dict(status='failed',error=str(error),
-            traceback=traceback.format_exc(),phase='setup',task_outcome='unverified'))
+            traceback=traceback.format_exc(),phase='setup',task_outcome='unverified',
+            reset_diagnostics=reset_failure_context(env)))
         close_runtime(env,app)
         raise
 
 
-def plan_episode(args,source,runtime,episode,control,acceptance,info):
+def reset_scene(args,source,suite,env,runtime,acceptance):
+    """Rebind only this isolated scene's start, then use the native reset/readback."""
+    import torch
+    from robot_sim.tasks.manager_based.coffee_make.episode_scene import EpisodeScene
+    from robot_sim.tasks.manager_based.coffee_make.episode_randomization import scene_build_key
+    from robot_sim.tasks.manager_based.coffee_make.initial_robot_state import initial_robot_state,joint_positions,arm_positions,gripper_mode
+    from robot_sim.specs.action import ArmCommand,DualArmCommand,ac_one_dual_arm_zero_home_action_spec
+    from robot_workbench.joint_bounds import position_noise_rad
+    data=deepcopy(suite['episodes'][0]);original=data['metadata']['initial_robot_state']
+    environment=source_environment(source)
+    initial,adjustments=normalize_initial_arm_limits(original,ac_one_dual_arm_zero_home_action_spec(),environment=environment)
+    data['metadata'].update(initial_robot_state=initial,initial_robot_state_digest=_digest(initial),gripper_mode='distance')
+    episode=EpisodeScene.from_dict(data)
+    if (scene_build_key(episode)!=scene_build_key(runtime.spec.episode)
+            or gripper_mode(episode)!=runtime.gripper_mode):
+        raise ValueError('scene model changed; explicitly prepare a new scene service')
+    state=initial_robot_state(episode,acceptance.open_position_m*2000)
+    joints=joint_positions(state);robot=env.scene['robot']
+    ids,names=robot.find_joints(list(joints),preserve_order=True)
+    if list(names)!=list(joints):raise ValueError('scene reset joint ordering differs')
+    values=torch.tensor([[joints[name] for name in names]],device=env.device,dtype=robot.data.default_joint_pos.dtype)
+    # The original builder sets these same default positions. Keep the original
+    # configured machine pose: reset_episode_poses computes deltas from it.
+    robot.data.default_joint_pos[:,ids]=values
+    robot.data.default_joint_vel[:,ids]=0.
+    env.cfg.scene.robot.init_state.joint_pos.update(joints)
+    runtime.initial_robot_state=state;runtime.home_positions=arm_positions(state)
+    runtime.home=runtime.action.encode(DualArmCommand(ArmCommand(runtime.home_positions[:6],True),ArmCommand(runtime.home_positions[6:],True)))
+    runtime.evaluator.home_positions=runtime.home_positions
+    runtime.physical_identity.update(initial_robot_state=state,initial_robot_state_digest=_digest(state))
+    runtime.physical_sha256=hashlib.sha256(json.dumps(runtime.physical_identity,sort_keys=True,allow_nan=False).encode()).hexdigest()
+    write(args.output/'initial-normalization.json',dict(source_initial_digest=_digest(source['initial_state']['model']),
+        input_initial_digest=_digest(original),reset_initial_digest=_digest(initial),source_environment=environment,
+        limit_allowance_rad=position_noise_rad(environment),adjustments=adjustments,scene_runtime_reused=True,
+        **getattr(args,'scene_reset_identity',{})))
+    _,info=env.reset(options={'episode':episode})
+    observed,_=runtime.read(runtime.loop.physics_steps)
+    if max(abs(a-b) for a,b in zip(observed.arm_positions,initial['left_arm_joints']+initial['right_arm_joints']))>.005:
+        raise ValueError('simulated reset differs from its accepted initial state by over 0.005 rad')
+    runtime._render()
+    return episode,info
+
+
+def first_frame(args,source,env,runtime,materials):
+    """Render this reset's calibrated scene; no previous source pixels are reused."""
+    from PIL import Image
+    sensors=preview_sensors(env.scene)
+    _,scene=runtime.read(runtime.loop.physics_steps)
+    metadata=camera_metadata(env,sensors,source,scene.instance.world_from_environment)
+    write(args.output/'camera-metadata.json',metadata)
+    Image.fromarray(camera_frame(env,'base_0')).save(args.output/'first-frame.png')
+    write(args.output/'first-frame.json',dict(source_digest=_digest(source),clock='simulation',simulation_time_s=0,
+        camera='base_0',image_domain='rectified',camera_metadata=metadata,materials=materials,
+        task_outcome='unverified',sha256=file_sha256(args.output/'first-frame.png')))
+    return sensors
+
+
+def plan_episode(args,source,runtime,episode,control,acceptance,info,*,planner=None):
     started=time.monotonic()
     import isaaclab.sim as sim_utils
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
@@ -320,14 +428,19 @@ def plan_episode(args,source,runtime,episode,control,acceptance,info):
     from robot_sim.tasks.manager_based.coffee_make.native_finger_geometry import export_native_fingers
     from robot_sim.tasks.manager_based.coffee_make.scene_instance import ResolvedPrimitive
     from playground_plan import build
-    native=export_native_fingers(sim_utils.get_current_stage(),runtime.root+'/Robot')
-    if not native['complete']:raise ValueError('incomplete native geometry')
-    digest=hashlib.sha256(json.dumps(dict(parts=native['parts'],planes=native['native_planes']),sort_keys=True).encode()).hexdigest()
-    layout=canonical_coffee_make_v1_layout()
-    table=ResolvedPrimitive(runtime.evaluator.table_shape,runtime.evaluator.table_shape,'shell',
-        RigidTransform(layout.worktable.position),layout.worktable_size_m,'box',None)
-    planner=EpisodePlanner(args.assets,args.finger_envelope,args.finger_envelope_sha256,digest,table,
-        episode=episode,open_position_m=acceptance.open_position_m)
+    if planner is None:
+        native=export_native_fingers(sim_utils.get_current_stage(),runtime.root+'/Robot')
+        if not native['complete']:raise ValueError('incomplete native geometry')
+        digest=hashlib.sha256(json.dumps(dict(parts=native['parts'],planes=native['native_planes']),sort_keys=True).encode()).hexdigest()
+        layout=canonical_coffee_make_v1_layout()
+        table=ResolvedPrimitive(runtime.evaluator.table_shape,runtime.evaluator.table_shape,'shell',
+            RigidTransform(layout.worktable.position),layout.worktable_size_m,'box',None)
+        planner=EpisodePlanner(args.assets,args.finger_envelope,args.finger_envelope_sha256,digest,table,
+            episode=episode,open_position_m=acceptance.open_position_m)
+    else:
+        from robot_sim.tasks.manager_based.coffee_make.initial_robot_state import initial_robot_state,joint_positions
+        planner.home_state=joint_positions(initial_robot_state(episode,acceptance.open_position_m*2000))
+        digest=planner.identity['native_geometry_sha256']
     geometry_ready=time.monotonic()
     print(json.dumps(dict(stage='geometry-ready',elapsed_s=geometry_ready-started)),flush=True)
     sample,scene=runtime.read(runtime.loop.physics_steps)
@@ -337,13 +450,22 @@ def plan_episode(args,source,runtime,episode,control,acceptance,info):
         physical_configuration_sha256=runtime.physical_sha256,finger_envelope_sha256=args.finger_envelope_sha256,
         native_geometry_sha256=digest,planner_identity=planner.identity,task_outcome='unverified')
     from robot_sim.asset_cfg.robots.ac_one_spec import ac_one_asset_spec
-    write(args.output/'planning-input.json',dict(parts=[asdict(p) for p in planner.parts],
+    from real_contract import validate_assisted_cup_geometry
+    validate_assisted_cup_geometry(source,asdict(planner.cup))
+    exported=dict(parts=[asdict(p) for p in planner.parts],
         cup=asdict(planner.cup),table=asdict(planner.table),obstacles=[asdict(p) for p in planner.obstacles],
         observation=dict(episode_id=obs.episode_id,step_id=obs.step_id,facts=obs.facts,sample=asdict(sample),
             scene=asdict(scene),terminal_reason=obs.terminal_reason,support_now=obs.support_now),
         planner_identity=planner.identity,open_position_m=planner.open_position_m,source_digest=_digest(source),
-        native_identity=identity,urdf_sha256=file_sha256(ac_one_asset_spec(args.assets).urdf_path)))
-    if args.mode=='geometry-inputs':return None
+        native_identity=identity,urdf_sha256=file_sha256(ac_one_asset_spec(args.assets).urdf_path))
+    if args.mode=='maintenance-geometry-inputs':
+        import inspect
+        scope=dict(args.maintenance_scope,initial_support_audit=info['maintenance_geometry'],
+                   initialization_audit=info['maintenance_audit_trace'],
+                   native_runtime_sha256=file_sha256(Path(inspect.getfile(type(runtime)))))
+        exported.update(export_scope=scope,export_scope_digest=_digest(scope))
+    write(args.output/'planning-input.json',exported)
+    if args.mode in ('geometry-inputs','maintenance-geometry-inputs'):return planner
     initial=planner.initial(obs,acceptance.edge_margin_m)
     initial_ready=time.monotonic()
     print(json.dumps(dict(stage='initial-route-ready',elapsed_s=initial_ready-geometry_ready,passed=initial.get('passed'))),flush=True)
@@ -474,8 +596,13 @@ def main(args):
     timeline=json.loads(timeline_path.read_text()) if timeline_path else None
     if timeline is not None and args.mode!='replay':raise ValueError('execution timeline is replay-only')
     validate_inputs(source,binding,suite,plan,timeline,environment=getattr(args,'environment','physical'))
+    if args.mode=='maintenance-geometry-inputs':
+        from maintenance_geometry import validate_request
+        if not getattr(args,'maintenance_request',None):raise ValueError('sealed maintenance request required')
+        args.maintenance_scope=validate_request(args.maintenance_request,source,args.environment)
+    elif getattr(args,'maintenance_request',None):raise ValueError('maintenance request is restricted to maintenance geometry')
     if args.mode=='replay' and plan is None:raise ValueError('replay requires plan')
-    if args.mode in ('plan','geometry-inputs') and (not args.finger_envelope or not args.finger_envelope_sha256
+    if args.mode in ('plan','geometry-inputs','maintenance-geometry-inputs') and (not args.finger_envelope or not args.finger_envelope_sha256
             or file_sha256(args.finger_envelope)!=args.finger_envelope_sha256):
         raise ValueError('plan requires pinned native finger envelope')
     args.output.mkdir(parents=True,exist_ok=False)
@@ -483,19 +610,14 @@ def main(args):
     try:
         app,env,runtime,episode,control,acceptance,info,materials=setup(args,source,suite,plan,timeline)
         initialized=time.monotonic()
-        sensors=preview_sensors(env.scene)
-        from PIL import Image
-        _,scene=runtime.read(runtime.loop.physics_steps)
-        metadata=camera_metadata(env,sensors,source,scene.instance.world_from_environment)
-        write(args.output/'camera-metadata.json',metadata)
-        Image.fromarray(camera_frame(env,'base_0')).save(args.output/'first-frame.png')
-        write(args.output/'first-frame.json',dict(source_digest=_digest(source),clock='simulation',simulation_time_s=0,
-            camera='base_0',image_domain='rectified',camera_metadata=metadata,materials=materials,
-            task_outcome='unverified',sha256=file_sha256(args.output/'first-frame.png')))
+        sensors=first_frame(args,source,env,runtime,materials)
         result=dict(status='first-frame-ready',task_outcome='unverified')
-        if args.mode=='geometry-inputs':
+        if args.mode in ('geometry-inputs','maintenance-geometry-inputs'):
             plan_episode(args,source,runtime,episode,control,acceptance,info)
-            result.update(status='geometry-inputs-ready')
+            if args.mode=='maintenance-geometry-inputs':
+                from maintenance_geometry import STATUS
+                result.update(status=STATUS,task_characterization='not_run')
+            else:result.update(status='geometry-inputs-ready')
         elif args.mode=='plan':
             faulthandler.dump_traceback_later(60,repeat=True)
             try:plan=plan_episode(args,source,runtime,episode,control,acceptance,info)
@@ -509,15 +631,17 @@ def main(args):
         write(args.output/'result.json',result)
     except Exception as error:
         traceback.print_exc()
-        write(args.output/'result.json',dict(status='failed',error=str(error),traceback=traceback.format_exc(),
-                                             wall_seconds=time.monotonic()-started,task_outcome='unverified'))
+        if not (args.output/'result.json').is_file():
+            write(args.output/'result.json',dict(status='failed',error=str(error),traceback=traceback.format_exc(),
+                                                 wall_seconds=time.monotonic()-started,task_outcome='unverified'))
         raise
     finally:close_runtime(env,app)
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode',choices=('plan','first-frame','geometry-inputs','replay'),required=True)
+    parser.add_argument('--mode',choices=('plan','first-frame','geometry-inputs','maintenance-geometry-inputs','replay'),required=True)
+    parser.add_argument('--maintenance-request',type=Path,help='sealed parent/current/asset identities; maintenance geometry only')
     for name in ('source','suite','assets','hardware-binding','output'):
         parser.add_argument('--'+name,type=Path,required=True)
     parser.add_argument('--plan',type=Path)
@@ -539,5 +663,5 @@ if __name__=='__main__':
     else:lane=PIPELINE_LANES['dsw-scene']
     if (args.instance,args.gpu)!=(lane['instance_id'],lane['gpu']) or os.environ.get('CUDA_VISIBLE_DEVICES')!=str(args.gpu):
         raise ValueError('instance/GPU not authorized for target simulation')
-    if not .1<=args.speed_scale<=1:raise ValueError('speed scale outside [0.1,1]')
+    if not .3<=args.speed_scale<=1.7:raise ValueError('speed scale outside [0.3,1.7]')
     main(args)

@@ -15,6 +15,205 @@ from robot_workbench.workflows import CalibrationWorkflow,CollectionWorkflow,cal
 
 
 class WorkflowAdapterTest(unittest.TestCase):
+    def test_finished_calibration_does_not_keep_environment_busy_via_old_active_flag(self):
+        flow=CalibrationWorkflow.__new__(CalibrationWorkflow);flow.lock=threading.Lock();flow.active=True;flow.generation=3
+        for status in ('failed','stopped','completed'):
+            flow.value=dict(busy=False,status=status,stage_id='wrist.plan')
+            self.assertFalse(flow.environment_status()['busy'])
+            flow.value['busy']=True
+            self.assertTrue(flow.environment_status()['busy'],'real work or sealing must still block maintenance')
+        flow.value=dict(busy=False,status='running')
+        self.assertTrue(flow.environment_status()['busy'])
+
+    def test_single_arm_manual_preview_uses_checked_control_path_without_jaw_or_other_arm(self):
+        class Vector(list):
+            def tolist(self):return list(self)
+        flow=CalibrationWorkflow.__new__(CalibrationWorkflow)
+        flow.app=SimpleNamespace(geometry=SimpleNamespace(_q=Vector),control_request=Mock(return_value={'plans':[]}))
+        body=dict(active_arm='right',q12=[.1]*6+[.2,.3,.4,0.,.5,.6],speeds12=[.03]*6+[.5]*6)
+        flow.manual_preview(body)
+        flow.app.control_request.assert_called_once_with('motion-preview',dict(
+            active_arm='right',q_active=[.2,.3,.4,0.,.5,.6],max_velocity=.5))
+        for update in ({'jaw_gap_mm':[83.,83.]},{'active_arm':'both'},{'speeds12':[.03]*11+[.5]},
+                       {'speeds12':[float('nan')]*12},{'speeds12':[.5001]*12}):
+            with self.subTest(update=update),self.assertRaises(ValueError):flow.manual_preview(dict(body,**update))
+        with self.assertRaises(ValueError):flow.manual_preview(body,queue=True)
+
+    def test_collection_admission_uses_live_busy_in_both_cache_races(self):
+        for action in ('generate_plan','execute'):
+            with self.subTest(action=action):
+                flow,state=self.collection()
+                with flow.lock:flow.value['busy']=True
+                with flow.playground.lock:state['busy']=False
+                self.assertTrue(flow.allowed(action)['allowed'])
+                self.assertFalse(flow.allowed('cancel')['allowed'])
+                result=flow.action(action,{'token':'frozen'})
+                self.assertIn('preview' if action=='generate_plan' else 'output',result)
+                if action=='generate_plan':flow.playground.start.assert_not_called()
+                else:flow.playground.start.assert_called_once_with({'action':'execute','speed_scale':.3})
+        flow,state=self.collection()
+        with flow.lock:flow.value['busy']=False
+        with flow.playground.lock:state['busy']=True
+        for action in ('generate_plan','execute'):
+            self.assertFalse(flow.allowed(action)['allowed'])
+            with self.assertRaisesRegex(ValueError,'当前数采阶段不允许此操作'):
+                flow.action(action,{'token':'frozen'})
+        self.assertTrue(flow.allowed('cancel')['allowed'])
+        flow.action('cancel',{})
+        flow.playground.start.assert_called_once_with({'action':'interrupt'})
+
+    def frozen_service(self):
+        root=Path(__file__).resolve().parents[1]
+        sys.path[:0]=[str(root/'rule_based_workbench'),str(root/'tests')]
+        from test_restore_prepared import RestorePreparedTest
+        from robot_workbench.service import Application,Device,serve
+        fixture=RestorePreparedTest();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        device=Device('fixture-physical','physical',None);device.runtime=SimpleNamespace(holder='collection')
+        def snapshot(business):
+            return dict(fixture.bridge.owner(),runtime_nonce='frozen-restore-cpu',calibration_revision=1,
+                allowed_operations={name:dict(allowed=True,reason=None) for name in ('preview','confirm','handoff')})
+        device.snapshot=snapshot
+        device.collection_preparation=SimpleNamespace(snapshot=lambda:dict(status='failed',busy=False,
+            can_retry=True,retry_reason=None,persistent_service=True))
+        app=Application({'physical':device})
+        flow=CollectionWorkflow(fixture.service,device,app);device.workflows['collection']=flow
+        flow.closed.set();flow.thread.join(2)
+        self.addCleanup(flow.closed.set)
+        server=serve(app,port=0);thread=threading.Thread(target=lambda:server.serve_forever(poll_interval=.01),daemon=True);thread.start()
+        app._cpu_test_http_url='http://127.0.0.1:'+str(server.server_port)
+        def close_http():server.shutdown();server.server_close();thread.join(2)
+        self.addCleanup(close_http)
+        return app,device,flow,fixture
+
+    def frozen_action(self,app,action,**fields):
+        from urllib.request import Request,build_opener,ProxyHandler
+        from urllib.error import HTTPError
+        url=app._cpu_test_http_url
+        body=dict(environment='physical',business='collection',request_id='frozen-'+str(time.time_ns()),**fields)
+        request=Request(url+'/api/actions/'+action,json.dumps(body).encode(),headers={
+            'X-CSRF-Token':app.csrf,'Origin':url,'Content-Type':'application/json'})
+        try:
+            with build_opener(ProxyHandler({})).open(request,timeout=3) as response:return json.loads(response.read())
+        except HTTPError as error:raise ValueError(json.loads(error.read())['error']) from error
+
+    def wait_frozen_job(self,app):
+        end=time.monotonic()+3
+        while time.monotonic()<end:
+            job=app.jobs[('physical','collection')]
+            if job['status']!='running':return job
+            time.sleep(.01)
+        self.fail('frozen service job did not finish')
+
+    def test_application_restores_real_frozen_artifacts_without_warmup_and_keeps_review_gate(self):
+        from robot_workbench.service import frozen_collection_scope
+        app,device,flow,fixture=self.frozen_service()
+        self.assertFalse(frozen_collection_scope(device))
+        restore=fixture.service.restore_prepared
+        def restore_with_stale_monitor():
+            result=restore()
+            with flow.lock:flow.value['busy']=True  # Last UI poll saw restore in progress.
+            return result
+        with patch.object(fixture.service,'start',side_effect=AssertionError('restoration cannot start work')),\
+                patch.object(fixture.service,'restore_prepared',side_effect=restore_with_stale_monitor):
+            self.frozen_action(app,'generate_plan',restore_frozen_plan=True)
+            self.assertEqual(self.wait_frozen_job(app)['status'],'completed')
+        self.assertTrue(frozen_collection_scope(device))
+        self.assertFalse(fixture.service.snapshot()['environment']['ready'])
+        self.assertEqual(device.collection_preparation.snapshot()['status'],'failed')
+        review=app.reviews[('physical','collection')]
+        self.assertEqual(review['token'],fixture.plan['timeline_digest'])
+        flow.refresh();view=app.state('physical','collection')
+        self.assertEqual(view['workflow']['review']['id'],review['id'])
+        self.assertTrue(view['runtime']['allowed_operations']['execute']['allowed'])
+        self.assertFalse(view['workflow']['collection']['environment']['ready'])
+        self.frozen_action(app,'generate_plan')
+        self.assertEqual(self.wait_frozen_job(app)['status'],'completed')
+        review=app.reviews[('physical','collection')]
+        with self.assertRaisesRegex(ValueError,'环境准备'):
+            self.frozen_action(app,'collection_plan')
+        with self.assertRaisesRegex(ValueError,'审批'):
+            self.frozen_action(app,'execute',review_id='unreviewed',physical_clearance=True)
+        with self.assertRaisesRegex(ValueError,'净空'):
+            self.frozen_action(app,'execute',review_id=review['id'])
+        with patch.object(fixture.service,'start',return_value={'output':'cpu-only-accepted'}) as start:
+            self.frozen_action(app,'execute',review_id=review['id'],physical_clearance=True)
+            self.assertEqual(self.wait_frozen_job(app)['status'],'completed')
+        start.assert_called_once_with({'action':'execute','speed_scale':review['speed_scale']})
+        fixture.bridge.control.assert_not_called();fixture.recover.assert_not_called()
+
+    def test_application_frozen_execution_rechecks_calibration_and_consumed_checkpoint(self):
+        app,device,flow,fixture=self.frozen_service()
+        self.frozen_action(app,'generate_plan',restore_frozen_plan=True)
+        self.assertEqual(self.wait_frozen_job(app)['status'],'completed')
+        review=app.reviews[('physical','collection')]
+        checkpoint=fixture.service.directory/'prepared-plan.json';saved=json.loads(checkpoint.read_text())
+        consumed=deepcopy(saved);consumed.update(execution_pending=True,execution_output=str(fixture.service.directory/'jobs/unknown-execution'))
+        checkpoint.write_text(json.dumps(consumed))
+        with self.assertRaisesRegex(ValueError,'未执行冻结计划'):
+            self.frozen_action(app,'execute',review_id=review['id'],physical_clearance=True)
+        checkpoint.write_text(json.dumps(saved))
+        binding_path=Path(fixture.bridge.config['trusted_binding_path']);binding=json.loads(binding_path.read_text())
+        binding['calibration_profile_digest']='0'*64;binding_path.write_text(json.dumps(binding))
+        with self.assertRaisesRegex(ValueError,'标定版本已改变'):
+            self.frozen_action(app,'generate_plan',restore_frozen_plan=True)
+        fixture.bridge.control.assert_not_called();fixture.recover.assert_not_called()
+
+    def test_application_frozen_flag_does_not_bypass_missing_plan_drift_or_normal_planning(self):
+        app,device,flow,fixture=self.frozen_service()
+        checkpoint=fixture.service.directory/'prepared-plan.json'
+        raw=checkpoint.read_bytes();checkpoint.unlink()
+        with self.assertRaisesRegex(ValueError,'未执行冻结计划'):
+            self.frozen_action(app,'generate_plan',restore_frozen_plan=True)
+        checkpoint.write_bytes(raw)
+        fixture.current['right_arm_joints'][0]+=.011
+        with self.assertRaisesRegex(ValueError,'当前实测姿态'):
+            self.frozen_action(app,'generate_plan',restore_frozen_plan=True)
+        for action,fields in (('collection_plan',{'restore_frozen_plan':True}),
+                ('generate_plan',{'restore_frozen_plan':True,'replan':True}),('execute',{'restore_frozen_plan':True})):
+            with self.subTest(action=action),self.assertRaises(ValueError):self.frozen_action(app,action,**fields)
+        self.assertEqual(app.jobs,{})
+        fixture.bridge.control.assert_not_called();fixture.recover.assert_not_called()
+
+    def test_explicit_checkpoint_restore_only_installs_a_new_review(self):
+        flow,state=self.collection()
+        state.update(environment={'ready':False},can_execute=False)
+        def restore():state['can_execute']=True;return deepcopy(state['plan'])
+        flow.playground.restore_prepared=Mock(side_effect=restore)
+        result=flow.action('generate_plan',{'restore_frozen_plan':True})
+        flow.playground.restore_prepared.assert_called_once()
+        flow.playground.start.assert_not_called()
+        self.assertEqual(result['preview']['token'],'frozen')
+        self.assertEqual(result['preview']['command_epoch'],5)
+        self.assertEqual(result['preview']['expires_in_s'],30)
+        state['can_execute']=False;flow.playground.restore_prepared.side_effect=lambda:state['plan']
+        with self.assertRaisesRegex(ValueError,'不会自动预热'):
+            flow.action('generate_plan',{'restore_frozen_plan':True})
+        flow.playground.start.assert_not_called()
+        for action,body in (('execute',{'restore_frozen_plan':True}),
+                            ('generate_plan',{'restore_frozen_plan':'yes'}),
+                            ('generate_plan',{'restore_frozen_plan':True,'replan':True})):
+            with self.assertRaisesRegex(ValueError,'恢复冻结计划'):flow.action(action,body)
+
+    def test_explicit_physical_assistance_id_reaches_planning_without_changing_default_gate(self):
+        flow,state=self.collection();flow.device.environment='physical'
+        state.update(environment={'ready':False},busy=False)
+        flow.refresh()
+        with self.assertRaisesRegex(ValueError,'环境准备'):flow.action('collection_plan',{})
+        with self.assertRaisesRegex(ValueError,'初始化与预热'):
+            flow.action('collection_plan',{'operator_assisted_request_id':'this-accepted-scene','speed_scale':.4})
+        flow.playground.start.assert_not_called();state['environment']['ready']=True
+        flow.action('collection_plan',{'operator_assisted_request_id':'this-accepted-scene','speed_scale':.4})
+        flow.playground.start.assert_called_once_with(dict(action='plan',speed_scale=.4,
+            operator_assisted_request_id='this-accepted-scene'))
+        with self.assertRaisesRegex(ValueError,'正在进行'):
+            flow.action('collection_plan',{'operator_assisted_request_id':'this-accepted-scene'})
+        for action,value in (('generate_plan','x'),('collection_prepare','x'),('collection_plan',''),('collection_plan',None)):
+            with self.assertRaisesRegex(ValueError,'辅助定位'):
+                flow.action(action,{'operator_assisted_request_id':value})
+        state['busy']=False;flow.device.environment='fake'
+        with self.assertRaisesRegex(ValueError,'真机'):
+            flow.action('collection_plan',{'operator_assisted_request_id':'x'})
+
     def test_history_candidate_switch_keeps_frame_camera_and_solver_source(self):
         flow=self.calibration();a=flow.app
         a.selected_batch='solver-source'
@@ -47,8 +246,11 @@ class WorkflowAdapterTest(unittest.TestCase):
         flow.refresh();domain=flow.snapshot()['collection']
         self.assertEqual(domain['timing'],state['progress']);self.assertEqual(domain['relations']['source']['run_id'],'observation')
         self.assertEqual(domain['relations']['calibration']['calibration_profile_digest'],'profile-sha')
-        flow.action('collection_prepare',{});flow.playground.start.assert_called_with({'action':'prepare','speed_scale':.3})
-        with self.assertRaisesRegex(ValueError,'正在进行'):flow.action('collection_plan',{})
+        flow.device.collection_prepare_operation=Mock(return_value={'operation_id':'prepare-one'})
+        result=flow.action('collection_prepare',{})
+        self.assertEqual(result['action'],'prepare')
+        flow.device.collection_prepare_operation.assert_not_called()
+        self.assertTrue(flow.playground.start.call_args.kwargs['lifecycle_admission']('warmup:collection'))
         state.update(busy=False);flow.refresh();flow.action('collection_plan',{});flow.playground.start.assert_called_with({'action':'plan','speed_scale':.3})
         state.update(busy=False,environment={'ready':False});flow.refresh()
         with self.assertRaisesRegex(ValueError,'环境准备'):flow.action('collection_plan',{})
@@ -124,14 +326,17 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.closed=threading.Event()
         state=dict(output='job-1',environment={'ready':True},busy=False,can_execute=True,status='ready',action='plan',progress={},
             plan=dict(validated=True,timeline_digest='frozen',output='job-1',duration_s=20.,speed_scale=.3),videos=[])
-        def start(payload):
+        def start(payload,**kwargs):
             if payload['action']=='interrupt':return {'status':'stopping'}
             state.update(output='job-next',busy=True,can_execute=False,status='running',action=payload['action'])
             return dict(status='accepted',action=payload['action'],output=state['output'])
         workflow.playground=SimpleNamespace(snapshot=Mock(side_effect=lambda:deepcopy(state)),start=Mock(side_effect=start),
-            directory=self.root,media=Mock(),invalidate_checkpoint=Mock(),lock=threading.Lock(),state=state)
-        workflow.device=SimpleNamespace(id='fixture-device',environment='fake',snapshot=Mock(return_value={'command_epoch':5}))
-        workflow.service=SimpleNamespace(add_review=Mock(),lock=threading.Lock(),reviews={('fake','collection'):{'id':'old'}})
+            directory=self.root,media=Mock(),invalidate_checkpoint=Mock(),lock=threading.Lock(),state=state,
+            initialization=lambda:dict(status='ready',planner=dict(status='ready',model_initialized=True)))
+        workflow.device=SimpleNamespace(id='fixture-device',environment='fake',runtime=SimpleNamespace(holder='collection'),
+            snapshot=Mock(return_value=dict(command_epoch=5,connected=True,feedback_healthy=True,stationary=True,
+                automatic_enabled=False,sample_age_s=.01)))
+        workflow.service=SimpleNamespace(add_review=Mock(),lock=threading.Lock(),reviews={('fake','collection'):{'id':'old'}},generations={'fake':0})
         return workflow,state
 
     def legacy_library(self):
@@ -627,8 +832,8 @@ class WorkflowAdapterTest(unittest.TestCase):
 
     def test_expired_collection_review_refresh_is_cheap_and_replanning_is_explicit(self):
         workflow,state=self.collection();workflow.refresh()
-        workflow.service.add_review.assert_called_once()
-        workflow.refresh();workflow.service.add_review.assert_called_once()  # No polling-based TTL renewal.
+        workflow.service.add_review.assert_not_called()
+        workflow.refresh();workflow.service.add_review.assert_not_called()  # Read projection never grants a review.
         self.assertEqual(workflow.snapshot()['primary_action']['label'],'重新预览冻结计划')
         result=workflow.action('generate_plan',{})
         self.assertEqual(result['preview']['token'],'frozen');self.assertEqual(result['preview']['command_epoch'],5)
@@ -636,6 +841,26 @@ class WorkflowAdapterTest(unittest.TestCase):
         workflow.action('generate_plan',{'replan':True})
         workflow.playground.start.assert_called_once_with({'action':'plan','speed_scale':.3})
         self.assertNotIn(('fake','collection'),workflow.service.reviews)
+
+    def test_cold_business_points_to_warmup_and_missing_services_to_operations(self):
+        for mode in ('fake','physical'):
+            flow,state=self.collection();flow.device.environment=mode
+            state.update(environment={'ready':False},plan={},can_execute=False,warmup={'status':'invalidated'})
+            for services_ready in (True,False):
+                with self.subTest(mode=mode,services_ready=services_ready):
+                    flow.playground.initialization=lambda:dict(status='ready' if services_ready else 'stopped',
+                        planner=dict(status='ready' if services_ready else 'stopped',model_initialized=False))
+                    flow.refresh();value=flow.snapshot();prepare=value['collection']['actions']['prepare']
+                    self.assertEqual(prepare['allowed'],services_ready)
+                    reason=value['primary_action']['reason']
+                    self.assertEqual(reason,value['collection']['actions']['plan']['reason'])
+                    self.assertIn('初始化与预热' if services_ready else '服务运维',reason)
+                    if services_ready:self.assertNotIn('运维',reason)
+                    for action in ('generate_plan','collection_plan'):
+                        with self.assertRaises(ValueError) as error:
+                            flow.action(action,{})
+                        self.assertEqual(str(error.exception),reason)
+                    flow.playground.start.assert_not_called()
 
     def test_collection_binding_requires_this_run_instance_and_clears_on_acceptance(self):
         workflow,state=self.collection()
@@ -676,6 +901,19 @@ class WorkflowAdapterTest(unittest.TestCase):
         state.update(status='running',busy=True);workflow.refresh()
         self.assertEqual(workflow.snapshot()['title'],'视频已核验，等待 L3')
 
+    def test_collection_failure_is_visible_only_for_current_failed_operation(self):
+        workflow,state=self.collection()
+        failure=dict(kind='motion_limit',message='左 J2 加速度超限',recovery='降低速度后重新规划',details={})
+        state.update(status='failed',failure=failure,error='technical error')
+        workflow.refresh();value=workflow.snapshot()
+        self.assertEqual(value['failure'],failure)
+        self.assertEqual(value['message'],'technical error')
+        state.update(status='running',busy=True);workflow.refresh()
+        self.assertIsNone(workflow.snapshot()['failure'])
+        workflow.value['failure']=failure
+        workflow.accepted({'output':'next'},'plan')
+        self.assertIsNone(workflow.snapshot()['failure'])
+
     def test_collection_diagnostics_preserve_cached_evidence_without_full_frame_logs(self):
         workflow,state=self.collection();state.update(environment={'ready':False,'checks':[{'key':'camera','status':'failed','message':'source stale'}]},
             progress={'stages':[{'label':'观测','status':'failed','elapsed_s':12,'estimate_s':8,'internal':'omit'}]},
@@ -689,17 +927,19 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertFalse(rows['本轮辅助回放']['task_success_evidence']);self.assertNotIn('frames',rows['本轮辅助回放'])
 
     def test_collection_speed_preview_is_bound_and_reuses_original_retime_entry(self):
-        workflow,state=self.collection();workflow.refresh()
-        result=workflow.action('generate_plan',{'speed_scale':.5})
-        self.assertEqual(result['preview']['speed_scale'],.5);self.assertIn('50%',result['summary'])
-        workflow.refresh();self.assertEqual(workflow.snapshot()['speed_scale'],.5)
-        workflow.playground.start.assert_not_called()
-        workflow.action('execute',{'token':'frozen','speed_scale':.5})
-        workflow.playground.start.assert_called_once_with({'action':'execute','speed_scale':.5})
-        for value in (True,'0.5',float('nan'),.09,1.01):
-            state.update(busy=False,status='ready');workflow.refresh()
-            with self.assertRaisesRegex(ValueError,'10%'):
-                workflow.action('generate_plan',{'speed_scale':value})
+        for speed in (.3,1.,1.7):
+            workflow,state=self.collection();workflow.refresh()
+            result=workflow.action('generate_plan',{'speed_scale':speed})
+            self.assertEqual(result['preview']['speed_scale'],speed);self.assertIn(f'{speed*100:g}%',result['summary'])
+            workflow.refresh();self.assertEqual(workflow.snapshot()['speed_scale'],speed)
+            workflow.playground.start.assert_not_called()
+            workflow.action('execute',{'token':'frozen','speed_scale':speed})
+            workflow.playground.start.assert_called_once_with({'action':'execute','speed_scale':speed})
+        for value in (True,'0.5',float('nan'),float('inf'),.29,1.71):
+            for action in ('collection_prepare','collection_plan','generate_plan','execute'):
+                state.update(busy=False,status='ready');workflow.refresh()
+                with self.assertRaisesRegex(ValueError,'30% 至 170%'):
+                    workflow.action(action,{'speed_scale':value,'token':'frozen'})
 
     def test_collection_readonly_plan_and_replay_metadata_are_current_and_bounded(self):
         workflow,state=self.collection();plan=self.root/'plan.json';plan.write_text('{"timeline_digest":"frozen","ticks":[]}')
@@ -745,11 +985,12 @@ class WorkflowAdapterTest(unittest.TestCase):
         self.assertEqual(entry['media']['mime_type'],'video/mp4');self.assertIn('/api/result-media?',entry['media']['url'])
         workflow.playground.media.assert_called_with('video-0','job-1')
         state['videos']=[];workflow.refresh();self.assertIsNone(workflow.media(entry['id']))
-        workflow.value['busy']=True;workflow.action('cancel',{})
+        with workflow.playground.lock:state['busy']=True
+        workflow.action('cancel',{})
         workflow.playground.start.assert_called_with({'action':'interrupt'})
 
     def test_collection_acceptance_closes_cache_gap_and_rejects_old_refresh(self):
-        for action,stage in [('generate_plan','prepare'),('generate_plan','plan'),('execute','execute')]:
+        for action,stage in [('generate_plan','plan'),('execute','execute')]:
             with self.subTest(stage=stage):
                 workflow,state=self.collection()
                 if stage=='prepare':state.update(environment={'ready':False},can_execute=False,plan={'validated':False})
@@ -783,6 +1024,75 @@ class WorkflowAdapterTest(unittest.TestCase):
                 workflow.refresh()
                 self.assertEqual(workflow.snapshot()['id'],'job-next')
                 self.assertEqual(workflow.snapshot()['status'],'ready');self.assertFalse(workflow.snapshot()['busy'])
+
+    def test_missing_collection_capability_and_interrupt_have_no_lifecycle_effects(self):
+        root=Path(__file__).resolve().parents[1];sys.path.insert(0,str(root/'rule_based_workbench'))
+        from playground import Playground
+        from test_playground import Bridge
+        for environment in ('fake','physical'):
+            with self.subTest(environment=environment):
+                bridge=Bridge();bridge.config['environment']=environment
+                recover=Mock(side_effect=AssertionError('business restarted services'))
+                playground=Playground(self.root/environment,bridge,lambda:{'status':'stopped'},recover_planner=recover)
+                device=SimpleNamespace(id='fixture',environment=environment,snapshot=lambda business:{'command_epoch':1})
+                manager=SimpleNamespace(lock=threading.Lock(),reviews={},add_review=Mock())
+                flow=CollectionWorkflow(playground,device,manager)
+                try:
+                    flow.refresh()
+                    self.assertFalse(flow.allowed('collection_prepare')['allowed'])
+                    self.assertFalse(flow.snapshot()['collection']['actions']['prepare']['allowed'])
+                    for action in ('generate_plan','collection_plan','collection_prepare'):
+                        with self.assertRaises(ValueError):flow.action(action,{'replan':True})
+                    with self.assertRaisesRegex(ValueError,'业务准入'):
+                        playground.start({'action':'prepare','arms_supported':True})
+                    playground.finish_interrupt()
+                    self.assertIsNone(playground.thread);self.assertEqual(bridge.commands,[])
+                    recover.assert_not_called()
+                finally:flow.closed.set();flow.thread.join(2)
+
+    def test_fixed_physical_preparation_uses_same_scoped_operation_without_connect(self):
+        root=Path(__file__).resolve().parents[1];sys.path.insert(0,str(root/'rule_based_workbench'))
+        from playground import Playground
+        from test_playground import Bridge
+        bridge=Bridge();bridge.connected=True;bridge.config['environment']='physical'
+        service_state=dict(status='stopped',planner=dict(status='stopped',model_initialized=False))
+        admitted=[]
+        def recover(**kwargs):
+            kwargs['launch'](lambda:service_state.update(status='ready',planner=dict(status='ready',model_initialized=False)))
+            return dict(compatibility_path='legacy_fixed_profile',service_steps=[dict(role='planner',outcome='recovered',needs_warmup=True)])
+        recovery=Mock(side_effect=recover)
+        playground=Playground(self.root/'fixed',bridge,lambda:deepcopy(service_state),recover_planner=recovery)
+        playground.operations_prepare_services=recovery
+        device=SimpleNamespace(id='fixed',environment='physical',maintenance=True,runtime=SimpleNamespace(holder='collection'),
+            snapshot=lambda business:dict(connected=True,feedback_healthy=True,stationary=True,automatic_enabled=False,sample_age_s=.01))
+        flow=CollectionWorkflow(playground,device,SimpleNamespace(lock=threading.Lock(),reviews={},add_review=Mock()))
+        def warmup(*args):service_state['planner']['model_initialized']=True;return {'model_initialized':True}
+        pipeline=SimpleNamespace(prepare_environment=lambda config:[dict(key='cpu-dependencies',status='ready')],
+            warmup=warmup,restore_plan=lambda *args:None)
+        try:
+            del playground.operations_prepare_services
+            with self.assertRaisesRegex(ValueError,'未装配受控运维准备hook'):
+                flow.operations_prepare(still_current=lambda:True,lifecycle_admission=lambda action:True)
+            recovery.assert_not_called();playground.operations_prepare_services=recovery
+            with patch.dict('sys.modules',playground_pipeline=pipeline):
+                result=flow.operations_prepare(still_current=lambda:True,lifecycle_admission=lambda action:admitted.append(action) or True)
+            self.assertTrue(result['services_ready']);self.assertFalse(result['ready'])
+            self.assertFalse(flow.environment_status()['ready']);self.assertFalse(service_state['planner']['model_initialized'])
+            recovery.assert_called_once();self.assertIn('start:collection',admitted)
+            self.assertEqual(bridge.commands,[])
+            with self.assertRaisesRegex(ValueError,'维护窗口'):
+                flow.operations_prepare(still_current=lambda:False,lifecycle_admission=lambda action:True)
+            self.assertEqual(recovery.call_count,1)
+            current=[True];spawn=Mock()
+            def stopped_hook(**kwargs):
+                current[0]=False
+                kwargs['launch'](spawn)
+            playground.operations_prepare_services=stopped_hook
+            with self.assertRaises(InterruptedError):
+                flow.operations_prepare(still_current=lambda:current[0],lifecycle_admission=lambda action:True)
+            spawn.assert_not_called();self.assertTrue(playground.managed_lifecycle)
+            self.assertEqual(bridge.commands,[])
+        finally:flow.closed.set();flow.thread.join(2)
 
     def test_old_monitor_failure_cannot_replace_new_task_message(self):
         workflow,state=self.collection();entered=threading.Event();release=threading.Event()

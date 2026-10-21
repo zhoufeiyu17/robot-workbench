@@ -1,5 +1,6 @@
 """Real Owner/recorder/lease wiring on CPU plant fixtures, never GPU qualification."""
 from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -53,13 +54,20 @@ class RecordingPreparationTest(unittest.TestCase):
                 return super().write_json(name,value)
         def factory(payload,on_fault):
             if self.factory_hook:self.factory_hook(payload)
-            session=RecordingSession(self.root/secrets.token_hex(8)/'raw',payload['source'],payload['plan'],self.binding,
+            # This legacy recorder fixture consumes the ref only in its dedicated
+            # preparation thread; production uses ProcessRecordingSession.
+            if 'plan_ref' in payload:
+                from robot_workbench.control_plan import load_artifact
+                source=load_artifact(payload['plan_ref']['source']);plan=load_artifact(payload['plan_ref']['plan'])
+            else:source,plan=payload['source'],payload['plan']
+            session=RecordingSession(self.root/secrets.token_hex(8)/'raw',source,plan,self.binding,
                 camera_directories=self.producer.directories,execution_timeline=payload.get('execution_timeline'),
                 environment='fake',execution_owner=payload['execution_owner'],on_fault=on_fault,
                 resident_deadline_wall_ns=time.time_ns()+120_000_000_000,recorder_factory=ObservedRecorder,
                 **payload['recording_preparation'])
             self.sessions.append(session)
             return session
+        factory.supports_deferred_preparation=True
         self.factory=factory
         self.owner=collection(self.backend,FakeSafety,hardware=False,environment='fake',
             hardware_binding=self.root/'binding.json',control_clock=self.clock,runtime_nonce='preparation-cpu-runtime',
@@ -69,6 +77,7 @@ class RecordingPreparationTest(unittest.TestCase):
             intrinsics=dict(fx=100.,fy=100.,cx=2.,cy=1.),distortion=dict(coefficients=[0.]*5))
             for name,side in zip(CAMERAS,('head','left','right'))}}
         self.producer=CameraProducer(camera_intrinsics(rig),self.root/'spool',min_free_bytes=0,
+            memory_recording=False,
             recording_guard=lambda lease:self.owner.recording is not None and self.owner.recording.lease_active(lease))
         self.sample_images=True
         self.addCleanup(self.cleanup)
@@ -110,11 +119,44 @@ class RecordingPreparationTest(unittest.TestCase):
         self.until(lambda:self.owner.runner is not prior)
         return self.owner.runner
 
+    def test_valid_cup_return_executes_without_starting_a_recording_factory(self):
+        from test_cup_return_replay import fixture as replay_fixture
+        from cup_return_replay import build_return_plan
+        from integration import _digest
+        original,parent,receipt,source,binding,_=replay_fixture(
+            jaw_mapping_sha256=hashlib.sha256((self.root/'jaw.json').read_bytes()).hexdigest())
+        source['clock']['source_clock_id']=self.backend.source_clock_id
+        source['initial_state']['clock']=deepcopy(source['clock'])
+        source['replay_context']['clock']=deepcopy(source['clock'])
+        for sample in source['initial_state']['owner_samples']:sample['source_clock_id']=self.backend.source_clock_id
+        self.source=source;self.plan=build_return_plan(parent,original,receipt,source)
+        binding.update(source_digest=_digest(source),clock=source['clock'],initial_state=source['initial_state'])
+        (self.root/'binding.json').write_text(json.dumps(binding))
+        self.factory_hook=lambda _:self.fail('maintenance replay must not start a recorder')
+        runner=self.start();self.until(lambda:runner.status=='READY')
+        self.assertTrue(runner.maintenance_replay)
+        self.assertIsNone(runner.preparation_thread)
+        self.assertIsNone(self.owner.recording)
+        self.assertEqual(self.sessions,[])
+        self.assertGreater(runner.last_sent_index,0)
+        self.assertEqual(self.owner.snapshot()['frozen']['validation_scope'],'exact_parent_reverse_without_new_collision_check')
+        self.assertFalse(any(row['kind']=='recording_preparation_started' for row in self.events))
+        self.assertFalse(list((self.root/'spool').rglob('recording-request.json')))
+
+    def test_filesystem_consumer_rejects_memory_only_camera_registration(self):
+        for directory in self.producer.directories.values():
+            (Path(directory)/'recording-service.json').write_text(json.dumps(
+                dict(schema='rgbd_lease.v1',transport='bounded_memory',same_process_only=True)))
+        self.start()
+        self.until(lambda:self.owner.recording is not None and self.owner.recording.done.is_set())
+        self.assertIn('on-demand recording service required',self.owner.recording.error)
+        self.assertFalse(list((self.root/'spool').rglob('recording-request.json')))
+
     def test_actual_sampled_first_frames_precede_command_and_final_timeline_is_bound_once(self):
         runner=self.start()
         self.until(lambda:self.owner.recording is not None and self.owner.recording.prepared.is_set())
         session=self.owner.recording
-        self.assertIsNone(session.recorder)
+        if session.camera_channels is None:self.assertIsNone(session.recorder)
         self.assertFalse((session.root/'execution-timeline.json').exists())
         for instance,identity in ((secrets.token_hex(16),runner.recording_owner),
                 (runner.execution_instance_id,dict(runner.recording_owner,runtime_nonce='wrong-owner'))):
@@ -148,7 +190,7 @@ class RecordingPreparationTest(unittest.TestCase):
         original=self.producer._publish;old=[]
         def delayed(packet):
             if not entered.is_set():
-                old.append(deepcopy(packet));entered.set()
+                old.append(deepcopy({key:packet[key] for key in ('wall_ns','feedback')}));entered.set()
                 if not release.wait(3):raise TimeoutError('old camera packet was not released')
             original(packet)
         self.producer._publish=delayed

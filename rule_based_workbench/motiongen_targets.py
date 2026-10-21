@@ -2,6 +2,7 @@
 from dataclasses import asdict
 from itertools import product
 import math
+from types import SimpleNamespace
 
 
 REFERENCE = dict(
@@ -43,6 +44,17 @@ def checked_reference(planner,data,*,reference=None,urdf_path=None):
     if reference is None and urdf_path is not None and ref['urdf_sha256']!=expected['urdf_sha256']:
         from a1_asset_derivation import derive_cup_reference
         ref=derive_cup_reference(ref,urdf_path)
+    assisted=getattr(planner,'operator_assisted_cup_geometry',None)
+    if reference is None and assisted is not None:
+        # This retains a numerical search seed, never the previous cup's grasp proof.
+        if (assisted.get('profile_sha256')!=expected['cup_profile_sha256']
+                or any(ref.get(key)!=expected[key] for key in expected if key!='cup_profile_sha256')):
+            raise ValueError('assisted cup seed requires the same checked A1 mechanical geometry')
+        ref=dict(ref,cup_profile_sha256=expected['cup_profile_sha256'],
+            assistance_derivation=dict(scope='unverified_task_pose_seed',
+                parent_cup_profile_sha256=ref['cup_profile_sha256'],
+                current_cup_profile_sha256=expected['cup_profile_sha256'],
+                contact_and_path_acceptance_reused=False))
     if not ref.get('source') or any(ref.get(key) != value for key, value in expected.items()):
         raise ValueError('cup-relative reference does not match current cup/A1-cal geometry')
     return ref,expected
@@ -103,6 +115,31 @@ def reserved_grasp_candidates(planner,observation,data,ref,seed,*,closed_jaw_m):
         rejected=rejected,accepted_count=total_accepted,global_infeasibility_claim=False)
 
 
+def placement_support_profile(cup):
+    """Native placement input only: bottom footprint and mouth height, no mesh.
+
+    Native placement_candidates reads the first band's radius as a footprint.
+    A frustum's radius_m is its maximum radius, so pass a separate support view;
+    collision/contact consumers must continue to receive the original cup.
+    """
+    bottom=min(cup.bands,key=lambda band:band.z_min_m)
+    return SimpleNamespace(bands=(SimpleNamespace(z_min_m=bottom.z_min_m,
+        z_max_m=max(band.z_max_m for band in cup.bands),radius_m=cup.bottom_radius_m),))
+
+
+def supported_cup_pose(scene,cup,orientation,xy):
+    """Keep cup orientation/support XY; bring its true lowest point to the plane."""
+    from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
+    from robot_sim.tasks.manager_based.coffee_make.interaction_evaluation import InteractionEvaluator
+    bottom=min(cup.bands,key=lambda band:band.z_min_m)
+    support=scene.world_from_support
+    pose=RigidTransform(support.transform_point((*xy,-bottom.z_min_m)),orientation)
+    height=-InteractionEvaluator._lowest_z(SimpleNamespace(cup=cup),support.inverse().compose(pose))
+    if abs(height)<=1e-12:return pose,0.
+    normal=support.rotate((0.,0.,1.))
+    return RigidTransform(tuple(p+height*n for p,n in zip(pose.position,normal)),orientation),height
+
+
 def generate_targets(planner, observation, data, *, reference=None,urdf_path=None,closed_jaw_m=None):
     """Bind reserve-screened cup-relative grasps and support-local cup goals."""
     ref,expected,seed=reference_grasp(planner,data,reference=reference,urdf_path=urdf_path)
@@ -131,8 +168,7 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
     scene = observation.scene
     acceptance = data['native_identity']['acceptance']['edge_margin_m']
     margin = acceptance+max(planner.PLACEMENT_TRACKING_RESERVE_M,planner.MACHINE_PLACEMENT_RESERVE_M)
-    bottom = min(planner.cup.bands, key=lambda band: band.z_min_m)
-    polygon = eroded_support_polygon(scene, bottom.radius_m, margin)
+    polygon = eroded_support_polygon(scene, planner.cup.bottom_radius_m, margin)
     heading = scene.world_from_support.inverse().rotate(cup.rotate((1., 0., 0.)))
     yaw = math.atan2(heading[1], heading[0])
     placements, rejected = [], []
@@ -143,7 +179,7 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
 
     def append(xy, source, preferred=False):
         nominal_xy = tuple(xy)
-        nominal_pose=RigidTransform(scene.world_from_support.transform_point((*nominal_xy,-bottom.z_min_m)),cup.orientation_wxyz)
+        nominal_pose,_=supported_cup_pose(scene,planner.cup,cup.orientation_wxyz,nominal_xy)
         nominal_distance=outlet_distance(scene,planner.cup,nominal_pose)
         # Tray-local +Y goes inward; neither grasp depth nor cup height changes.
         xy = (nominal_xy[0],nominal_xy[1]+PLACEMENT_INWARD_BIAS_M)
@@ -152,8 +188,7 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
             return
         if any(math.dist(row['support_xy_m'], xy) < 1e-10 for row in placements):
             return
-        point = scene.world_from_support.transform_point((*xy, -bottom.z_min_m))
-        pose = RigidTransform(point, cup.orientation_wxyz)
+        pose,support_height=supported_cup_pose(scene,planner.cup,cup.orientation_wxyz,xy)
         distance=outlet_distance(scene,planner.cup,pose)
         if distance>target_tolerance+1e-12:
             rejected.append(dict(source=source,support_xy_m=xy,reason='outside reserved receiving goal',outlet_distance_m=distance))
@@ -163,9 +198,12 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
                                tool_pose_binding='selected grasp and actual native closing relation',
                                planning_edge_margin_m=margin,outlet_distance_m=distance,accepted_trajectory=False,
                                nominal_support_xy_m=nominal_xy,nominal_outlet_distance_m=nominal_distance,
-                               inward_bias_m=PLACEMENT_INWARD_BIAS_M))
+                               inward_bias_m=PLACEMENT_INWARD_BIAS_M,
+                               **({'support_normal_adjustment_m':support_height,
+                                   'support_contact_geometry':'native lowest point; dynamic stability unverified'}
+                                  if support_height else {})))
 
-    for candidate in placement_candidates(scene, planner.cup, seed.inverse(),
+    for candidate in placement_candidates(scene, placement_support_profile(planner.cup), seed.inverse(),
             edge_margin_m=margin,cup_yaw_rad=yaw,outlet_tolerance_m=target_tolerance):
         append(candidate.support_xy_m, 'native-outlet-aligned-support-geometry')
     placements.sort(key=lambda row:row['nominal_outlet_distance_m'])
@@ -174,6 +212,7 @@ def generate_targets(planner, observation, data, *, reference=None,urdf_path=Non
                 reference_identity=expected,grasp_contact_policy=dict(GRASP_CONTACT_POLICY),
                 grasp_candidate_selection=selection,grasp_candidates=grasps,placement_candidates=placements,
                 **({'reference_derivation':ref['calibration_derivation']} if 'calibration_derivation' in ref else {}),
+                **({'assisted_reference_derivation':ref['assistance_derivation']} if 'assistance_derivation' in ref else {}),
                 placement_goal=dict(schema_version='cup_outlet_goal.v1',metric='cup_mouth_world_xy_to_liquid_outlet',
                     tolerance_m=OUTLET_TOLERANCE_M,target_tolerance_m=target_tolerance,
                     tracking_reserve_m=tracking_reserve,

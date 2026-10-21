@@ -20,7 +20,7 @@ def main():
     boundary=w.frames[0]['source_stamp_ns']
     for i in range(6,12):
         state=w.add(sample(i,.05))
-        assert state['ready']==((i+1)*10**9-boundary>=5*10**9)
+        assert state['ready']==(len(w.frames)>=6 and (i+1)*10**9-boundary>=3*10**9)
         if state['ready']:break
     assert state['ready']
     assert all(f['cup_position'][0]==.05 for f in w.frames)

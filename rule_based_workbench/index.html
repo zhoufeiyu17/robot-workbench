@@ -20,7 +20,7 @@
 <div class="body">
 <p class="small-copy">先准备环境，再重建与规划。执行时展示真机实时画面与仿真场景首帧；视频完成后独立回放。</p>
 <div class="pg-actions"><button id="pg-prepare" disabled>1. 环境准备<small>DSW · 检测器 · 仿真 · 真机控制与相机</small></button><button id="pg-plan" disabled>2. 场景重建及规划<small>5 秒有效观测 · 路径碰撞检查 · 静态首帧</small></button><button id="pg-execute" disabled>3. action 真机执行<small>点击执行本轮轨迹，同时启动两侧录制</small></button><button id="pg-interrupt" disabled>中断当前阶段<small>停止本阶段，返回环境已准备</small></button></div>
-<div class="pg-speed"><label for="pg-speed">运动速度</label><input id="pg-speed" type="range" min="10" max="100" step="1" value="30"><output id="pg-speed-value" for="pg-speed">30%</output><span class="small-copy">两侧共用插值时间线 · 静止等待不缩放 · 闭爪保持 0.6 秒</span></div>
+<div class="pg-speed"><label for="pg-speed">运动速度</label><input id="pg-speed" type="range" min="30" max="170" step="1" value="30"><output id="pg-speed-value" for="pg-speed">30%</output><span class="small-copy">两侧共用插值时间线 · 静止等待不缩放 · 闭爪保持 0.6 秒</span></div>
 <label class="support-label" id="pg-support-label"><input type="checkbox" id="pg-supported">双臂已受支撑，允许环境准备时初始化接入控制</label>
 <div id="pg-checks" class="pg-checks" aria-label="环境准备状态"><span class="tag">尚未核验环境</span></div>
 <p id="pg-message" role="status">正在读取 Playground 状态；尚未发起操作。</p><p id="pg-error" class="err" role="alert" hidden></p>
@@ -438,7 +438,7 @@ async function pgRefresh(){
 }
 async function pgAction(action){
  const button=$('#pg-'+action);if(button.disabled||pgRequest)return;
- const speed=Number($('#pg-speed').value)/100;if(action!=='interrupt'&&(!Number.isFinite(speed)||speed<.1||speed>1))return;
+ const speed=Number($('#pg-speed').value)/100;if(action!=='interrupt'&&(!Number.isFinite(speed)||speed<.3||speed>1.7))return;
  pgRequest=true;++pgVersion;pgSnapshot=null;pgLastError='';pgButtons();text('pg-error','');$('#pg-error').hidden=true;
  try{await post('/api/playground',action==='interrupt'?{action}:{action,speed_scale:speed,arms_supported:action==='prepare'&&$('#pg-supported').checked});$('#pg-supported').checked=false;}
  catch(e){pgLastError=e.message+'；请求不会自动重试。';text('pg-error',pgLastError);$('#pg-error').hidden=false;}

@@ -9,6 +9,7 @@ route still requires native collision/contact audit.
 import hashlib
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 from curobo_planning import robot_config
@@ -23,10 +24,73 @@ PROXY_NUMERIC_STANDARDS = {
     'finger': dict(max_gap_m=.0015, max_outward_m=.0015),
     'pad': dict(max_gap_m=.008, max_outward_m=.0005),
 }
+LEFT3_PART = '/ac_one_A1_pending_calibration_r2/left_link3/collisions/left_link3/node_STL_BINARY_/mesh'
+LEFT3_PART_SHA256 = '85518fc8d6431726c8847a9a92d095fdfabaa3caa353acebd4bb3545ba8f99c8'
+
+
+def refine_left3_recipe(recipe, parts, parent_recipe_sha256):
+    """Subdivide one proven coarse cell without editing asset certificates."""
+    part = next((part for part in parts if part['name'] == LEFT3_PART), None)
+    if part is None or digest(part) != LEFT3_PART_SHA256:
+        raise ValueError('left_link3 cell refinement requires its reviewed source geometry')
+    if recipe['refine_cells'].get(LEFT3_PART):
+        raise ValueError('left_link3 cell refinement requires the reviewed unrefined parent cell')
+    result = deepcopy(recipe)
+    # The unchanged .055 m grid covers cell20 with three descendant cells.
+    # All descendants retain the existing convex cell/circumsphere proof.
+    result['refine_cells'][LEFT3_PART] = ['20', '20/0']
+    result['local_refinement'] = dict(parent_recipe_sha256=parent_recipe_sha256,
+        part=LEFT3_PART, parent_cell='20', source_part_sha256=digest(part),
+        geometry_unchanged=True, cover_method_unchanged=True, collision_thresholds_unchanged=True)
+    return result
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def refine_pickup_recipe(recipe, parts, profile):
+    """Apply the single reviewed C10 recipe; default planners continue using C9."""
+    if profile=='pickup-c11-v1':
+        parent=refine_pickup_recipe(recipe,parts,'pickup-c10-v1')
+        path=Path(__file__).with_name('a1_pickup_refinement_v2.json');approved=json.loads(path.read_text())
+        wrist='/ac_one_A1_pending_calibration_r2/left_link6/collisions/left_link6/node_STL_BINARY_/mesh'
+        extra={wrist:['15/0/0/0','3/1/1/0/1/1']}
+        if (approved.get('profile')!=profile or approved.get('extra_refine_cells')!=extra
+                or approved.get('parent_effective_recipe_sha256')!=digest(parent)
+                or approved.get('source_parts_sha256')!=digest(parts)
+                or approved.get('left_sphere_cap')!=1147 or approved.get('total_sphere_cap')!=1819):
+            raise ValueError('C11 requires its frozen two-cell descendant refinement and C10 parent')
+        result=deepcopy(parent)
+        result['refine_cells'][wrist]=sorted(set(result['refine_cells'][wrist])|set(extra[wrist]))
+        result['pickup_refinement']=dict(parent['pickup_refinement'],**{k:v for k,v in approved.items() if k!='parent_effective_recipe_sha256'},
+            parent_c10_effective_recipe_sha256=approved['parent_effective_recipe_sha256'],
+            parent_c10_recipe_file_sha256=parent['pickup_refinement']['recipe_file_sha256'],
+            recipe_file_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        return result
+    path=Path(__file__).with_name('a1_pickup_refinement.json')
+    approved=json.loads(path.read_text())
+    if (profile!='pickup-c10-v1' or approved.get('profile')!=profile
+            or approved.get('additional_binary_levels')!=3
+            or approved.get('left_sphere_cap')!=1145 or approved.get('total_sphere_cap')!=1817
+            or approved.get('parent_effective_recipe_sha256')!=digest(recipe)
+            or approved.get('source_parts_sha256')!=digest(parts)
+            or sum(len(v) for v in approved['cells'].values())!=8):
+        raise ValueError('C10 requires its reviewed profile, parent recipe and source geometry')
+    sources={p['name']:digest(p) for p in parts}
+    if any(sources.get(name)!=value for name,value in approved['part_sha256'].items()) or set(approved['cells'])!=set(approved['part_sha256']):
+        raise ValueError('C10 source part identity differs')
+    result=deepcopy(recipe)
+    for name,leaves in approved['cells'].items():
+        nodes=set(result['refine_cells'].get(name,()))
+        for leaf in leaves:
+            frontier=[leaf]
+            for _ in range(3):
+                nodes.update(frontier)
+                frontier=[key+'/'+bit for key in frontier for bit in ('0','1')]
+        result['refine_cells'][name]=sorted(nodes)
+    result['pickup_refinement']=dict(approved,recipe_file_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    return result
 
 
 def official_fit(vertices, faces, count, surface_radius):
@@ -254,13 +318,18 @@ def fixed_world_mesh_descriptors(exported, report, fk, positions):
     return descriptors
 
 
-def build_conservative_robot_model(exported, urdf_path, movable, positions, *, ignored_link_pairs, domain_certificate=None, attached_spheres=264):
+def build_conservative_robot_model(exported, urdf_path, movable, positions, *, ignored_link_pairs, domain_certificate=None, attached_spheres=264, pickup_profile=None):
     """Task candidate: spend the approximately 1000 left spheres on known tight regions."""
     import numpy as np
     from conservative_spheres import cover
-    recipe=json.loads(certificate_path('a1_conservative_refinement.json',urdf_path).read_text())
+    recipe_path=certificate_path('a1_conservative_refinement.json',urdf_path)
+    recipe=json.loads(recipe_path.read_text())
     if (recipe['urdf_sha256']!=exported['urdf_sha256'] or recipe['source_parts_sha256']!=digest(exported['parts'])):
         raise ValueError('local conservative refinement recipe requires its frozen model geometry')
+    recipe=refine_left3_recipe(recipe,exported['parts'],hashlib.sha256(recipe_path.read_bytes()).hexdigest())
+    parent_recipe=recipe
+    if pickup_profile is not None:recipe=refine_pickup_recipe(recipe,exported['parts'],pickup_profile)
+    promotion=recipe.get('pickup_refinement')
     if domain_certificate is None:
         domain_certificate=json.loads(certificate_path('a1_self_domain_certificate.json',urdf_path).read_text())
     mounts={name for name,link in exported['planner_identity']['chassis_collision']['base_arm_exemptions'] if link=='left_link1'}
@@ -284,6 +353,18 @@ def build_conservative_robot_model(exported, urdf_path, movable, positions, *, i
         else:
             options=dict(pitch_m=recipe['base_pitch_m'] if link=='base_link' else recipe['body_pitch_m'] if link in ('left_link1','left_link2','left_link4','left_link5') else .035 if link=='left_link6' else .055,clip_boundary=True)
         centers,radii,proof=cover(vertices,faces=faces,refine_cells=recipe['refine_cells'].get(part['name'],()),**options)
+        if promotion and part['name'] in promotion['cells']:
+            old_c,old_r,old=cover(vertices,faces=faces,refine_cells=parent_recipe['refine_cells'].get(part['name'],()),**options)
+            before={key:np.r_[c,r] for key,c,r in zip(old['cell_keys'],old_c,old_r,strict=True)}
+            after={key:np.r_[c,r] for key,c,r in zip(proof['cell_keys'],centers,radii,strict=True)}
+            leaves=set(promotion['cells'][part['name']])
+            extra_count=len(promotion.get('extra_refine_cells',{}).get(part['name'],()))
+            if (not leaves<=before.keys() or leaves & after.keys() or len(after)>len(before)+7*len(leaves)+extra_count
+                    or any(key not in after or before[key].tobytes()!=after[key].tobytes() for key in before.keys()-leaves)
+                    or any(not any(key.startswith(leaf+'/') for leaf in leaves) for key in after.keys()-before.keys())):
+                raise ValueError('C10 must replace only the eight declared leaves and preserve all other spheres')
+            proof['pickup_refinement_check']=dict(parent_count=len(before),new_count=len(after),
+                replaced_leaves=sorted(leaves),unchanged_spheres_byte_identical=True)
         coverage.append(dict(name=part['name'],link=link,count=len(centers),**proof))
         return centers,radii,proof
     config,report=build_robot_model(exported,urdf_path,movable,positions,
@@ -312,13 +393,19 @@ def build_conservative_robot_model(exported, urdf_path, movable, positions, *, i
         inactive_cup_buffer_slots=264,allocated_spheres=report['allocated_spheres']+264,
         robot_config_sha256=digest(config))
     left_count=sum(p['count'] for p in coverage if p['link'].startswith('left_'))
-    if left_count>1088 or not all(p['whole_solid_covered'] for p in coverage):
+    left_budget=promotion['left_sphere_cap'] if promotion else 1089
+    if left_count>left_budget or promotion and report['allocated_spheres']>promotion['total_sphere_cap'] or not all(p['whole_solid_covered'] for p in coverage):
         raise ValueError(f'left arm conservative coverage/budget not met: {left_count} spheres; counts='+str([(p['link'],p['count']) for p in coverage]))
-    report.update(refinement_recipe_sha256=digest(recipe),fit_policy='conservative_box_cells_local_density_v2',fixture_fitter_used=False,
-        conservative_coverage_proven=True,coverage=coverage,left_sphere_count=left_count,left_sphere_budget=1088,
+    report.update(refinement_recipe_sha256=digest(recipe),local_refinement=recipe['local_refinement'],
+        fit_policy='conservative_box_cells_local_density_v3_'+promotion['profile'].split('-')[1] if promotion else 'conservative_box_cells_local_density_v3',fixture_fitter_used=False,
+        conservative_coverage_proven=True,coverage=coverage,left_sphere_count=left_count,left_sphere_budget=left_budget,
         numeric_quality_gate_passed=False,numeric_standards_scope='old adaptive quality gate does not apply',
         requires_complete_native_final_audit=False,online_validation_backend='curobo_gpu',
         production_ready=False,readiness_note='contact policy and complete MotionGen path/replay still require validation')
+    if promotion:report['pickup_promotion']=dict(promotion,effective_recipe_sha256=digest(recipe),
+        robot_config_sha256=report['robot_config_sha256'],source_parts_sha256=report['source_parts_sha256'],
+        collision_sphere_order_sha256=digest(kin['collision_link_names']),
+        model_code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
     return config,report
 
 

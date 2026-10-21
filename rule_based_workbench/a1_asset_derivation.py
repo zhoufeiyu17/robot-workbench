@@ -87,6 +87,37 @@ def support_identity(urdf,native_code):
 
 
 def derive(source_urdf,bundle_urdf,target_urdf,native_code,certificate_root=None):
+    """Verify a copied calibration overlay, then rebind from its reviewed baseline."""
+    source_urdf=Path(source_urdf).resolve();path=source_urdf.with_name(PROOF)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():raise ValueError('regular asset-local derivation proof required')
+        proof=json.loads(path.read_bytes())
+        certificates={name:certificate_path(name,source_urdf) for name in CERTIFICATES}
+        sidecar=Path(proof['source_support_identity']['sidecar_path'])
+        baseline=Path(proof.get('source_urdf_path') or sidecar.with_name('acone_no_handle_d405.urdf'))
+        if baseline.resolve().parent!=sidecar.resolve().parent:
+            raise ValueError('derived baseline URDF and support sidecar differ')
+        # A copied overlay retains the original publication path in its proof.
+        # Reconstruct those bytes without reading or writing that old destination.
+        published=Path(proof['derived_support_identity']['sidecar_path']).with_name(source_urdf.name)
+        expected_sidecar,expected_certificates,expected=_derive_baseline(baseline,source_urdf,published,native_code,certificate_root)
+        if 'source_urdf_path' not in proof:
+            expected.pop('source_urdf_path')
+            for name,data in expected_certificates.items():
+                data=json.loads(data);data['calibration_derivation'].pop('source_urdf_path')
+                expected_certificates[name]=encoded(data)
+                expected['certificates'][name]['derived_sha256']=hashlib.sha256(expected_certificates[name]).hexdigest()
+        local_sidecar=source_urdf.with_name('a1_support_contact.json')
+        if local_sidecar.is_symlink() or local_sidecar.read_bytes()!=expected_sidecar or proof!=expected:
+            raise ValueError('derived proof/support identity differs from reviewed baseline')
+        for name,path in certificates.items():
+            if path.read_bytes()!=expected_certificates[name]:
+                raise ValueError('derived certificate differs from reviewed baseline: '+name)
+        source_urdf=baseline
+    return _derive_baseline(source_urdf,bundle_urdf,target_urdf,native_code,certificate_root)
+
+
+def _derive_baseline(source_urdf,bundle_urdf,target_urdf,native_code,certificate_root=None):
     """Prepare new bytes only after the baseline and protected mechanics agree."""
     source_urdf,bundle_urdf,target_urdf=map(Path,(source_urdf,bundle_urdf,target_urdf))
     identity=support_identity(source_urdf,native_code)

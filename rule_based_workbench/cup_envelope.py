@@ -17,12 +17,12 @@ def cylinder_sagitta(mesh):
     return sagitta
 
 
-def prepare(world):
+def prepare(world, *, path=None):
     """Load the frozen inward-sphere asset; no fitting or CPU mesh audit online."""
     import json
     from pathlib import Path
     from cup_contact import cup_geometry_digest
-    prepared=json.loads(Path(__file__).with_name('a1_cup_inset.json').read_text())
+    prepared=json.loads((Path(path) if path is not None else Path(__file__).with_name('a1_cup_inset.json')).read_text())
     validate_prepared(prepared,cup_geometry_digest(world))
     return prepared
 

@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
+from .execution_settings import defaults as default_execution_settings, validate as validate_execution_settings
 import queue
 import secrets
 import stat
@@ -17,10 +19,11 @@ import threading
 import time
 
 
-BUSINESSES = {'calibration', 'collection'}
+BUSINESSES = {'calibration', 'collection', 'inference'}
 CALIBRATION_PREVIEWS = {'preview', 'preview_home', 'preview_arm_home', 'preview_jaw_target',
                         'preview_both_home', 'preview_workbench'}
 COLLECTION_PREVIEWS = {'preview_frozen', 'preview_start_alignment'}
+INFERENCE_PREVIEWS = {'preview_inference'}
 
 
 class _Backend:
@@ -35,7 +38,7 @@ class _Backend:
     def __getattr__(self, name):
         value = getattr(self._backend, name)
         if name not in {'connect', 'close', 'begin', 'send', 'set_damping_hold',
-                         'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains'}:
+                         'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains', 'enable_collection_arm','queue_reference'}:
             return value
         def invoke(*args, **kwargs):
             return self._runtime._backend_call(name, value, *args, **kwargs)
@@ -63,13 +66,23 @@ class Runtime:
         self.call_sequence, self.preview_revision = 0, 0
         self.calibration_revision, self.calibration_snapshot_id = 0, None
         self.reviewed_plans, self.execution_calibration = {}, None
+        self.inference_factory, self.inference_configuration, self.inference_revision = None, None, 0
         self.last_return, self.stop_receipt, self.detached_hold = None, None, None
         self.release_receipt = None
+        self.protected_retirement = None
+        self.maintenance_active = False
+        self.control_operation = None
+        self._hold_verification = None
         self.initialization_error = None
         self.owner = None
         root = Path(lock_root).resolve(); root.mkdir(parents=True, exist_ok=True)
+        if owner_options.get('execution_root') is None:
+            owner_options['execution_root']=root/'plan-evidence'
+            owner_options['execution_root'].mkdir(mode=0o700,exist_ok=True)
         identity = hashlib.sha256((environment+'\0'+device_id).encode()).hexdigest()
         self.lock_path = root/(identity+'.lock')
+        self.execution_settings_path = root/(identity+'.execution-settings.json')
+        self.execution_settings_revision, self.execution_settings_policies = 0, {}
         self.fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             if not stat.S_ISREG(os.fstat(self.fd).st_mode):
@@ -79,6 +92,15 @@ class Runtime:
             collection, _, _ = classes(ref, jaw_mapping_file=jaw_mapping_file)
             runtime = self
             class ManagedOwner(collection):
+                def invalidate(self):
+                    revoke=getattr(self.backend,'revoke_output',None)
+                    if callable(revoke):revoke()
+                    runner = getattr(self, 'runner', None)
+                    if getattr(runner, 'is_inference', False):
+                        runner.revoke('owner_invalidated')
+                    getattr(self, 'inference_payloads', {}).clear()
+                    return super().invalidate()
+
                 def accept_review(self, plans):
                     # This short section is the execution/install ordering point;
                     # no SDK call, hashing, or trajectory compilation occurs here.
@@ -86,10 +108,16 @@ class Runtime:
                     with runtime.lock:
                         binding = runtime.reviewed_plans.pop(hashes, None)
                         if (binding is None or binding['calibration_revision'] != runtime.calibration_revision
+                                or binding['execution_settings']['revision'] != runtime.execution_settings_revision
+                                or binding.get('inference_revision', runtime.inference_revision) != runtime.inference_revision
+                                or binding.get('inference_clock', self.feedback_clock) != self.feedback_clock
+                                or binding.get('controller_profile') != self.shared_target_profile
                                 or binding['command_epoch'] != self.epoch
-                                or self.stop_requested or self.release_requested):
+                                or runtime.maintenance_active or self.stop_requested or self.release_requested):
                             return False
                         self.execution_instance_id = secrets.token_hex(16)
+                        self.execution_error_settings = (None if binding['execution_settings']['legacy_passive_guards']
+                                                         else deepcopy(binding['execution_settings']['settings']))
                         runtime.execution_calibration = dict(binding, plan_sha256=hashes,
                             execution_instance_id=self.execution_instance_id,
                             accepted_monotonic_s=time.monotonic())
@@ -100,14 +128,35 @@ class Runtime:
                     # Shared capabilities are invariant, including during the base cache refresh.
                     result['capabilities'] = ['collection_execution_v2',
                         'workbench_trajectory_v1', 'calibration_capture_ack_v1',
-                        'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous']
+                        'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous', 'policy_inference_v1']
+                    result['inference'] = (self.runner.snapshot() if getattr(self.runner, 'is_inference', False) else None)
+                    result['inference_configured'] = runtime.inference_factory is not None
+                    result['inference_configuration_revision'] = runtime.inference_revision
+                    interpreter=getattr(self.runner,'target_interpreter',None)
+                    result['target_interpreter']=dict(enabled=bool(self.shared_target_profile),
+                        controller_profile=self.shared_target_profile,
+                        reference=interpreter.snapshot()if interpreter is not None else None)
                     return result
 
                 def start_motion(self, plan, feedback, *, reviewed_deadline=None):
                     runtime.detached_hold = None
+                    if plan.sha256 in self.inference_payloads:
+                        payload = self.inference_payloads.pop(plan.sha256)
+                        if runtime.inference_factory is None:
+                            raise ValueError('inference backend is not prepared')
+                        self.recording_error = None
+                        self.arrival_pending = None
+                        self.runner = runtime.inference_factory(self, plan, feedback, deepcopy(payload['configuration']))
+                        self.runner.start(self.control_time(), feedback)
+                        return
                     if plan.sha256 in self.frozen_payloads or plan.sha256 in self.alignment_plans:
                         return super().start_motion(plan, feedback, reviewed_deadline=reviewed_deadline)
                     return ref.Owner.start_motion(self, plan, feedback, reviewed_deadline=reviewed_deadline)
+
+                def reject_confirmation(self, plans, reason, *, review_deadline=None):
+                    for plan in plans:
+                        self.inference_payloads.pop(plan.sha256, None)
+                    return super().reject_confirmation(plans, reason, review_deadline=review_deadline)
 
                 def begin_collection(self, measured):
                     # Includes the physical collection implementation's direct gain calls.
@@ -115,8 +164,15 @@ class Runtime:
 
             self.ref, self.collection = ref, collection
             backend = _Backend(backend_factory(), self)
-            self.owner = ManagedOwner(backend, safety, hardware=hardware, environment=environment, **owner_options)
+            if getattr(backend,'target_interpreter_profile',None):
+                # Warm CPU preparation libraries before the caller acquires SDK
+                # output. Online fitting later stays in the existing query worker.
+                from scipy.interpolate import CubicSpline
+            self.owner = ManagedOwner(backend, safety, hardware=hardware, environment=environment, isolated_plans=True, **owner_options)
+            self.owner.inference_payloads = {}
             self.owner.runtime_nonce = self.nonce
+            if self.execution_settings_path.exists():
+                self.restore_execution_settings(json.loads(self.execution_settings_path.read_text()))
             if initialize_backend is not None:
                 # Caller owns connection/support authorization. No implicit connect/hold.
                 with self.tick_lock:
@@ -144,6 +200,141 @@ class Runtime:
             return dict(business=business, token=token, runtime_nonce=self.nonce,
                         environment=self.environment, device_id=self.device_id)
 
+    def control_inputs(self):
+        """One cached control envelope for business preparation; never calls SDK."""
+        with self.lock,self.owner.lock:
+            owner=self.owner
+            return dict(schema='workbench.control_inputs.v1',runtime_nonce=self.nonce,
+                command_epoch=owner.epoch,control_time_s=owner.control_time(),holder=self.holder,
+                feedback_healthy=owner.feedback_healthy,
+                calibration_feedback=deepcopy(owner.cache.get('calibration_feedback')),
+                joint_limits=deepcopy(owner.cache.get('joint_limits')),
+                disabled_grippers=list(getattr(owner.backend,'passive_jaws',())),
+                controller_profile=owner.shared_target_profile,
+                calibration_revision=self.calibration_revision,calibration_snapshot_id=self.calibration_snapshot_id,
+                hardware_binding=str(owner.hardware_binding)if getattr(owner,'hardware_binding',None)else None)
+
+    def revoke_inference(self):
+        """Retire a business configuration atomically, without exporting Owner locks."""
+        with self.lock,self.owner.lock:
+            if self.holder!='inference':return
+            owner=self.owner;runner=owner.runner;recording=owner.recording
+            if (getattr(runner,'status',None)in('ARMED','PREPARING','VERIFYING','RUNNING','SETTLING')
+                    or getattr(owner,'capture_sample',None)
+                    or recording is not None and not recording.done.is_set()):
+                raise ValueError('设备执行或录制未结束，不能切换推理模型')
+            self.preview_revision+=1
+            owner.pending={token:review for token,review in owner.pending.items()
+                if not any(plan.kind=='inference'for plan in review[0])}
+            owner.inference_payloads.clear()
+            self.reviewed_plans={key:value for key,value in self.reviewed_plans.items()if value.get('business')!='inference'}
+            self.inference_factory=self.inference_configuration=None
+            loop=getattr(runner,'loop',None)
+            if loop is not None:
+                loop.generation+=1;loop.history.clear();loop.applied.clear();loop._commands.clear();loop._outstanding=None
+                runner.outstanding=None
+
+    def configure_inference(self, configuration, factory):
+        """Trusted prepared-model bootstrap; this never starts a model or moves a device."""
+        from .inference_owner import configuration as validate, digest
+        value = validate(configuration)
+        profile=self.owner.shared_target_profile
+        if 'target_interpreter_profile'in value and value['target_interpreter_profile']!=profile:
+            raise ValueError('inference reference controller profile differs from the shared device policy')
+        if profile:
+            value.update(target_interpreter_profile=profile,target_execution='shared_reference_windows')
+            if value.get('reference_feedforward')and profile!='normal_X5':
+                raise ValueError('frozen feedforward was qualified for normal_X5; requalify before another controller profile')
+        if not callable(factory):
+            raise ValueError('prepared inference runner factory required')
+        with self._preview_boundary(), self.owner.lock:
+            reason = self._idle_reason()
+            if reason:
+                raise ValueError(reason)
+            self.inference_configuration, self.inference_factory = value, factory
+            self.inference_revision += 1
+            self.preview_revision += 1
+            self.owner.pending.clear()
+            self.owner.inference_payloads.clear()
+            self.reviewed_plans.clear()
+            return dict(revision=self.inference_revision, configuration_digest=digest(value), configured=True)
+
+    def export_execution_settings(self):
+        with self.lock:
+            return dict(schema='execution_settings.v1', device_id=self.device_id, environment=self.environment,
+                revision=self.execution_settings_revision, policies=deepcopy(self.execution_settings_policies))
+
+    def restore_execution_settings(self, value):
+        """Trusted startup only; restore policies before this Runtime accepts clients."""
+        with self.lock:
+            if self.clients or self.owner.runner is not None:
+                raise ValueError('execution settings restore is startup-only')
+            if (not isinstance(value, dict) or value.get('schema') != 'execution_settings.v1'
+                    or value.get('device_id') != self.device_id or value.get('environment') != self.environment
+                    or type(value.get('revision')) is not int or value['revision'] < 0
+                    or not isinstance(value.get('policies'), dict) or set(value['policies']) - BUSINESSES):
+                raise ValueError('execution settings identity or schema mismatch')
+            policies = {name: validate_execution_settings(policy, environment=self.environment)
+                        for name, policy in value['policies'].items()}
+            self._configure_fake_error(policies.get(self.holder, default_execution_settings(self.holder)))
+            self.execution_settings_revision, self.execution_settings_policies = value['revision'], policies
+
+    def _execution_policy(self, business):
+        return deepcopy(self.execution_settings_policies.get(business) or default_execution_settings(business,
+            self.owner.arm_tolerances or [self.owner.arm_tolerance] * 12))
+
+    def execution_settings_snapshot(self, business):
+        with self.lock:
+            if business not in BUSINESSES:
+                raise ValueError('unknown business')
+            reason = ('请先交接控制权限：当前由 '+self.holder if business != self.holder else self._idle_reason(include_in_flight=False))
+            return dict(revision=self.execution_settings_revision, business=business,
+                settings=self._execution_policy(business), update_allowed=reason is None, update_reason=reason,
+                legacy_passive_guards=business == 'calibration' and business not in self.execution_settings_policies,
+                fake_error_available=self.environment == 'fake' and callable(getattr(self.owner.backend, 'configure_error_model', None)))
+
+    def _configure_fake_error(self, settings):
+        configure = getattr(self.owner.backend, 'configure_error_model', None)
+        if callable(configure):
+            configure(deepcopy(settings['fake_error']))
+        elif settings['fake_error']['enabled']:
+            raise ValueError('this backend does not support physical fake actuation errors')
+
+    def update_execution_settings(self, credential, payload):
+        settings = validate_execution_settings(payload, environment=self.environment)
+        with self._preview_boundary(), self.owner.lock:
+            business = self._authenticate(credential)
+            if business != self.holder:
+                raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
+            reason = self._idle_reason()
+            if reason:
+                raise ValueError(reason)
+            old = self._execution_policy(business)
+            self._configure_fake_error(settings)  # Memory-only backend configuration; never sends a target.
+            value = self.export_execution_settings()
+            value['revision'] += 1
+            value['policies'][business] = settings
+            temporary = self.execution_settings_path.with_suffix('.tmp')
+            try:
+                temporary.write_text(json.dumps(value, sort_keys=True, allow_nan=False)+'\n')
+                os.replace(temporary, self.execution_settings_path)
+            except BaseException:
+                self._configure_fake_error(old)
+                raise
+            self.execution_settings_revision = value['revision']
+            self.execution_settings_policies = value['policies']
+            self.owner.execution_error_settings = deepcopy(settings)
+            self.owner.invalidate()
+            self.preview_revision += 1
+            self.reviewed_plans.clear()
+            self.owner.frozen_payloads.clear(); self.owner.alignment_plans.clear()
+            self.owner.inference_payloads.clear()
+            self.owner.runner = None
+            self.owner.active_epoch = None
+            self.owner.cache.update(command_epoch=self.owner.epoch, motion=None, automatic_enabled=False)
+            self.owner.cache.pop('frozen', None)
+            return self.execution_settings_snapshot(business)
+
     def _authenticate(self, credential):
         if self.fd is None:
             raise PermissionError('runtime closed; reconnect through the device lifecycle')
@@ -160,11 +351,13 @@ class Runtime:
 
     def _backend_call(self, name, function, *args, **kwargs):
         with self.lock:
-            if name in {'begin', 'send', 'begin_collection'}:
+            if name in {'begin', 'send', 'begin_collection', 'enable_collection_arm','queue_reference'}:
                 self.owner.command_gate()
             self.call_sequence += 1
             call = dict(id=self.call_sequence, operation=name, started_monotonic_s=time.monotonic(),
                         epoch=self.owner.epoch if self.owner else None)
+            if self._hold_verification is not None and name in ('begin','send'):
+                call.update(side=args[0],**{('feedback_argument' if name=='begin' else 'target'):list(args[1])})
             self.calls[call['id']] = call
         try:
             result = function(*args, **kwargs)
@@ -186,6 +379,7 @@ class Runtime:
                     self.hold = dict.fromkeys(('left', 'right'), 'manual_damping' if kwargs.get('manual') else 'damping')
                     self.hold_returns = dict.fromkeys(('left', 'right'), call)
                 elif name == 'begin':
+                    if self._hold_verification is not None:call['returned_feedback']=list(result)
                     self.hold[args[0]] = 'position'
                     self.hold_returns[args[0]] = call
                 elif name == 'begin_collection':
@@ -200,7 +394,16 @@ class Runtime:
         finally:
             with self.lock:
                 call['returned_monotonic_s'] = time.monotonic()
+                if name=='close' and self.release_receipt is not None:
+                    backend=getattr(function,'__self__',None)
+                    self.release_receipt['release_diagnostics']=dict(schema='sdk_release_diagnostics.v1',
+                        owner_call={key:call[key] for key in ('id','operation','started_monotonic_s','returned_monotonic_s','error') if key in call},
+                        owner_steps=deepcopy(list(getattr(backend,'release_steps',()))),
+                        can_evidence='unsupported' if self.environment=='fake' else 'independent_guard',
+                        scope='Owner memory is available only if native close returned or raised; guard records survive protected termination')
                 self.last_return = call
+                if self._hold_verification is not None and name in ('begin','send','set_damping_hold'):
+                    self.control_operation['sdk_returns'].append(deepcopy(call))
                 self.calls.pop(call['id'])
                 self.tick_idle.notify_all()
 
@@ -212,9 +415,9 @@ class Runtime:
                 raise ValueError('control tick or SDK call is still in flight after 0.1s preview boundary wait')
             yield
 
-    def _release_reason(self):
+    def _release_reason(self, *, include_in_flight=True):
         owner = self.owner
-        if self.tick_lock.locked() or self.calls:
+        if include_in_flight and (self.tick_lock.locked() or self.calls):
             return '控制调用尚未结束，暂不能释放连接'
         if not owner.backend.is_connected:
             return '设备已断开，等待连接收尾'
@@ -223,17 +426,25 @@ class Runtime:
         if (owner.runner is not None and owner.runner.status not in {'READY','STOPPED','FAULT'}
                 or owner.sequence_remaining or owner.capture_sample):
             return '请先停止运动和采图，再释放设备连接'
+        if getattr(owner.runner, 'recording_pending', False):
+            return '推理录制尚未完成收尾，暂不能释放连接'
         recording = owner.recording
         if recording is not None and (not recording.done.is_set() or getattr(recording,'thread',None) is None or recording.thread.is_alive()):
             return '录制尚未完成收尾，暂不能释放连接'
         return None
 
-    def request_release(self, credential, command=None):
+    def request_release(self, credential, command=None, *, maintenance=False, actor=None):
         command = {'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'} if command is None else command
         if command != {'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'}:
             raise ValueError('explicit supported-arm release required')
-        with self.lock:
-            business = self._authenticate(credential)
+        with self._preview_boundary():
+            if actor is not None:
+                actor.require(self)
+                if actor.action!='release_control':raise PermissionError('maintenance actor cannot release this device')
+                business=self.holder;maintenance=True
+            else:business = self._authenticate(credential)
+            if self.maintenance_active and not maintenance:
+                raise ValueError('服务维护中，释放需要维护身份')
             if business != self.holder:
                 raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
             reason = self._release_reason()
@@ -242,15 +453,20 @@ class Runtime:
             self.preview_revision += 1
             method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
             result = method(self.owner, command)
+            if getattr(self.owner.runner, 'is_inference', False):
+                self.owner.runner.revoke('operator release')
             self.release_receipt = dict(status='requested', runtime_nonce=self.nonce,
                 calibration_snapshot_id=self.calibration_snapshot_id,
                 requested_monotonic_s=time.monotonic(), requested_wall_ns=time.time_ns(),
                 sdk_close_returned=False, message='释放已受理，等待 SDK 断开与设备锁收尾')
             return dict(result, release_receipt=deepcopy(self.release_receipt))
 
-    def _idle_reason(self):
+    def _idle_reason(self, *, include_in_flight=True, maintenance_actor=None):
+        if self.maintenance_active:
+            if maintenance_actor is None:return '服务维护中，停止仍可独立使用'
+            maintenance_actor.require(self)
         owner = self.owner
-        if self.tick_lock.locked() or self.calls:
+        if include_in_flight and (self.tick_lock.locked() or self.calls):
             return 'control tick or SDK call is still in flight'
         if not owner.backend.is_connected:
             return 'device disconnected'
@@ -259,6 +475,8 @@ class Runtime:
         if (owner.runner is not None and owner.runner.status not in {'READY', 'STOPPED'}
                 or owner.sequence_remaining or owner.capture_sample):
             return 'motion or capture is still active'
+        if getattr(owner.runner, 'recording_pending', False):
+            return 'inference recording writer has not exited after sealing'
         if owner.control.state not in (owner.states.READY, owner.states.STOPPED, owner.states.MANUAL):
             return 'holding/control state is not confirmed'
         if any(mode is None for mode in self.hold.values()):
@@ -275,35 +493,174 @@ class Runtime:
                 return 'recording writer has not exited after sealing'
         return None
 
+    def begin_maintenance(self):
+        """Claim only between control calls; queued confirmations cannot cross."""
+        with self._preview_boundary(), self.owner.lock:
+            if self.maintenance_active:raise ValueError('已有服务维护窗口')
+            reason=self._release_reason()
+            if reason and getattr(self.owner.backend,'terminal_failure',None):
+                evidence=self.owner.backend.protection_snapshot()
+                recording=self.owner.recording
+                if (evidence.get('worker_exit_confirmed') is True and not self.tick_lock.locked() and not self.calls
+                        and (recording is None or recording.done.is_set()
+                             and getattr(recording,'thread',None) is not None and not recording.thread.is_alive())):
+                    reason=None  # Maintenance may inspect/retire; never re-enable old SDK output.
+            if reason:raise ValueError(reason)
+            if self.owner.stop_requested or not self.owner.commands.empty():
+                raise ValueError('控制命令仍在排队，等待收尾后再维护')
+            self.maintenance_active=True
+            self.preview_revision+=1
+            self.owner.pending.clear();self.owner.inference_payloads.clear();self.reviewed_plans.clear()
+
+    def end_maintenance(self):
+        with self.lock:self.maintenance_active=False
+
+    def request_stop(self):
+        """Same independent stop path for business and restricted control actors."""
+        with self.lock:
+            if self.fd is None:return dict(message='设备连接已释放，没有新的控制输出')
+            result=self.ref.Owner.submit(self.owner,{'action':'stop'})
+            if getattr(self.owner.runner,'is_inference',False):self.owner.runner.revoke('operator stop')
+            self.preview_revision+=1
+            self.stop_receipt=dict(accepted_monotonic_s=time.monotonic(),barrier_epoch=self.owner.epoch,
+                in_flight_calls=deepcopy(list(self.calls.values())),prior_calls_complete=not self.calls,
+                stop_hold_return_confirmed=False,firmware_ack='unsupported',physical_stop='unverified')
+            recording=self.owner.recording
+            if recording is not None:
+                def finish():
+                    try:recording.finish('stopped','operator stop')
+                    except Exception as error:self.owner.recording_failed(error)
+                threading.Thread(target=finish,daemon=True).start()
+            return dict(result,stop=deepcopy(self.stop_receipt))
+
+    def control_release(self,actor):return self.request_release(None,actor=actor)
+
+    def control_recover(self,actor):
+        actor.require(self)
+        if actor.action!='recover_control':raise PermissionError('maintenance actor cannot recover this device')
+        with self._preview_boundary(),self.owner.lock:
+            actor.require(self)
+            if not self.owner.recovery_ready():raise ValueError('当前不是可确认恢复的运动故障；不会自动清除设备或guard锁存')
+            result=self.ref.Owner.submit(self.owner,dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',owner_pid=os.getpid(),command_epoch=self.owner.epoch))
+            self.preview_revision+=1
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            actor.require(self)
+            facts=self.fact_snapshot()
+            from .state_contract import control_healthy
+            if (self.owner.recoverable_fault is None and self.owner.control.state is self.owner.states.STOPPED
+                    and control_healthy(facts)):
+                return dict(result,recovered=True,runtime=facts,motion_resumed=False)
+            time.sleep(.01)
+        raise ValueError('恢复请求结果未确认；未重连或恢复旧动作')
+
+    def verify_hold(self,actor):
+        """Fixed five-second joint-pose diagnostic with existing jaw command bounds."""
+        actor.require(self)
+        if actor.action!='verify_hold':raise PermissionError('maintenance actor cannot run fixed hold verification')
+        with self._preview_boundary(),self.owner.lock:
+            actor.require(self)
+            reason=self._idle_reason(maintenance_actor=actor)
+            if reason:raise ValueError(reason)
+            if self._hold_verification is not None:raise ValueError('固定保持验证尚未结束')
+            self.owner.invalidate();self.owner.runner=None;self.preview_revision+=1
+            self.control_operation=dict(schema='workbench.fixed_hold_verification.v1',operation_id=secrets.token_hex(16),
+                status='queued',verified=False,duration_s=5.,runtime_nonce=self.nonce,command_epoch=self.owner.epoch,
+                disabled_grippers=list(getattr(self.owner.backend,'passive_jaws',())),target_source='fresh_joint_feedback_and_bounded_calibrated_jaw_command',
+                joint_offsets_applied=False,requested_target=None,fixed_target=None,samples=[],sdk_returns=[],
+                stop_receipt=None,motion_kind='fixed_joint_pose_hold_not_home',firmware_ack='unsupported')
+            verification=dict(actor=actor,done=threading.Event(),runner=None,epoch=self.owner.epoch,stop_sent=False,error=None,
+                initial_stop_receipt=self.stop_receipt)
+            self._hold_verification=verification
+        if not verification['done'].wait(30):
+            self.request_stop()
+            with self.lock:self.control_operation.update(status='unknown',error='固定保持/Stop回执超时，停止已请求但结果未确认')
+            raise ValueError(self.control_operation['error'])
+        result=deepcopy(self.control_operation)
+        if result['status']!='completed':raise ValueError(result.get('error') or '固定保持验证已撤销，部分证据保留在环境状态')
+        return result
+
+    def _hold_before_tick(self):
+        verification=self._hold_verification
+        if verification is None or verification['stop_sent']:return
+        owner=self.owner;actor=verification['actor']
+        try:
+            actor.require(self)
+            if owner.epoch!=verification['epoch']:raise ValueError('保持验证的控制代次已变化')
+            if verification['runner'] is not None:return
+            reason=self._idle_reason(include_in_flight=False,maintenance_actor=actor)
+            if reason:raise ValueError(reason)
+            from arx_env.joint_head_real_motion import MotionRunner,make_plan,feedback_to_command
+            feedback=deepcopy(owner.cache['calibration_feedback']);limits=deepcopy(owner.cache['joint_limits'])
+            def plan(raw):return make_plan('both',raw,feedback_to_command(raw,limits,environment=self.environment),limits,
+                duration_s=5.,kind='workbench',created_at_s=owner.control_time(),environment=self.environment)
+            def begin(measured):
+                actor.require(self);actual=owner.begin('both',measured)
+                # The native begin re-samples the current pose. Seal that exact
+                # raw pose once so interpolation cannot move toward an older pose.
+                runner.plan=plan(actual)
+                runner.consumed.add(runner.plan.sha256)
+                from arx_env.joint_head_jaw_mapping import feedback_gaps,command_gap_mm
+                measured_gaps=feedback_gaps(actual)
+                command_gaps=[command_gap_mm(side,runner.plan.q_target[index]) for side,index in (('left',6),('right',13))]
+                self.control_operation.update(jaw_feedback_mm=measured_gaps,jaw_command_mm=command_gaps,
+                    jaw_command_clipped={side:abs(measured_gaps[i]-command_gaps[i])>1e-6 for i,side in enumerate(('left','right'))})
+                self.control_operation.update(status='holding',begin_feedback_qpos=list(actual),fixed_target=list(runner.plan.q_target),
+                    started_wall_ns=time.time_ns(),started_monotonic_s=time.monotonic(),error_policy=deepcopy(runner.error_settings))
+                return actual
+            def send(desired):
+                actor.require(self)
+                if tuple(desired)!=tuple(self.control_operation['fixed_target']):raise ValueError('固定保持目标发生变化')
+                owner.send('both',desired)
+            runner=MotionRunner(plan(feedback['qpos']),begin=begin,send=send,stop=owner.motion_fault,consumed=owner.consumed,
+                arm_tolerance=owner.arm_tolerance,arm_tolerances=owner.arm_tolerances,environment=self.environment,
+                execution_settings=owner.motion_error_settings(),disabled_grippers=getattr(owner.backend,'passive_jaws',()))
+            owner.active_epoch=owner.epoch;owner.review_press=owner.pedal_snapshot()[0];owner.runner=runner
+            verification['runner']=runner
+            self.control_operation.update(status='verifying_feedback',initial_feedback=feedback)
+            runner.start(owner.control_time(),feedback)
+        except Exception as error:
+            verification['error']=str(error);verification['stop_sent']=True
+            if self.stop_receipt is verification['initial_stop_receipt']:self.request_stop()
+
+    def _hold_after_tick(self):
+        verification=self._hold_verification
+        if verification is None:return
+        owner=self.owner;receipt=self.control_operation;runner=verification['runner']
+        feedback=owner.cache.get('calibration_feedback')
+        if feedback is not None:
+            receipt['samples'].append({key:deepcopy(feedback[key]) for key in ('qpos','qvel','sample_time_s','sample_wall_ns','source_time_ns','physics_step','sdk_timestamps') if key in feedback})
+        if not verification['stop_sent']:
+            if not verification['actor'].current() or owner.epoch!=verification['epoch'] or runner is None or runner.status in ('FAULT','STOPPED'):
+                verification['error']=getattr(runner,'reason',None) or 'Stop、维护范围或设备条件已变化'
+                verification['stop_sent']=True
+                if self.stop_receipt is verification['initial_stop_receipt']:self.request_stop()
+            elif runner.started is not None and owner.control_time()-runner.started>=5.:
+                receipt.update(status='stopping',held_source_s=owner.control_time()-runner.started,
+                    held_wall_s=time.monotonic()-receipt['started_monotonic_s'],target_error=deepcopy(runner.target_error))
+                verification['stop_sent']=True;self.request_stop()
+        if verification['stop_sent'] and (self.stop_receipt or {}).get('stop_hold_return_confirmed') is True:
+            receipt.update(status='failed' if verification['error'] else 'completed',verified=verification['error'] is None,error=verification['error'],
+                stop_receipt=deepcopy(self.stop_receipt),finished_wall_ns=time.time_ns(),sample_count=len(receipt['samples']),
+                sdk_send_count=sum(row['operation']=='send' and 'error' not in row for row in receipt['sdk_returns']))
+            self._hold_verification=None;verification['done'].set()
+
     def submit(self, credential, command):
         if not isinstance(command, dict):
             raise ValueError('command object required')
         action = command.get('action')
         if action == 'release':
             return self.request_release(credential, command)
-        with self._preview_boundary() if action in CALIBRATION_PREVIEWS | COLLECTION_PREVIEWS else self.lock:
+        with self._preview_boundary() if action in CALIBRATION_PREVIEWS | COLLECTION_PREVIEWS | INFERENCE_PREVIEWS else self.lock:
             business = self._authenticate(credential)
             if action == 'stop':
-                result = self.ref.Owner.submit(self.owner, command)
-                self.preview_revision += 1
-                self.stop_receipt = dict(accepted_monotonic_s=time.monotonic(), barrier_epoch=self.owner.epoch,
-                    in_flight_calls=deepcopy(list(self.calls.values())), prior_calls_complete=not self.calls,
-                    stop_hold_return_confirmed=False,
-                    firmware_ack='unsupported', physical_stop='unverified')
-                recording = self.owner.recording
-                if recording is not None:
-                    # Writer bookkeeping is outside request/control locks. A stuck
-                    # writer blocks handoff, never stop acceptance or motor holding.
-                    def finish():
-                        try:
-                            recording.finish('stopped', 'operator stop')
-                        except Exception as error:
-                            self.owner.recording_failed(error)
-                    threading.Thread(target=finish, daemon=True).start()
-                return dict(result, stop=deepcopy(self.stop_receipt))
+                if command!={'action':'stop'}:raise ValueError('explicit stop command required')
+                return self.request_stop()
+            if self.maintenance_active:raise ValueError('服务维护中，停止仍可独立使用')
             if business != self.holder:
                 raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
-            previews = CALIBRATION_PREVIEWS if business == 'calibration' else COLLECTION_PREVIEWS
+            previews = {'calibration': CALIBRATION_PREVIEWS, 'collection': COLLECTION_PREVIEWS,
+                        'inference': INFERENCE_PREVIEWS}[business]
             if action in previews:
                 reason = self._idle_reason()
                 if reason:
@@ -317,9 +674,23 @@ class Runtime:
                     compiler.lock = threading.RLock()
                     compiler.cache = deepcopy(self.owner.cache)
                     compiler._preview_live_owner = self.owner
+                    compiler._preview_current = lambda:(self.preview_revision==revision and self.holder==business
+                        and self.owner.epoch==epoch and not self.maintenance_active)
                     compiler.pending, compiler.frozen_payloads, compiler.alignment_plans = {}, {}, {}
+                    compiler.inference_payloads = {}
                     compiler.commands = queue.Queue(maxsize=16)
-                method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
+                    compiler.execution_error_settings = (None if business == 'calibration' and business not in self.execution_settings_policies
+                                                         else self._execution_policy(business))
+                if business == 'inference':
+                    if self.inference_factory is None:
+                        raise ValueError('prepare the inference model before review')
+                    from .inference_owner import preview as inference_preview
+                    config = deepcopy(self.inference_configuration)
+                    config.update(calibration_snapshot_id=self.calibration_snapshot_id,
+                                  calibration_revision=self.calibration_revision)
+                    method = lambda current, requested: inference_preview(current, requested, config)
+                else:
+                    method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
             else:
                 if action not in {'confirm', 'capture_ack', 'recover', 'release', 'simulate_pedal'}:
                     raise ValueError('action unavailable for this business')
@@ -328,7 +699,10 @@ class Runtime:
                 if action in {'confirm', 'release', 'recover', 'simulate_pedal'}:
                     self.preview_revision += 1
                 method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
-                return method(self.owner, command)
+                result = method(self.owner, command)
+                if action == 'simulate_pedal' and getattr(self.owner.runner, 'is_inference', False):
+                    self.owner.runner.revoke('operator pedal')
+                return result
         # No runtime/owner lock around full plan validation and hashing.
         result = method(compiler, command)
         with self._preview_boundary(), self.owner.lock:
@@ -339,12 +713,21 @@ class Runtime:
             self.owner.pending = compiler.pending
             self.owner.frozen_payloads = compiler.frozen_payloads
             self.owner.alignment_plans = compiler.alignment_plans
+            self.owner.inference_payloads = compiler.inference_payloads
             self.owner.review_wall_deadline = compiler.review_wall_deadline
             self.reviewed_plans = {
                 tuple(plan.sha256 for plan in review[0]): dict(calibration_revision=self.calibration_revision,
-                    snapshot_id=self.calibration_snapshot_id, command_epoch=epoch, business=business)
+                    inference_revision=self.inference_revision,
+                    controller_profile=self.owner.shared_target_profile,
+                    inference_clock=deepcopy(self.owner.feedback_clock),
+                    snapshot_id=self.calibration_snapshot_id, command_epoch=epoch, business=business,
+                    execution_settings=dict(revision=self.execution_settings_revision, business=business,
+                                            legacy_passive_guards=business == 'calibration' and business not in self.execution_settings_policies,
+                                            settings=self._execution_policy(business)))
                 for review in compiler.pending.values()}
-            return dict(result, business=business, runtime_nonce=self.nonce, environment=self.environment)
+            return dict(result, business=business, runtime_nonce=self.nonce, environment=self.environment,
+                target_interpreter=dict(enabled=bool(self.owner.shared_target_profile),
+                    controller_profile=self.owner.shared_target_profile,ordinary_point_send_disabled=bool(self.owner.shared_target_profile)))
 
     def notify_calibration_installed(self, snapshot_id):
         """Trusted installer callback after publishing the actual installed identity.
@@ -368,21 +751,35 @@ class Runtime:
             # this callback may not yet have constructed its collection runner.
             return dict(snapshot_id=snapshot_id, calibration_revision=self.calibration_revision, revoked=True)
 
-    def handoff(self, credential, target):
+    def handoff(self, credential, target, *, active=None):
         with self.lock:
-            business = self._authenticate(credential)
-            if business != self.holder or target not in self.clients or target == business:
-                raise PermissionError('current holder must explicitly hand off to another registered business')
-            reason = self._idle_reason()
+            business=self._authenticate(credential)
+            if business!=self.holder or target==business:raise PermissionError('current holder must explicitly hand off to another registered business')
+        return self.admit_business(target,active=active,expected_holder=business)
+
+    def admit_business(self,target,*,active=None,expected_holder=None,maintenance_actor=None):
+        """Shared trusted admission, preserving the existing Owner boundary/hold."""
+        with self._preview_boundary():
+            if active is not None and not active():raise ValueError('handoff revoked before control boundary')
+            if target not in self.clients or expected_holder is not None and expected_holder!=self.holder:
+                raise PermissionError('registered business and unchanged current holder required')
+            if maintenance_actor is not None:
+                maintenance_actor.require(self)
+                if maintenance_actor.action!='ops_prepare_collection' or target!='collection':
+                    raise PermissionError('maintenance actor cannot claim this business')
+            reason = self._idle_reason(maintenance_actor=maintenance_actor)
             if reason:
                 raise ValueError(reason)
+            if target==self.holder:return dict(holder=target,command_epoch=self.owner.epoch,reused=True)
             if not self.tick_lock.acquire(blocking=False):
                 raise ValueError('control tick is in flight')
             try:
                 with self.owner.lock:
+                    self._configure_fake_error(self._execution_policy(target))
                     self.owner.invalidate()
                     self.preview_revision += 1
                     self.owner.frozen_payloads.clear(); self.owner.alignment_plans.clear()
+                    self.owner.inference_payloads.clear()
                     # READY runners only monitor endpoint hold. Retire their old
                     # policy/epoch; the SDK retains its already submitted setpoint.
                     self.owner.runner = None
@@ -391,6 +788,8 @@ class Runtime:
                                               sdk_returns=deepcopy(self.hold_returns),
                                               evidence='completed SDK calls; firmware ACK unsupported')
                     self.holder = target
+                    self.owner.execution_error_settings = (None if target == 'calibration' and target not in self.execution_settings_policies
+                                                           else self._execution_policy(target))
                     self.owner.cache.update(command_epoch=self.owner.epoch, motion=None, automatic_enabled=False)
                     self.owner.cache.pop('frozen', None)
                     return dict(holder=target, command_epoch=self.owner.epoch, hold=deepcopy(self.detached_hold))
@@ -404,6 +803,27 @@ class Runtime:
         try:
             if self.fd is None:
                 raise RuntimeError('runtime closed')
+            protection_failure=getattr(self.owner.backend,'terminal_failure',None)
+            if protection_failure:
+                from .gc_timing import snapshot as gc_snapshot
+                timing_fault=gc_snapshot()
+                with self.lock,self.owner.lock:
+                    self.owner.invalidate()
+                    self.owner.control.state=self.owner.states.FAULT
+                    self.owner.control.auto_aborted=True
+                    self.owner.control.reason=str(protection_failure)
+                    if self.owner.runner:
+                        self.owner.runner.status,self.owner.runner.reason='FAULT',str(protection_failure)
+                    self.owner.cache.update(state='FAULT_STOP_UNCONFIRMED',reason=str(protection_failure),
+                        connected=False,automatic_enabled=False,feedback_healthy=False,stationary=False,
+                        command_epoch=self.owner.epoch,control_timing_fault=timing_fault)
+                    self.owner.stop_requested=self.owner.release_requested=False
+                    while not self.owner.commands.empty():self.owner.commands.get_nowait()
+                    self.hold=dict(left=None,right=None);self.hold_returns=dict(left=None,right=None)
+                self.owner.recording_call('finish','failed',str(protection_failure))
+                self.owner.event('control_protection_timing',reason=str(protection_failure),gc=timing_fault)
+                return False
+            self._hold_before_tick()
             result = self.owner.tick()
             with self.lock:
                 if self.stop_receipt is not None:
@@ -414,6 +834,7 @@ class Runtime:
                             and row.get('started_monotonic_s', -1) >= receipt['accepted_monotonic_s']
                             and 'returned_monotonic_s' in row for row in self.hold_returns.values())):
                         receipt.update(stop_hold_return_confirmed=True, sdk_hold_returns=deepcopy(self.hold_returns))
+                self._hold_after_tick()
             return result
         finally:
             with self.lock:
@@ -421,13 +842,35 @@ class Runtime:
                 self.tick_idle.notify_all()
 
     def snapshot(self, credential):
+        with self.lock:return self._snapshot(self._authenticate(credential))
+
+    def fact_snapshot(self):
+        """Shared cached device facts; no business registration or impersonation."""
+        with self.lock:return self._snapshot(None)
+
+    def _snapshot(self, business):
         with self.lock:
-            business = self._authenticate(credential)
-            reason = '请先交接控制权限：当前由 '+self.holder+' 持有' if business != self.holder else self._idle_reason()
+            reason = '请先交接控制权限：当前由 '+self.holder+' 持有' if business is not None and business != self.holder else self._idle_reason(include_in_flight=False)
+            readiness_reason = self._idle_reason(include_in_flight=False)
             # Use the cache: a stalled SDK/recording call must not block status.
             with self.owner.lock:
                 state = deepcopy(self.owner.cache)
+                publication=state.get('control_publication') or {}
+                published_epoch=(publication.get('dependencies') or {}).get('command_epoch')
+                coherent=(publication.get('valid') is True and published_epoch==self.owner.epoch
+                    and state.get('state')==self.owner.control.state.value)
+                coherence=dict(consistent=coherent,published_epoch=published_epoch,
+                    current_epoch=self.owner.epoch,publication_revision=publication.get('revision'))
             owner=self.owner
+            protection_reader=getattr(owner.backend,'protection_snapshot',None)
+            protection=protection_reader() if callable(protection_reader) else None
+            if protection is not None:
+                state['control_protection']=protection
+                from .gc_timing import snapshot as gc_snapshot
+                state['control_timing']=dict(gc=gc_snapshot(),last_sdk_return=deepcopy(self.last_return))
+                if protection.get('event'):
+                    state.update(connected=False,state='FAULT_STOP_UNCONFIRMED',automatic_enabled=False,
+                        feedback_healthy=False,stationary=False,reason=protection['reason'])
             state=owner.cached_snapshot_fields(state)
             native=getattr(owner,'native_task_status',None)
             state['native_task']=({key:deepcopy(native[key]) for key in (
@@ -447,22 +890,42 @@ class Runtime:
                     manifest_path=str(root/'manifest.json') if root and manifest else None,
                     manifest={k:deepcopy(v) for k,v in manifest.items() if k!='files'} if manifest else None)
             state.update(device_id=self.device_id, environment=self.environment, runtime_nonce=self.nonce,
+                control_time_s=owner.control_time(),
+                control_coherence=coherence,
+                maintenance_active=self.maintenance_active,
                 holder=self.holder, command_epoch=self.owner.epoch, hold=deepcopy(self.hold),
                 calibration_revision=self.calibration_revision, calibration_snapshot_id=self.calibration_snapshot_id,
                 execution_calibration=deepcopy(self.execution_calibration),
+                execution_settings=self.execution_settings_snapshot(self.holder if business is None else business),
                 execution_instance_id=getattr(self.owner,'execution_instance_id',None),
                 sdk_hold_returns=deepcopy(self.hold_returns),
                 sdk_calls_in_flight=deepcopy(list(self.calls.values())), last_sdk_return=deepcopy(self.last_return),
                 detached_hold=deepcopy(self.detached_hold), stop_receipt=deepcopy(self.stop_receipt),
                 release_receipt=deepcopy(self.release_receipt),
                 initialization_error=self.initialization_error,
+                prior_control_retirement=deepcopy(getattr(self,'prior_control_retirement',None)),
+                control_operation=({**{key:deepcopy(value) for key,value in self.control_operation.items()
+                    if key not in ('samples','sdk_returns')},
+                    'sample_count':len(self.control_operation.get('samples',[])),
+                    'sdk_return_count':len(self.control_operation.get('sdk_returns',[])),
+                    'full_evidence':'operation_receipt'} if self.control_operation else None),
+                idle_readiness=dict(allowed=readiness_reason is None,reason=readiness_reason,
+                    control_cycle_in_flight=bool(self.tick_lock.locked() or self.calls)),
                 allowed_operations={'stop':dict(allowed=True, reason=None),
-                    'release':dict(allowed=business == self.holder and self._release_reason() is None,
-                        reason='请先交接控制权限：当前由 '+self.holder+' 持有' if business != self.holder else self._release_reason()),
+                    'release':dict(allowed=business == self.holder and self._release_reason(include_in_flight=False) is None,
+                        reason='请先交接控制权限：当前由 '+self.holder+' 持有' if business != self.holder else self._release_reason(include_in_flight=False)),
                     'preview':dict(allowed=reason is None, reason=reason),
                     'handoff':dict(allowed=reason is None, reason=reason),
                     'confirm':dict(allowed=reason is None and bool(self.owner.pending),
                                    reason=reason or (None if self.owner.pending else 'generate and review a fresh plan'))})
+            if self.maintenance_active:
+                for action,gate in state['allowed_operations'].items():
+                    if action!='stop':gate.update(allowed=False,reason='服务维护中')
+            if business is None:
+                state.pop('allowed_operations',None)
+                state['control_operations']=dict(stop=dict(allowed=True,reason=None),
+                    release=dict(allowed=self._release_reason(include_in_flight=False) is None,reason=self._release_reason(include_in_flight=False)),
+                    recover=dict(allowed=self.owner.recovery_ready(),reason=None if self.owner.recovery_ready() else '当前没有满足恢复条件的运动故障'))
             return state
 
     def close(self):
@@ -473,7 +936,32 @@ class Runtime:
             if self.release_receipt is not None and not self.release_receipt['sdk_close_returned']:
                 raise RuntimeError('SDK release return remains unconfirmed')
             if self.fd is not None:
+                listener=self.owner.listener
+                if listener is not None and callable(getattr(listener,'close',None)):
+                    listener.close()
+                    self.owner.listener=None
                 os.close(self.fd); self.fd = None
             if self.release_receipt is not None:
                 self.release_receipt.update(status='released', confirmed_wall_ns=time.time_ns(),
                     message='设备连接已释放；再次接入需要显式连接')
+
+    def retire_protected(self):
+        """Explicit supported reconnect only; worker exit is never SDK close success."""
+        with self.lock:
+            backend=self.owner.backend
+            reader=getattr(backend,'protection_snapshot',None)
+            evidence=reader() if callable(reader) else {}
+            recording=self.owner.recording
+            if (not evidence.get('event') or evidence.get('worker_exit_confirmed') is not True
+                    or self.tick_lock.locked() or self.calls or backend.is_connected
+                    or recording is not None and not recording.done.is_set()):
+                raise ValueError('保护后的控制进程退出或录制收尾尚未确认，不能重新接入')
+            self.owner.invalidate()
+            listener=self.owner.listener
+            if listener is not None:listener.close();self.owner.listener=None
+            if self.fd is not None:os.close(self.fd);self.fd=None
+            backend.dispose()
+            self.protected_retirement=dict(runtime_nonce=self.nonce,event=evidence['event'],
+                retired_wall_ns=time.time_ns(),worker_exit_confirmed=True,sdk_close_confirmed=False,
+                mechanical_state='not_verified',motion_resumed=False)
+            return deepcopy(self.protected_retirement)

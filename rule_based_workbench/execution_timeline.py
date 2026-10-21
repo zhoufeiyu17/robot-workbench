@@ -39,19 +39,36 @@ def prepare(plan):
         planning_evidence_unchanged=True,collision_audit_rerun=False)
 
 
-def initialize(base,current_state,limits,*,environment='physical'):
+def initialize(base,current_state,limits,*,environment='physical',disabled_grippers=(),held_arms=()):
     """Compile off-thread. Measured values remain raw; only issued targets are bounded."""
     from contract import validate_physical_feedback
     validate_physical_feedback(current_state, enforce_range=False)
     if base.get('schema_version')!='execution_timeline.v1' or base.get('control_hz')!=CONTROL_HZ:
         raise ValueError('prepared 30 Hz base required')
+    disabled_grippers=tuple(disabled_grippers)
+    if any(side not in ('left','right') for side in disabled_grippers):
+        raise ValueError('disabled grippers must name left or right')
+    held_arms=tuple(held_arms)
+    if held_arms not in ((),('right',)):raise ValueError('only the observed inactive right arm may be held')
     goal=base['commands'][0]['target'];legal=deepcopy(current_state);corrections=[]
+    for side in disabled_grippers:
+        key=side+'_gripper'
+        if any(abs(row['target'][key]-goal[key])>1e-9 for row in base['commands']):
+            raise ValueError('initialization cannot discard movement of disabled '+side+' gripper')
     for key in ARM_KEYS:
         if len(limits[key])!=6:raise ValueError('six physical joint limits required')
         legal[key], changes=project_joint_positions(current_state[key],limits[key],environment=environment)
         corrections.extend(dict(row,arm=key) for row in changes)
+        if key.split('_')[0] in held_arms:
+            if (any(abs(a-b)>position_noise_rad(environment)+1e-12 for a,b in zip(current_state[key],goal[key]))
+                    or any(any(abs(a-b)>1e-8 for a,b in zip(row['target'][key],goal[key])) for row in base['commands'])):
+                raise ValueError('inactive right arm changed; reobserve and replan instead of returning it to an old pose')
+            legal[key]=deepcopy(goal[key])
     for key in GRIPPER_KEYS:
-        lo,hi=limits[key];legal[key]=min(hi,max(lo,current_state[key]))
+        lo,hi=limits[key]
+        # Missing feedback is retained in actual_start, never used to invent
+        # a slow return motion for an output the native backend has disabled.
+        legal[key]=goal[key] if key.split('_')[0] in disabled_grippers else min(hi,max(lo,current_state[key]))
     for key in (*ARM_KEYS,*GRIPPER_KEYS):
         values=goal[key] if key in ARM_KEYS else [goal[key]]
         bounds=limits[key] if key in ARM_KEYS else [limits[key]]
@@ -74,6 +91,8 @@ def initialize(base,current_state,limits,*,environment='physical'):
         command_limits=deepcopy(limits),duration_s=duration,command_projection=legal!=current_state,
         environment=environment,position_noise_rad=position_noise_rad(environment),position_corrections=corrections,
         arm_speed_rad_s=.08,jaw_speed_mm_s=6.)
+    if disabled_grippers:initialization['disabled_grippers']=list(disabled_grippers)
+    if held_arms:initialization['held_arms']=list(held_arms)
     return dict(base,commands=commands,duration_s=base['duration_s']+duration,
         times=[row['time_s'] for row in commands],holding_ticks=[row['holding'] for row in commands],
         unloading_ticks=[row['unloading'] for row in commands],
@@ -82,9 +101,10 @@ def initialize(base,current_state,limits,*,environment='physical'):
         digest_kind='base command digest plus initialization prefix and its measured provenance')
 
 
-def build(plan,*,current_state=None,limits=None,environment='physical'):
+def build(plan,*,current_state=None,limits=None,environment='physical',disabled_grippers=(),held_arms=()):
     base=prepare(plan)
-    if current_state is not None:return initialize(base,current_state,limits,environment=environment)
+    if current_state is not None:return initialize(base,current_state,limits,environment=environment,
+        disabled_grippers=disabled_grippers,held_arms=held_arms)
     return dict(base,timeline_digest=base['base_timeline_digest'],digest_kind='base commands')
 
 
@@ -93,7 +113,8 @@ def validate(timeline,plan):
     expected=prepare(plan)
     if timeline.get('initialization'):
         init=timeline['initialization']
-        expected=initialize(expected,init['actual_start'],init['command_limits'],environment=init['environment'])
+        expected=initialize(expected,init['actual_start'],init['command_limits'],environment=init['environment'],
+                            disabled_grippers=init.get('disabled_grippers',()),held_arms=init.get('held_arms',()))
     else:
         expected=dict(expected,timeline_digest=expected['base_timeline_digest'],digest_kind='base commands')
     if timeline!=expected:raise ValueError('execution timeline differs from its sealed parent/initialization')

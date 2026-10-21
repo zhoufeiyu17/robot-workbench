@@ -3,8 +3,16 @@ import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
+const sessionSource=await readFile(new URL('../web/session.js',import.meta.url),'utf8');
+const sessionModule='data:text/javascript;base64,'+Buffer.from(sessionSource).toString('base64');
+const operationsSource=await readFile(new URL('../web/operations.js',import.meta.url),'utf8');
+const operationsModule='data:text/javascript;base64,'+Buffer.from(operationsSource).toString('base64');
+const endpointSource=await readFile(new URL('../web/physical_endpoint.js',import.meta.url),'utf8');
+const endpointModule='data:text/javascript;base64,'+Buffer.from(endpointSource.replace("'./operations.js'",JSON.stringify(operationsModule))).toString('base64');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
-const {createWorkbench,actionPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+assert.match(html, /id="control-fault-recovery" href="#environment-recover"/);
+assert.match(html, /id="collection-speed" type="range" min="30" max="170"/);
+const {createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.open=false;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -24,8 +32,9 @@ class Element {
 }
 function documentStub(){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Element()]));
+  for(const id of ['return-offset-x','return-offset-y'])nodes.get(id).value='0';
   for(const id of ['head','left','right','preview','mesh']){const card=nodes.get('media-'+id),image=new Element('img'),empty=new Element('p'),meta=new Element('p');empty.className='empty';meta.className='media-meta';card.append(image,empty,meta);}
-  const tabs=['calibration','collection','results','diagnostics'].map(tab=>{const button=new Element('button');button.dataset.tab=tab;return button;});
+  const tabs=['calibration','collection','inference','results','diagnostics'].map(tab=>{const button=new Element('button');button.dataset.tab=tab;return button;});
   return {hidden:false,nodes,tabs,events:{},getElementById(id){assert(nodes.has(id),'Missing UI node '+id);return nodes.get(id);},createElement(tag){return new Element(tag);},createElementNS(namespace,tag){return new Element(tag);},querySelectorAll(selector){return selector==='[data-tab]'?tabs:[];},addEventListener(name,callback){this.events[name]=callback;}};
 }
 const response=(value,headers={})=>({ok:true,status:200,headers:{get:key=>headers[key]??null},json:async()=>value,blob:async()=>new Blob(['fixture'])});
@@ -39,9 +48,9 @@ function manualSnapshot(){
   value.manual={joint_names:Array.from({length:12},(_,i)=>'J'+i),positions:Array(12).fill(.1),limits:Array.from({length:12},()=>[-1,1]),jaw_gaps_mm:[80,80],default_joint_speed_rad_s:.2,default_jaw_speed_mm_s:10,queue:{available:true,revision:4,waypoints:[]}};
   return value;
 }
-function harness({audit=false,storage,sessionMonitor}={}){
+function harness({audit=false,physical=false,business,storage,sessionMonitor,environmentAccess,crypto=webcrypto,create=createWorkbench}={}){
   const document=documentStub(),requests=[],intervals=[],revoked=[],blobs=[],timeouts=new Map(),rafs=new Map();let now=0,timerId=0,rafId=0;
-  const app=createWorkbench({document,storage,sessionMonitor,location:{href:'http://localhost:8110/'+(audit?'?preview-audit=1':'')},performance:{now:()=>now},crypto:webcrypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
+  const app=create({document,storage,sessionMonitor,environmentAccess,location:{href:'http://localhost:8110/?'+new URLSearchParams({...audit?{'preview-audit':'1'}:{},...physical?{environment:'physical'}:{},...business!==undefined?{business}:{}})},performance:{now:()=>now},crypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
   const fireTimer=predicate=>{const timer=[...timeouts.entries()].find(([,t])=>predicate(t.ms));assert(timer,'matching timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;};
   return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
@@ -59,6 +68,135 @@ const review=snapshot({device:{environment:'physical'},workflow:{primary_action:
 assert.match(actionPermission(review,'execute').reason,/净空/);
 assert.equal(actionPermission(review,'execute',{clearance:true}).allowed,true);
 assert.equal(actionPermission(snapshot(),'stop',{pending:true,fresh:false}).allowed,true);
+assert.equal(handoffPermission(snapshot(),'collection').allowed,true);
+assert.equal(handoffPermission(snapshot(),'calibration').allowed,false);
+assert.equal(handoffPermission(snapshot(),'constructor').allowed,false);
+assert.equal(handoffPermission(snapshot(),'collection',{pending:true}).allowed,false);
+assert.equal(handoffPermission(snapshot(),'collection',{fresh:false}).allowed,false);
+assert.equal(handoffPermission({...snapshot(),workflow:{busy:true}},'collection').allowed,false);
+assert.equal(handoffPermission({...snapshot(),runtime:{...snapshot().runtime,connected:false}},'collection').allowed,false);
+
+for(const [business,expected]of [['inference','inference'],['collection','collection'],['calibration','calibration'],['invalid','calibration'],['constructor','calibration']]){
+  const h=harness({physical:true,business});h.app.start();
+  assert.deepEqual(h.app.context,{environment:'physical',business:expected});
+  assert.equal(h.document.tabs.find(tab=>tab.dataset.tab===expected).attributes['aria-current'],'page');
+  assert.equal(h.requests.length,1);assert.equal(h.requests[0].url,'/api/state?environment=physical&business='+expected);
+  const href='/operations?environment=physical&business='+expected;
+  assert.equal(h.get('operations-link').href,href);assert.equal(h.get('operations-link').dataset.business,expected);
+  assert.equal(h.get('context-guidance-next').href,href);
+  const value=snapshot();value.device.environment='physical';h.reply(0,value);await settle();
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'initial browse context never connects, hands off or executes');
+  h.app.selectTab('collection');
+  assert.equal(h.get('operations-link').href,'/operations?environment=physical&business=collection');
+  assert.equal(h.get('operations-link').dataset.business,'collection');
+  h.app.selectTab('diagnostics');assert.equal(h.get('operations-link').dataset.business,'collection','auxiliary tabs retain the current business');
+  h.app.destroy();
+}
+
+async function guidanceFixture(business,update,environment='fake'){
+  const h=harness({physical:environment==='physical'});h.app.start();
+  if(business!=='calibration')h.app.selectTab(business);
+  const value=snapshot();Object.assign(value.runtime,{state:'READY',holder:business});
+  Object.assign(value.workflow,{status:'idle',busy:false,stage_id:business+'.idle',message:'',
+    primary_action:{id:'generate_plan',label:'生成计划',allowed:true}});
+  value.runtime.allowed_operations.inference_refresh={allowed:false,reason:'fixture has no catalog refresh'};
+  update?.(value);h.reply(h.requests.length-1,value);await settle();return {h,value};
+}
+const htmlIds=new Set([...html.matchAll(/id="([^"]+)"/g)].map(match=>match[1]));
+for(const target of ['operations-link','diagnostics-pane','task-panel','manual-tools','primary','collection-execute','return-cup',
+  'inference-run','inference-checkpoint','environment-connect','collection-prepare','collection-plan'])
+  assert(htmlIds.has(target),'guidance navigation target must exist in actual index.html: '+target);
+function followGuidance(h,target){
+  assert(htmlIds.has(target),'navigation target cannot be created only by the DOM fixture');
+  let scrolled=false;h.get(target).scrollIntoView=()=>{scrolled=true;};
+  const requests=h.requests.length;
+  h.get('context-guidance-next').events.click({preventDefault(){}});
+  assert.equal(scrolled,true);assert.equal(h.requests.length,requests,'guidance only navigates; it cannot send an action');
+  assert.equal(h.get('inference-run-dialog').open,false);assert.equal(h.get('manual-execution-dialog').open,false);
+}
+{
+  const h=harness();h.app.start();assert.match(h.get('context-guidance-title').textContent,/标定.*待核验/);
+  h.app.selectTab('collection');assert.match(h.get('context-guidance-title').textContent,/数采.*待核验/);
+  assert.match(h.get('context-guidance-message').textContent,/不会连接设备或交接控制权/);
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);h.app.destroy();
+}
+for(const connected of [false,true]){
+  const {h}=await guidanceFixture('inference',value=>{
+    Object.assign(value.runtime,{connected,holder:connected?'calibration':null,state:connected?'READY':'DISCONNECTED'});
+    value.runtime.allowed_operations.inference_run={allowed:true};
+    value.workflow.inference={model_ready:true,control_ready:false,model:{loaded:true,id:'fixture-model'}};
+  });
+  assert.match(h.get('context-guidance-title').textContent,connected?/模型已就绪.*等待本轮确认/:/模型已就绪.*尚未连接/);
+  assert.match(h.get('context-guidance-message').textContent,connected?/控制已接入.*不连接或恢复/:/控制未接入.*Run 不会连接/);
+  assert.equal(h.get('context-guidance-next').href,'#inference-run');followGuidance(h,'inference-run');
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);
+  h.advance(3100);h.intervals[1]();assert.match(h.get('context-guidance-title').textContent,/待重新核验/);
+  assert.equal(h.get('context-guidance-next').href,'/operations?environment=fake&business=inference');h.app.destroy();
+}
+{
+  const {h}=await guidanceFixture('inference',value=>{
+    Object.assign(value.runtime,{connected:false,holder:null,state:'DISCONNECTED'});
+    value.runtime.allowed_operations.inference_run={allowed:false,reason:'头部相机尚未就绪，请核验当前相机服务'};
+    value.workflow.inference={model_ready:true,model:{loaded:true}};
+  });
+  assert.match(h.get('context-guidance-title').textContent,/模型已就绪.*尚未连接/);
+  assert.equal(h.get('context-guidance-message').textContent,'头部相机尚未就绪，请核验当前相机服务');
+  followGuidance(h,'inference-run');h.app.destroy();
+}
+{
+  const {h}=await guidanceFixture('inference',value=>{value.workflow.inference={};});
+  assert.match(h.get('context-guidance-title').textContent,/状态待核验/);
+  assert.doesNotMatch(h.get('context-guidance-title').textContent,/已就绪/);h.app.destroy();
+}
+for(const [business,update,title,reason,target]of [
+  ['calibration',v=>{v.runtime.state='FAULT';v.runtime.reason='CAN反馈丢失，控制仍锁定';},/控制故障仍锁定/,/CAN反馈丢失/,'diagnostics-pane'],
+  ['calibration',v=>{v.maintenance={purpose:'restart_model'};v.workflow.primary_action.reason='服务维护中';},/服务维护中/,/服务维护中/,'operations-link'],
+  ['calibration',v=>{v.workflow.primary_action={id:'generate_plan',allowed:false,reason:'先应用标定类型与头部依赖'};},/标定/,/先应用标定类型与头部依赖/,'primary'],
+  ['collection',v=>{v.workflow.collection={warmup:{status:'not_started',message:'请先安装当前设备的头部与双腕标定'}};v.runtime.allowed_operations.collection_prepare={allowed:false,reason:'请先安装当前设备的头部与双腕标定'};},/数采环境待准备/,/请先安装当前设备/,'collection-prepare'],
+  ['calibration',v=>{v.workflow.review={id:'review-for-guidance'};v.workflow.primary_action={id:'execute',allowed:true};},/待审阅确认/,/原执行入口/,'primary'],
+  ['collection',v=>{v.workflow.busy=true;v.workflow.stage_id='collection.plan';v.workflow.message='正在处理本次真实观测';},/观测与规划/,/本次真实观测/,'task-panel']
+]){
+  const {h}=await guidanceFixture(business,update);
+  assert.match(h.get('context-guidance-title').textContent,title);assert.match(h.get('context-guidance-message').textContent,reason);
+  assert.equal(h.get('context-guidance-next').dataset.target,target);assert.equal(h.get('stop').disabled,false,'guidance preserves independent Stop');
+  if(target!=='operations-link')followGuidance(h,target);
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);h.app.destroy();
+}
+{
+  const {h}=await guidanceFixture('collection',value=>{
+    value.workflow.collection={warmup:{status:'failed',message:'准备失败'},environment:{ready:true}};
+    value.runtime.allowed_operations.collection_prepare={allowed:false,reason:'请核验初始化失败原因'};
+  });
+  assert.match(h.get('context-guidance-title').textContent,/数采初始化失败/,'explicit warmup wins over environment fallback, as in renderCollection');
+  const requests=h.requests.length,lookup=h.document.getElementById.bind(h.document);
+  h.document.getElementById=id=>id==='removed-guidance-target'?null:lookup(id);
+  h.get('context-guidance-next').dataset.target='removed-guidance-target';
+  assert.doesNotThrow(()=>h.get('context-guidance-next').events.click({preventDefault(){}}));
+  assert.equal(h.requests.length,requests);h.app.destroy();
+}
+for(const environment of ['fake','physical']){
+  const {h}=await guidanceFixture('collection',value=>{
+    value.device.environment=environment;
+    value.workflow.collection={warmup:{status:'invalidated',message:'服务变化后需要业务预热'},environment:{ready:false}};
+    value.workflow.primary_action={id:'generate_plan',allowed:false,reason:'数采服务已就绪；请在本页完成业务环境准备（初始化与预热）'};
+    value.runtime.allowed_operations.collection_prepare={allowed:true,reason:null};
+  },environment);
+  assert.equal(h.get('context-guidance-title').textContent,'数采业务待预热');
+  assert.match(h.get('context-guidance-message').textContent,/本页.*初始化与预热/);
+  assert.doesNotMatch(h.get('context-guidance-message').textContent,/运维/);
+  followGuidance(h,'collection-prepare');h.app.destroy();
+}
+
+{
+  const version='a'.repeat(64),injected=source.replace('__WORKBENCH_DEPLOYMENT_SHA__',version)
+    .replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule));
+  const versioned=await import('data:text/javascript;base64,'+Buffer.from(injected).toString('base64'));
+  for(const [create,expected] of [[createWorkbench,undefined],[versioned.createWorkbench,version]]){
+    const h=harness({create});h.app.start();h.reply(0,snapshot());await settle();
+    const sent=h.app.send('stop');assert.equal(h.requests[1].options.headers['X-Workbench-Deployment'],expected);
+    h.reply(1,{message:'stopped'});await sent;h.app.destroy();
+  }
+}
 
 {
   let starts=0,stops=0;const h=harness({sessionMonitor:{start:()=>starts++,destroy:()=>stops++}});
@@ -100,6 +238,7 @@ for(const [status,message,label] of [['running','本轮准备仍在运行','进�
   h.reply(0,value);await settle();
   assert.match(h.get('task-message').textContent,new RegExp(message));
   assert.match(h.get('task-message').textContent,/本次请求失败：重复请求被拒绝/);
+  assert.match(h.get('request-status').textContent,/本次请求失败：重复请求被拒绝/,'asynchronous failure is visible without opening details');
   assert.equal(h.get('task-status').textContent,label,'a request error is not the business task outcome');
   h.app.destroy();
 }
@@ -161,6 +300,20 @@ async function pendingManualExecution({queue=false,physical=false}={}){
   const ready=()=>{value.revision++;value.workflow={...value.workflow,status:'awaiting_review',stage_id:'manual.review',request:undefined,
     primary_action:{id:'manual_execute',label:'审阅并执行本批',allowed:true},review:{id:'intent-review',request_job_id:'intent-job',summary:'冻结动作：2个路径点，预计4.25秒',total_motion_duration_s:4.25,waypoint_jaw_gap_mm:[[80,81]],physical_clearance_required:physical}};return value;};
   return {h,value,post,ready};
+}
+for(const accepted of [false,true]){
+  const {h,value,post,ready}=await pendingManualExecution();
+  if(accepted){h.reply(post,{job_id:'intent-job'});await settle();}
+  h.advance(3100);h.intervals[1]();
+  assert.equal(h.get('manual-execution-dialog').open,false,'stale state cannot present or approve a pending check');
+  h.get('manual-confirm').events.click();
+  assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0);
+  if(!accepted){h.reply(post,{job_id:'intent-job'});await settle();}
+  h.reply(h.requests.length-1,ready());await settle();
+  assert.equal(h.get('manual-execution-dialog').open,true,'a slow unreviewed check waits for its fresh matching receipt');
+  assert.equal(h.get('manual-execution-dialog').showCount,1);
+  assert.equal(h.requests.filter(r=>r.url==='/api/actions/manual_execute').length,0,'opening a delayed confirmation never executes');
+  h.app.destroy();
 }
 {
   const {h,value,post,ready}=await pendingManualExecution();h.reply(post,{job_id:'intent-job'});await settle();
@@ -410,10 +563,163 @@ function previewSnapshot(){
   value.preview={connected:true,renderer_id:'renderer-one',status:'ready',revisions:{target:7,overview:3,mesh:4},
     frames:Object.fromEntries(['target','overview','mesh'].map(view=>[view,{ready:false,url:'/api/preview-media?environment=fake&view='+view,revision:{target:7,overview:3,mesh:4}[view]}])),
     mesh:{requested:false,applied:false,camera:'head',candidate_id:null},recovery:{allowed:false,reason:'无需重启'}};
-  value.results=[{id:'poor-head',kind:'head',label:'未通过头部',status:'quality_failed'},{id:'other-head',kind:'head',label:'另一个头部',status:'quality_failed'},{id:'poor-wrist',kind:'wrist',label:'未通过双腕',status:'quality_failed'}];
+  value.results=[{id:'poor-head',kind:'head',label:'未通过头部',status:'quality_failed'},{id:'other-head',kind:'head',label:'另一个头部',status:'quality_failed'},{id:'poor-wrist',kind:'wrist',label:'未通过双腕',status:'quality_failed',details:{head_result_id:'poor-head'}}];
   return value;
 }
 const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringify({environment:'fake',view,revision,view_revision:3,renderer_id:'renderer-one',frame_id:'frame-'+revision,source_wall_ns:10e9,...extra})});
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;
+  h.reply(0,value);await settle();h.reply(1,{},previewHeaders('target',7));await settle();
+  const image=h.get('media-preview').querySelector('img'),previous=image.src;
+  value.revision++;value.preview.revisions.overview++;value.preview.frames.target.ready=false;
+  h.app.poll();h.reply(2,value);await settle();
+  assert.equal(image.src,previous);assert.equal(image.hidden,false);assert(!h.revoked.includes(previous));
+  assert.match(h.get('media-preview').querySelector('.media-meta').textContent,/保留上一帧/);
+  value.revision++;value.preview.renderer_id='replacement-renderer';h.app.poll();h.reply(3,value);await settle();
+  assert.equal(image.hidden,true,'a frame must not survive a renderer identity change');assert(h.revoked.includes(previous));h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  h.get('preview-view').value='overview';h.get('preview-view').events.change();h.reply(1,{client_revision:4});await settle();
+  value.revision++;value.preview.revisions.overview=4;value.preview.frames.overview={...value.preview.frames.overview,ready:true,revision:4,view_revision:4};
+  h.reply(2,value);await settle();h.reply(3,{},previewHeaders('overview',4,{view_revision:4}));await settle();
+  const image=h.get('media-preview').querySelector('img'),previous=image.src;
+  assert.equal(image.draggable,false,'native image dragging must not steal the orbit gesture');
+  let prevented=0;image.events.dragstart({preventDefault:()=>prevented++});
+  image.events.pointerdown({clientX:100,clientY:100,pointerId:1,preventDefault:()=>prevented++});
+  image.events.pointermove({clientX:130,clientY:110});image.events.pointerup();assert.equal(prevented,2);
+  assert.equal(h.requests[4].url,'/api/actions/preview_overview');assert.notEqual(JSON.parse(h.requests[4].options.body).yaw,-Math.PI/2);
+  assert.equal(image.hidden,false);assert.equal(image.src,previous,'dragging retains the last completed view during the POST');
+  h.reply(4,{client_revision:5});await settle();value.revision++;value.preview.revisions.overview=5;
+  h.reply(5,value);await settle();h.reply(6,{},previewHeaders('overview',4,{view_revision:4}));await settle();assert.equal(image.src,previous,'old frame metadata cannot satisfy the new view');
+  h.nextFrame();h.reply(7,{},previewHeaders('overview',5,{view_revision:5}));await settle();
+  assert.notEqual(image.src,previous);assert(h.revoked.includes(previous));assert.equal(image.hidden,false);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  h.get('preview-view').value='overview';h.get('preview-view').events.change();h.reply(1,{client_revision:4});await settle();
+  h.reply(3,{},previewHeaders('overview',4,{view_revision:4}));await settle();
+  value.revision++;h.reply(2,value);await settle();h.nextFrame();
+  h.reply(4,{},previewHeaders('overview',4,{view_revision:4}));await settle();
+  assert.doesNotMatch(h.get('media-preview').querySelector('.media-meta').textContent,/不匹配|读取失败/,'a late state projection cannot regress an acknowledged view revision');
+  assert.equal(h.get('media-preview').querySelector('img').hidden,false);h.app.destroy();
+}
+function physicalMeshSnapshot(){
+  const value=previewSnapshot();value.device.environment='physical';value.preview.capabilities={mesh:true};
+  Object.assign(value.runtime,{calibration_revision:3,calibration_snapshot_id:'physical-installed-group'});
+  const details={environment:'hardware',robot_source:'physical',simulation_only:false};
+  value.results=[{id:'simulation-head',kind:'head',label:'v99',details:{...details,robot_source:'simulated',simulation_only:true}},
+    {id:'unproven-head',kind:'head',label:'v0'},
+    {id:'history-head',kind:'head',label:'v3',status:'quality_failed',details:{...details,version:'v3'}},
+    {id:'installed-head',kind:'head',label:'v5',status:'passed',details:{...details,version:'v5'},install:{installed:true,wrist_result_id:'installed-wrist'}},
+    {id:'installed-wrist',kind:'wrist',label:'v6',status:'quality_failed',details:{...details,version:'v6',head_result_id:'installed-head'}}];
+  value.results.push({...value.results.at(-1)});
+  return value;
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.capabilities={top_view:true};h.reply(0,value);await settle();
+  assert.equal(h.get('preview-top-view').disabled,false);h.get('preview-top-view').checked=true;h.get('preview-top-view').events.change();
+  assert.equal(JSON.parse(h.requests[1].options.body).top_view,true);
+  h.reply(1,{client_revision:4});await settle();
+  const image=h.get('media-preview').querySelector('img');image.events.pointerdown({clientX:100,clientY:100,pointerId:1,preventDefault(){}});
+  image.events.pointermove({clientX:120,clientY:100});
+  h.reply(3,{},previewHeaders('overview',4,{view_revision:4,top_view:true}));await settle();
+  assert.equal(h.get('media-preview').classList.contains('split'),true);
+  let previous=image.src;
+  for(let i=0;i<3;i++){
+    const post=h.requests.findLastIndex(row=>row.options.method==='POST');h.reply(post,{client_revision:5+i});await settle();
+    image.events.pointermove({clientX:140+20*i,clientY:100});
+    const frame=h.requests.findLastIndex(row=>row.url.includes('preview-media'));
+    h.reply(frame,{},previewHeaders('overview',5+i,{view_revision:5+i,top_view:true}));await settle();
+    assert.notEqual(image.src,previous,'continuous drag presents new frames before pointerup');previous=image.src;
+  }
+  image.events.pointerup();assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url.endsWith('/preview_overview')));
+  h.app.destroy();
+}
+{
+  const value=physicalMeshSnapshot(),rows=meshRows(value);
+  assert.deepEqual(rows.map(row=>row.id),['installed-head','installed-wrist','history-head']);
+  assert.equal(rows[0].label,'当前安装 · 头部 v5');assert.equal(rows[1].label,'当前安装 · 双腕 v6');
+  assert.equal(rows[2].status,'quality_failed','viewing a historical candidate does not impose the install quality gate');
+  value.preview.mesh_candidates=[value.results[2]];
+  assert.deepEqual(meshRows(value).map(row=>row.id),['history-head'],'dedicated mesh directory takes precedence');
+  const fake=previewSnapshot();assert.deepEqual(meshRows(fake),fake.results,'legacy fake uses its original candidate directory');
+}
+{
+  const h=harness({physical:true});h.app.start();const value=physicalMeshSnapshot();
+  value.preview.mesh.candidate_id='simulation-head';h.reply(0,value);await settle();
+  assert.equal(h.get('mesh-candidate').value,'installed-head','unusable old selection defaults to the physical installed head');
+  assert.deepEqual(h.get('mesh-candidate').children.map(row=>row.value),['','installed-head','history-head']);
+  assert.equal(h.get('mesh').checked,false);assert.equal(h.requests.length,1,'loading defaults never enables or starts mesh');
+  h.get('mesh-candidate').value='history-head';h.get('mesh-candidate').events.change();
+  h.reply(1,{client_revision:5});await settle();value.revision++;value.preview.mesh.candidate_id='history-head';value.preview.revisions.mesh=5;
+  h.reply(2,value);await settle();assert.equal(h.get('mesh-candidate').value,'history-head','a valid user-selected historical candidate survives polling');
+  h.get('mesh').checked=true;h.get('mesh-camera').value='all';h.get('mesh-camera').events.change();
+  assert.equal(h.get('mesh-candidate').value,'','missing historical wrist dependency must not silently use an unrelated installed pair');
+  assert.equal(h.requests.length,3,'a missing association never dispatches an unrelated candidate');h.app.destroy();
+}
+{
+  const h=harness({physical:true});h.app.start();const value=physicalMeshSnapshot();
+  value.preview.mesh={requested:true,applied:true,camera:'head',candidate_id:'installed-head'};
+  h.reply(0,value);await settle();
+  for(const [camera,candidate] of [['left','installed-wrist'],['right','installed-wrist'],['all','installed-wrist'],['head','installed-head']]){
+    const index=h.requests.length;h.get('mesh-camera').value=camera;h.get('mesh-camera').events.change();
+    const sent=JSON.parse(h.requests[index].options.body);assert.equal(sent.candidate_id,candidate);assert.equal(sent.enabled,true);
+    h.reply(index,{client_revision:index+10});await settle();value.revision++;
+    value.preview.mesh={requested:true,applied:true,camera,candidate_id:candidate};value.preview.revisions.mesh=index+10;
+    h.reply(index+1,value);await settle();assert.equal(h.get('mesh').checked,true);
+  }
+  h.app.destroy();
+}
+{
+  const h=harness({physical:true});h.app.start();h.app.selectTab('collection');
+  assert.equal(h.requests[0].options.signal.aborted,true);
+  const collection=physicalMeshSnapshot();collection.results=[];collection.workflow.stage_id='collection.idle';
+  collection.preview.mesh={requested:true,applied:true,camera:'all',candidate_id:'installed-wrist'};
+  h.reply(1,collection);await settle();assert.equal(h.app.state.workflow.stage_id,'collection.idle','main state renders without waiting for the extra catalog');
+  const directory=h.requests[2];assert.match(directory.url,/business=calibration/);assert.equal(directory.options.method,undefined);
+  h.reply(2,physicalMeshSnapshot());await settle();
+  assert.equal(h.get('mesh-candidate').value,'installed-wrist');assert.equal(h.get('mesh').checked,true);
+  assert.deepEqual(h.app.state.results,[],'the calibration catalog does not replace collection results');
+  assert.equal(h.app.state.preview.mesh_candidates.length,6);
+  h.app.poll();h.reply(3,{...collection,revision:2,preview:{...collection.preview,mesh_candidates:undefined}});await settle();
+  assert.equal(h.requests.length,4,'same service/install identity reuses the catalog');
+  h.app.selectTab('calibration');h.reply(4,physicalMeshSnapshot());await settle();
+  h.app.selectTab('collection');h.reply(5,{...collection,revision:3,preview:{...collection.preview,mesh_candidates:undefined}});await settle();
+  assert.equal(h.requests.length,6,'business changes reuse the same physical directory');
+  assert.equal(h.get('mesh-candidate').value,'installed-wrist');assert.equal(h.get('mesh').checked,true);h.app.destroy();
+}
+for(const changed of ['server','route','calibration','environment']){
+  const h=harness({physical:true});h.app.start();h.app.selectTab('collection');
+  const value=physicalMeshSnapshot();value.results=[];
+  h.reply(1,value);await settle();const old=h.requests[2];
+  if(changed==='environment'){
+    h.app.switchContext({environment:'fake',business:'collection'});h.reply(3,previewSnapshot());await settle();
+  }else{
+    const newer=physicalMeshSnapshot();newer.results=[];newer.revision=2;
+    if(changed==='server')newer.server_instance_id='new-physical-server';
+    if(changed==='route')newer.gateway_route={route_id:'a'.repeat(32)};
+    if(changed==='calibration')newer.runtime.calibration_revision++;
+    h.app.poll();h.reply(3,newer);await settle();
+    assert.equal(h.requests.length,5,'new identity gets its own catalog request');
+    const result={...newer,results:physicalMeshSnapshot().results.map(row=>({...row,id:'new-'+row.id}))};
+    h.reply(4,result);await settle();
+  }
+  assert.equal(old.options.signal.aborted,true,'old catalog request is aborted on '+changed+' change');
+  old.resolve(response(physicalMeshSnapshot()));await settle();
+  assert(!h.get('mesh-candidate').children.some(row=>row.value==='installed-head'),'late catalog cannot cross '+changed+' identity');
+  h.app.destroy();
+}
+{
+  const h=harness({physical:true});h.app.start();h.app.selectTab('collection');
+  const value=physicalMeshSnapshot();value.results=[];h.reply(1,value);await settle();
+  h.reply(2,{...physicalMeshSnapshot(),server_instance_id:'unrelated-calibration-server'});await settle();
+  assert.equal(h.get('mesh-candidate').value,'');assert.match(h.app.state.preview.mesh_catalog_error,/已变化的服务或安装/);
+  assert.equal(h.app.state.server_instance_id,'fixture-server','catalog lookup cannot change the accepted main service identity');
+  h.app.poll();h.reply(3,{...value,revision:2,preview:{...value.preview,mesh_candidates:undefined}});await settle();
+  assert.equal(h.requests.length,4,'a failed lookup is not retried on every status poll; calibration view can refresh it');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
 {
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;value.preview.frames.target.source_wall_ns=4e9;
   h.reply(0,value);await settle();h.reply(1,{},previewHeaders('target',7,{source_wall_ns:4e9}));await settle();
@@ -506,17 +812,20 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
   h.get('preview-view').value='overview';h.get('preview-view').events.change();assert.equal(h.requests[1].url,'/api/actions/preview_overview');
   h.get('overview-zoom').value=1.5;h.get('overview-zoom').events.input();h.get('overview-zoom').value=2;h.get('overview-zoom').events.input();assert.equal(h.requests.length,2,'overview requests are serialized and coalesced');
-  h.reply(1,{client_revision:4});await settle();assert.equal(h.requests[3].url,'/api/actions/preview_overview');assert.equal(JSON.parse(h.requests[3].options.body).zoom,2);h.app.destroy();
+  h.reply(1,{client_revision:4});await settle();assert.match(h.requests[3].url,/preview-media/);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'the next view waits for a rendered frame, not just its HTTP ACK');
+  h.reply(3,{},previewHeaders('overview',4,{view_revision:4}));await settle();
+  assert.equal(h.requests[4].url,'/api/actions/preview_overview');assert.equal(JSON.parse(h.requests[4].options.body).zoom,2);h.app.destroy();
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.connected=false;value.preview.error='renderer process unavailable';value.preview.recovery={allowed:false,reason:'后端未允许',message:'检查本会话渲染日志',commands:['review renderer.log']};
-  h.reply(0,value);await settle();h.app.selectTab('diagnostics');assert.equal(h.get('image-recovery').hidden,false);assert.equal(h.get('preview-recover').disabled,true);
-  await h.get('preview-recover').events.click();assert.equal(h.requests.length,1,'disabled recovery must not send a restart');
+  h.reply(0,value);await settle();h.app.selectTab('diagnostics');assert.equal(h.get('image-recovery').hidden,false);assert.equal(h.get('preview-recover').href,'/operations?environment=fake&business=calibration');
+  assert.equal(h.get('preview-recover').events.click,undefined,'service recovery is navigation, not a business action');
   const reconnect=h.get('reconnect-images').events.click();assert.match(h.requests[1].url,/\/api\/state/);h.reply(1,{...value,revision:2});await reconnect;
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'browser recovery only rereads state and frames');
   assert.equal(h.get('image-recovery-commands').textContent,'review renderer.log');
-  value.preview.recovery.allowed=true;value.revision=3;h.app.poll();h.reply(2,value);await settle();assert.equal(h.get('preview-recover').disabled,false);
-  h.get('preview-recover').events.click();assert.equal(h.requests[3].url,'/api/actions/preview_recover');h.app.destroy();
+  value.preview.recovery.allowed=true;value.revision=3;h.app.poll();h.reply(2,value);await settle();assert.equal(h.get('preview-recover').events.click,undefined);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
 }
 {
   const h=harness();h.app.start();h.reply(0,snapshot({device:{id:'protocol-fake',environment:'fake'}}));await settle();
@@ -690,10 +999,15 @@ function deletionSnapshot(){
   const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.manual.jaw_gaps_mm=[83.00000236797332,-.000002];h.reply(0,value);await settle();
   assert.equal(h.get('jaw-left').value,83);assert.equal(h.get('jaw-right').value,0);assert.equal(h.get('audit-start').disabled,false);
   assert.deepEqual(h.app.state.manual.jaw_gaps_mm,[83.00000236797332,-.000002],'command fields must not mutate measured feedback');
-  h.get('jaw-left').value='84';h.get('show-target').events.click();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'an explicit command outside 0–83 is rejected, not clamped');
-  value.manual.jaw_gaps_mm=[-2,85];h.get('use-feedback').events.click();assert.equal(h.get('jaw-left').value,0);assert.equal(h.get('jaw-right').value,83);
-  assert.deepEqual(value.manual.jaw_gaps_mm,[-2,85]);h.get('audit-start').events.click();assert.deepEqual(JSON.parse(h.requests[1].options.body).jaw_gap_mm,[0,83]);h.app.destroy();
-  for(const invalid of [-2.00001,85.00001,NaN,Infinity]){
+  h.get('jaw-left').value='83.1';h.get('show-target').events.click();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'an explicit command outside 0–83 is rejected, not clamped');
+  value.manual.jaw_gaps_mm=[-2,87];h.get('use-feedback').events.click();assert.equal(h.get('jaw-left').value,0);assert.equal(h.get('jaw-right').value,83);
+  assert.deepEqual(value.manual.jaw_gaps_mm,[-2,87]);h.get('audit-start').events.click();assert.deepEqual(JSON.parse(h.requests[1].options.body).jaw_gap_mm,[0,83]);h.app.destroy();
+  for(const accepted of [85.019,87,88.5,89]){
+    const valid=harness({audit:true});valid.app.start();const observed=previewSnapshot();observed.manual.jaw_gaps_mm=[accepted,80];valid.reply(0,observed);await settle();
+    assert.equal(valid.get('use-feedback').disabled,false);assert.equal(valid.get('audit-start').disabled,false);assert.equal(valid.get('jaw-left').value,83);
+    assert.equal(valid.app.state.manual.jaw_gaps_mm[0],accepted);assert.match(valid.get('manual-feedback').textContent,/反馈范围 -2–89 mm，命令目标仍为 0–83 mm/);valid.app.destroy();
+  }
+  for(const invalid of [-2.00001,89.000001,NaN,Infinity]){
     const rejected=harness({audit:true});rejected.app.start();const bad=previewSnapshot();bad.manual.jaw_gaps_mm=[invalid,80];rejected.reply(0,bad);await settle();
     assert.equal(rejected.get('use-feedback').disabled,true);assert.equal(rejected.get('audit-start').disabled,true);assert.equal(rejected.get('jaw-left').value,'','invalid feedback is never silently converted into a target');
     assert(Object.is(rejected.app.state.manual.jaw_gaps_mm[0],invalid));
@@ -713,10 +1027,10 @@ function deletionSnapshot(){
   const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
   const value=collectionSnapshot();Object.assign(value.workflow,{busy:false,status:'ready',speed_scale:.3,review:{id:'speed-30',speed_scale:.3},primary_action:{id:'execute',allowed:true},trajectory:{id:'plan-one',timeline_digest:'frozen-plan',url:'/api/result-media?result_id=plan-one',speed_scale:.3}});
   value.runtime.allowed_operations.generate_plan={allowed:true};h.reply(1,value);await settle();
-  h.get('collection-speed').value='50';h.get('collection-speed').events.input();assert.equal(h.get('primary').disabled,true);
-  const update=h.get('review-speed').events.click();assert.equal(JSON.parse(h.requests[2].options.body).speed_scale,.5);
-  h.reply(2,{message:'新速度已审阅'});await update;value.revision++;value.workflow.speed_scale=.5;value.workflow.review={id:'speed-50',speed_scale:.5};h.reply(3,value);await settle();
-  assert.equal(h.get('primary').disabled,false);assert.equal(h.get('collection-speed-value').textContent,'50%');
+  h.get('collection-speed').value='170';h.get('collection-speed').events.input();assert.equal(h.get('primary').disabled,true);
+  const update=h.get('review-speed').events.click();assert.equal(JSON.parse(h.requests[2].options.body).speed_scale,1.7);
+  h.reply(2,{message:'新速度已审阅'});await update;value.revision++;value.workflow.speed_scale=1.7;value.workflow.review={id:'speed-170',speed_scale:1.7};h.reply(3,value);await settle();
+  assert.equal(h.get('primary').disabled,false);assert.equal(h.get('collection-speed-value').textContent,'170%');
   const target={left_arm_joints:Array(6).fill(0),right_arm_joints:Array(6).fill(.1),left_gripper:65,right_gripper:83};
   const plan={timeline_digest:'frozen-plan',ticks:[{tick:0,time_s:0,target},{tick:1,time_s:.033,target}],stages:[{name:'close',start_tick:1}]};
   const load=h.get('trajectory-load').events.click();h.reply(4,plan);await load;
@@ -726,6 +1040,96 @@ function deletionSnapshot(){
   assert.equal(h.requests[5].options.signal.aborted,true);h.reply(5,plan);await stale;assert.equal(h.get('trajectory-view').hidden,true);
   const bad=h.get('trajectory-load').events.click();h.reply(7,{...plan,timeline_digest:'another-plan'});await bad;
   assert.match(h.get('trajectory-status').textContent,/身份/);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'trajectory inspection never issues motion');h.app.destroy();
+}
+async function pendingSceneRestore(offsets=[20,-10],reviewOffsets=offsets,planningWaitMs=0){
+  const saved=new Map(),h=harness({storage:{getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)}});
+  h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=manualSnapshot();value.runtime.holder='collection';
+  Object.assign(value.runtime.allowed_operations,{return_cup:{allowed:true},collection_plan:{allowed:true},generate_plan:{allowed:true}});
+  Object.assign(value.workflow,{status:'ready',busy:false,stage_id:'collection.idle',speed_scale:.97,collection:{},review:null});
+  h.reply(1,value);await settle();h.get('collection-speed').value='106';h.get('collection-speed').events.input();
+  offsets.forEach((n,i)=>{const input=h.get(i?'return-offset-y':'return-offset-x');input.value=String(n);input.events.input();});
+  assert.equal(h.get('return-cup').disabled,false);assert.equal(h.get('collection-return').hidden,false);
+  const request=h.get('return-cup').events.click(),post=h.requests.length-1;
+  assert.equal(h.requests[post].url,'/api/actions/return_cup');const body=JSON.parse(h.requests[post].options.body);
+  assert.equal(body.speed_scale,undefined,'scene recovery does not submit the normal speed draft');assert.deepEqual(body.offset_xy_mm,offsets);
+  assert.equal(h.get('manual-execution-dialog').open,false,'generation request does not confirm movement');
+  if(planningWaitMs){h.advance(planningWaitMs);h.intervals[1]();assert.equal(h.get('manual-execution-dialog').open,false);value.server_wall_ns+=planningWaitMs*1e6;}
+  h.reply(post,{job_id:'restore-job',message:'恢复计划已生成'});await request;
+  value.revision++;Object.assign(value.workflow,{id:'return-one',status:'awaiting_review',stage_id:'collection.return_review',
+    primary_action:{id:'execute',allowed:true},review:{id:'return-review',request_job_id:'restore-job',speed_scale:.97,offset_xy_mm:reviewOffsets,expires_at_wall_ns:value.server_wall_ns+30e9,physical_clearance_required:false,summary:'恢复到固定原始杯位附近'},
+    collection:{return_task:{status:'awaiting_review',message:'请确认本次恢复',offset_xy_mm:offsets,origin_position_m:[.7,.05,.051],goal_position_m:[.7+offsets[0]/1000,.05+offsets[1]/1000,.051],duration_s:37.5667,parent_speed_scale:.97,parent_plan_id:'successful-parent-plan'}},
+    trajectory:{id:'return-path',url:'/api/result-media?result_id=return-path',speed_scale:.97}});
+  h.reply(h.requests.length-1,value);await settle();return {h,value};
+}
+{
+  const {h,value}=await pendingSceneRestore();
+  assert.equal(h.get('stage-title').textContent,'恢复场景 · 待确认');assert.equal(h.get('primary-action').hidden,true);
+  assert.equal(h.get('collection-execute-action').hidden,true);assert.equal(h.get('review-panel').hidden,true,'scene recovery has one confirmation entry');
+  assert.equal(h.get('manual-execution-dialog').open,true);assert.equal(h.get('manual-execution-dialog').showCount,1);
+  assert.equal(h.get('manual-confirm-title').textContent,'恢复场景');assert.match(h.get('manual-confirm-jaws').textContent,/固定原始杯位.*20 mm.*-10 mm/);
+  assert.match(h.get('manual-confirm-jaws').textContent,/本次计划目标 \[720.0, 40.0, 51.0\] mm/);
+  assert.match(h.get('collection-return-positions').textContent,/固定原始杯位 \[700.0, 50.0, 51.0\].*本次计划目标 \[720.0, 40.0, 51.0\]/);
+  assert.equal(h.get('collection-speed').value,'106');assert.equal(h.get('collection-speed').disabled,true);assert.equal(h.get('review-speed').disabled,true);
+  assert.match(h.get('collection-return-timing').textContent,/37.6 秒.*固定原始杯位.*数采速度草稿不参与/);
+  assert.equal(h.get('collection-return-source').textContent,'父计划：successful-parent-plan');assert.equal(h.get('collection-stages').hidden,true);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'a ready plan opens confirmation without executing');
+  const before=h.requests.length;h.get('review-speed').events.click();assert.equal(h.requests.length,before);
+  h.get('manual-confirm').events.click();const executePost=h.requests.length-1;
+  assert.equal(h.requests[executePost].url,'/api/actions/execute');const body=JSON.parse(h.requests[executePost].options.body);
+  assert.equal(body.speed_scale,.97);assert.equal(body.review_id,'return-review');assert.deepEqual(body.offset_xy_mm,[20,-10]);
+  h.reply(executePost,{message:'恢复执行已受理'});await settle();
+  value.revision++;value.workflow.status='running';value.workflow.stage_id='collection.return_execute';value.workflow.busy=true;value.workflow.collection.return_task.status='running';
+  h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('stage-title').textContent,'正在恢复场景');assert.equal(h.get('collection-speed').value,'106');
+  assert.equal(h.get('return-offset-x').disabled,true,'offset draft is locked during motion');
+  value.revision++;Object.assign(value.workflow,{status:'completed',busy:false,stage_id:'collection.return_complete',review:null,primary_action:{id:'execute',allowed:false}});
+  value.workflow.collection.return_task.status='completed';h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('collection-speed').disabled,false);assert.equal(h.get('collection-speed').value,'106','completed restoration unlocks and preserves the normal draft even while its receipt remains');
+  value.revision++;Object.assign(value.workflow,{id:'normal-after-return',status:'ready',stage_id:'collection.plan',primary_action:{id:'collection_plan',allowed:true}});
+  h.app.poll();h.reply(h.requests.length-1,value);await settle();assert.equal(h.get('collection-stages').hidden,false);
+  h.get('collection-speed').value='106';h.get('collection-speed').events.input();
+  const normalPlan=h.get('collection-plan').events.click(),normalPost=h.requests.length-1;
+  assert.equal(JSON.parse(h.requests[normalPost].options.body).speed_scale,1.06,'historical return metadata cannot lock normal planning or change its speed');
+  assert.equal(JSON.parse(h.requests[normalPost].options.body).offset_xy_mm,undefined);
+  h.reply(normalPost,{message:'普通数采计划请求已受理'});await normalPlan;h.app.destroy();
+}
+for(const invalidate of ['offset','stale','dismiss','tab','instance']){
+  const {h,value}=await pendingSceneRestore([0,0]);
+  if(invalidate==='offset'){h.get('return-offset-x').value='1';h.get('return-offset-x').events.input();}
+  if(invalidate==='stale'){h.advance(3100);h.intervals[1]();assert.equal(h.get('return-cup').disabled,true);}
+  if(invalidate==='dismiss')h.get('manual-dismiss').events.click();
+  if(invalidate==='tab'){h.app.selectTab('calibration');h.reply(h.requests.length-1,manualSnapshot());await settle();h.app.selectTab('collection');h.reply(h.requests.length-1,value);await settle();}
+  if(invalidate==='instance'){value.server_instance_id='new-instance';value.revision=1;h.app.poll();h.reply(h.requests.length-1,value);await settle();}
+  assert.equal(h.get('manual-execution-dialog').open,false,invalidate+' revokes the presented restore approval');
+  h.get('manual-confirm').events.click();await h.app.send('execute');
+  assert.equal(h.requests.filter(row=>row.url==='/api/actions/execute').length,0,invalidate+' cannot execute an old recovery plan');h.app.destroy();
+}
+{
+  const {h}=await pendingSceneRestore([10,5],[0,0]);assert.equal(h.get('manual-execution-dialog').open,false,'a receipt for another offset cannot open confirmation');
+  h.get('manual-confirm').events.click();await h.app.send('execute');assert.equal(h.requests.filter(row=>row.url==='/api/actions/execute').length,0);h.app.destroy();
+}
+{
+  const {h,value}=await pendingSceneRestore([0,0],[0,0],120000);
+  assert.equal(h.get('manual-execution-dialog').open,true,'a two-minute plan can still open its new matching confirmation');
+  assert.match(h.get('manual-confirm-expiry').textContent,/30 秒/);
+  value.revision++;value.server_wall_ns+=30.001e9;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('manual-execution-dialog').open,false,'waiting for planning cannot extend the actual 30-second credential');
+  assert.match(h.get('request-status').textContent,/重新点击“恢复场景”/);h.get('manual-confirm').events.click();
+  assert.equal(h.requests.filter(row=>row.url==='/api/actions/execute').length,0);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');const value=manualSnapshot();
+  value.runtime.allowed_operations.return_cup={allowed:true};value.workflow.stage_id='collection.idle';h.reply(1,value);await settle();
+  for(const invalid of ['51','-51','','1.5','NaN']){
+    h.get('return-offset-x').value=invalid;h.get('return-offset-x').events.input();assert.equal(h.get('return-cup').disabled,true);await h.get('return-cup').events.click();
+    assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'invalid offset cannot reach the backend');
+  }
+  h.get('return-offset-x').value='50';h.get('return-offset-y').value='-50';h.get('return-offset-x').events.input();assert.equal(h.get('return-cup').disabled,false);
+  h.advance(3100);h.intervals[1]();assert.equal(h.get('return-cup').disabled,true);h.get('return-cup').events.click();assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+  const physical=snapshot({device:{environment:'physical'}});physical.runtime.allowed_operations.return_cup={allowed:true};
+  assert.equal(actionPermission(physical,'return_cup').allowed,true);
+  physical.runtime.allowed_operations.return_cup={allowed:false,reason:'当前真机还原计划尚未完成观测与路径检查'};
+  assert.equal(actionPermission(physical,'return_cup').allowed,false);
 }
 {
   const h=harness();h.app.start();const value=snapshot();
@@ -746,13 +1150,24 @@ function deletionSnapshot(){
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
 }
 {
-  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.switchContext({environment:'physical',business:'calibration'});
-  const value=snapshot({device:{id:'physical-fixture',environment:'physical'}});value.runtime.allowed_operations.release={allowed:true};
-  h.reply(1,value);await settle();assert.equal(h.get('release').disabled,true);h.get('release-supported').checked=true;h.get('release-supported').events.change();
-  assert.equal(h.get('release').disabled,false);const release=h.get('release').events.click();assert.equal(h.requests[2].url,'/api/actions/release');assert.equal(JSON.parse(h.requests[2].options.body).arms_supported,true);
-  h.reply(2,{message:'释放已受理'});await release;value.revision++;value.runtime.release_receipt={status:'unconfirmed',message:'SDK 尚未断开'};value.runtime.allowed_operations.release={allowed:false};value.runtime.allowed_operations.connect={allowed:false};
-  h.reply(3,value);await settle();assert.match(h.get('release-state').textContent,/尚未确认.*SDK/);assert.equal(h.get('release-supported').checked,false);
-  assert.equal(h.requests.filter(row=>row.url==='/api/actions/connect').length,0);h.app.destroy();
+  const h=harness({physical:true});h.app.start();const value=snapshot({device:{id:'physical-fixture',environment:'physical'}});
+  value.runtime.allowed_operations.release={allowed:true};value.runtime.allowed_operations.recover={allowed:true};
+  value.runtime.release_receipt={status:'unconfirmed',message:'SDK 尚未断开'};h.reply(0,value);await settle();
+  for(const action of ['connect','handoff','release','recover'])await h.app.send(action);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'business page cannot call lifecycle writes even when legacy permissions allow them');
+  assert.match(h.get('release-state').textContent,/尚未确认.*SDK/);
+  for(const id of ['connect','release','recover'])assert(!htmlIds.has(id),'old lifecycle entry removed');h.app.destroy();
+}
+{
+  const h=harness({physical:true});h.app.start();h.reply(0,snapshot({device:{id:'physical-fixture',environment:'physical'}}));await settle();
+  assert.equal(h.get('handoff').disabled,true,'same holder needs no handoff');
+  h.get('handoff-target').value='collection';h.get('handoff-target').events.change();
+  assert.equal(h.get('handoff').disabled,false);h.get('handoff').events.click();await settle();
+  const writes=h.requests.filter(row=>row.options.method==='POST');
+  assert.equal(writes.length,1);assert.equal(writes[0].url,'/api/actions/handoff');
+  assert.equal(JSON.parse(writes[0].options.body).target_business,'collection');
+  assert.equal(h.app.context.business,'calibration','handoff does not navigate or execute');
+  h.app.destroy();
 }
 {
   const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
@@ -769,11 +1184,10 @@ function deletionSnapshot(){
   h.reply(0,value);await settle();assert.equal(h.get('feedback').textContent,'反馈：健康');
   assert.match(h.get('control-state').textContent,/故障锁定/);assert.equal(h.get('control-fault').hidden,false);
   assert.match(h.get('control-fault-reason').textContent,/SDK feedback age.*original control failure.*feedback_age/);
-  assert.match(h.get('handoff-reason').textContent,/保持\/控制状态尚未确认/);
   const count=h.requests.length;h.get('control-fault-diagnostics').events.click();assert.equal(h.get('diagnostics-pane').hidden,false);assert.equal(h.requests.length,count,'diagnostic navigation must not recover or reconnect');
   value.revision++;value.runtime.state='READY';h.app.poll();h.reply(count,value);await settle();assert.equal(h.get('control-fault').hidden,true,'historical diagnostic must not imply a current fault');h.app.destroy();
   const physical=harness();physical.app.start();physical.app.switchContext({environment:'physical',business:'calibration'});value.device.environment='physical';value.runtime.state='FAULT';physical.reply(1,value);await settle();
-  assert.match(physical.get('control-fault-guidance').textContent,/可靠支撑双臂.*确认断开后再连接.*未确认时不要重试/);physical.app.destroy();
+  assert.match(physical.get('control-fault-guidance').textContent,/可靠支撑双臂.*中断恢复.*未确认时不要重试/);physical.app.destroy();
 }
 {
   const saved=new Map(),storage={getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)};
@@ -852,16 +1266,94 @@ function deletionSnapshot(){
   value.workflow.collection={timing:{elapsed_s:12,stage_elapsed_s:4,stage_estimate_s:8,next_label:'核验三路相机',stages:[{label:'加载环境',status:'completed',elapsed_s:8,estimate_s:10},{label:'相机检查',status:'running',elapsed_s:4,estimate_s:8}]},environment:{ready:false,checks:{cameras:'waiting'}},relations:{plan:{timeline_digest:'private-plan'}}};
   h.reply(1,value);await settle();assert.equal(h.get('collection-stages').children.length,2);assert.match(h.get('collection-timing').textContent,/12\.0 秒.*4\.0 秒.*8\.0 秒.*核验三路相机/);
   assert.equal(h.get('collection-plan').disabled,true);assert.match(h.get('collection-plan-reason').textContent,/先准备环境/);
-  h.get('collection-prepare').events.click();assert.equal(h.requests[2].url,'/api/actions/collection_prepare');h.app.destroy();
+  h.get('collection-prepare').events.click();
+  const request=h.requests.find(row=>row.options.method==='POST');assert.equal(request.url,'/api/actions/collection_prepare','business warmup uses the business endpoint without a management operation');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=snapshot();value.runtime.state='READY';
+  Object.assign(value.workflow,{status:'failed',stage_id:'collection.plan',message:'target_joint_acceleration_limit: 6.36775 > 5',
+    failure:{kind:'motion_limit',message:'当前路径在 123% 速度下超过关节加速度上限。',recovery:'请降低速度后重新规划。',details:{speed_scale:1.23}},
+    collection:{timing:{label:'规划与碰撞检查',stages:[{label:'规划与碰撞检查',status:'failed'}]}}});
+  h.reply(1,value);await settle();
+  assert.equal(h.get('collection-failure').hidden,false);assert.equal(h.get('collection-failure-title').textContent,'本次数采未通过');
+  assert.match(h.get('collection-failure-message').textContent,/当前路径.*123%.*加速度上限/);
+  assert.match(h.get('collection-failure-recovery').textContent,/降低速度后重新规划/);
+  assert.match(h.get('task-message').textContent,/加速度上限/);assert.doesNotMatch(h.get('task-message').textContent,/target_joint/);
+  assert.match(h.get('task-details').children.map(node=>node.children.map(child=>child.textContent).join(' ')).join(' '),/target_joint_acceleration_limit/,'raw failure stays available in technical details');
+  assert.equal(h.get('control-fault').hidden,true,'planning failure does not manufacture a controller fault');
+  h.advance(3100);h.intervals[1]();assert.match(h.get('collection-failure-title').textContent,/最后确认.*当前状态待核验/);
+  value.revision++;delete value.workflow.failure;value.workflow.message='杯子检测未通过';h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('collection-failure-message').textContent,'杯子检测未通过');assert.match(h.get('collection-failure-recovery').textContent,/原始错误/);
+  assert.doesNotMatch(h.get('collection-failure-recovery').textContent,/降低速度/,'generic failures do not retain old recovery guidance');
+  for(const status of ['running','ready']){
+    value.revision++;value.workflow.status=status;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+    assert.equal(h.get('collection-failure').hidden,true);assert.equal(h.get('collection-failure-message').textContent,'');assert.equal(h.get('collection-failure-recovery').textContent,'');
+  }
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'failure guidance never initiates recovery or motion');h.app.destroy();
+}
+for(const [status,label,button]of [['not_started','待准备','初始化与预热'],['running','进行中','初始化与预热中'],['ready','已就绪','核验已就绪环境'],['invalidated','已失效','重新初始化与预热'],['failed','失败','重新初始化与预热']]){
+  const preparations=[],access={permission:()=>({allowed:status!=='running',reason:status==='running'?'正在预热':''}),prepare:action=>{if(status!=='running')preparations.push(action);},subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({environmentAccess:access});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=snapshot();value.runtime.allowed_operations.collection_prepare={allowed:status!=='running',reason:status==='running'?'正在预热':''};
+  value.workflow.primary_action={id:'prepare_collection',allowed:true,label:'旧后台准备入口'};
+  value.workflow.collection={warmup:{status,message:'后端准备说明',stage_label:'核验规划服务',elapsed_s:12,generation:'service-one'}};
+  h.reply(1,value);await settle();
+  assert.equal(h.get('collection-warmup-status').textContent,'初始化与预热：'+label);assert.match(h.get('collection-warmup-message').textContent,/后端准备说明/);
+  assert.match(h.get('collection-warmup-stage').textContent,/核验规划服务.*12.0 秒/);assert.match(h.get('collection-prepare').textContent,new RegExp(button));
+  assert.equal(h.get('primary-action').hidden,true,'one preparation button replaces the separate background-setup button');
+  h.get('collection-prepare').events.click();
+  assert.deepEqual(preparations,[],'business warmup never delegates to operations lifecycle');
+  const posts=h.requests.filter(r=>r.options.method==='POST');assert.equal(posts.length,status==='running'?0:1);
+  if(posts.length){
+    assert.equal(posts[0].url,'/api/actions/collection_prepare');h.reply(2,{job_id:'business-warmup',message:'accepted'});await settle();
+    h.reply(h.requests.length-1,value);await settle();
+  }
+  if(status==='ready'){
+    value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+    assert.equal(h.get('collection-warmup-status').textContent,'初始化与预热：已就绪','idempotent verification does not invent a new cold preparation');
+    assert.equal(h.get('collection-prepare').disabled,false);
+    for(const taskStatus of ['stopped','idle','failed']){
+      value.revision++;value.workflow.status=taskStatus;value.workflow.review=null;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+      assert.equal(h.get('collection-warmup-status').textContent,'初始化与预热：已就绪','task outcome is separate from resident initialization');
+    }
+    h.advance(3100);h.intervals[1]();assert.equal(h.get('collection-warmup-status').textContent,'最后确认的初始化与预热：已就绪');
+    assert.match(h.get('collection-warmup-message').textContent,/当前状态待核验/);assert.equal(h.get('collection-prepare').disabled,true,'business warmup requires fresh business facts');
+  }
+  h.app.destroy();
+}
+for(const status of ['ready','invalidated']){
+  const prepared=[],access={permission:()=>({allowed:true}),prepare:action=>prepared.push(action),subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({environmentAccess:access});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('collection');
+  const value=snapshot();value.runtime.allowed_operations.collection_prepare={allowed:true};value.runtime.allowed_operations.execute={allowed:true};
+  Object.assign(value.workflow,{primary_action:{id:'execute',allowed:true},review:{id:'retained-review',physical_clearance_required:false},collection:{warmup:{status}}});
+  h.reply(1,value);await settle();h.get('collection-prepare').events.click();await settle();
+  h.reply(2,{job_id:'business-warmup',message:'accepted'});await settle();
+  value.revision++;h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('collection-execute').disabled,status!=='ready','ready verification preserves the server review; cold preparation still invalidates old reviews');
+  assert.deepEqual(prepared,[]);assert.deepEqual(h.requests.filter(r=>r.options.method==='POST').map(r=>r.url),['/api/actions/collection_prepare'],'verification never auto-confirms a retained plan');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();
+  assert.match(h.get('collection-warmup-status').textContent,/状态未知/,'missing initialization evidence cannot imply readiness');
+  const value=snapshot({revision:2});value.workflow.collection={environment:{ready:true}};h.app.poll();h.reply(1,value);await settle();
+  assert.equal(h.get('collection-warmup-status').textContent,'初始化与预热：已就绪','older backends retain their explicit environment readiness');
+  assert.match(h.get('collection-warmup-message').textContent,/移动杯子或咖啡机、中断后复位后，可直接重新观测与规划/);h.app.destroy();
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.mesh={requested:true,applied:true,camera:'head',candidate_id:'poor-head'};
   h.reply(0,value);await settle();h.get('observation-camera').value='left';h.get('observation-camera').events.change();assert.equal(h.get('camera-grid').dataset.camera,'left');
-  h.get('mesh-camera').value='left';h.get('mesh-camera').events.change();assert.equal(JSON.parse(h.requests[1].options.body).candidate_id,null);
-  h.reply(1,{client_revision:5});await settle();value.revision++;value.preview.revisions.mesh=5;value.preview.mesh={requested:false,applied:false,camera:'left',candidate_id:null};h.reply(2,value);await settle();
-  h.get('mesh-candidate').value='poor-wrist';h.get('mesh-candidate').events.change();assert.equal(JSON.parse(h.requests[3].options.body).candidate_id,'poor-wrist');
-  h.reply(3,{client_revision:6});await settle();value.revision++;value.preview.revisions.mesh=6;value.preview.mesh.candidate_id='poor-wrist';h.reply(4,value);await settle();
-  h.get('mesh-camera').value='head';h.get('mesh-camera').events.change();assert.equal(JSON.parse(h.requests[5].options.body).candidate_id,'poor-head','switching cameras restores its own remembered candidate');
+  for(const [index,camera,candidate] of [[1,'left','poor-wrist'],[3,'right','poor-wrist'],[5,'all','poor-wrist'],[7,'head','poor-head']]){
+    h.get('mesh-camera').value=camera;h.get('mesh-camera').events.change();
+    assert.deepEqual(JSON.parse(h.requests[index].options.body).candidate_id,candidate);
+    assert.equal(JSON.parse(h.requests[index].options.body).enabled,true,'switches preserve enabled mesh');
+    h.reply(index,{client_revision:index+4});await settle();value.revision++;value.preview.revisions.mesh=index+4;
+    value.preview.mesh={requested:true,applied:false,camera,candidate_id:candidate};h.reply(index+1,value);await settle();
+  }
+  const rows=[...value.results,{id:'other-wrist',kind:'wrist',details:{head_result_id:'other-head'}}];
+  assert.equal(matchingMeshCandidate(rows,'all','poor-head','other-wrist'),'poor-wrist','unrelated remembered candidate cannot override the dependency');
+  assert.equal(matchingMeshCandidate(rows,'head','other-wrist','poor-head'),'other-head');
+  assert.equal(matchingMeshCandidate(rows.filter(row=>row.id!=='poor-wrist'),'all','poor-head',''),'', 'missing association is not replaced by an unrelated candidate');
   assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url.endsWith('/preview_mesh')),'camera selection never routes to install or execution');h.app.destroy();
 }
 {
@@ -877,7 +1369,10 @@ function deletionSnapshot(){
   const value=snapshot(),current='/runs/current-job',historical='/runs/old-job';value.workflow.id=current;
   const video=(role,run)=>({id:role,kind:'replay',mime_type:'video/mp4',ready:true,camera:'base_0',role,url:'/videos/'+(run?'old':'current')+'-'+role+'.mp4',...(run?{run_id:run}:{})});
   value.media=['source','target'].map(role=>video(role));
-  value.results=['source','target'].map(role=>({id:role,kind:'recording',run_id:historical,label:role,media:video(role,historical)}));
+  value.results=['source','target'].map(role=>({id:role,kind:'recording',status:'failed',run_id:historical,label:role,media:video(role,historical),
+    recording_quality:{raw_manifest_sha256:'a'.repeat(64),dimensions:{motion:{label:'控制执行完成'},data:{label:'存在采样缺口'},video:{label:'视频可回放'},training:{label:'训练用途待筛选'}},
+      cameras:{base_0:{label:'头部',accepted_pairs:3,consecutive_sequences:[{first_index:0,last_index:1,first_time_ns:100,last_time_ns:200},{first_index:2,last_index:2,first_time_ns:400,last_time_ns:400}],
+        discontinuities:[{reason:'accepted_counter_discontinuity',before_index:1,after_index:2}],ingress_diagnostics:{status:'not_available'}}}}}));
   h.reply(1,value);await settle();h.app.selectTab('results');
   assert.equal(h.get('collection-history-run').children.length,2);assert.equal(h.get('collection-history-run').value,current);
   let videos=h.get('replay-media').querySelectorAll('video');assert.equal(videos.length,2);assert(videos.every(node=>node.src.includes('current-')));
@@ -886,6 +1381,12 @@ function deletionSnapshot(){
   assert(videos.every(node=>node.paused),'switching runs stops playback from the old pair');
   videos=h.get('replay-media').querySelectorAll('video');assert.equal(videos.length,2,'same camera and media ids across runs never form a four-video pair');assert(videos.every(node=>node.src.includes('old-')));
   assert.equal(h.get('results-list').querySelectorAll('article').length,2);assert.match(h.get('collection-history-summary').textContent,/正在查看历史任务.*2 项回放/);assert.equal(h.get('collection-history-summary').title,historical);
+  const qualityLabels=h.get('results-list').querySelectorAll('dd').map(node=>node.textContent);
+  for(const label of ['控制执行完成','存在采样缺口','视频可回放','训练用途待筛选'])assert(qualityLabels.includes(label));
+  const selectors=h.get('results-list').querySelectorAll('input');assert.equal(selectors.length,4);
+  const pick=h.get('results-list').querySelectorAll('button').find(node=>node.textContent==='下载已选片段清单');
+  assert.equal(pick.disabled,true);selectors[0].checked=true;selectors[0].events.change();assert.equal(pick.disabled,false);
+  selectors[0].checked=false;selectors[0].events.change();assert.equal(pick.disabled,true);
   for(const node of videos){node.duration=4;node.events.loadedmetadata();}assert.equal(h.get('collection-replay-toggle').disabled,false);await h.get('collection-replay-toggle').events.click();assert(videos.every(node=>!node.paused));
   assert.equal(h.requests.length,before,'history browsing and local playback send no device actions');
   value.revision++;value.workflow.id='/runs/newly-generated-job';h.app.poll();h.reply(before,value);await settle();
@@ -893,4 +1394,287 @@ function deletionSnapshot(){
   h.app.selectTab('calibration');h.reply(before+1,snapshot());await settle();h.app.selectTab('collection');h.reply(before+2,value);await settle();
   assert.equal(h.get('collection-history-run').value,historical,'history selection survives switching business context');h.app.destroy();
 }
-console.log('PASS unified web: per-run history pairing, server-owned outcomes, workspace drafts, degree sliders, readonly auto-preview, calibration comparison, explicit collection stages, reviewed speed, replay, release and instance/media guards.');
+for(const crypto of [webcrypto,{getRandomValues:values=>webcrypto.getRandomValues(values)}]){
+  const h=harness({crypto});h.app.start();h.reply(0,previewSnapshot());await settle();h.get('show-target').events.click();
+  assert.equal(h.requests[1].url,'/api/actions/preview_target','preview reaches the backend with secure-context or HTTP crypto');
+  const previewId=JSON.parse(h.requests[1].options.body).request_id;
+  assert.match(previewId,/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+  const stop=h.app.send('stop');assert.equal(h.requests[2].url,'/api/actions/stop');
+  const stopId=JSON.parse(h.requests[2].options.body).request_id;
+  assert.match(stopId,/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);assert.notEqual(stopId,previewId);
+  h.reply(2,{message:'停止已受理'});await stop;h.app.destroy();
+}
+{
+  const h=harness({crypto:{}});h.app.start();h.reply(0,previewSnapshot());await settle();h.get('show-target').events.click();await settle();
+  assert.match(h.get('request-status').textContent,/缺少安全随机数/);await h.app.send('stop');
+  assert.match(h.get('request-status').textContent,/缺少安全随机数/);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
+function executionSettingsSnapshot(business='calibration'){
+  const value=snapshot();value.runtime.allowed_operations.execution_settings={allowed:true};
+  value.runtime.execution_settings={revision:2,business,settings:{arrival_enabled:business==='calibration',
+    arrival_tolerances_rad:Array.from({length:12},(_,i)=>.01+i*.001),arrival_jaw_mm:2,
+    tracking_enabled:business==='calibration',tracking_joint_rad:.08,tracking_jaw_mm:4,tracking_duration_s:.2,
+    fake_error:{enabled:false,joint_bias_max_rad:0,seed:0}}};return value;
+}
+{
+  const h=harness();h.app.start();assert.equal(h.get('execution-settings-apply').disabled,true);
+  const value=executionSettingsSnapshot();value.runtime.execution_settings.legacy_passive_guards=true;h.reply(0,value);await settle();
+  const inputs=()=>h.get('arrival-tolerance-inputs').querySelectorAll('input');
+  assert.deepEqual(inputs().map(node=>node.value),value.runtime.execution_settings.settings.arrival_tolerances_rad);
+  assert.match(h.get('execution-settings-effective').textContent,/当前生效.*版本 2.*标定.*超差保护/);
+  assert.match(h.get('execution-settings-effective').textContent,/原被动轴保护（0.01 rad \/ 2 mm）；应用后所有轴按本页跟踪设置执行/);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  h.get('arrival-observe-only').checked=true;h.get('arrival-observe-only').events.input();
+  h.get('tracking-observe-only').checked=true;h.get('tracking-observe-only').events.input();
+  h.get('fake-error-enabled').checked=true;h.get('fake-error-enabled').events.input();
+  h.get('fake-error-max').value='.004';h.get('fake-error-max').events.input();
+  h.get('fake-error-seed').value='42';h.get('fake-error-seed').events.input();
+  inputs()[2].value='.027';inputs()[2].events.input();
+  value.revision++;h.app.poll();h.reply(1,value);await settle();
+  assert.equal(inputs()[2].value,'.027','status polling must preserve unapplied per-joint draft');
+  assert.match(h.get('execution-settings-draft').textContent,/未应用/);
+  assert.match(h.get('execution-settings-effective').textContent,/到位超差保护/,'draft toggles do not misreport effective policy');
+  assert.equal(h.get('execution-settings-apply').disabled,false);h.get('execution-settings-apply').events.click();
+  assert.equal(h.requests[2].url,'/api/actions/execution_settings');const body=JSON.parse(h.requests[2].options.body);
+  assert.equal(body.expected_revision,2);assert.equal(body.business,'calibration');assert.equal(body.settings.arrival_enabled,false);assert.equal(body.settings.tracking_enabled,false);
+  assert.deepEqual(body.settings.arrival_tolerances_rad,value.runtime.execution_settings.settings.arrival_tolerances_rad.map((v,i)=>i===2?.027:v));
+  assert.deepEqual(body.settings.fake_error,{enabled:true,joint_bias_max_rad:.004,seed:42});
+  assert.equal(h.get('manual-execution-dialog').open,false,'applying policy does not ask for or confirm a motion');
+  h.reply(2,{message:'执行误差设置已生效'});await settle();
+  value.revision++;value.runtime.execution_settings={...value.runtime.execution_settings,revision:3,settings:body.settings,legacy_passive_guards:false};
+  h.reply(3,value);await settle();assert.match(h.get('execution-settings-summary').textContent,/到位仅记录.*跟踪仅记录.*随机误差开启/);
+  assert.doesNotMatch(h.get('execution-settings-effective').textContent,/原被动轴保护/);
+  assert.equal(h.get('execution-settings-apply').disabled,true);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=executionSettingsSnapshot();h.reply(0,value);await settle();
+  h.get('tracking-joint-tolerance').value='.12';h.get('tracking-joint-tolerance').events.input();
+  value.revision++;value.runtime.execution_settings.revision++;h.app.poll();h.reply(1,value);await settle();
+  assert.equal(h.get('tracking-joint-tolerance').value,'.12');assert.equal(h.get('execution-settings-apply').disabled,true);
+  assert.match(h.get('execution-settings-draft').textContent,/版本已变化/);
+  h.get('execution-settings-reset').events.click();assert.equal(h.get('tracking-joint-tolerance').value,.08);
+  h.get('fake-error-max').value='.051';h.get('fake-error-max').events.input();assert.equal(h.get('execution-settings-apply').disabled,true);
+  assert.match(h.get('execution-settings-draft').textContent,/0～0.05/);
+  h.app.selectTab('collection');const collection=executionSettingsSnapshot('collection');collection.runtime.allowed_operations.execution_settings={allowed:false,reason:'请先交接控制权限'};
+  h.reply(2,collection);await settle();assert.equal(h.get('arrival-observe-only').checked,true);assert.equal(h.get('tracking-observe-only').checked,true);
+  assert.equal(h.get('execution-settings-apply').disabled,true);assert.match(h.get('execution-settings-reason').textContent,/交接/);
+  collection.revision++;collection.runtime.allowed_operations.execution_settings={allowed:true};collection.runtime.execution_settings.fake_error_available=false;
+  h.app.poll();h.reply(3,collection);await settle();assert.equal(h.get('fake-error-enabled').disabled,true);
+  assert.match(h.get('fake-error-capability').textContent,/需要完整 Fake/);
+  h.app.switchContext({...h.app.context,environment:'physical'});
+  const physical=executionSettingsSnapshot('collection');physical.device.environment='physical';h.reply(4,physical);await settle();
+  assert.equal(h.get('fake-error-settings').hidden,true);h.app.destroy();
+}
+{
+  const h=harness(),value=snapshot();
+  value.inference_execution={execute_steps:30,revision:0,allowed:true,action_horizon:60,control_hz:30};
+  value.runtime.allowed_operations.inference_execution_settings={allowed:true};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-execution-settings').hidden,false);
+  assert.equal(h.get('inference-execute-steps').value,'30');
+  h.get('inference-execute-steps').value='45';h.get('inference-execute-steps').events.input();
+  assert.equal(h.get('inference-steps-apply').disabled,false);
+  h.app.poll();h.reply(1,value);await settle();
+  assert.equal(h.get('inference-execute-steps').value,'45','poll preserves draft');
+  h.get('inference-steps-apply').events.click();
+  const sent=h.requests.find(row=>row.options.method==='POST');
+  assert.equal(sent.url,'/api/actions/inference_execution_settings');
+  const body=JSON.parse(sent.options.body);assert.equal(body.business,'calibration');assert.equal(body.execute_steps,45);assert.equal(body.expected_revision,0);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'saving does not run or connect');
+  h.app.destroy();
+}
+function inferenceSnapshot(){
+  const value=snapshot();value.runtime.holder='inference';value.runtime.allowed_operations.inference_prepare={allowed:true};value.runtime.allowed_operations.inference_preview={allowed:true};value.runtime.allowed_operations.execute={allowed:true};
+  value.workflow={id:'inference-round-1',revision:1,status:'ready',busy:false,stage_id:'inference.idle',message:'推理环境就绪',primary_action:{id:'inference_preview',label:'准备本轮推理',allowed:true},outcomes:{},
+    inference:{model:{id:'base379-010-29450',label:'Base379 · epoch 010 / step 29450',loaded:true},duration_s:40,seed:7,
+      metrics:{elapsed_source_s:12.4,remaining_source_s:27.6,elapsed_wall_s:31.2,queries:4,predictions:3,submitted:372,completed:370,last_infer_wall_s:.42},
+      outcome:{success:null},audit:{problems:[{kind:'velocity',axis:1,value:4}],projections:[{axis:2,before:2.1,after:2}]}}};
+  return value;
+}
+{
+  const h=harness({business:'inference'});h.app.start();const value=inferenceSnapshot();
+  value.runtime.connected=false;value.runtime.allowed_operations.inference_run={allowed:true};
+  value.workflow.inference={...value.workflow.inference,model_ready:true,run_context:{id:'legacy-disconnected'},selected_model_id:'chosen',bundle_digest:'a'.repeat(64)};
+  h.reply(0,value);await settle();assert.equal(h.get('inference-run').disabled,true);
+  h.get('inference-run').events.click();h.get('inference-run-clearance').checked=true;h.get('inference-run-confirm').events.click();
+  await h.app.send('inference_run');assert.equal(h.get('inference-run-dialog').open,false);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'disconnected Run cannot submit any SDK or business execution even with legacy allowed:true');h.app.destroy();
+}
+function oneRunSnapshot(){
+  const value=inferenceSnapshot(),id='base566-epoch007-step58982',digest='a'.repeat(64);
+  Object.assign(value.runtime,{connected:true,holder:'inference'});
+  Object.assign(value.runtime.allowed_operations,{inference_run:{allowed:true},inference_select:{allowed:true},inference_refresh:{allowed:false}});
+  Object.assign(value.workflow.inference,{selected_model_id:id,bundle_digest:digest,model_ready:true,
+    run_context:{server_instance_id:value.server_instance_id,device_id:value.device.id,connected:true,workflow_generation:1},
+    models:[{id,label:'Base566 epoch007',selectable:true,status:'ready',bundle_digest:digest},
+      {id:'base566-epoch005-step42130',label:'Base566 epoch005',selectable:true,status:'ready',bundle_digest:'b'.repeat(64)},
+      {id:'pending',label:'epoch008',selectable:false,status:'downloading',reason:'下载中'}],
+    model:{id,label:'Base566 epoch007',loaded:true,bundle_digest:digest}});
+  return value;
+}
+{
+  const calls=[];let listener=()=>{},allowed=true,finish;
+  const access={state:{model:{selected_model_id:'base566-epoch007-step58982',ready:false},active_job:null},
+    permission:()=>({allowed}),subscribe(fn){listener=fn;},setEnvironment(){},destroy(){},
+    prepare(action,parameters){calls.push({action,parameters});allowed=false;listener();return new Promise(resolve=>finish=resolve);}};
+  const h=harness({business:'inference',environmentAccess:access}),value=oneRunSnapshot(),id=value.workflow.inference.selected_model_id;
+  value.runtime.connected=false;value.runtime.allowed_operations.inference_run={allowed:false,reason:'先选择checkpoint'};
+  value.workflow.inference.model_ready=false;value.workflow.inference.model.loaded=false;value.workflow.inference.model.status='not_loaded';
+  value.workflow.inference.models=value.workflow.inference.models.slice(0,1);value.workflow.inference.catalog_error='模型目录接口尚未启动';
+  h.app.start();h.reply(0,value);await settle();
+  const select=h.get('inference-checkpoint');
+  assert.equal(select.value,'');assert.equal(select.children.length,2);
+  assert.equal(select.children[0].textContent,'选择checkpoint以准备');assert.equal(select.children[0].disabled,true);
+  assert.equal(select.children[1].value,id,'unreachable catalog adds no invented checkpoint');
+  const choose=next=>{if(select.value!==next){select.value=next;return select.events.change();}};
+  choose(id);select.events.change();assert.equal(calls.length,1,'one human choice submits exactly one operation');
+  assert.equal(select.value,id);assert.equal(select.disabled,true);
+  value.revision++;h.app.poll();h.reply(1,value);await settle();assert.equal(select.value,id,'a stale business poll preserves the in-flight selection');
+  access.state.active_job={request:{action:'prepare_model',parameters:{model_id:id}},status:'running',phase:'warming_model'};
+  finish();await settle();listener();
+  value.revision++;value.workflow.inference.model.status='loading';value.workflow.inference.model.message='正在预热当前 checkpoint';
+  h.app.poll();h.reply(2,value);await settle();assert.equal(select.value,id);assert.match(h.get('inference-model-message').textContent,/正在预热/);
+  assert.equal(access.state.active_job.phase,'warming_model');assert.equal(calls.length,1);
+  access.state.active_job=null;allowed=true;value.workflow.inference.model.status='error';value.workflow.inference.model.error='预热失败';
+  value.revision++;h.app.poll();h.reply(3,value);await settle();listener();
+  assert.equal(select.value,'','failed preparation restores a real re-selection opportunity');assert.equal(select.disabled,false);
+  choose(id);assert.equal(calls.length,2,'the same sole checkpoint can be explicitly retried');
+  access.state.model.ready=true;allowed=true;finish();await settle();listener();
+  value.workflow.inference.model_ready=true;value.workflow.inference.model.loaded=true;value.workflow.inference.model.status='ready';value.workflow.inference.model.error=null;
+  value.revision++;h.app.poll();h.reply(4,value);await settle();assert.equal(select.value,id,'prepared model remains selected');
+  assert.equal(h.get('inference-run').disabled,true);h.get('inference-run').events.click();
+  assert.equal(h.get('inference-run-dialog').open,false);
+  assert(calls.every(row=>row.action==='prepare_model'));assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'selection and Run never auto-connect through business actions');
+  h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('inference');
+  const value=oneRunSnapshot();h.reply(1,value);await settle();
+  assert.equal(h.get('inference-checkpoint').value,value.workflow.inference.selected_model_id);
+  assert.equal(h.get('inference-checkpoint').children[2].disabled,true);
+  h.get('inference-duration').value='2';h.get('inference-duration').events.change();
+  h.get('inference-run').events.click();assert.equal(h.get('inference-run-dialog').open,true);
+  assert.match(h.get('inference-run-summary').textContent,/2 秒/);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'opening Run is not authorization');
+  assert.equal(h.get('inference-run-confirm').disabled,true);
+  h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();
+  h.get('inference-run-confirm').events.click();h.get('inference-run-confirm').events.click();
+  const sent=h.requests.filter(row=>row.options.method==='POST');assert.equal(sent.length,1);
+  assert.equal(sent[0].url,'/api/actions/inference_run');const body=JSON.parse(sent[0].options.body);
+  assert.equal(body.seed,7);assert.equal(body.duration_s,2);assert.equal(body.arms_supported,undefined);
+  assert.equal(body.physical_clearance,true);assert.equal(body.scene_reset,true);
+  assert.equal(body.expected_bundle_digest,'a'.repeat(64));assert.deepEqual(body.expected_context,value.workflow.inference.run_context);
+  assert.equal(h.get('inference-run-dialog').open,false);
+  assert.equal(sent.some(row=>/actions\/(connect|handoff|execute)$/.test(row.url)),false,'Run contains no control connection or handoff request');
+  h.app.destroy();
+}
+{
+  const calls=[],access={permission:()=>({allowed:true}),prepare:(action,parameters)=>calls.push({action,parameters}),subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({environmentAccess:access});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('inference');
+  const value=oneRunSnapshot();h.reply(1,value);await settle();
+  h.get('inference-run').events.click();h.get('inference-duration').value='2';h.get('inference-duration').events.change();
+  assert.equal(h.get('inference-run-dialog').open,false,'duration change revokes unified confirmation');
+  h.get('inference-run').events.click();h.get('inference-seed').value='8';h.get('inference-seed').events.input();
+  assert.equal(h.get('inference-run-dialog').open,false,'seed change revokes unified confirmation');
+  h.get('inference-run').events.click();h.advance(3100);h.intervals[1]();
+  assert.equal(h.get('inference-run-dialog').open,false,'stale state revokes unified confirmation');
+  h.app.poll();const poll=h.requests.length-1;value.revision++;h.reply(poll,value);await settle();
+  h.get('inference-run').events.click();h.get('inference-checkpoint').value='base566-epoch005-step42130';
+  h.get('inference-checkpoint').events.change();assert.equal(h.get('inference-run-dialog').open,false);
+  assert.deepEqual(calls,[{action:'prepare_model',parameters:{model_id:'base566-epoch005-step42130',expected_bundle_digest:'b'.repeat(64)}}]);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'selection cannot use inference_select or connect');
+  h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('inference');
+  const value=oneRunSnapshot();h.reply(1,value);await settle();h.get('inference-run').events.click();
+  h.app.poll();value.revision++;value.server_instance_id='new-server';h.reply(2,value);await settle();
+  assert.equal(h.get('inference-run-dialog').open,false,'server restart revokes unified confirmation');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('inference');
+  assert.match(h.requests[1].url,/business=inference/);assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'navigation does not transfer control or prepare a model');
+  const value=inferenceSnapshot();value.workflow.inference.duration_s=1;h.reply(1,value);await settle();assert.equal(h.get('work-pane').dataset.business,'inference');
+  assert.match(h.get('inference-model').textContent,/Base379/);assert.equal(h.get('inference-model-status').textContent,'已加载');
+  assert.match(h.get('inference-outcome').textContent,/未知/);assert.match(h.get('inference-audit-summary').textContent,/速度超限 1.*位置投影 1.*不执行碰撞检查/);
+  const metricText=h.get('inference-metrics').children.flatMap(row=>row.children.map(node=>node.textContent)).join(' ');
+  assert.match(metricText,/\/ 1 秒/,'short diagnostic reports its actual duration; next Run uses 120 seconds');
+  assert.match(metricText,/12.4 秒.*27.6 秒.*31.2 秒.*4 \/ 3.*372 \/ 370.*0.420 秒/);
+  assert.equal(h.get('primary-action').hidden,true,'prepare action has one visible entry');
+  h.get('inference-preview').events.click();assert.equal(h.requests[2].url,'/api/actions/inference_preview');h.reply(2,{job_id:'preview-job'});await settle();
+  value.revision++;value.workflow.status='awaiting_review';value.workflow.stage_id='inference.review';
+  value.workflow.primary_action={id:'execute',allowed:true,label:'确认执行本轮 40 秒推理'};value.workflow.review={id:'inference-review-1',seed:7,duration_s:120,summary:'整轮120秒，仅记录越限，不检查碰撞'};
+  h.reply(3,value);await settle();assert.equal(h.get('review-panel').hidden,false);assert.equal(h.get('primary-action').hidden,false);assert.equal(h.get('primary').disabled,false);
+  assert.equal(h.requests.filter(row=>row.url==='/api/actions/execute').length,0,'preparing and rendering the round review never starts it');
+  h.get('inference-seed').value='8';h.get('inference-seed').events.input();assert.equal(h.get('primary').disabled,true,'changing seed revokes prior local review');
+  h.get('inference-preview').events.click();h.reply(4,{job_id:'next-preview'});await settle();
+  value.revision++;value.workflow.review={...value.workflow.review,id:'inference-review-2',seed:8};value.workflow.inference.seed=8;
+  h.reply(5,value);await settle();h.get('primary').events.click();assert.equal(h.requests[6].url,'/api/actions/execute');
+  const body=JSON.parse(h.requests[6].options.body);assert.equal(body.seed,8);assert.equal(body.duration_s,120);assert.equal(body.physical_clearance,true);
+  h.reply(6,{job_id:'inference-running'});await settle();value.revision++;value.workflow.status='running';value.workflow.busy=true;value.workflow.review=null;value.workflow.primary_action=null;value.workflow.stage_id='inference.execute';h.reply(7,value);await settle();
+  assert.equal(h.get('inference-seed').disabled,true);assert.equal(h.requests.filter(row=>row.url==='/api/actions/execute').length,1,'a running round has no per-chunk confirmation');
+  value.revision++;value.workflow.status='completed';value.workflow.busy=false;value.workflow.inference.outcome={success:true,reason:'stable_tray_support'};
+  value.results=[{id:'infer-head',kind:'recording',status:'valid',run_id:value.workflow.id,media:{id:'infer-head',kind:'replay',camera:'base_0',role:'source',ready:true,mime_type:'video/mp4',url:'/api/result-media?business=inference&result_id=infer-head'}}];
+  h.app.poll();h.reply(8,value);await settle();assert.match(h.get('inference-outcome').textContent,/成功：末段稳定托盘支撑已确认/);
+  h.get('inference-results').events.click();assert.equal(h.get('results-pane').hidden,false);assert.equal(h.get('results-business').value,'inference');assert.equal(h.get('replay-media').querySelectorAll('video').length,1);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,3);h.app.destroy();
+}
+{
+  const route={route_id:'a'.repeat(32),prefix:'/device-physical/'+'a'.repeat(32),device_id:'physical-cpu'};
+  const value=snapshot({device:{id:'physical-cpu',environment:'physical'},gateway_route:route});
+  assert.equal(routePhysicalRequest('/api/actions/stop',{body:JSON.stringify({environment:'physical'})},value,'http://localhost:8110/'),route.prefix+'/api/actions/stop');
+  assert.equal(routePhysicalRequest('/api/state?environment=physical',{},value,'http://localhost:8110/'),'/api/state?environment=physical');
+  assert.equal(routePhysicalRequest('/api/actions/stop',{body:JSON.stringify({environment:'fake'})},value,'http://localhost:8110/'),'/api/actions/stop');
+  assert.equal(routePhysicalRequest(route.prefix+'/api/media/head?environment=physical',{},value,'http://localhost:8110/'),route.prefix+'/api/media/head?environment=physical');
+  const h=harness();h.app.start();h.reply(0,snapshot({server_instance_id:'fake-server'}));await settle();
+  h.app.switchContext({environment:'physical',business:'calibration'});value.server_instance_id='physical-server';h.reply(1,value);await settle();
+  assert.equal(h.app.state.server_instance_id,'physical-server');
+  h.app.switchContext({environment:'fake',business:'calibration'});h.reply(2,snapshot({server_instance_id:'fake-server',revision:2}));await settle();
+  assert.equal(h.app.state.server_instance_id,'fake-server','returning to another environment must not retire that live server');
+  h.app.switchContext({environment:'physical',business:'calibration'});value.revision++;h.reply(3,value);await settle();
+  h.app.send('stop');assert.equal(h.requests[4].url,route.prefix+'/api/actions/stop');
+  assert.equal(JSON.parse(h.requests[4].options.body).environment,'physical');h.reply(4,{message:'stop accepted'});await settle();h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=manualSnapshot();
+  value.manual.disabled_grippers=['left'];value.manual.jaw_gaps_mm=[null,72.];
+  h.reply(0,value);await settle();h.get('jaw-left').value='65';
+  assert.equal(h.get('jaw-left').disabled,true);assert.equal(h.get('jaw-right').disabled,false);
+  assert.match(h.get('manual-feedback').textContent,/左夹爪 未知/);
+  assert.match(h.get('manual-feedback').textContent,/已禁用夹爪：左/);
+  h.get('use-feedback').events.click();
+  assert.equal(h.get('jaw-left').value,'65','missing feedback cannot overwrite the draft with a fake zero');
+  assert.equal(Number(h.get('jaw-right').value),72);h.app.destroy();
+}
+{
+  const calls=[],access={navigateEnvironment:next=>calls.push(next),permission:()=>({allowed:false}),subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({environmentAccess:access,business:'collection'});h.app.start();const value=snapshot();h.reply(0,value);await settle();
+  const count=h.requests.length;h.get('environment').value='physical';h.get('environment').events.change();
+  assert.deepEqual(calls,['physical']);assert.equal(h.app.context.environment,'fake');assert.equal(h.get('environment').value,'fake');
+  assert.equal(h.requests.length,count,'environment switch cannot reuse current scripts against a different manager');h.app.destroy();
+}
+{
+  const env={target:{manager_instance:'current-manager'},recent_jobs:[]},access={state:env,permission:()=>({allowed:true}),subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({business:'inference',environmentAccess:access});h.app.start();const value=oneRunSnapshot();
+  value.workflow.message='所选模型已就绪';value.workflow.inference.model.status='ready';value.workflow.inference.model.error=null;
+  value.workflow.request={id:'old-model-tool',action:'inference_refresh',status:'failed',finished_wall_ns:20,error:'Connection refused'};
+  const originalRequest=JSON.parse(JSON.stringify(value.workflow.request));h.reply(0,value);await settle();
+  assert.match(h.get('task-message').textContent,/本次请求失败.*Connection refused/,'model_ready alone cannot hide a failed tool');
+  const job={status:'succeeded',verification:{ok:true},finished_at_ns:30,request:{action:'prepare_model',
+    expected_target:{manager_instance:'current-manager',backend_instance:value.server_instance_id,environment:'fake',device_id:value.device.id},
+    parameters:{model_id:value.workflow.inference.selected_model_id,expected_bundle_digest:value.workflow.inference.bundle_digest}}};
+  env.recent_jobs=[job];value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.doesNotMatch(h.get('task-message').textContent,/本次请求失败/);assert.match(h.get('request-status').textContent,/更新的运维操作.*通过核验/);
+  assert.match(h.get('task-details').children.flatMap(row=>row.children.map(node=>node.textContent)).join(' '),/Connection refused/);assert.deepEqual(value.workflow.request,originalRequest);
+  for(const alter of [j=>j.status='unknown',j=>j.verification.ok=false,j=>j.finished_at_ns=10,
+    j=>j.request.parameters.model_id='another-model',j=>j.request.expected_target.backend_instance='old-backend',
+    j=>j.request.expected_target.manager_instance='old-manager']){
+    const invalid=JSON.parse(JSON.stringify(job));alter(invalid);env.recent_jobs=[invalid];value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+    assert.match(h.get('task-message').textContent,/本次请求失败.*Connection refused/);
+  }
+  env.recent_jobs=[job];value.workflow.request={...originalRequest,action:'inference_run',finished_wall_ns:20};value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.match(h.get('task-message').textContent,/本次请求失败/,'new model preparation cannot hide an execution failure');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
+console.log('PASS unified web: inference workspace/reviews/metrics/media, execution error settings/drafts/gates, per-run history pairing, server-owned outcomes, workspace drafts, degree sliders, readonly auto-preview, calibration comparison, explicit collection stages and failure guidance, HTTP request IDs, reviewed speed, replay, release, per-environment server identities and bound physical endpoint routing.');

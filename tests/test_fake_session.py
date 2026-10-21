@@ -90,6 +90,8 @@ class FakeSessionTest(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         code, state = self.http('/api/state?environment=fake&business=collection')
         self.assertEqual(code, 200); self.assertEqual(state['host'], '127.0.0.1:18866')
+        code, scene = self.http('/api/fake-scene?environment=fake&business=collection')
+        self.assertEqual(code,200);self.assertEqual(scene['path'],'/api/fake-scene?environment=fake&business=collection')
         code, _ = self.http('/api/actions/stop', {'request_id': 'business'}, **{'X-CSRF-Token': 'backend-token'})
         self.assertEqual(code, 200)
         self.assertEqual(self.http('/api/actions/stop', {'request_id': 'wrong'})[0], 403)
@@ -144,6 +146,26 @@ class FakeSessionTest(unittest.TestCase):
         self.assertTrue(self.http('/api/session')[1]['cleanup_verified'])
         self.assertEqual(self.http('/')[1], b'offline management')
         self.assertEqual(self.http('/api/session/start', self.body('late'))[0], 409)
+    def test_persistent_child_survives_wall_clock_advance_and_requires_manual_stop(self):
+        for deadline, persistent in ((None, False), (time.time_ns()+1000000000, True)):
+            with self.assertRaises(ValueError):
+                FakeSession(self.prepare, state_dir=self.root/'bad', deadline_wall_ns=deadline, persistent=persistent)
+        admitted = FakeSession(self.prepare, state_dir=self.root/'admitted', deadline_wall_ns=None, persistent=True)
+        self.addCleanup(admitted.close)
+        self.assertIsNone(admitted.remaining()); self.assertFalse(admitted.expired())
+        self.manager.deadline_wall_ns = None
+        self.start()
+        with patch('robot_workbench.fake_session.time.time_ns', return_value=time.time_ns()+365*86400*10**9):
+            time.sleep(.25)
+            state = self.http('/api/session')[1]
+            self.assertTrue(state['persistent_service']); self.assertIsNone(state['remaining_wall_s'])
+            self.assertIsNone(state['deadline_wall_ns']); self.assertEqual(state['status'], 'ready')
+            self.assertEqual(self.http('/api/state')[0], 200)
+            self.assertIsNone(self.calls[0][1])
+        self.http('/api/session/stop', self.body('manual-stop', confirm=True)); self.wait_status('stopped')
+        self.assertTrue(self.manager.snapshot()['cleanup_verified'])
+        self.assertTrue(self.manager.snapshot()['allowed']['start']['allowed'])
+
     def test_cancel_preparation_and_failure_allow_no_late_spawn(self):
         entered = threading.Event(); release = threading.Event()
         def slow(generation, remaining):
@@ -215,6 +237,39 @@ class FakeSessionTest(unittest.TestCase):
         self.manager.start_guard=private
         self.http('/api/session/start',self.body('private'))
         self.assertNotIn('private command',self.wait_status('failed')['error'])
+
+    def test_operations_managed_legacy_http_is_readonly_and_cannot_replay_lifecycle(self):
+        self.manager.operations_managed=True
+        state=self.http('/api/session')[1]
+        self.assertEqual(state['lifecycle_owner'],'operations')
+        self.assertFalse(state['allowed']['start']['allowed']);self.assertFalse(state['allowed']['stop']['allowed'])
+        for action in ('start','stop'):
+            code,value=self.http('/api/session/'+action,self.body('legacy-'+action,confirm=True))
+            self.assertEqual(code,410);self.assertEqual(value['code'],'operation_required')
+            with self.assertRaisesRegex(PublicSessionError,'只读'):self.manager.request(action,self.body('direct-'+action))
+        self.assertEqual(self.calls,[]);self.assertIsNone(self.manager.child)
+        self.manager.start_once();self.wait_status('ready')
+        child=self.manager.child
+        self.assertEqual(self.http('/api/session/stop',self.body('late-stop',confirm=True))[0],410)
+        self.assertIsNone(child.poll());self.assertEqual(len(self.calls),1)
+        with self.assertRaisesRegex(ValueError,'another generation'):self.manager.start_once()
+        self.manager.close();self.assertIsNotNone(child.poll());self.assertTrue(self.manager.snapshot()['cleanup_verified'])
+
+    def test_single_attempt_reuses_guard_and_callbacks_without_http_or_automatic_restart(self):
+        sys.path.insert(0,str(ROOT/'scripts'))
+        from serve_fake_session import run_single_attempt
+        self.manager.operations_managed=True;events=[];stop=threading.Event();result=[]
+        self.manager.start_guard=lambda *args:events.append('guard') or True
+        self.manager.on_started=lambda spec,identity:events.append(('started',identity))
+        self.manager.on_stopped=lambda spec,receipt:events.append(('stopped',receipt))
+        runner=threading.Thread(target=lambda:result.append(run_single_attempt(self.manager,stop)));runner.start()
+        self.wait_status('ready');child=self.manager.child;stop.set();runner.join(4)
+        self.assertFalse(runner.is_alive());self.assertEqual(result,[0]);self.assertEqual(len(self.calls),1)
+        self.assertEqual(events[0],'guard');self.assertEqual(events[1][0],'started');self.assertEqual(events[2][0],'stopped')
+        self.assertEqual(events[1][1]['pid'],child.pid);self.assertTrue(events[1][1]['start_ticks'])
+        self.assertEqual(events[2][1]['child_exit_code'],child.returncode)
+        self.assertTrue(events[2][1]['all_owned_exited']);self.assertIsNotNone(child.poll())
+        with self.assertRaisesRegex(ValueError,'another generation'):self.manager.start_once()
 
 
 if __name__ == '__main__':

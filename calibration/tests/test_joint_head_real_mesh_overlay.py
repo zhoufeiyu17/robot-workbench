@@ -34,15 +34,15 @@ class OverlayTests(unittest.TestCase):
             side_meshes={s:[('link6',v,None)] for s in ('left','right')},
             gaps={'left':.083,'right':.083},hand={'signs':np.ones(3)},k=camera)
         img=np.zeros((48,64,3),np.uint8)
-        candidate=dict(camera_T_world_optical=np.eye(4), offsets=np.zeros(12),jaw_gap_mm=[-2.,85.])
+        candidate=dict(camera_T_world_optical=np.eye(4), offsets=np.zeros(12),jaw_gap_mm=[-2.,87.])
         with patch('cv2.fillConvexPoly') as draw:
             mesh_overlay(g,img,np.zeros(12),candidate)
             polygons=[call.args[1].copy() for call in draw.call_args_list]
-        expected=v.copy();expected[:,1]+=(.085-.083)/2
+        expected=v.copy();expected[:,1]+=(.087-.083)/2
         np.testing.assert_array_equal(polygons[1], (expected[:,:2]*1000+[32,24]).astype(np.int32))
         raw=np.zeros(14)
         raw[6]=interpolate(-2.,GAP_MM['left'],FEEDBACK['left'])
-        raw[13]=interpolate(85.,GAP_MM['right'],FEEDBACK['right'])
+        raw[13]=interpolate(87.,GAP_MM['right'],FEEDBACK['right'])
         with patch('cv2.fillConvexPoly') as draw:
             real_mesh_overlay(g,img,raw,dict(camera_T_world_optical=np.eye(4),
                 joint_offsets_rad={'left':[0.]*6,'right':[0.]*6}),camera)
@@ -50,7 +50,7 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(g.gaps,{'left':.083,'right':.083})
         np.testing.assert_array_equal(v,np.array([[-.1,-.1,1],[.1,-.1,1],[0,.1,1]]))
         with self.assertRaises(ValueError):
-            mesh_overlay(g,img,np.zeros(12),{**candidate,'jaw_gap_mm':[0,85.01]})
+            mesh_overlay(g,img,np.zeros(12),{**candidate,'jaw_gap_mm':[0,89.000001]})
 
     def test_articulated_fingers_use_gap_frames(self):
         from arx_env.joint_head_workbench_overlay import mesh_overlay

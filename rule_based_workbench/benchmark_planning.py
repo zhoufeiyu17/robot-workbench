@@ -158,8 +158,8 @@ def main():
         return 0
     if any(getattr(args, name) is None for name in ('input', 'source', 'native_code', 'assets', 'output')):
         parser.error('--input, --source, --native-code, --assets and --output are required')
-    if not .1 <= args.speed_scale <= 1.:
-        parser.error('--speed-scale must be finite and between 0.1 and 1.0')
+    if not .3 <= args.speed_scale <= 1.7:
+        parser.error('--speed-scale must be finite and between 0.3 and 1.7')
     return run(args)
 
 

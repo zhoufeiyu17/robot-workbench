@@ -1,0 +1,14 @@
+[Unit]
+Description=Robot Workbench dedicated DSW loopback tunnel
+After=network-online.target
+ConditionPathExists=/home/wujie/.ssh/id_ed25519_dsw_codex
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -NT -o "ProxyCommand=/usr/bin/python3 -B /home/wujie/services/robot-workbench/ssh_tcp_transport.py 47.116.111.83 734 1000" -i /home/wujie/.ssh/id_ed25519_dsw_codex -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/wujie/services/robot-workbench/dsw-known-hosts -o HostKeyAlias=[47.116.111.83]:734 -o ForwardAgent=no -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=12 -L 127.0.0.1:18867:127.0.0.1:43759 -p 734 root@47.116.111.83
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

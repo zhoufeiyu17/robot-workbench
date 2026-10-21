@@ -35,7 +35,7 @@ def main():
     source,model,_=fake_inputs();target=model['ticks'][0]['target']
     data={'native_identity':dict(control=deepcopy(model['control']),physical_configuration=deepcopy(runtime.physical_identity),
                                  physical_configuration_sha256=runtime.physical_sha256)}
-    grip=dict(open_travel_mm=82.992,closed_travel_mm=64.992,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
+    grip=dict(open_travel_mm=82.992,closed_travel_mm=64.992,closed_metal_gap_mm=65.,rubber_gap_mm=62.,native_travel_offset_mm=.008,max_metal_gap_mm=83.)
     stages=[dict(name='initial_hold',rows=[target,target],native_actions=[target_vector(target)]*2)]
     with patch('isaac_lane.native_target',side_effect=lambda raw,*a,**kw:vector_target(raw)):
         frozen=freeze(stages,source,data,grip,None,run_id='cpu-preset')

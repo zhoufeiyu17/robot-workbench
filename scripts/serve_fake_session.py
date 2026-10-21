@@ -1,4 +1,4 @@
-"""CPU management entry for a fixed, pre-reserved full-fake resource window."""
+"""CPU management entry for an explicitly reserved full-fake service."""
 import argparse
 from copy import deepcopy
 import hashlib
@@ -33,10 +33,23 @@ def save(path,value):
 class FullFakeProfile:
     """Derive child paths from one administrator-frozen contract, never HTTP input."""
     def __init__(self,*,contract,base,nominal,state_dir,lease,deadline_wall_ns,
-                 resume=None,history=None,browser_ports=()):
+                 resume=None,history=None,browser_ports=(),backend_port=0,attempt_root=None):
         self.contract_path=Path(contract).resolve();self.contract=json.loads(self.contract_path.read_bytes())
         self.base=Path(base).resolve();self.nominal=Path(nominal).resolve();self.root=Path(state_dir).resolve()
         self.lease=Path(lease).resolve();self.deadline=deadline_wall_ns;self.browser_ports=list(browser_ports)
+        if type(backend_port) is not int or backend_port!=0 and not 1024<=backend_port<=65535:
+            raise ValueError('trusted backend port required')
+        if (attempt_root is None)!=(backend_port==0):
+            raise ValueError('managed attempts require both a fixed backend port and attempt root')
+        self.backend_port=backend_port
+        self.attempt_root=Path(attempt_root).resolve() if attempt_root is not None else None
+        if self.attempt_root is not None:self.attempt_root.mkdir(parents=True,exist_ok=True)
+        self.persistent=self.contract['resources'].get('persistent_service') is True
+        if self.persistent:
+            if deadline_wall_ns is not None or self.contract['resources'].get('service_lifetime_seconds','missing') is not None:
+                raise ValueError('persistent contract requires explicit null service lifetime and deadline')
+        elif type(deadline_wall_ns) is not int or deadline_wall_ns<=0:
+            raise ValueError('finite full-fake contract requires a deadline')
         self.root.mkdir(parents=True,exist_ok=True)
         self.source_file=self.root/'sources.json'
         initial=dict(resume=str(Path(resume).resolve()) if resume else None,
@@ -52,10 +65,12 @@ class FullFakeProfile:
 
     def guard(self,generation,remaining_s):
         lease=json.loads(self.lease.read_text());c=self.contract
+        lifetime_valid=(lease.get('persistent_service') is True and lease.get('deadline_wall_ns','missing') is None and remaining_s is None) if self.persistent else (
+            type(lease.get('deadline_wall_ns')) is int and self.deadline<=lease['deadline_wall_ns']
+            and time.time_ns()<self.deadline and remaining_s is not None and remaining_s>=180)
         if (lease.get('schema')!='fake_session_lease.v1' or lease.get('session_id')!=c['identity']['session_id']
                 or lease.get('status')!='active' or not lease.get('gpu_record')
-                or type(lease.get('deadline_wall_ns')) is not int or self.deadline>lease['deadline_wall_ns']
-                or time.time_ns()>=self.deadline or remaining_s<180
+                or not lifetime_valid
                 or set(lease.get('gpu_uuids',[]))!=set(c['resources']['exclusive_host_gpu_uuids'])):
             raise PublicSessionError('当前资源时段无效或不足三分钟；需要新的明确资源授权')
         cards=ET.fromstring(subprocess.check_output(['nvidia-smi','-q','-x'],text=True,timeout=10)).findall('gpu')
@@ -67,9 +82,69 @@ class FullFakeProfile:
     def prepare(self,generation,remaining_s):
         # Keep each stopped run; immutable catalogs are read directly on restart.
         tag='session-'+str(generation)+'-'+secrets.token_hex(6)
-        run=self.root/'runs'/tag;run.mkdir(parents=True,exist_ok=False);output=run/'data'
+        run=self.root/'runs'/tag;run.mkdir(parents=True,exist_ok=False)
+        output=self.attempt_root/('attempt-'+str(time.time_ns())) if self.attempt_root is not None else run/'data'
         c=deepcopy(self.contract);sources=deepcopy(self.sources)
         last=Path(sources['last_output']) if sources.get('last_output') else None
+        maintenance=c.get('maintenance_restore') or {}
+        scene_override=maintenance.get('scene_override_source_output')
+        if scene_override is not None:
+            if not isinstance(scene_override,str) or not Path(scene_override).is_absolute() or '..' in Path(scene_override).parts:
+                raise ValueError('scene override requires an absolute source output path')
+            try:
+                scene=maintenance['scene']
+                from robot_workbench.fake_scene import normalize_restored_scene
+                normalize_restored_scene(scene)
+                for key in ('environment_from_cup','environment_from_machine_root'):
+                    position=scene[key]['position']
+                    if not isinstance(position,(list,tuple)) or len(position)!=3 or any(type(v) not in (int,float) or not math.isfinite(v) for v in position):
+                        raise ValueError('scene override requires finite object positions')
+            except (KeyError,TypeError) as error:raise ValueError('scene override requires an explicit valid maintenance scene') from error
+        retained=sources.get('inference_source') or (c.get('maintenance_restore') or {}).get('inference_source')
+        from serve_physx_device import inference_source,validate_inference_source
+        if last is not None and (last/'inference').is_dir():
+            retained=inference_source(last/'inference') or retained
+        if retained is not None:
+            retained=validate_inference_source(retained)
+            sources['inference_source']=deepcopy(retained)
+            c.setdefault('maintenance_restore',{})['inference_source']=deepcopy(retained)
+            c['filesystem']['readonly_roots'].append(retained['root'])
+            for name,pin in retained['files'].items():
+                c['provenance'].setdefault('input_sha256',{})[str(Path(retained['root'])/name)]=pin['sha256']
+        settings_source=sources.get('execution_settings_source') or (c.get('maintenance_restore') or {}).get('execution_settings_source')
+        if last is not None:
+            settings_files=list((last/'owner-lock').glob('*.execution-settings.json'))
+            if len(settings_files)>1:raise ValueError('ambiguous retained execution settings')
+            if settings_files:
+                path=settings_files[0]
+                settings_source=dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        if settings_source:
+            path=Path(settings_source['path']);raw=path.read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=settings_source['sha256']:
+                raise ValueError('retained execution settings changed')
+            sources['execution_settings_source']=deepcopy(settings_source)
+            c.setdefault('maintenance_restore',{})['execution_settings_source']=deepcopy(settings_source)
+            c['provenance'].setdefault('input_sha256',{})[str(path)]=settings_source['sha256']
+            c['filesystem']['readonly_roots'].append(str(path.parent))
+        recovery_source=sources.get('recovery_state_source') or (c.get('maintenance_restore') or {}).get('recovery_state_source')
+        if last is not None and (last/'scene-recovery-state.json').is_file():
+            recovery=last/'scene-recovery-state.json'
+            recovery_source=dict(path=str(recovery),sha256=hashlib.sha256(recovery.read_bytes()).hexdigest())
+        if recovery_source:
+            recovery=Path(recovery_source['path']);raw=recovery.read_bytes();saved=json.loads(raw)
+            if (hashlib.sha256(raw).hexdigest()!=recovery_source['sha256'] or saved.get('schema')!='scene_recovery_state.v1'):
+                raise ValueError('invalid retained scene recovery state')
+            sources['recovery_state_source']=deepcopy(recovery_source)
+            maintenance=c.setdefault('maintenance_restore',{})
+            maintenance['recovery_state_source']=deepcopy(recovery_source)
+            c['provenance'].setdefault('input_sha256',{})[str(recovery)]=recovery_source['sha256']
+            c['filesystem']['readonly_roots'].append(str(recovery.parent))
+            latest_scene=saved.get('last_observed_scene') or saved.get('last_completed')
+            if latest_scene and scene_override!=str(last):
+                episode=deepcopy(json.loads(self.base.read_text())['initial_suite']['episodes'][0])
+                episode['environment_from_cup']=latest_scene['cup']
+                episode['environment_from_machine_root']=latest_scene['machine']
+                maintenance['scene']=episode
         if last is not None:
             if (last/'calibrations/hardware/active/manifest.json').exists():
                 sources['resume']=str(run/'calibration-resume-source.json')
@@ -84,16 +159,17 @@ class FullFakeProfile:
                 save(sources['history'],history_source(last,jobs))
             else:sources['history']=None
             save(run/'history-discovery.json',dict(imported_jobs=[str(p) for p in jobs],not_imported=skipped))
-        duration=min(math.floor(remaining_s),math.floor((self.deadline-time.time_ns())/1e9),
+        duration=None if self.persistent else min(math.floor(remaining_s),math.floor((self.deadline-time.time_ns())/1e9),
                      self.contract['resources'].get('service_lifetime_seconds',86400))
-        if duration<180:raise PublicSessionError('本次资源时段剩余不足三分钟')
+        if duration is not None and duration<180:raise PublicSessionError('本次资源时段剩余不足三分钟')
         spool_root=Path(self.contract['camera_spool_root'])
         spool_root.mkdir(parents=True,exist_ok=True);spool=spool_root/tag
         c['identity']['experiment_id']=tag
         c['filesystem']['writable_roots']=[str(self.code),str(output),str(spool)]
         c['camera_spool_root']=str(spool)
         c['browser_ports']=sorted(set(c.get('browser_ports',[])+self.browser_ports))
-        c['resources'].update(service_lifetime_seconds=duration,max_wall_time_minutes=math.ceil(duration/60)+5)
+        c['resources']['service_lifetime_seconds']=duration
+        if duration is not None:c['resources']['max_wall_time_minutes']=math.ceil(duration/60)+5
         if sources.get('resume'):
             c['filesystem']['readonly_roots']+=list(json.loads(Path(sources['resume']).read_text())['input_sha256'])
         c['filesystem']['readonly_roots']+=sources['catalogs']
@@ -104,28 +180,52 @@ class FullFakeProfile:
             if flag in argv:argv[argv.index(flag)+1]=str(value)
             else:argv.extend([flag,str(value)])
         replace('--base',self.base);replace('--nominal-config',self.nominal)
-        replace('--output',output);replace('--port',0);replace('--duration-wall-s',duration)
-        replace('--deadline-wall-ns',self.deadline);replace('--collection-contract',run/'contract.json')
-        if 'timeout' in argv:argv[argv.index('timeout')+3]=str(duration+45)
+        replace('--output',output);replace('--port',self.backend_port);replace('--collection-contract',run/'contract.json')
+        if self.persistent:
+            for flag in ('--duration-wall-s','--deadline-wall-ns'):
+                if flag in argv:
+                    index=argv.index(flag);del argv[index:index+2]
+            if '--persistent' not in argv:argv.append('--persistent')
+            if 'timeout' in argv:
+                index=argv.index('timeout')
+                if argv[index+1:index+3]!=['-k','30']:raise ValueError('unsupported lifetime wrapper in frozen contract')
+                del argv[index:index+4]
+        else:
+            replace('--duration-wall-s',duration);replace('--deadline-wall-ns',self.deadline)
+            if 'timeout' in argv:argv[argv.index('timeout')+3]=str(duration+45)
         for flag,name in [('--calibration-resume-source','resume'),('--collection-history-source','history')]:
             if flag in argv:
                 index=argv.index(flag);del argv[index:index+2]
             if sources.get(name):argv.extend([flag,sources[name]])
         for catalog in sources['catalogs']:argv.extend(['--collection-history-catalog',catalog])
         c['execution']['smoke_commands']=[shlex.join(argv)]
-        c['execution']['stop_conditions']=['absolute manager/child deadline '+str(self.deadline),'explicit user stop; no automatic restart']
+        c['execution']['stop_conditions']=([] if self.persistent else ['absolute manager/child deadline '+str(self.deadline)])+['explicit user stop; no automatic restart']
         save(run/'contract.json',c);save(run/'sources.json',sources)
         for name,digest in c['provenance']['code_sha256'].items():
             path=Path(name) if Path(name).is_absolute() else self.code/name
             if hashlib.sha256(path.read_bytes()).hexdigest()!=digest:raise ValueError('frozen code changed: '+name)
         with (run/'preflight.log').open('xb') as log:
-            subprocess.run(argv+['--dry-run'],stdout=log,stderr=subprocess.STDOUT,check=True,timeout=min(120,duration))
+            subprocess.run(argv+['--dry-run'],stdout=log,stderr=subprocess.STDOUT,check=True,timeout=120 if duration is None else min(120,duration))
         return dict(argv=argv,cwd=str(self.code),run_path=str(run),output_path=str(output),
                     service_path=str(output/'service.json'),log_path=str(run/'resident.log'))
+
+    def started(self,spec,identity):
+        if self.attempt_root is None:return
+        if (Path(identity['output']).parent!=self.attempt_root or not identity.get('start_ticks')
+                or identity['output']!=spec['output_path'] or identity['argv']!=spec['argv']):
+            raise ValueError('managed attempt identity does not match prepared child')
+        save(Path(spec['run_path'])/'attempt.json',identity)
+        save(self.attempt_root/'current.json',identity)
 
     def stopped(self,spec,receipt):
         if spec is None:return
         run=Path(spec['run_path']);save(run/'cleanup.json',receipt)
+        identity_path=run/'attempt.json'
+        if self.attempt_root is not None and identity_path.is_file():
+            identity=json.loads(identity_path.read_text());code=receipt.get('child_exit_code')
+            identity.update(status='exited' if receipt['all_owned_exited'] and type(code) is int else 'unknown',
+                            exit_code=code,finished_wall_ns=receipt.get('checked_wall_ns',time.time_ns()))
+            save(self.attempt_root/(Path(spec['output_path']).name+'-exit.json'),identity)
         if not receipt['all_owned_exited']:return
         output=Path(spec['output_path'])
         self.sources=json.loads((run/'sources.json').read_text())
@@ -137,32 +237,70 @@ class FullFakeProfile:
         save(self.source_file,self.sources)
 
 
+def run_single_attempt(manager,stop_requested):
+    """ManagedService owns this foreground attempt; there is no HTTP writer."""
+    if not manager.operations_managed:raise ValueError('single attempt requires operations-managed lifecycle')
+    try:
+        if stop_requested.is_set():return 0
+        manager.start_once()
+        while not stop_requested.wait(.1):
+            with manager.lock:
+                if manager.worker is None:break
+    finally:manager.close()
+    state=manager.snapshot()
+    return 0 if state['cleanup_verified'] and state['error'] is None else 1
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('contract','base','nominal-config','state-dir','lease'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--calibration-resume-source',type=Path);p.add_argument('--collection-history-source',type=Path)
-    p.add_argument('--deadline-wall-ns',type=int,required=True)
-    p.add_argument('--manager-deadline-wall-ns',type=int,required=True,help='independent absolute CPU entry deadline')
+    p.add_argument('--persistent',action='store_true',help='explicit persistent contract/lease; manual stop only, no automatic restart')
+    p.add_argument('--deadline-wall-ns',type=int)
+    p.add_argument('--manager-deadline-wall-ns',type=int,help='independent absolute CPU entry deadline')
+    p.add_argument('--single-attempt',action='store_true',help='one foreground child for OperationService; no legacy HTTP lifecycle entry')
+    p.add_argument('--backend-port',type=int,help='trusted fixed backend port for a managed attempt')
+    p.add_argument('--attempt-root',type=Path,help='managed current.json and attempt-<ns> output root')
     p.add_argument('--port',type=int,default=43759);p.add_argument('--browser-port',type=int,action='append',default=[])
     a=p.parse_args()
     now=time.time_ns()
-    if not now<a.deadline_wall_ns<=a.manager_deadline_wall_ns<=now+86400*10**9:p.error('finite authorized lifetimes required')
+    if a.single_attempt:
+        if a.backend_port is None or not 1024<=a.backend_port<=65535 or a.attempt_root is None or not a.attempt_root.is_absolute():
+            p.error('--single-attempt requires --backend-port and absolute --attempt-root')
+        if a.manager_deadline_wall_ns is not None:p.error('single-attempt has no independent HTTP manager deadline')
+    elif a.backend_port is not None or a.attempt_root is not None:
+        p.error('--backend-port and --attempt-root require --single-attempt')
+    if a.persistent:
+        if a.deadline_wall_ns is not None or a.manager_deadline_wall_ns is not None:p.error('--persistent cannot include deadlines')
+    elif a.single_attempt:
+        if a.deadline_wall_ns is None or not now<a.deadline_wall_ns<=now+86400*10**9:
+            p.error('finite authorized child lifetime required without --persistent')
+    elif (a.deadline_wall_ns is None or a.manager_deadline_wall_ns is None
+          or not now<a.deadline_wall_ns<=a.manager_deadline_wall_ns<=now+86400*10**9):p.error('finite authorized lifetimes required without --persistent')
     profile=FullFakeProfile(contract=a.contract,base=a.base,nominal=a.nominal_config,state_dir=a.state_dir,
         lease=a.lease,deadline_wall_ns=a.deadline_wall_ns,resume=a.calibration_resume_source,
-        history=a.collection_history_source,browser_ports=a.browser_port)
-    manager=FakeSession(profile.prepare,state_dir=a.state_dir,deadline_wall_ns=a.deadline_wall_ns,
-        profile='full_fake',start_guard=profile.guard,on_stopped=profile.stopped,grace_s=30)
+        history=a.collection_history_source,browser_ports=a.browser_port,backend_port=a.backend_port or 0,
+        attempt_root=a.attempt_root)
+    if profile.persistent!=a.persistent:p.error('CLI lifetime differs from frozen contract')
+    runtime_state=a.state_dir/'launcher-attempts'/('attempt-'+str(time.time_ns())) if a.single_attempt else a.state_dir
+    manager=FakeSession(profile.prepare,state_dir=runtime_state,deadline_wall_ns=a.deadline_wall_ns,
+        profile='full_fake',start_guard=profile.guard,on_stopped=profile.stopped,on_started=profile.started,
+        grace_s=30,persistent=a.persistent,operations_managed=a.single_attempt)
+    if a.single_attempt:
+        done=threading.Event()
+        for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:done.set())
+        return run_single_attempt(manager,done)
     server=serve_session(manager,port=a.port,browser_ports=a.browser_port)
     profile.browser_ports.append(server.server_port)
     save(a.state_dir/'manager-service.json',dict(pid=os.getpid(),port=server.server_port,
         deadline_wall_ns=a.deadline_wall_ns,manager_deadline_wall_ns=a.manager_deadline_wall_ns,
-        session_id=profile.contract['identity']['session_id'],autostart=False))
+        session_id=profile.contract['identity']['session_id'],persistent_service=a.persistent,autostart=False))
     done=threading.Event()
     def stop(*_):done.set()
     signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-    try:done.wait(max(0,(a.manager_deadline_wall_ns-time.time_ns())/1e9))
+    try:done.wait(None if a.persistent else max(0,(a.manager_deadline_wall_ns-time.time_ns())/1e9))
     finally:manager.close();server.shutdown();server.server_close();thread.join(2)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':raise SystemExit(main())

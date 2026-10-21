@@ -15,7 +15,7 @@ import numpy as np
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'calibration'),str(ROOT/'calibration/infra')]
 from examples.scripts.debug.joint_head_workbench_live import Session,serve
-from robot_workbench.target_preview import RendererClient,TargetPreview,PendingFrame,observed_mesh
+from robot_workbench.target_preview import RendererClient,TargetPreview,PendingFrame,observed_mesh,observed_mesh_group
 
 
 class Geometry:
@@ -131,6 +131,34 @@ class TargetPreviewTests(unittest.TestCase):
             self.assertEqual(client.request.call_count,before)
         bad=deepcopy(inputs);bad[1].pop('pair_id')
         with self.assertRaises(ValueError):observed_mesh(client,bad,'poor-but-viewable')
+
+    def test_three_camera_mesh_retains_per_camera_sources_and_rejects_bad_group(self):
+        from io import BytesIO
+        from PIL import Image
+        inputs={name:deepcopy(self.inputs()) for name in ('head','left','right')}
+        for name,packet in inputs.items():
+            packet[1]['pair_id']='frame-'+name
+            packet[4]['id']='head-cal' if name=='head' else 'wrist-cal'
+            if name!='head':packet[4]['head_result_id']='head-cal'
+        def render(path,body,**kwargs):
+            self.assertEqual(path,'/real-overlay')
+            image=Image.new('RGB',(64,48),'red' if body['candidate']['id']=='head-cal' else 'blue')
+            output=BytesIO();image.save(output,format='JPEG');return output.getvalue()
+        raw,meta=observed_mesh_group(SimpleNamespace(request=render),inputs,'wrist-cal')
+        with Image.open(BytesIO(raw)) as image:self.assertEqual(image.size,(192,72))
+        self.assertEqual(meta['head_candidate_id'],'head-cal');self.assertEqual(meta['wrist_candidate_id'],'wrist-cal')
+        self.assertEqual([m['source_frame_id'] for m in meta['cameras']],['frame-head','frame-left','frame-right'])
+        self.assertFalse(meta['synchronized_capture']);self.assertFalse(meta['measurement_qualified'])
+        bad=deepcopy(inputs);bad['right'][4]['id']='unrelated'
+        with self.assertRaises(ValueError):observed_mesh_group(SimpleNamespace(request=render),bad,'wrist-cal')
+        bad=deepcopy(inputs);bad['right'][4]['head_result_id']='wrong-head'
+        with self.assertRaises(ValueError):observed_mesh_group(SimpleNamespace(request=render),bad,'wrist-cal')
+        adapter=TargetPreview(SimpleNamespace(),'renderer',mesh_inputs=lambda *_:inputs)
+        adapter.mesh(True,camera='all',candidate_id='wrist-cal')
+        adapter.frames['mesh']=(raw,dict(meta,revision=1),time.monotonic())
+        self.assertEqual(adapter.media('mesh')[1]['camera'],'all')
+        adapter.mesh(False,camera='all',candidate_id='wrist-cal')
+        with self.assertRaises(PendingFrame):adapter.media('mesh')
 
     def test_unchanged_frame_skips_jpeg_without_skipping_new_target_or_view(self):
         remote=dict(renderer_instance_id='preview',mesh_rendering_enabled=False,preview_revision=0,overview_revision=0,

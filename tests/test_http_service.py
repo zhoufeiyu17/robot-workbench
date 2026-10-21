@@ -21,6 +21,339 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_quality_download_is_readonly_and_bound_to_the_selected_recording(self):
+        report=dict(schema='recording_quality.v1',raw_manifest_sha256='a'*64,cameras={},raw_modified=False)
+        self.device.collection_history=SimpleNamespace(quality_report=lambda identity:dict(report=report,sidecar_sha256='b'*64) if identity=='known' else None)
+        base=self.url+'/api/recording-quality?environment=fake&business=collection&result_id='
+        with self.http.open(base+'known') as response:
+            value=json.load(response)
+            self.assertEqual(value['raw_manifest_sha256'],report['raw_manifest_sha256'])
+            self.assertEqual(value['download_identity']['result_id'],'known')
+            self.assertEqual(value['download_identity']['sidecar_sha256'],'b'*64)
+            self.assertIn('attachment',response.headers['Content-Disposition'])
+        for url in (base+'missing',base.replace('collection','calibration')+'known'):
+            with self.assertRaises(HTTPError):self.http.open(url)
+        self.assertIsNone(self.device.runtime)
+
+    def test_calibration_can_set_inference_length_without_connecting_or_running(self):
+        flow,calls,_,_=self.infer_run_fixture()
+        settings=dict(execute_steps=30,revision=0,allowed=True,reason=None)
+        flow.execution_settings=lambda:dict(settings)
+        def update(value,revision):
+            if revision!=settings['revision']:raise ValueError('revision changed')
+            settings.update(execute_steps=value,revision=revision+1);flow.invalidate();return dict(settings)
+        flow.set_execution_steps=update
+        view=self.state('calibration')
+        self.assertTrue(view['runtime']['allowed_operations']['inference_execution_settings']['allowed'])
+        self.assertEqual(view['inference_execution']['execute_steps'],30)
+        _,result=self.action('inference_execution_settings',business='calibration',execute_steps=45,expected_revision=0)
+        self.assertEqual(result['inference_execution']['execute_steps'],45)
+        self.assertIsNone(self.device.runtime);self.assertEqual(calls,[])
+        self.assertEqual(self.state('inference')['inference_execution']['execute_steps'],45)
+        with self.assertRaises(HTTPError):self.action('inference_execution_settings',business='calibration',execute_steps=30,expected_revision=0)
+
+    def test_inference_state_reuses_calibration_snapshot_and_holder_snapshot(self):
+        self.infer_run_fixture();self.connect()
+        calibration=SimpleNamespace(snapshot=Mock(return_value=dict(busy=False,arrival_statistics={'count':3})),results=lambda:[])
+        self.device.workflows['calibration']=calibration
+        with patch.object(self.device,'snapshot',wraps=self.device.snapshot) as snapshots:
+            state=self.app.state('fake','inference')
+        self.assertEqual(calibration.snapshot.call_count,1)
+        self.assertEqual(snapshots.call_count,2)
+        self.assertEqual(state['arrival_statistics'],{'count':3})
+
+    def test_run_remains_eligible_and_waits_for_normal_read_before_handoff(self):
+        _,calls,_,_=self.infer_run_fixture();self.connect()
+        entered=threading.Event();release=threading.Event();self.addCleanup(release.set)
+        backend=self.device.runtime.owner.backend._backend;original=backend.read_calibration_state
+        def read():entered.set();release.wait(1);return original()
+        with patch.object(backend,'read_calibration_state',side_effect=read):
+            self.assertTrue(entered.wait(1))
+            state=self.state('inference')
+            self.assertTrue(state['runtime']['idle_readiness']['control_cycle_in_flight'])
+            self.assertTrue(state['runtime']['allowed_operations']['inference_run']['allowed'])
+            body=self.infer_run_body()
+            self.action('inference_run',business='inference',**body)
+            deadline=time.monotonic()+.06
+            while self.app.jobs[('fake','inference')].get('stage')!='handoff' and time.monotonic()<deadline:time.sleep(.001)
+            self.assertEqual(self.app.jobs[('fake','inference')].get('stage'),'handoff')
+            self.assertEqual(self.device.runtime.holder,'calibration');release.set()
+            self.wait_infer_job('completed')
+        self.assertEqual(calls,['bind','preview','execute'])
+
+    def infer_run_fixture(self, pause=None):
+        calls=[];entered=threading.Event();release=threading.Event();self.addCleanup(release.set)
+        device=self.device
+        class Workflow:
+            generation=0
+            model_id='base566-epoch007-step58982'
+            digest='a'*64
+            def snapshot(self):return dict(status='ready',busy=False,outcomes={},primary_action=None,
+                inference=dict(selected_model_id=self.model_id,bundle_digest=self.digest,model_ready=True,
+                    model=dict(id=self.model_id,loaded=True,bundle_digest=self.digest)))
+            def results(self):return []
+            def allowed(self,action):return dict(allowed=True,reason=None)
+            def invalidate(self):self.generation+=1
+            cancel=invalidate
+            def refresh_models(self):calls.append('refresh');return {'models':[]}
+            def select_model(self,model_id,expected_bundle_digest=None):
+                if expected_bundle_digest!=self.digest:raise ValueError('digest changed')
+                self.generation+=1;calls.append('select');return {'model_ready':True}
+            def prepare_model(self,**_):calls.append('prepare');return {'model_ready':True}
+            def step(self,name):
+                calls.append(name)
+                if pause==name:entered.set();release.wait(2)
+            def bind_device(self):
+                if device.runtime.holder!='inference':raise ValueError('not inference holder')
+                self.step('bind')
+            def preview_episode(self,seed=0,duration_s=40):
+                self.step('preview');self.last_review=dict(token='cpu-episode-token',seed=seed,duration_s=duration_s)
+                return {'preview':dict(self.last_review)}
+            def execute_review(self,token,physical_clearance=True):
+                if token!='cpu-episode-token' or physical_clearance is not True:raise ValueError('invalid confirmation')
+                self.step('execute');return {'accepted':True}
+        flow=Workflow();self.device.workflows['inference']=flow
+        return flow,calls,entered,release
+
+    def infer_run_body(self):
+        state=self.state('inference');info=state['workflow']['inference']
+        return dict(seed=7,duration_s=40,model_id=info['selected_model_id'],expected_bundle_digest=info['bundle_digest'],
+            expected_context=info['run_context'],state_wall_ns=state['server_wall_ns'],
+            scene_reset=True,physical_clearance=True,arms_supported=True)
+
+    def wait_infer_job(self,status=None):
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            job=self.app.jobs.get(('fake','inference'),{})
+            if job.get('status') not in (None,'running'):
+                if status:self.assertEqual(job['status'],status,job)
+                return job
+            time.sleep(.01)
+        self.fail('inference job did not finish: '+str(job))
+
+    def test_inference_model_selection_does_not_connect_sdk(self):
+        flow,calls,_,_=self.infer_run_fixture()
+        for action,extra in (('inference_refresh',{}),('inference_select',dict(model_id=flow.model_id,expected_bundle_digest=flow.digest)),('inference_prepare',{})):
+            self.assertTrue(self.state('inference')['runtime']['allowed_operations'][action]['allowed'])
+            self.action(action,business='inference',**extra);self.wait_infer_job('completed')
+            self.assertIsNone(self.device.runtime)
+        self.assertEqual(calls,['refresh','select','prepare'])
+
+    def test_one_run_hands_off_existing_connection_and_executes_once_for_one_confirmation(self):
+        flow,calls,_,_=self.infer_run_fixture();self.connect();body=self.infer_run_body()
+        data=dict(environment='fake',business='inference',request_id='one-reviewed-run',**body)
+        def request():
+            req=Request(self.url+'/api/actions/inference_run',json.dumps(data).encode(),headers={
+                'Content-Type':'application/json','Origin':self.url,'X-CSRF-Token':self.app.csrf})
+            with self.http.open(req,timeout=2) as response:return json.loads(response.read())
+        first=request();self.assertEqual(request(),first)
+        job=self.wait_infer_job('completed');self.assertEqual(request(),first)
+        self.assertEqual(flow.last_review['duration_s'],40);self.assertEqual(job['result']['duration_s'],40)
+        self.assertEqual(self.device.runtime.holder,'inference');self.assertEqual(calls,['bind','preview','execute'])
+        self.assertFalse(self.device.snapshot('inference').get('motion'),'fixture checks orchestration without sending motion')
+
+    def test_two_second_run_is_bound_to_review_and_idempotent(self):
+        flow,calls,_,_=self.infer_run_fixture();self.connect();body=dict(self.infer_run_body(),duration_s=2)
+        data=dict(environment='fake',business='inference',request_id='two-second-reviewed-run',**body)
+        def request(value):
+            req=Request(self.url+'/api/actions/inference_run',json.dumps(value).encode(),headers={
+                'Content-Type':'application/json','Origin':self.url,'X-CSRF-Token':self.app.csrf})
+            with self.http.open(req,timeout=2) as response:return json.loads(response.read())
+        first=request(data);self.assertEqual(request(data),first)
+        job=self.wait_infer_job('completed');self.assertEqual(request(data),first)
+        self.assertEqual(calls,['bind','preview','execute']);self.assertEqual(flow.last_review['duration_s'],2)
+        self.assertEqual(flow.last_review['seed'],7);self.assertEqual(job['result']['duration_s'],2)
+        with self.assertRaises(HTTPError):request(dict(data,duration_s=40))
+        self.assertEqual(calls.count('execute'),1)
+
+    def test_run_default_duration_is_120_and_other_durations_are_rejected(self):
+        flow,calls,_,_=self.infer_run_fixture();body=self.infer_run_body()
+        for duration in (0,3,39,41,True,'1',float('nan')):
+            with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**dict(body,duration_s=duration))
+        self.assertIsNone(self.device.runtime);self.assertFalse(calls)
+        self.connect();body=self.infer_run_body();body.pop('duration_s');self.action('inference_run',business='inference',**body)
+        job=self.wait_infer_job('completed');self.assertEqual(flow.last_review['duration_s'],120)
+        self.assertEqual(job['result']['duration_s'],120)
+
+    def test_one_second_run_rejects_a_wrong_duration_review_before_confirmation(self):
+        flow,calls,_,_=self.infer_run_fixture();self.connect();original=flow.preview_episode
+        def wrong(seed=0,duration_s=40):return original(seed,duration_s=40)
+        flow.preview_episode=wrong
+        self.action('inference_run',business='inference',**dict(self.infer_run_body(),duration_s=1))
+        job=self.wait_infer_job('failed');self.assertIn('时长',job['error']);self.assertEqual(calls,['bind','preview'])
+
+    def test_stop_during_one_second_review_still_revokes_the_run(self):
+        _,calls,entered,release=self.infer_run_fixture('preview');self.connect()
+        self.action('inference_run',business='inference',**dict(self.infer_run_body(),duration_s=1))
+        self.assertTrue(entered.wait(1));self.action('stop',business='inference');release.set()
+        self.wait_infer_job('cancelled');self.assertEqual(calls,['bind','preview'])
+
+    def test_one_run_rejects_stale_context_missing_consent_busy_other_business_and_fault(self):
+        _,calls,_,_=self.infer_run_fixture();body=self.infer_run_body()
+        for change in ({'physical_clearance':False},{'scene_reset':False},{'expected_bundle_digest':'b'*64},
+                       {'state_wall_ns':0},{'expected_context':{}},{'duration_s':41}):
+            with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**dict(body,**change))
+        self.assertIsNone(self.device.runtime);self.assertFalse(calls)
+        self.connect()
+        self.device.workflows['collection']=SimpleNamespace(snapshot=lambda:dict(busy=True),results=lambda:[])
+        with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**self.infer_run_body())
+        del self.device.workflows['collection']
+        original=self.device.snapshot
+        with patch.object(self.device,'snapshot',side_effect=lambda business:dict(original(business),state='FAULT')):
+            with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**self.infer_run_body())
+        self.assertEqual(self.device.runtime.holder,'calibration');self.assertFalse(calls)
+
+    def test_stop_during_run_binding_prevents_late_preview_or_execution(self):
+        _,calls,entered,release=self.infer_run_fixture('bind');self.connect()
+        self.action('inference_run',business='inference',**self.infer_run_body());self.assertTrue(entered.wait(1))
+        start=time.monotonic();self.action('stop',business='inference');self.assertLess(time.monotonic()-start,.2)
+        release.set();self.wait_infer_job('cancelled');self.assertEqual(calls,['bind'])
+
+    def test_disconnected_run_reports_operations_gap_without_calling_factory(self):
+        _,calls,_,_=self.infer_run_fixture()
+        self.device.factory=Mock(side_effect=AssertionError('Run must not connect control'))
+        with self.assertRaises(HTTPError) as rejected:
+            self.action('inference_run',business='inference',**self.infer_run_body())
+        self.assertIn('运维',json.loads(rejected.exception.read())['error'])
+        self.device.factory.assert_not_called();self.assertFalse(calls);self.assertIsNone(self.device.runtime)
+
+    def test_physical_run_never_auto_connects_even_with_support_confirmation(self):
+        flow,_,_,_=self.infer_run_fixture()
+        physical=self.app.devices['physical'];physical.factory=Mock(side_effect=AssertionError('must not open SDK'))
+        physical.workflows['inference']=flow
+        state=self.app.state('physical','inference');info=state['workflow']['inference']
+        body=dict(environment='physical',business='inference',request_id='physical-consent',seed=7,duration_s=40,
+            model_id=flow.model_id,expected_bundle_digest=flow.digest,expected_context=info['run_context'],
+            state_wall_ns=state['server_wall_ns'],scene_reset=True,physical_clearance=True,arms_supported=False)
+        for supported in (False,True):
+            with self.assertRaisesRegex(ValueError,'运维'):self.app.action('inference_run',dict(body,arms_supported=supported))
+        physical.factory.assert_not_called()
+
+    def test_cancel_and_model_generation_change_revoke_pending_run_review(self):
+        flow,calls,entered,release=self.infer_run_fixture('preview');self.connect()
+        self.action('inference_run',business='inference',**self.infer_run_body());self.assertTrue(entered.wait(1))
+        self.action('cancel',business='inference');flow.invalidate();release.set()
+        self.wait_infer_job('cancelled');self.assertEqual(calls,['bind','preview'])
+
+    def test_inference_uses_shared_holder_and_once_per_round_review(self):
+        self.connect();calls=[]
+        flow=SimpleNamespace(generation=0,results=lambda:[],allowed=lambda action:dict(allowed=action in ('inference_prepare','inference_preview','execute','cancel'),reason=None))
+        flow.snapshot=lambda:dict(status='idle',busy=False,stage_id='inference.idle',outcomes={},
+            primary_action=dict(id='inference_preview',allowed=True,label='准备本轮推理'),inference=dict(duration_s=40,seed=7,model=dict(id='base379-010-29450',loaded=True)))
+        flow.invalidate=lambda:setattr(flow,'generation',flow.generation+1)
+        flow.cancel=lambda:None
+        def perform(action,body):
+            calls.append((action,deepcopy(body)))
+            if action=='inference_preview':
+                owner=self.device.snapshot('inference')
+                return dict(preview=dict(token='round-token',owner_pid=owner['pid'],runtime_nonce=owner['runtime_nonce'],
+                    command_epoch=owner['command_epoch'],workflow_generation=flow.generation,seed=body['seed'],duration_s=40),summary='40秒；仅记录目标审计；不检查碰撞')
+            return dict(message='推理请求已受理')
+        flow.action=perform;self.device.workflows['inference']=flow
+        self.assertFalse(self.state('inference')['runtime']['allowed_operations']['inference_preview']['allowed'])
+        with self.assertRaises(HTTPError):self.action('inference_preview',business='inference',seed=7,duration_s=40)
+        self.action('handoff',target_business='inference')
+        self.assertEqual(self.device.runtime.holder,'inference')
+        def finish():
+            deadline=time.monotonic()+2
+            while self.app.jobs.get(('fake','inference'),{}).get('status')=='running' and time.monotonic()<deadline:time.sleep(.01)
+            self.assertEqual(self.app.jobs[('fake','inference')]['status'],'completed')
+        self.action('inference_prepare',business='inference',seed=7,duration_s=40);finish()
+        for action,extra in [('inference_prepare',dict(reference_feedforward_sha256='a'*64)),
+                             ('inference_preview',dict(torque_bias_sdk6=[[0.]*6]))]:
+            with self.assertRaises(HTTPError):self.action(action,business='inference',seed=7,duration_s=40,**extra)
+        self.action('inference_preview',business='inference',seed=7,duration_s=40,reference_feedforward_sha256='a'*64);finish()
+        self.assertEqual([name for name,_ in calls],['inference_prepare','inference_preview'])
+        self.assertEqual(calls[-1][1]['reference_feedforward_sha256'],'a'*64)
+        review=self.state('inference')['workflow']['review'];self.assertEqual(review['seed'],7);self.assertEqual(review['duration_s'],40)
+        with self.assertRaises(HTTPError):self.action('execute',business='inference',review_id=review['id'],seed=8,duration_s=40,physical_clearance=True)
+        with self.assertRaises(HTTPError):self.action('execute',business='inference',review_id=review['id'],seed=7,duration_s=40)
+        self.action('execute',business='inference',review_id=review['id'],seed=7,duration_s=40,physical_clearance=True);finish()
+        self.assertEqual(calls[-1][0],'execute');self.assertEqual(calls[-1][1]['token'],'round-token')
+        with self.assertRaises(HTTPError):self.action('execute',business='inference',review_id=review['id'],seed=7,duration_s=40,physical_clearance=True)
+        self.assertEqual(sum(name=='execute' for name,_ in calls),1)
+        self.action('inference_preview',business='inference',seed=7,duration_s=40);finish()
+        self.action('handoff',target_business='collection')
+        self.assertNotIn(('fake','inference'),self.app.reviews)
+        self.assertEqual(self.device.runtime.holder,'collection')
+        for body in (dict(model_path='/tmp/model'),dict(duration_s=41),dict(seed=-1),dict(seed=True)):
+            with self.assertRaises(HTTPError):self.action('inference_prepare',business='inference',**body)
+
+    def test_inference_history_shares_media_route_without_connecting(self):
+        path=Path(self.temp.name)/'infer.mp4';path.write_bytes(b'0123456789')
+        self.device.workflows['inference']=SimpleNamespace(snapshot=lambda:dict(status='idle',busy=False,outcomes={}),
+            results=lambda:[dict(id='infer-video',kind='recording',status='valid',run_id='inference-1')],media=lambda ident:path if ident=='infer-video' else None)
+        state=self.state('inference');self.assertFalse(state['runtime']['connected']);self.assertEqual(state['results'][0]['id'],'infer-video')
+        url=self.url+'/api/result-media?environment=fake&business=inference&result_id=infer-video'
+        with self.http.open(Request(url,headers={'Range':'bytes=2-5'})) as response:
+            self.assertEqual(response.status,206);self.assertEqual(response.read(),b'2345')
+        with self.assertRaises(HTTPError):self.http.open(url.replace('business=inference','business=collection'))
+        self.assertIsNone(self.device.runtime)
+
+    def test_execution_settings_are_scoped_idle_only_and_revoke_reviews(self):
+        with self.assertRaises(HTTPError):self.action('execution_settings',settings={},expected_revision=0)
+        self.connect()
+        before=self.state()['runtime']['execution_settings'];settings=deepcopy(before['settings'])
+        settings.update(arrival_enabled=False,tracking_enabled=False)
+        settings['arrival_tolerances_rad']=[.01+i*.001 for i in range(12)]
+        self.app.reviews[('fake','calibration')]={'id':'obsolete-review'}
+        code,result=self.action('execution_settings',settings=settings,expected_revision=before['revision'])
+        self.assertEqual(code,200);self.assertNotIn(('fake','calibration'),self.app.reviews)
+        applied=self.state()['runtime']['execution_settings']
+        self.assertEqual(applied['settings'],settings);self.assertEqual(applied['revision'],before['revision']+1)
+        self.assertEqual(result['execution_settings']['revision'],applied['revision'])
+        self.assertFalse(self.device.snapshot('calibration').get('motion'),'editing settings must not start motion')
+        with self.assertRaises(HTTPError):self.action('execution_settings',settings=settings,expected_revision=before['revision'])
+        with self.assertRaises(HTTPError):self.action('execution_settings',business='collection',settings=settings,expected_revision=applied['revision'])
+        self.device.workflows['calibration']=SimpleNamespace(snapshot=lambda:dict(busy=True),results=lambda:[])
+        self.assertFalse(self.state()['runtime']['allowed_operations']['execution_settings']['allowed'])
+        with self.assertRaises(HTTPError):self.action('execution_settings',settings=settings,expected_revision=applied['revision'])
+        self.device.workflows.clear()
+        self.assertEqual(self.device.runtime.execution_settings_snapshot('calibration'),applied)
+
+    def test_fake_scene_readback_is_diagnostic_only_and_requires_namespace(self):
+        scene=dict(cup_position_m=[.4,.2,.78],source_wall_ns=123)
+        getter=Mock(return_value=scene);self.device.fake_scene_snapshot=getter
+        url=self.url+'/api/fake-scene?environment=fake&business=collection'
+        self.assertEqual(json.loads(self.http.open(url).read()),scene)
+        getter.assert_called_once_with();self.assertIsNone(self.device.runtime)
+        for invalid in (url.replace('fake&','physical&'),url.replace('collection','calibration'),self.url+'/api/fake-scene'):
+            with self.assertRaises(HTTPError) as error:self.http.open(invalid)
+            self.assertEqual(error.exception.code,409)
+        getter.assert_called_once_with()
+        del self.device.fake_scene_snapshot
+        with self.assertRaises(HTTPError) as error:self.http.open(url)
+        self.assertEqual(error.exception.code,409)
+
+    def test_cup_return_requires_new_review_and_never_starts_during_generation(self):
+        self.connect();self.action('handoff',target_business='collection')
+        owner=self.device.snapshot('collection');sent=[]
+        self.device.cup_return_inputs={'fixture':'parent-bound'}
+        self.device.collection_preparation=SimpleNamespace(snapshot=lambda:dict(status='ready',busy=False,can_retry=True,retry_reason=None,installed={'verified':True}))
+        self.device.workflows['collection']=SimpleNamespace(snapshot=lambda:dict(status='failed',busy=False,outcomes={},collection={}),
+            results=lambda:[],allowed=lambda action:dict(allowed=True,reason=None))
+        def prepare(device,offset_xy_mm=None):
+            device.cup_return_task=dict(directory='return-job',timeline_digest='return-timeline',duration_s=37.57,
+                parent_plan_id='parent-plan',parent_speed_scale=.97,submitted=False)
+            return dict(preview=dict(token='one-reviewed-return',owner_pid=owner['pid'],command_epoch=owner['command_epoch'],
+                runtime_nonce=owner['runtime_nonce'],purpose='cup_return',speed_scale=.97),summary='取回杯子；无新碰撞检查')
+        with patch('robot_workbench.cup_return.prepare',side_effect=prepare), \
+                patch.object(self.device,'submit',side_effect=lambda business,command:sent.append(command) or {'queued':'confirm'}):
+            self.action('return_cup',business='collection')
+            deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                view=self.state('collection')['workflow']
+                if view.get('review'):break
+                time.sleep(.01)
+            self.assertEqual(sent,[])
+            review=view['review'];self.assertEqual(review['speed_scale'],.97)
+            with self.assertRaises(HTTPError):self.action('execute',business='collection',review_id=review['id'],speed_scale=.97)
+            self.action('execute',business='collection',review_id=review['id'],speed_scale=.97,physical_clearance=True)
+            self.assertEqual(len(sent),1);self.assertEqual(sent[0]['token'],'one-reviewed-return')
+            self.assertTrue(self.device.cup_return_task['submitted'])
+            with self.assertRaises(HTTPError):self.action('execute',business='collection',review_id=review['id'],speed_scale=.97,physical_clearance=True)
+            self.assertEqual(len(sent),1)
+
     def test_readonly_history_is_available_before_collection_backend_or_connection(self):
         path=Path(self.temp.name)/'history.mp4';path.write_bytes(b'0123456789')
         row=dict(id='history-video',kind='recording',label='历史任务',media=dict(
@@ -513,7 +846,8 @@ class HTTPTest(unittest.TestCase):
         root=Path(self.temp.name);path=root/'plan.json';payload={'timeline_digest':'current-plan','ticks':[]}
         path.write_text(json.dumps(payload));config=root/'config.json';config.write_text('{"not_a_plan":true}')
         state={'plan':{'validated':True,'timeline_digest':'current-plan','plan_path':str(path)},'can_execute':False}
-        flow=CollectionWorkflow(SimpleNamespace(directory=root,snapshot=lambda:state),self.device,self.app)
+        flow=CollectionWorkflow(SimpleNamespace(directory=root,snapshot=lambda:state,state=state,lock=threading.RLock(),
+            initialization=lambda:dict(status='stopped')),self.device,self.app)
         flow.closed.set();flow.thread.join(1);flow.refresh()
         self.device.workflows['collection']=flow
         trajectory=flow.snapshot()['trajectory'];url=self.url+trajectory['url']
@@ -535,11 +869,14 @@ class HTTPTest(unittest.TestCase):
         from robot_workbench.workflows import CollectionWorkflow
         self.connect();self.action('handoff',target_business='collection')
         state=dict(status='ready',busy=False,environment={'ready':True},plan={},can_execute=False)
-        playground=SimpleNamespace(directory=Path(self.temp.name),snapshot=lambda:deepcopy(state),
-            start=Mock(return_value={'output':'new-step','status':'accepted'}))
+        playground=SimpleNamespace(directory=Path(self.temp.name),lock=threading.RLock(),state=state,snapshot=lambda:deepcopy(state),
+            start=Mock(return_value={'output':'new-step','status':'accepted'}),initialization=lambda:dict(status='stopped'))
         flow=CollectionWorkflow(playground,self.device,self.app);flow.closed.set();flow.thread.join(1);flow.refresh()
         self.device.workflows['collection']=flow
-        for action,expected in (('collection_prepare','prepare'),('collection_plan','plan')):
+        self.assertFalse(self.state('collection')['runtime']['allowed_operations']['collection_prepare']['allowed'])
+        with self.assertRaises(HTTPError):self.action('collection_prepare',business='collection',speed_scale=.4)
+        playground.start.assert_not_called()
+        for action,expected in (('collection_plan','plan'),):
             flow.refresh();self.assertTrue(self.state('collection')['runtime']['allowed_operations'][action]['allowed'])
             code,_=self.action(action,business='collection',speed_scale=.4);self.assertEqual(code,202)
             deadline=time.monotonic()+2
@@ -548,7 +885,7 @@ class HTTPTest(unittest.TestCase):
             playground.start.assert_called_with({'action':expected,'speed_scale':.4})
         self.assertFalse(self.state('collection')['runtime']['allowed_operations']['execute']['allowed'])
         with self.assertRaises(HTTPError):self.action('execute',business='collection',review_id='not-approved',physical_clearance=True)
-        self.assertEqual(playground.start.call_count,2,'step buttons must never bypass the execution review')
+        self.assertEqual(playground.start.call_count,1,'step buttons must never bypass the execution review or prepare services')
 
     def test_calibration_JSON_export_uses_original_version_store_without_connect(self):
         sys.path[:0]=[str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'calibration/examples/scripts/debug'),str(ROOT/'calibration/tests')]

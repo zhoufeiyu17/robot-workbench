@@ -100,7 +100,7 @@ def main(native_code, urdf):
         projection_noise = False
         reject_held_stage = None
         extra_cartesian_command = False
-        def __init__(self, config, world, model_report=None):
+        def __init__(self, config, world, model_report=None, prepared_cup_envelope=None):
             self.config = deepcopy(config); self.receipts = []
             report={}
             self.cup_contact=NS(certify_held=lambda *args:dict(passed=True),report=report,
@@ -117,7 +117,7 @@ def main(native_code, urdf):
                 positions.tolist=lambda:[row[:3] for row in q]
                 return NS(ee_position=positions)
             self.generator.kinematics=NS(get_state=fk)
-            self.initialization_seconds = self.warmup_seconds = 0.
+            self.initialization_seconds, self.warmup_seconds = .125, .25
             self.self_collision_partition = {'fixture': True}
         def warmup(self): pass
         def validate_continuous_path(self,path):
@@ -133,7 +133,7 @@ def main(native_code, urdf):
                 project_to_goal_frame=project_to_goal_frame,path_sha256=_digest(path))
             return receipt
         def update_world(self, world): self.generator.update_world(world)
-        def update_locked_joints(self, values): self.config['kinematics']['lock_joints'] = dict(values)
+        def update_locked_joints(self, values, *, update_right=False): self.config['kinematics']['lock_joints'] = dict(values)
         def path(self,start,end):
             steps=max(2,math.ceil(max(abs(b-a) for a,b in zip(start,end))/.0045))
             return [[a+(b-a)*i/steps for a,b in zip(start,end)] for i in range(steps+1)]
@@ -189,7 +189,9 @@ def main(native_code, urdf):
     planner.geo = Geo(scene, fk)
     observation = NS(scene=scene, sample=NS(world_from_cup=cup))
     data = dict(urdf_sha256=hashlib.sha256(urdf.read_bytes()).hexdigest(), planner_identity={'fixture': 'native'},
+                parts=[{'name':'fixture'}],cup={'fixture':True},table={},obstacles=[],observation={'scene':{'shapes':[]}},
                 native_identity=dict(control=dict(physics_hz=240, substeps=8, max_target_velocity_rad_s=2., max_target_acceleration_rad_s2=5.)))
+    planner.identity=data['planner_identity']
     grip = gripper_geometry(planner, urdf)
     spec = ac_one_dual_arm_zero_home_action_spec()
     reset_action = spec.encode(DualArmCommand(ArmCommand(tuple(state[n] for n in LEFT), True),
@@ -213,7 +215,7 @@ def main(native_code, urdf):
     def model(*args, **kwargs):
         model_calls.append(1)
         return dict(kinematics=dict(cspace={}, lock_joints={name: args[3][name] for name in FK.movable- set(LEFT)})), dict(
-            kinematics=dict(joints={name: {'velocity': 5.5} for name in LEFT}))
+            kinematics=dict(joints={name: {'velocity': 5.5} for name in LEFT}),fixed_world_geometry={'locked_positions':{}})
 
     def route(*args, **kwargs):
         return dict(recipe='normal-v31-dynamic-targets',
@@ -259,27 +261,42 @@ def main(native_code, urdf):
     from contextlib import ExitStack
     with ExitStack() as stack:
         for item in patches: stack.enter_context(item)
-        diagnostics=[]
+        from control_motion import MotionLimitError
+        failed=dict(kind='motion_limit',message='左 J2 加速度超限',recovery='降低速度',details={})
+        with patch('motiongen_plan.check_requested_speed',side_effect=MotionLimitError(failed)) as speed_check, \
+                patch('gpu_acceptance.closing_geometry',side_effect=AssertionError('contact proof ran after speed failure')):
+            try:plan_loaded(planner,observation,data,source,urdf,speed_scale=1.23)
+            except MotionLimitError as error:assert error.failure==failed
+            else:raise AssertionError('speed failure swallowed as a grasp-candidate failure')
+            assert speed_check.call_count==1
+            assert speed_check.call_args.args[0][-1]['name']=='approach_pre'
+        diagnostics=[];plan_cache={}
         base, plan, evidence = plan_loaded(planner, observation, data, source, urdf, speed_scale=.3,
-            diagnostic=lambda name,value:diagnostics.append((name,deepcopy(value))))
+            diagnostic=lambda name,value:diagnostics.append((name,deepcopy(value))),engine_cache=plan_cache)
+        assert evidence['motiongen_initialization_seconds']==.125 and evidence['motiongen_warmup_seconds']==.25
+        _,_,hot_evidence=plan_loaded(planner,observation,data,source,urdf,speed_scale=.3,engine_cache=plan_cache)
+        assert hot_evidence['engine_reused'] and hot_evidence['model_reused']
+        assert hot_evidence['motiongen_initialization_seconds']==hot_evidence['motiongen_warmup_seconds']==0.
+        assert hot_evidence['initialization_breakdown']=={}
         assert sum(name=='motiongen-receipts-latest' for name,value in diagnostics)==1
         individual=[value for name,value in diagnostics if name.startswith('motiongen-receipt-')]
         assert len(individual)==len(evidence['motiongen_receipts'])
         assert all('source_digest' in value and 'robot_config_sha256' in value for value in individual)
         assert plan['task_targets']['placement_goal']==targets['placement_goal']
         assert evidence['gpu_final_acceptance']['receiving_goal']['passed']
-        # Reuse the prepared geometry only while its source/state/rules match.
+        # Reuse geometry while model/rules match; actual locked state refreshes.
         cached_data={**data,'parts':[{'name':'fixture'}]};planner.identity=data['planner_identity']
+        model_state=dict(state,right_joint18=state['right_joint17'])
         cache={};before=len(model_calls)
-        motiongen_plan.prepare_model(planner,observation,cached_data,urdf,state,cache)
+        motiongen_plan.prepare_model(planner,observation,cached_data,urdf,model_state,cache)
         assert cache['engine'].seed_resets == 0, 'fresh warmup sampling state was reset'
         cache['engine'].grasp_contact_certificate={'stale':'previous request'}
-        motiongen_plan.prepare_model(planner,observation,cached_data,urdf,state,cache)
+        motiongen_plan.prepare_model(planner,observation,cached_data,urdf,model_state,cache)
         assert cache['engine'].seed_resets == 1, 'reused request retained the previous sampling sequence'
         assert cache['engine'].grasp_contact_certificate is None
         assert len(model_calls)==before+1
         changed={**cached_data,'parts':[{'name':'changed geometry'}]}
-        motiongen_plan.prepare_model(planner,observation,changed,urdf,state,cache)
+        motiongen_plan.prepare_model(planner,observation,changed,urdf,model_state,cache)
         assert len(model_calls)==before+2, 'changed geometry reused a stale sphere model'
         bridge = DualGpuPipeline(); bridge.ingest_source(source); bridge.accept_plan(plan)
         assert plan['planning_validation']['selected_motiongen_method_counts']['MotionGen.plan_single_js'] == 1

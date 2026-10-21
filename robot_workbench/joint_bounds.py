@@ -10,7 +10,20 @@ def position_noise_rad(environment):
 
 def project_joint_positions(values, limits, *, environment):
     """Return legal positions and explicit corrections, preserving the input."""
-    tolerance = position_noise_rad(environment)
+    return _project(values,limits,position_noise_rad(environment))
+
+
+def feedback_position_margin_rad(environment):
+    """Observation validity only; never expands the legal command interval."""
+    return math.radians(2.) if environment=='physical' else position_noise_rad(environment)
+
+
+def inspect_joint_feedback(values,limits,*,environment):
+    """Return bounded diagnostic values; these are not command authorization."""
+    return _project(values,limits,feedback_position_margin_rad(environment))
+
+
+def _project(values,limits,tolerance):
     if len(values) != len(limits) or not values:
         raise ValueError('joint positions and limits must have equal nonzero length')
     projected, changes = [], []

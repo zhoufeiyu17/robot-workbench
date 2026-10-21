@@ -11,6 +11,41 @@ from joint_space import gripper_offset_mm, contract
 NATIVE_DISTANCE_ENCODING = 'normalized_joint_gripper_travel_mm.v1'
 HOLDING_STAGES = frozenset({'close_and_hold', 'lift', 'lift_hold', 'raise', 'transport', 'lower', 'support_settle'})
 HOLD_STAGES = HOLDING_STAGES
+COSINE_RELEASE_SCHEMAS = frozenset({'commanded_gap_release.v3', 'commanded_gap_release.v4'})
+
+
+def release_targets(closed, opening):
+    """Keep the 30 Hz cosine and 20 mm/s bound when a narrower grasp opens."""
+    if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (closed, opening))
+            or not 0 <= closed < opening):
+        raise ValueError('release requires finite increasing nonnegative gap endpoints')
+    # Bound the continuous cosine derivative too, not just sampled differences.
+    count = max(45, math.ceil((opening-closed)*math.pi*30/(2*20.))+1)
+    gaps = [closed+(opening-closed)*(1-math.cos(math.pi*i/(count-1)))/2 for i in range(count)]
+    policy = dict(schema_version='commanded_gap_release.v3' if count == 45 else 'commanded_gap_release.v4',
+                  duration_s=count/30, maximum_gap_speed_mm_s=20., initial_model_gap_mm=closed, arm_motion=False)
+    return gaps, policy
+
+
+def requested_metal_gap_mm(source):
+    """Only an explicitly bound physical assistance receipt may change 65 mm."""
+    if isinstance(source,dict) and source.get('schema_version')=='physical_cup_maintenance_source.v1':
+        from physical_cup_maintenance import validate_source
+        validate_source(source)
+        return float(source['grasp_command']['metal_gap_mm'])
+    if not isinstance(source,dict) or source.get('adapter')!='operator_assisted_rgbd':
+        return 65.
+    command=source.get('grasp_command')
+    scene=source.get('scene');observation=scene.get('source') if isinstance(scene,dict) else None
+    receipt=observation.get('assistance_receipt') if isinstance(observation,dict) else None
+    if (source.get('environment','physical')!='physical' or source.get('simulation_only') is True
+            or not isinstance(command,dict) or not isinstance(receipt,dict)
+            or command!=receipt.get('grasp_command')
+            or command.get('units')!='metal_inner_gap_mm' or command.get('controlled_gripper')!='left_gripper'
+            or type(command.get('metal_gap_mm')) not in (int,float)
+            or not math.isfinite(command['metal_gap_mm']) or command['metal_gap_mm'] not in (61.,65.)):
+        raise ValueError('assisted grip requires the same accepted physical 61/65 mm metal-gap command in source and receipt')
+    return float(command['metal_gap_mm'])
 
 
 def holding_ticks(plan, stage_names=HOLDING_STAGES):
@@ -35,13 +70,14 @@ def validate_release_control(plan, *, closed=None, opening=None, legacy=False):
             return [False] * len(plan['ticks'])
         release = {'schema_version': 'commanded_gap_release.v2'}
     if not isinstance(release, dict) or release.get('schema_version') not in (
-            'commanded_gap_release.v2', 'commanded_gap_release.v3'):
+            'commanded_gap_release.v2', *COSINE_RELEASE_SCHEMAS):
         raise ValueError('unsupported commanded gap release policy')
-    v3 = release['schema_version'] == 'commanded_gap_release.v3'
+    cosine = release['schema_version'] in COSINE_RELEASE_SCHEMAS
+    v4 = release['schema_version'] == 'commanded_gap_release.v4'
     if (release.get('arm_motion', False) is not False
-            or not v3 and (release.get('maximum_step_mm', .2) != .2
+            or not cosine and (release.get('maximum_step_mm', .2) != .2
                            or 'maximum_gap_speed_mm_s' in release)
-            or v3 and 'maximum_step_mm' in release):
+            or cosine and 'maximum_step_mm' in release):
         raise ValueError('release declaration conflicts with its versioned limits')
     mask = holding_ticks(plan, {'open'})
     indices = [i for i, active in enumerate(mask) if active]
@@ -61,22 +97,27 @@ def validate_release_control(plan, *, closed=None, opening=None, legacy=False):
     stationary = ('left_arm_joints', 'right_arm_joints', 'right_gripper')
     if (any(type(gap) not in (int, float) or not math.isfinite(gap) for gap in [closed, opening, *gaps])
             or not closed < opening or abs(gaps[0]-closed) > 1e-9 or abs(gaps[-1]-opening) > 1e-9
-            or any(any(row[key] != rows[0][key] for key in stationary) for row in rows)
-            or any(not 0 <= b-a <= (20/30+1e-8 if v3 else .20000001) for a,b in zip(gaps,gaps[1:]))):
+            or any(any(row[key] != rows[0][key] for key in stationary) for row in rows)):
         raise ValueError('release requires stationary arms and a continuous target-to-open ramp')
-    if v3:
+    maximum_step = 20/30+1e-8 if cosine else .20000001
+    if any(not 0 <= b-a <= maximum_step for a,b in zip(gaps,gaps[1:])):
+        raise ValueError(f'release gap ramp must be monotonic and <= {20. if cosine else 6.:g} mm/s; '
+                         f'observed peak {max(b-a for a,b in zip(gaps,gaps[1:]))*30:.9g} mm/s')
+    if cosine:
+        expected = (release_targets(closed, opening)[0] if v4 else
+                    [closed+(opening-closed)*(1-math.cos(math.pi*i/44))/2 for i in range(45)])
         if (set(release) - {'schema_version', 'duration_s', 'maximum_gap_speed_mm_s', 'initial_model_gap_mm', 'arm_motion'}
                 or plan.get('native_action_encoding') != NATIVE_DISTANCE_ENCODING
-                or len(rows) != 45 or release.get('duration_s') != 1.5
+                or len(rows) != len(expected) or release.get('duration_s') != len(expected)/30
+                or v4 and len(expected) <= 45
                 or release.get('maximum_gap_speed_mm_s') != 20.):
-            raise ValueError('v3 release requires 45 commands, 1.5 seconds and a 20 mm/s gap limit')
+            raise ValueError('release requires its versioned cosine command count, 30 Hz duration and 20 mm/s gap limit')
         offset = policy.get('native_travel_offset_mm', 0.) if policy.get('schema_version') == 'gripper_distance_control.v2' else 0.
         initial = release.get('initial_model_gap_mm', closed-offset)
         if type(initial) not in (int, float) or not math.isfinite(initial) or abs(initial+offset-closed) > 1e-9:
-            raise ValueError('v3 release initial model gap differs from its closed target')
-        expected = [closed+(opening-closed)*(1-math.cos(math.pi*i/44))/2 for i in range(45)]
+            raise ValueError('release initial model gap differs from its closed target')
         if any(abs(gap-value) > 1e-9 for gap,value in zip(gaps,expected)):
-            raise ValueError('v3 release must retain its frozen cosine curve')
+            raise ValueError('release must retain its frozen cosine curve')
         hz, nominal = plan.get('control', {}).get('physics_hz'), plan.get('control', {}).get('substeps')
         counts, ticks, duration = plan.get('native_substeps'), plan['ticks'], plan.get('duration_s')
         if (type(hz) is not int or type(nominal) is not int or nominal <= 0 or hz != 30*nominal
@@ -87,27 +128,32 @@ def validate_release_control(plan, *, closed=None, opening=None, legacy=False):
                        or tick.get('tick') != i or abs(tick['time_s']-i/30) > 1e-9 for i,tick in enumerate(ticks))
                 or type(duration) not in (int, float) or not math.isfinite(duration)
                 or abs(duration-sum(counts)/hz) > 1e-9):
-            raise ValueError('v3 release requires the actual 30 Hz native clock and duration')
+            raise ValueError('release requires the actual 30 Hz native clock and duration')
         if any((b-a)/(ticks[j]['time_s']-ticks[i]['time_s']) > 20.+1e-8
                for i,j,a,b in zip(indices,indices[1:],gaps,gaps[1:])):
-            raise ValueError('v3 commanded gap speed exceeds 20 mm/s')
+            raise ValueError('commanded gap speed exceeds 20 mm/s')
         end = indices[-1]+1
         hold = [i for i, active in enumerate(holding_ticks(plan, {'release_hold'})) if active]
         if (hold != list(range(end, end+6)) or any(counts[i] != nominal for i in [*indices, *hold])
                 or any(ticks[i]['target'] != rows[-1] for i in hold)
                 or any(ticks[indices[0]-1]['target'][key] != rows[0][key] for key in stationary)):
-            raise ValueError('v3 release must preserve stationary arms and its 0.2 second release hold')
+            raise ValueError('release must preserve stationary arms and its 0.2 second release hold')
     return mask
 
 
 def validate_distance_control(plan, source):
     policy = plan.get('gripper_distance_control', {})
+    requested=requested_metal_gap_mm(source)
+    assisted=(source.get('adapter')=='operator_assisted_rgbd'
+              or source.get('schema_version')=='physical_cup_maintenance_source.v1')
     if policy.get('schema_version') != 'gripper_distance_control.v2':
-        if plan.get('native_action_encoding') == NATIVE_DISTANCE_ENCODING:
+        if assisted or plan.get('native_action_encoding') == NATIVE_DISTANCE_ENCODING:
             raise ValueError('native distance encoding requires the v2 distance policy')
         return [False] * len(plan['ticks'])
     target=policy.get('closed_metal_gap_mm')
-    if ((target,policy.get('rubber_gap_mm')) not in ((71.0,68.0),(65.0,62.0))
+    allowed=((requested,requested-3.),) if assisted else ((71.0,68.0),(65.0,62.0))
+    if ((target,policy.get('rubber_gap_mm')) not in allowed
+            or assisted and policy.get('units')!='metal_inner_gap_mm'
             or policy.get('controlled_gripper') != 'left_gripper'
             or policy.get('holding_stages') != sorted(HOLDING_STAGES)
             or plan.get('native_action_encoding') != NATIVE_DISTANCE_ENCODING):
@@ -167,6 +213,10 @@ def read_trace(episode, plan):
 
 
 def distance_plan(plan, source, trace=None, *, close_metal_gap_mm=None):
+    requested=requested_metal_gap_mm(source)
+    assisted=source.get('adapter')=='operator_assisted_rgbd'
+    if assisted and close_metal_gap_mm is None:
+        raise ValueError('assisted grip requires an explicit fixed metal-gap target')
     if 'execution_derivation' in plan or 'gripper_distance_control' in plan:
         raise ValueError('distance conversion requires original exported plan')
     if close_metal_gap_mm is None:
@@ -182,8 +232,9 @@ def distance_plan(plan, source, trace=None, *, close_metal_gap_mm=None):
     offset = gripper_offset_mm(source['calibration_profile'])
     maximum = source['calibration_profile']['gripper']['max_opening_mm']
     if close_metal_gap_mm is not None:
-        if type(close_metal_gap_mm) not in (int,float) or close_metal_gap_mm not in (71.0,65.0):
-            raise ValueError('only the reviewed 71/68 or 65/62 mm metal/rubber targets are supported')
+        allowed=(requested,) if assisted else (71.0,65.0)
+        if type(close_metal_gap_mm) not in (int,float) or close_metal_gap_mm not in allowed:
+            raise ValueError('fixed metal-gap target differs from the accepted source policy')
         held = holding_ticks(plan)
         if trace is not None and len(trace.get('stages', [])) != len(plan['ticks']):
             raise ValueError('native stage trace must cover all ticks')

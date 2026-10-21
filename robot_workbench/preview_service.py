@@ -26,21 +26,22 @@ def write(path,value):
 
 
 def resident_execution(contract,output,*,proc_root='/proc'):
-    from local_execution import TARGET
+    from local_execution import contract_compute_resource,validate_shared_model
     root=Path(output).resolve();details=contract['collection_setup'];pid=os.getpid();proc=Path(proc_root)/str(pid)
     script=str(ROOT/'scripts/serve_physx_device.py')
-    value=dict(TARGET,session_id=contract['identity']['session_id'],max_processes=contract['resources']['max_workers'],
+    value=dict(contract_compute_resource(contract),session_id=contract['identity']['session_id'],max_processes=contract['resources']['max_workers'],
         min_free_memory_mib=details['min_free_memory_mib'],plant=dict(session_id=contract['identity']['session_id'],pid=pid,
             process_start_ticks=(proc/'stat').read_text().rsplit(')',1)[1].split()[19],scope=str(root),
             script=script,script_sha256=sha(script),argv=[v.decode() for v in (proc/'cmdline').read_bytes().split(b'\0') if v],
             max_memory_mib=details['plant_max_memory_mib']))
-    if value['max_processes']==5:value['roles']=json.loads((root/'preview/roles.json').read_text())
+    if value['max_processes'] in (5,6):value['roles']=json.loads((root/'preview/roles.json').read_text())
+    if 'shared_model' in contract:value['shared_model']=deepcopy(validate_shared_model(contract['shared_model']))
     return value
 
 
 def prepare_preview_roles(contract,output,calibration_config):
     """Freeze private paths and inputs only when five roles were explicitly declared."""
-    if contract['resources']['max_workers']!=5:raise ValueError('preview requires an explicit five-role contract')
+    if contract['resources']['max_workers'] not in (5,6):raise ValueError('preview requires an explicit five/six-role contract')
     details=contract['preview_setup'];root=Path(output).resolve();directory=root/'preview'
     directory.mkdir(mode=0o700,exist_ok=False)
     config=deepcopy(calibration_config);config.update(display_only=True,mesh_rendering_enabled=False)
@@ -54,10 +55,15 @@ def prepare_preview_roles(contract,output,calibration_config):
     if port==0:
         with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
     script=ROOT/'calibration/examples/scripts/debug/joint_head_workbench_live.py';wb=ROOT/'rule_based_workbench'
-    entries={str(wb/name):sha(wb/name) for name in ('a1_isaac_assets.py','playground_sim.py','playground_geometry.py','motiongen_plan.py','isaac_lane.py')}
+    entries={str(wb/name):sha(wb/name) for name in ('a1_isaac_assets.py','playground_sim.py','playground_geometry.py','motiongen_plan.py','isaac_lane.py','test_motiongen_locked_native.py')}
     roles=dict(preview=dict(root=str(directory),registration=str(root/'gpu-roles/preview.json'),script=str(script),script_sha256=sha(script),
         config_path=str(config_path),config_sha256=sha(config_path),token_file=str(token),port=port,max_memory_mib=details['max_memory_mib']),
         auxiliary=dict(root=str(root),registration=str(root/'gpu-roles/auxiliary.json'),entrypoints=entries,max_memory_mib=details['auxiliary_max_memory_mib']))
+    if contract['resources'].get('persistent_service') is True:roles['preview']['persistent_service']=True
+    if contract['resources']['max_workers']==6:
+        scene=wb/'scene_worker.py'
+        roles['scene']=dict(root=str(root),registration=str(root/'gpu-roles/scene.json'),
+            entrypoints={str(scene):sha(scene)},max_memory_mib=details['scene_max_memory_mib'])
     write(directory/'roles.json',roles);return roles
 
 
@@ -66,8 +72,10 @@ class PreviewService:
     def __init__(self,*,execution,deadline_wall_ns,deps,mesh_inputs,validate_pose,admission_config=None):
         from local_execution import validate
         validate({'execution':execution})
-        if execution['max_processes']!=5:raise ValueError('dedicated preview requires the five-role contract')
+        if execution['max_processes'] not in (5,6):raise ValueError('dedicated preview requires the five/six-role contract')
         self.execution=deepcopy(execution);self.spec=execution['roles']['preview'];self.deadline=deadline_wall_ns
+        if (deadline_wall_ns is None)!=(self.spec.get('persistent_service') is True):
+            raise ValueError('renderer lifetime differs from its explicit role contract')
         self.deps=deps;self.mesh_inputs=mesh_inputs;self.validate_pose=validate_pose
         self.admission_config=admission_config or (lambda:{'execution':self.execution})
         self.lock=threading.Lock();self.closed=threading.Event();self.thread=None;self.process=None;self.adapter=None
@@ -105,7 +113,7 @@ class PreviewService:
         spec=self.spec
         args=['/isaac-sim/python.sh','-u','-B',spec['script'],'--config',spec['config_path'],
             '--output',str(output),'--token-file',spec['token_file'],'--port',str(spec['port']),
-            '--render-gpu','1','--duration-s',str(budget),'--display-only','--execution-json',json.dumps(self.execution)]
+            '--render-gpu',str(self.execution['vulkan_gpu']),'--duration-s',str(0 if budget is None else budget),'--display-only','--execution-json',json.dumps(self.execution)]
         from launch_environment import owned_command
         return owned_command(ROOT/'rule_based_workbench',args,budget)
 
@@ -113,8 +121,8 @@ class PreviewService:
         try:
             self._stop_owned()
             if self.closed.is_set():return
-            budget=min(14400.,(self.deadline-time.time_ns())/1e9-45)
-            if budget<=0:raise TimeoutError('resident deadline leaves no renderer/cleanup budget')
+            budget=None if self.deadline is None else min(14400.,(self.deadline-time.time_ns())/1e9-45)
+            if budget is not None and budget<=0:raise TimeoutError('resident deadline leaves no renderer/cleanup budget')
             from local_execution import gpu_check
             configuration=self.admission_config()
             if configuration.get('execution')!=self.execution:raise ValueError('renderer and collection resource contracts differ')
@@ -124,14 +132,14 @@ class PreviewService:
             output=Path(self.spec['root'])/('frames-'+secrets.token_hex(8))
             self.log=(output.parent/(output.name+'.log')).open('xb')
             from launch_environment import clean_environment,clean_command,owned_command
-            env={'CUDA_VISIBLE_DEVICES':'1','ROBOT_WORKBENCH_SESSION_ID':self.execution['session_id'],
+            env={'CUDA_VISIBLE_DEVICES':str(self.execution['gpu_index']),'ROBOT_WORKBENCH_SESSION_ID':self.execution['session_id'],
                 'PYTHONPATH':':'.join((str(ROOT/'rule_based_workbench'),str(ROOT/'calibration/infra'),str(ROOT/'calibration'),self.deps)),
                 'PYTHONNOUSERSITE':'1','OMP_NUM_THREADS':'4','MKL_NUM_THREADS':'4','OPENBLAS_NUM_THREADS':'1'}
             command=self.launch(budget,output)
             cut=command.index('--')
             command=owned_command(ROOT/'rule_based_workbench',clean_command(command[cut+1:],env),budget)
             self.process=subprocess.Popen(command,env=clean_environment(),stdout=self.log,stderr=subprocess.STDOUT)
-            ready_deadline=min(time.monotonic()+120,time.monotonic()+budget)
+            ready_deadline=time.monotonic()+(120 if budget is None else min(120,budget))
             while time.monotonic()<ready_deadline and not self.closed.wait(.1):
                 if self.process.poll() is not None:raise RuntimeError('owned renderer exited before readiness')
                 path=Path(self.spec['registration'])
@@ -164,7 +172,7 @@ class PreviewService:
             mesh={'enabled':False,'candidate_id':None,'camera':'head'})
         if process and process.poll() is not None:status='failed';error=error or '显示渲染进程已退出';value['connected']=False
         busy=bool(self.thread and self.thread.is_alive())
-        allowed=not self.closed.is_set() and not busy and (self.deadline-time.time_ns())/1e9>45
+        allowed=not self.closed.is_set() and not busy and (self.deadline is None or (self.deadline-time.time_ns())/1e9>45)
         value.update(status=status,error=error or value.get('error'),recovery=dict(allowed=allowed,
             action='preview_recover',message='可重新连接浏览器画面；若渲染服务异常，可单独恢复显示渲染器。设备控制与实际相机不重启。'))
         return value
@@ -198,6 +206,12 @@ def calibration_mesh_inputs(workbench,producer,camera,candidate_id):
     """Current producer packet + existing C candidate math; no solver/acceptance gate."""
     import numpy as np
     from arx_env.joint_head_isaac_fit import rigid
+    if camera=='all':
+        row=next((item for item in workbench.wrist_results() if item['id']==candidate_id),None)
+        if row is None or workbench.wrist_overlay_error(row):raise ValueError('三相机叠加需要完整双腕结果及其关联头部结果')
+        head_id=workbench.wrist_contract(row)['head_snapshot']['id']
+        return {name:calibration_mesh_inputs(workbench,producer,name,head_id if name=='head' else candidate_id)
+                for name in ('head','left','right')}
     name={'head':'base_0','left':'left_wrist_0','right':'right_wrist_0'}[camera]
     packet=producer.frames[name].snapshot();meta=packet['status']
     if not meta.get('ready') or meta.get('data_valid') is not True:raise ValueError('实际相机没有有效新帧')
@@ -213,5 +227,5 @@ def calibration_mesh_inputs(workbench,producer,camera,candidate_id):
         snapshot=workbench.wrist_contract(row)['head_snapshot'];q=feedback['qpos']
         offsets=np.concatenate([snapshot['joint_offsets_rad'][side] for side in ('left','right')])
         pose=workbench.geometry.frames(np.asarray(q[:6]+q[7:13])+offsets)[camera]['link6']@rigid(row[camera]['T_link6_camera'])
-        candidate=dict(snapshot,id=candidate_id,camera_T_world_optical=pose.tolist())
+        candidate=dict(snapshot,id=candidate_id,head_result_id=snapshot['id'],camera_T_world_optical=pose.tolist())
     return packet['jpeg'],meta,feedback,deepcopy(producer.intrinsics[name]),candidate

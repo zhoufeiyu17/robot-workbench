@@ -6,7 +6,7 @@ from copy import deepcopy
 import math
 
 from contract import demo_state, validate_physical14
-from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING, validate_distance_control
+from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING, validate_distance_control, requested_metal_gap_mm, COSINE_RELEASE_SCHEMAS
 from integration import CUROBO_PLANNER_ID, SIM_POLICY_ID, _digest
 from joint_space import convert_state, freeze_reported, gripper_offset_mm, validate_initial_state
 
@@ -30,7 +30,7 @@ def reported_target(target,profile,source=None):
     converted=reported_command(target,source) if source is not None else convert_state(target,profile,to_reported=True)
     # Only arithmetic roundoff at the declared metal endpoints is canonicalized.
     for key in ('left_gripper','right_gripper'):
-        for endpoint in (65.,profile['gripper']['max_opening_mm']):
+        for endpoint in (requested_metal_gap_mm(source),profile['gripper']['max_opening_mm']):
             if abs(converted[key]-endpoint)<=1e-10:converted[key]=endpoint
     return converted
 
@@ -139,7 +139,26 @@ def validate_model_evidence(plan,source):
     if not binding.get('urdf_sha256') or backend.get('native_robot_sha256')!=binding['urdf_sha256']:
         raise ValueError('GPU robot differs from the physical calibration model')
     acceptance=receipt.get('gpu_final_acceptance',{})
-    checks=[acceptance,*acceptance.get('fixed',{}).values(),*acceptance.get('jaw_sweeps',[]),
+    from real_contract import (fixed_right_collision_policy,skipped_fixed_right_acceptance,
+                               validate_fixed_right_hold,fixed_right_hold_reference)
+    fixed_policy=fixed_right_collision_policy(source)
+    fixed=acceptance.get('fixed',{})
+    if fixed_policy is not None:
+        initial_validation=plan.get('initial_state_validation')
+        held=fixed_right_hold_reference(source,initial_validation)['held_model_joints']
+        if (plan.get('fixed_right_collision_policy')!=fixed_policy
+                or fixed!=skipped_fixed_right_acceptance(source,held,initial_validation)
+                or receipt.get('static_collision_checked') is not False
+                or acceptance.get('static_collision_checked') is not False
+                or receipt.get('fixed_right_collision_policy_digest')!=_digest(fixed_policy)
+                or acceptance.get('fixed_right_collision_policy_digest')!=_digest(fixed_policy)
+                or acceptance.get('validation_scope')!='moving_left_and_cup; fixed_right_static_checks_skipped_by_operator'):
+            raise ValueError('physical static exception must remain explicit and bound; skipped checks are not passed')
+        for row in plan.get('ticks',[]):validate_fixed_right_hold(source,row.get('target',{}).get('right_arm_joints'),initial_validation)
+    elif (plan.get('fixed_right_collision_policy') is not None or receipt.get('static_collision_checked') is False
+            or acceptance.get('static_collision_checked') is False):
+        raise ValueError('static collision exception lacks the sealed source approval')
+    checks=[acceptance,*(fixed.values() if fixed_policy is None else ()),*acceptance.get('jaw_sweeps',[]),
             *[acceptance.get(k,{}) for k in ('closing','support','task_semantics','receiving_goal')]]
     if (set(acceptance.get('fixed',{}))!={'world','self'} or not acceptance.get('jaw_sweeps')
             or not all(isinstance(row,dict) and row.get('passed') is True for row in checks)):
@@ -221,13 +240,14 @@ def validate_model_evidence(plan,source):
                     or begin==0 or plan['ticks'][begin-1]['target']['left_arm_joints']!=proof['previous_command_target_q']):
                 raise ValueError('Cartesian emitted commands or their preceding target differ')
     policy=plan.get('gripper_distance_control',{})
+    gap=requested_metal_gap_mm(source)
     if (plan.get('native_action_encoding')!=NATIVE_DISTANCE_ENCODING
             or policy.get('schema_version')!='sim_gripper_distance_control.v1'
-            or policy.get('closed_metal_gap_mm')!=65. or policy.get('rubber_gap_mm')!=62.
+            or policy.get('closed_metal_gap_mm')!=gap or policy.get('rubber_gap_mm')!=gap-3.
             or abs(policy.get('native_travel_offset_mm',math.inf)-gripper_offset_mm(source['calibration_profile']))>1e-9):
-        raise ValueError('physical and GPU 65/62 mm distance definitions differ')
+        raise ValueError('physical and GPU requested metal/rubber distance definitions differ')
     from gripper_distance_plan import validate_release_control
-    validate_release_control(plan,closed=65.-policy['native_travel_offset_mm'],opening=plan.get('gripper_opening_mm'))
+    validate_release_control(plan,closed=gap-policy['native_travel_offset_mm'],opening=plan.get('gripper_opening_mm'))
 
 
 def freeze_physical(plan,source,binding,*,environment='physical'):
@@ -258,6 +278,9 @@ def freeze_physical(plan,source,binding,*,environment='physical'):
         source_digest=_digest(source),timeline_digest=result['timeline_digest'],
         model_validation_digest=_digest(proof['model_validation']),conversion_digest=_digest(proof),
         hardware_validated=False)
+    if result.get('fixed_right_collision_policy') is not None:
+        result['planning_validation'].update(static_collision_checked=False,
+            fixed_right_collision_policy_digest=_digest(result['fixed_right_collision_policy']))
     result['gripper_distance_control']=dict(result['gripper_distance_control'],
         schema_version='gripper_distance_control.v2',units='metal_inner_gap_mm',
         controlled_gripper='left_gripper',holding_stages=sorted(HOLDING_STAGES),
@@ -270,6 +293,12 @@ def freeze_physical(plan,source,binding,*,environment='physical'):
 
 def validate_evidence(plan,source):
     proof=plan.get('physical_gpu_conversion',{});receipt=plan.get('planning_validation',{})
+    from real_contract import fixed_right_collision_policy
+    fixed_policy=fixed_right_collision_policy(source)
+    if fixed_policy is not None and (plan.get('fixed_right_collision_policy')!=fixed_policy
+            or receipt.get('static_collision_checked') is not False
+            or receipt.get('fixed_right_collision_policy_digest')!=_digest(fixed_policy)):
+        raise ValueError('physical conversion lost the explicit fixed-right static exception')
     vectors=proof.get('model_target_vectors')
     if (proof.get('schema_version')!='physical_gpu_conversion.v1'
             or receipt.get('schema_version')!='physical_curobo_motiongen_path_validation.v1'
@@ -318,7 +347,7 @@ def retime_physical(plan,source,binding,speed_scale,*,environment='physical'):
             rows=[row['target'] for row in model['ticks'][begin:end]],
             native_actions=model['native_actions'][begin:end],receipt_index=stage.get('motiongen_receipt_index')))
     spec=ac_one_dual_arm_zero_home_action_spec()
-    fixed=WAITS|{'open'} if model.get('gripper_release',{}).get('schema_version')=='commanded_gap_release.v3' else WAITS
+    fixed=WAITS|{'open'} if model.get('gripper_release',{}).get('schema_version') in COSINE_RELEASE_SCHEMAS else WAITS
     scaled,times=scaled_stages(stages,speed_scale,spec,model['gripper_opening_mm'],fixed_stages=fixed)
     grip=model['gripper_distance_control']['geometry_derivation']
     encoded=freeze(scaled,source,dict(native_identity=model['native_identity']),grip,spec,

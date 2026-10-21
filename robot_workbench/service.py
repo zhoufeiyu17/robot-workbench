@@ -14,11 +14,23 @@ from urllib.parse import parse_qs, urlsplit,urlencode
 from robot_workbench.workflows import CALIBRATION_TOOLS,COLLECTION_TOOLS,HISTORY_ACTIONS,CalibrationWorkflow,collection_live_view
 from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
 from robot_workbench.sample_clock import host_sample_status
+from robot_workbench.inference_owner import episode_duration
 
 ROOT = Path(__file__).resolve().parents[1]
-BUSINESSES = ('calibration', 'collection')
+BUSINESSES = ('calibration', 'collection', 'inference')
+INFERENCE_MODEL_TOOLS = ('inference_refresh','inference_select','inference_prepare')
+INFERENCE_TOOLS = (*INFERENCE_MODEL_TOOLS, 'inference_preview')
 WARM_C_ACTIONS = ('generate_plan','execute','install',*CALIBRATION_TOOLS)
 WARM_C_REASON = '当前为复用标定的数采诊断；完整标定请使用空库验收入口'
+
+
+def frozen_collection_scope(device):
+    """Only the existing successful frozen restore supplies this server-side scope."""
+    playground=getattr(device.workflows.get('collection'),'playground',None)
+    if device.environment!='physical' or playground is None:return False
+    with playground.lock:
+        environment=playground.state.get('environment') or {}
+        return environment.get('ready') is True and environment.get('scope')=='frozen_plan_and_current_owner_only'
 
 
 class Device:
@@ -36,23 +48,51 @@ class Device:
         self.preview = None
         self.collection_preparation = None
         self.stop_latched = False
+        self.stop_serial = 0
         self.connecting = False
         self.release_receipt = None
+        self.maintenance = False
 
-    def connect(self, body):
+    def connect(self, body, *, active=None,maintenance_actor=None):
+        if getattr(getattr(self,'_operations_application',None),'operations_managed',False) and maintenance_actor is None:
+            raise ValueError('operation_required：设备接入必须通过运维维护窗口执行')
         if self.environment == 'physical' and body.get('arms_supported') is not True:
             raise ValueError('连接前请确认此刻双臂已可靠支撑')
         if not self.lock.acquire(blocking=False):
             raise ValueError('设备连接正在准备')
         try:
+            if self.maintenance:
+                from .maintenance import ControlActor
+                if not isinstance(maintenance_actor,ControlActor) or maintenance_actor.action!='connect_control':
+                    raise ValueError('服务维护中，不能连接设备')
+                maintenance_actor.require(self.runtime)
+            elif maintenance_actor is not None:raise ValueError('受限管理接入必须持有维护窗口')
             self.connecting = True
+            retirement=None
             if self.runtime is not None:
-                raise ValueError('设备已连接；控制权交接不会断开设备')
+                if (maintenance_actor is None or self.environment!='physical'
+                        or not getattr(self.runtime.owner.backend,'terminal_failure',None)):
+                    raise ValueError('设备已连接；控制权交接不会断开设备')
+                maintenance_actor.require(self.runtime)
+                remote=getattr(self.runtime,'remote_control_owner',False)
+                if remote:self.closed.set()  # Stop only this business fact observer.
+                if self.thread is not None and self.thread.is_alive():self.thread.join(timeout=2)
+                if self.thread is not None and self.thread.is_alive():raise ValueError('保护后的控制线程仍在收尾')
+                retirement=self.runtime.retire_protected()
+                if remote:self.runtime.detach()
             if self.thread is not None and self.thread.is_alive():
                 raise ValueError('上次设备连接仍在收尾，请等待断开确认')
             if self.factory is None:
                 raise ValueError('设备控制后端尚未配置')
+            current=lambda:(active is None or active()) and (maintenance_actor is None or maintenance_actor.current())
+            if not current():raise ValueError('本次连接请求已撤销')
+            if maintenance_actor is not None:self.stop_latched=False
             runtime = self.factory()
+            runtime.prior_control_retirement=retirement
+            if maintenance_actor is not None:
+                if getattr(runtime,'remote_control_owner',False):runtime.begin_maintenance()
+                else:
+                    with runtime.lock:runtime.maintenance_active=True
             installed = (self.release_receipt or {}).get('calibration_snapshot_id')
             if installed and runtime.calibration_snapshot_id is None:
                 runtime.notify_calibration_installed(installed)
@@ -61,29 +101,44 @@ class Device:
             self.runtime = runtime
             self.release_receipt = None
             self.error = None
-            if self.stop_latched:
+            if maintenance_actor is not None:maintenance_actor.adopt(runtime)
+            if self.stop_latched or not current():
+                self.stop_latched = True
                 runtime.submit(credentials[runtime.holder], {'action':'stop'})
             self.closed.clear()
+            if getattr(runtime,'remote_control_owner',False):
+                self._start_remote_monitor(runtime)
+                return {'message':'已接入独立Owner；业务进程仅订阅控制状态，尚未执行运动'}
             def loop():
+                probe=None
                 try:
                     if self.drive is not None:
                         self.drive(runtime, self.closed)
                         return
+                    import gc
+                    probe=runtime.owner.timing_probe
+                    probe.thread_id=threading.get_ident()
+                    gc.callbacks.append(probe.gc_callback)
                     while not self.closed.is_set():
                         started = time.monotonic()
-                        if not runtime.tick():
+                        probe.begin(runtime.owner.event)
+                        if not probe.call('runtime_tick',runtime.tick):
                             break
-                        self.closed.wait(max(0., .01-(time.monotonic()-started)))
+                        probe.call('idle_wait',self.closed.wait,max(0., .01-(time.monotonic()-started)))
                 except Exception as error:
                     self.error = str(error)
                     runtime.submit(self.credentials[runtime.holder], {'action': 'stop'})
                 finally:
+                    if probe is not None:
+                        probe.begin(runtime.owner.event);probe.flush(runtime.owner.event)
+                        if probe.gc_callback in gc.callbacks:gc.callbacks.remove(probe.gc_callback)
                     if runtime.release_receipt is not None:
                         try:
                             if runtime.fd is not None:
                                 runtime.close()
                             self.closed.set()
                             with self.lock:
+                                self.release_receipt = deepcopy(runtime.release_receipt)
                                 if self.runtime is runtime:
                                     self.runtime = None
                                     self.credentials = {}
@@ -97,9 +152,35 @@ class Device:
             self.connecting = False
             self.lock.release()
 
+    def _start_remote_monitor(self,runtime):
+        def monitor():
+            try:runtime.monitor(self.closed)
+            except Exception as error:
+                self.error='独立Owner状态读取失败：'+str(error)
+            finally:
+                receipt=runtime.release_receipt
+                if receipt and receipt.get('status')=='released':
+                    runtime.detach()
+                    self.release_receipt=deepcopy(receipt);self.closed.set()
+                    with self.lock:
+                        if self.runtime is runtime:self.runtime=None;self.credentials={}
+        self.thread=threading.Thread(target=monitor,daemon=True,name='control-facts-'+self.environment)
+        self.thread.start()
+
+    def attach_existing_owner(self,runtime):
+        """Read-only attachment after business restart; never acquire/re-enable SDK."""
+        if not getattr(runtime,'remote_control_owner',False)or runtime.nonce is None:raise ValueError('existing independent Owner required')
+        with self.lock:
+            if self.runtime is not None:raise ValueError('business already attached to an Owner')
+            self.runtime=runtime;self.credentials={name:runtime.register_business(name)for name in BUSINESSES}
+            self.error=None;self.closed.clear();self._start_remote_monitor(runtime)
+
     def submit(self, business, command):
         if command.get('action') == 'stop':
-            self.stop_latched = True
+            if command!={'action':'stop'}:raise ValueError('explicit stop command required')
+            return self.request_stop()
+        if getattr(getattr(self,'_operations_application',None),'operations_managed',False) and command.get('action') in ('release','recover'):
+            raise ValueError('operation_required：设备释放与恢复必须通过运维维护窗口执行')
         runtime, credentials = self.runtime, self.credentials
         if runtime is None:
             if command == {'action': 'stop'}:
@@ -114,6 +195,20 @@ class Device:
                 return {'message':'设备连接已撤权或正在收尾，没有新的运动命令'}
             raise ValueError('设备控制连接已变化，请重新核验状态')
 
+    def request_stop(self):
+        self.stop_latched=True;self.stop_serial+=1
+        runtime=self.runtime
+        if runtime is None:return dict(message='设备未连接，没有可发送的运动命令')
+        return runtime.request_stop()
+
+    def fact_snapshot(self):
+        value=self.snapshot(None);value.pop('allowed_operations',None)
+        ready=self.runtime is None and not self.connecting and not (self.thread and self.thread.is_alive())
+        value.setdefault('control_operations',{})['connect']=dict(allowed=bool(ready and self.factory is not None and not self.maintenance),
+            reason='服务维护中' if self.maintenance else None if ready and self.factory is not None else '设备控制后端未配置或上次连接仍在收尾')
+        value['observed_wall_ns']=time.time_ns()
+        return value
+
     def snapshot(self, business):
         runtime = self.runtime
         if runtime is None:
@@ -125,7 +220,7 @@ class Device:
         if self.runtime is not runtime:
             return self.snapshot(business)
         try:
-            result = runtime.snapshot(credential)
+            result = runtime.fact_snapshot() if business is None else runtime.snapshot(credential)
         except PermissionError:
             if runtime.fd is not None:
                 raise
@@ -133,6 +228,12 @@ class Device:
                 release_receipt=deepcopy(runtime.release_receipt),
                 allowed_operations={key:dict(allowed=key=='stop',reason='设备连接正在收尾')
                                     for key in ('stop','preview','confirm','handoff')})
+        except (ConnectionError,ValueError)as error:
+            if not getattr(runtime,'remote_control_owner',False):raise
+            return dict(connected=None,state='UNKNOWN',holder=None,feedback_healthy=False,stationary=False,
+                automatic_enabled=None,runtime_nonce=runtime.nonce,service_error='独立Owner当前不可核验：'+str(error),
+                allowed_operations={key:dict(allowed=key=='stop',reason='独立Owner当前不可核验；请检查运维状态')
+                                    for key in('stop','preview','confirm','handoff')})
         receipt = result.get('release_receipt')
         if receipt and receipt['status']=='requested' and time.monotonic()-receipt['requested_monotonic_s']>=2:
             receipt.update(status='unconfirmed',message='释放超过 2 秒仍未确认；请查看设备诊断，不能重新连接')
@@ -152,18 +253,159 @@ class Application:
         self.devices = devices
         self.csrf = secrets.token_urlsafe(32)
         self.server_instance_id = str(uuid.uuid4())  # Public lifetime identity, not an authorization token.
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.revision = 0
         self.display_actions=threading.Lock()
         self.preview_contexts = {}
         self.jobs, self.requests, self.reviews = {}, OrderedDict(), {}
         self.manual_tasks = {}
         self.generations = {environment: 0 for environment in devices}
+        self.inference_generations = {environment: 0 for environment in devices}
+        self.maintenance = {}
+        self.action_calls = {environment:0 for environment in devices}
+        self.operations_managed = False  # Trusted deployment assembly enables the operations-only lifecycle.
+        for device in devices.values():device._operations_application=self
+
+    def inference_context(self, device, runtime, workflow):
+        return dict(server_instance_id=self.server_instance_id,device_id=device.id,
+            connected=runtime.get('connected') is True,runtime_nonce=runtime.get('runtime_nonce'),
+            command_epoch=runtime.get('command_epoch'),holder=runtime.get('holder'),
+            calibration_revision=runtime.get('calibration_revision'),
+            execution_instance_id=runtime.get('execution_instance_id'),
+            execution_settings_revision=(runtime.get('execution_settings') or {}).get('revision'),
+            workflow_generation=getattr(workflow,'generation',None),
+            application_generation=self.generations[device.environment],
+            inference_generation=self.inference_generations[device.environment])
+
+    def inference_run_reason(self, device, workflow, runtime, *, ignore_job=None,
+                             workflow_view=None,workflow_views=None,holder_runtime=None):
+        if not workflow or not all(callable(getattr(workflow,name,None)) for name in ('bind_device','preview_episode','execute_review')):
+            return '当前推理工作流尚未支持 Run，请使用分步诊断'
+        value=workflow.snapshot() if workflow_view is None else workflow_view;inference=value.get('inference') or {}
+        if not (inference.get('model_ready') or (inference.get('model') or {}).get('loaded')):
+            return '先选择 checkpoint，并等待模型加载与预热完成'
+        views=(flow.snapshot() for flow in device.workflows.values()) if workflow_views is None else workflow_views.values()
+        if any(view.get('busy') for view in views):return '业务任务正在处理，不能接管控制'
+        with self.lock:
+            if any(row.get('status')=='running' and row.get('id')!=ignore_job
+                    for (environment,_),row in self.jobs.items() if environment==device.environment):
+                return '当前设备仍有请求正在处理'
+        if not runtime.get('connected'):
+            if device.connecting or device.thread and device.thread.is_alive():return '设备连接正在准备或收尾'
+            return '设备控制尚未接入，请先在运维接入设备；Run不会自动连接'
+        if str(runtime.get('state','')).upper()=='FAULT' or runtime.get('recoverable_fault'):
+            return '设备存在控制故障，请先恢复并核验，不会由 Run 自动恢复'
+        if runtime.get('service_error'):return '设备控制线程存在异常，请先核验设备连接'
+        holder=runtime.get('holder')
+        source=holder_runtime if holder_runtime is not None else device.snapshot(holder) if holder in BUSINESSES else runtime
+        # UI readiness is stable across normal 100 Hz reads. Actual admission still
+        # waits at Runtime's existing 100 ms boundary and checks every idle guard.
+        gate=source.get('idle_readiness') or (source.get('allowed_operations') or {}).get('preview' if holder=='inference' else 'handoff') or {}
+        if not gate.get('allowed'):return gate.get('reason') or '当前控制器不允许接入本轮推理'
+        return None
+
+    def run_inference(self, device, workflow, body, job, generation, inference_generation, flow_generation):
+        environment=device.environment
+        runtime=device.runtime
+        binding=self.inference_context(device,device.snapshot('inference'),workflow)
+        def current():
+            return (self.generations[environment]==generation and self.inference_generations[environment]==inference_generation
+                and workflow.generation==flow_generation)
+        def check():
+            if not current():raise ValueError('本轮 Run 已撤销，不会继续连接或执行')
+            info=workflow.snapshot().get('inference') or {}
+            selected=info.get('selected_model_id') or (info.get('model') or {}).get('id')
+            digest=info.get('bundle_digest') or (info.get('model') or {}).get('bundle_digest')
+            if selected!=body['model_id'] or digest!=body['expected_bundle_digest']:
+                raise ValueError('本轮模型选择或 checkpoint 内容已变化')
+            if device.runtime is not runtime:raise ValueError('设备控制实例已变化，本轮已撤销')
+            actual=self.inference_context(device,device.snapshot('inference'),workflow)
+            if actual!=binding:raise ValueError('本轮控制上下文已变化，请重新确认')
+        def stage(name):
+            check()
+            with self.lock:job['stage']=name
+        if runtime is None:raise ValueError('设备控制尚未接入，请先在运维接入设备；Run不会自动连接')
+        reason=self.inference_run_reason(device,workflow,device.snapshot('inference'),ignore_job=job['id'])
+        if reason:raise ValueError(reason)
+        if runtime.holder!='inference':
+            stage('handoff')
+            runtime.admit_business('inference',active=current)
+            binding=self.inference_context(device,device.snapshot('inference'),workflow)
+            check()
+        stage('binding');workflow.bind_device();check()
+        stage('reviewing');review=workflow.preview_episode(body['seed'],duration_s=body['duration_s']);check()
+        preview=review.get('preview',{})
+        token=preview.get('token')
+        if not isinstance(token,str) or not token:raise ValueError('本轮执行审阅未生成有效令牌')
+        if (type(preview.get('duration_s')) not in (int,float) or preview['duration_s']!=body['duration_s']
+                or type(preview.get('seed')) is not int or preview['seed']!=body['seed']):
+            raise ValueError('本轮审阅的时长或种子与已确认的 Run 不一致')
+        stage('confirming')
+        # Order the final enqueue against stop/cancel. No model/camera work in this lock.
+        with self.lock:
+            if not current() or device.runtime is not runtime:raise ValueError('本轮 Run 在执行前已撤销')
+            result=workflow.execute_review(token,physical_clearance=True)
+            job['stage']='submitted'
+        return dict(message='本轮推理已提交；请查看实际执行与录像状态',execution=result,
+            model_id=body['model_id'],seed=body['seed'],duration_s=body['duration_s'])
 
     def device(self, environment):
         if environment not in self.devices:
             raise ValueError('该环境尚未配置，不能切换到另一个环境代替执行')
         return self.devices[environment]
+
+    def environment_state(self,environment):
+        """Environment facts stay independent from a business's permissions/view."""
+        device=self.device(environment);runtime=device.fact_snapshot()
+        views={}
+        for name,flow in device.workflows.items():
+            reader=getattr(flow,'environment_status',None)
+            views[name]=reader() if callable(reader) else flow.snapshot()
+        flow=device.workflows.get('inference');info=(views.get('inference') or {}).get('inference') or {}
+        if callable(getattr(flow,'environment_status',None)):model=deepcopy(views.get('inference')or{})
+        else:
+            selected=info.get('model') or {}
+            model=dict(selected_model_id=info.get('selected_model_id') or selected.get('id'),bundle_digest=info.get('bundle_digest') or selected.get('bundle_digest'),
+                loaded=selected.get('loaded'),ready=info.get('model_ready'),model_ready=info.get('model_ready'),
+                status=selected.get('status','unknown'),error=selected.get('error'),generation=info.get('generation'),observed_wall_ns=time.time_ns())
+        preparation=device.collection_preparation or device.workflows.get('collection')
+        collection=(deepcopy(preparation.environment_status()) if callable(getattr(preparation,'environment_status',None)) else
+            deepcopy(preparation.snapshot()) if preparation is not None else dict(status='unconfigured',ready=False,reason='当前环境未配置数采准备'))
+        with self.lock:
+            jobs=[{key:deepcopy(row[key]) for key in ('id','action','status','stage','started_wall_ns','error') if key in row}
+                for (env,_),row in self.jobs.items() if env==environment]
+            from .maintenance import public_state
+            maintenance=public_state(self.maintenance.get(environment));action_calls=self.action_calls[environment]
+        recording=runtime.get('recording') or {}
+        from .gc_timing import snapshot as gc_snapshot
+        activity=dict(busy=bool(device.connecting or any(row.get('busy') for row in views.values()) or collection.get('busy')
+            or any(row.get('status')=='running' for row in jobs) or action_calls or runtime.get('automatic_enabled')
+            or (runtime.get('control_operation') or {}).get('status') in ('queued','verifying_feedback','holding','stopping','unknown')
+            or recording and recording.get('done') is not True),connecting=device.connecting,requests=jobs,
+            businesses={name:{key:view.get(key) for key in ('busy','status','stage_id')} for name,view in views.items()},
+            recording_active=bool(recording and recording.get('done') is not True))
+        return dict(schema='robot_workbench.environment.v1',projection='backend_environment',device=dict(id=device.id,environment=environment,label=device.label),
+            server_instance_id=self.server_instance_id,csrf=self.csrf,server_wall_ns=time.time_ns(),runtime=runtime,
+            control_timing=dict(gc=gc_snapshot()),
+            operations_managed=self.operations_managed,
+            activity=activity,maintenance=maintenance,model=model,collection=collection,
+            cameras=[provider.snapshot() for name,provider in device.media.items() if name in ('head','left','right')])
+
+    def maintenance_action(self,action,body):
+        if not isinstance(body,dict):raise ValueError('维护请求对象必需')
+        from .maintenance import operate
+        return operate(self,self.device(body.get('environment')),action,body)
+
+    def stop_device(self,device):
+        with self.lock:
+            window=self.maintenance.get(device.environment)
+            if window is not None:window.update(_cancelled=True,error='Stop已撤销维护计划')
+        result=device.request_stop()
+        self.invalidate(device.environment,clear_manual=True,workflow_async=True)
+        for workflow in device.workflows.values():
+            callback=getattr(workflow,'cancel',None)
+            if callable(callback):threading.Thread(target=callback,daemon=True).start()
+        return {**result,'message':'停止已受理；请查看控制器确认状态'}
 
     def preview_state(self,device,runtime=None):
         provider=device.preview
@@ -229,20 +471,29 @@ class Application:
     @staticmethod
     def preparation_view(preparation):
         phase=preparation['status'];busy=preparation['busy'];installed=preparation.get('installed') or {}
-        titles={'awaiting_calibration':'等待标定安装','queued':'数采环境等待准备','verifying_installation':'核验当前已安装标定',
+        titles={'awaiting_calibration':'等待标定安装','awaiting_prepare':'等待运维准备数采服务','queued':'数采服务等待准备','verifying_installation':'核验当前已安装标定',
             'preparing_profile':'根据已安装标定构建数采配置','converting_planning_assets':'转换数采规划资产',
             'initializing_detector':'初始化物体检测服务','initializing_planner':'初始化轨迹规划服务',
-            'ready':'数采环境已就绪','failed':'数采环境准备失败'}
+            'initializing_scene':'初始化常驻场景服务','warming_planner':'初始化场景与预热规划模型','ready':'数采常驻服务已就绪','failed':'数采服务准备失败'}
         title=titles.get(phase,'准备数采环境')
-        detail=preparation.get('error') or (preparation.get('worker') or {}).get('message') or title
+        detail=preparation.get('error') or (preparation.get('progress') or {}).get('label') or (preparation.get('worker') or {}).get('message') or title
         retained=preparation.get('installed_calibration_preserved')
+        warmup=deepcopy(preparation.get('warmup') or dict(status='not_started',
+            message='先在服务运维准备资产与服务，再在数采页初始化与预热。'))
+        warmup.update(stage_label=title,elapsed_s=(preparation.get('progress') or {}).get('elapsed_s'))
+        actions={name:dict(id=action,label=label,allowed=preparation['can_retry'] if name=='prepare' else False,
+                    reason=preparation['retry_reason'] if name=='prepare' else '先完成初始化与预热')
+            for name,action,label in (('prepare','collection_prepare','初始化与预热'),('plan','collection_plan','采集新观测并生成计划'),
+                                      ('execute','execute','审阅并执行本批'))}
         return dict(status='running' if busy else 'failed' if phase=='failed' else 'idle',busy=busy,
             stage_id='collection.setup.'+phase,title=title,
             message=('已安装标定保留，无需重新采集。' if retained else '')+str(detail),
             primary_action=dict(id='prepare_collection',label='重新准备数采环境',allowed=preparation['can_retry'],reason=preparation['retry_reason']),
+            collection=dict(warmup=warmup,actions=actions,timing=preparation.get('progress') or {}),
             progress=dict(indeterminate=True,unit=title) if busy else None,
             details=[dict(label='头部标定',value=installed.get('head_version') or installed.get('head_id') or '尚未安装'),
                      dict(label='双腕标定',value=installed.get('wrist_version') or installed.get('wrist_id') or '尚未安装'),
+                     dict(label='服务期限',value='长期运行 · 手动停止') if preparation.get('persistent_service') is True else
                      dict(label='本次驻留剩余时间',value=f"{preparation['remaining_wall_s']:.0f} 秒")],
             outcomes=dict(calibration='已安装并保留' if retained else '等待有效安装',preparation=phase),preparation=preparation)
 
@@ -266,13 +517,19 @@ class Application:
             job = deepcopy(self.jobs.get((environment,business)))
             review = deepcopy(self.reviews.get((environment,business)))
             manual_task = deepcopy(self.manual_tasks.get((environment,business)))
-        value = workflow.snapshot() if workflow else dict(status='unconfigured',busy=False,
+        workflow_views={name:flow.snapshot() for name,flow in device.workflows.items()}
+        value = workflow_views[business] if workflow else dict(status='unconfigured',busy=False,
             stage_id='configuration',title='配置业务后端',message='设备控制可独立验证；当前业务的采集、求解与数据路径尚未配置。',
             primary_action=None,progress=None,outcomes={})
-        if business=='collection':value=collection_live_view(value,runtime)
+        if business=='collection':
+            value=collection_live_view(value,runtime)
+            from robot_workbench.cup_return import view as cup_return_view
+            value=cup_return_view(device,runtime,value)
         if readiness is not None:value['control_readiness']=readiness
         preparation=device.collection_preparation.snapshot() if business=='collection' and device.collection_preparation else None
-        preparing=bool(preparation and (workflow is None or preparation['busy'] or preparation['status']=='failed' and not value.get('busy')))
+        preparing=bool(preparation and not getattr(device,'cup_return_task',None)
+            and (workflow is None or preparation['busy'] or preparation['status']!='ready'
+                and not value.get('busy') and not frozen_collection_scope(device)))
         if preparing:
             value=self.preparation_view(preparation)
             review=None
@@ -301,33 +558,50 @@ class Application:
         if review:
             value['review'] = {key:review[key] for key in ('id','summary','physical_clearance_required')}
             value['review']['expires_at_wall_ns']=time.time_ns()+int(max(0.,review['deadline']-time.monotonic())*1e9)
-            for name in ('request_job_id','total_motion_duration_s','waypoint_jaw_gap_mm'):
+            for name in ('request_job_id','total_motion_duration_s','waypoint_jaw_gap_mm','offset_xy_mm','origin_position_m','goal_position_m','seed','duration_s','execution_duration_s'):
                 if name in review:value['review'][name]=review[name]
             if review.get('speed_scale') is not None:value['review']['speed_scale']=review['speed_scale']
             execution_gate=runtime['allowed_operations']['confirm' if review['owner_preview'] else 'preview']
-            value['primary_action'] = dict(id=review['action'],label='审阅并执行本批',
+            value['primary_action'] = dict(id=review['action'],label=f"确认执行本轮 {review.get('execution_duration_s',review.get('duration_s',120)):g} 秒推理" if business=='inference' else '审阅并执行本批',
                 allowed=execution_gate['allowed'],reason=execution_gate['reason'])
-        if job and job['status'] in ('running','failed'):
+        if job and job['status'] in ('running','failed','cancelled'):
             value['request'] = job
             if job['status'] == 'running':
                 value['busy'] = True
+                if job['action']=='inference_run':
+                    phase=job.get('stage','binding')
+                    value.update(stage_id='inference.'+phase,title='准备本轮推理',message={
+                        'connecting':'正在连接设备并等待健康反馈','handoff':'正在交接控制权',
+                        'binding':'正在核对模型、标定与相机','reviewing':'正在准备本轮执行审阅',
+                        'confirming':'正在提交已确认的本轮推理','submitted':'本轮已提交，等待控制回执'}.get(phase,phase))
                 if value.get('primary_action'):
                     value['primary_action'].update(allowed=False,reason='当前请求仍在处理')
         allowed = runtime.setdefault('allowed_operations',{})
+        execution_settings=runtime.get('execution_settings') or {}
+        settings_reason=execution_settings.get('update_reason') or '请先连接设备'
+        settings_allowed=execution_settings.get('update_allowed') is True
+        with self.lock:
+            settings_job_busy=any(item.get('status')=='running' for (env,_),item in self.jobs.items() if env==environment)
+        workflows_busy=any(view.get('busy') for view in workflow_views.values())
+        if settings_job_busy or workflows_busy:
+            settings_allowed=False;settings_reason='请先结束当前请求或业务任务，再应用执行误差设置'
+        allowed['execution_settings']=dict(allowed=settings_allowed,reason=None if settings_allowed else settings_reason)
         connect_ready=device.runtime is None and not device.connecting and not (device.thread and device.thread.is_alive())
         allowed['connect'] = dict(allowed=bool(connect_ready and device.factory is not None),
                                   reason=('设备控制后端尚未配置' if device.factory is None else
                                           None if connect_ready else '设备仍连接或正在收尾，请等待明确断开'))
         allowed.setdefault('release',dict(allowed=False,reason='请先连接设备'))
-        if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+        if workflows_busy:
             allowed['release']=dict(allowed=False,reason='请先结束或取消业务任务，再释放设备连接')
         holder = runtime.get('holder')
+        holder_runtime=runtime
         # This is an explicit operator handoff endpoint, not an application
         # pretending to be the current holder when sending a motion command.
         if device.runtime is not None:
-            source = device.snapshot(holder)['allowed_operations']['handoff']
+            holder_runtime=runtime if holder==business else device.snapshot(holder)
+            source = holder_runtime['allowed_operations']['handoff']
             allowed['handoff'] = source
-            if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+            if workflows_busy:
                 allowed['handoff'] = dict(allowed=False,reason='业务任务仍在进行；请先结束或取消当前任务')
         motion_reason = allowed['preview']['reason']
         manual_ready=business=='calibration' and allowed['preview']['allowed'] and not value.get('busy')
@@ -343,15 +617,21 @@ class Application:
             reason=allowed['confirm']['reason'] or (None if review else '请先生成并审阅人工姿态'))
         allowed['recover'] = dict(allowed=bool(runtime.get('recoverable_fault')) and holder==business,
             reason=None if runtime.get('recoverable_fault') and holder==business else '当前没有可确认恢复的故障；设备故障请查看诊断')
+        if self.operations_managed:
+            for action in ('connect','release','recover'):
+                allowed[action]=dict(allowed=False,reason='operation_required：请从统一运维入口执行设备生命周期操作')
         preview=self.preview_state(device,runtime)
         for action in ('preview_target','preview_overview','preview_mesh'):
-            allowed[action]=dict(allowed=bool(preview.get('connected')),reason=None if preview.get('connected') else '目标图像服务尚未就绪，请查看画面恢复指引')
+            supported=preview.get('capabilities',{}).get(action.removeprefix('preview_'),True)
+            ready=bool(preview.get('connected')) and supported
+            allowed[action]=dict(allowed=ready,reason=None if ready else
+                ('此设备仅提供实际图像上的 mesh 叠加，未配置目标姿态渲染器' if not supported else '目标图像服务尚未就绪，请查看画面恢复指引'))
         allowed['preview_recover']=dict(allowed=bool(device.preview and hasattr(device.preview,'recover') and preview.get('recovery',{}).get('allowed')),
             reason=preview.get('recovery',{}).get('message'))
-        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS):
+        for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS):
             allowed.setdefault(action,dict(allowed=False,reason='当前业务后端尚未配置'))
         if workflow:
-            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS):
+            for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS):
                 if hasattr(workflow,'allowed'):
                     allowed[action]=workflow.allowed(action)
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
@@ -360,55 +640,163 @@ class Application:
             for action in ('execute','manual_execute'):
                 if allowed[action]['allowed']:allowed[action]=dict(allowed=False,reason=readiness['reason'])
         if preparation:
-            allowed['prepare_collection']=dict(allowed=preparation['can_retry'],reason=preparation['retry_reason'])
+            operation=getattr(device.collection_preparation,'collection_prepare_operation',None) or getattr(device,'collection_prepare_operation',None)
+            reason=preparation['retry_reason'] if callable(operation) else '数采环境准备需要运维 Operation；请从统一运维入口发起'
+            allowed['prepare_collection']=dict(allowed=preparation['can_retry'] and callable(operation),reason=reason)
+            if workflow is None:
+                allowed['collection_prepare']=dict(allowed=False,reason='请先在服务运维准备当前数采资产与常驻服务')
             if preparing:
                 for action in ('generate_plan','execute'):
                     allowed[action]=dict(allowed=False,reason='先完成数采环境准备；已安装标定仍保留')
         if business=='calibration' and (preview.get('diagnostic_calibration') or {}).get('mode')=='warm_diagnostic':
             for action in WARM_C_ACTIONS:allowed[action]=dict(allowed=False,reason=WARM_C_REASON)
         primary = value.get('primary_action')
+        if primary and primary['id']=='prepare_collection':primary.update(allowed['prepare_collection'])
         if primary and primary['id'] in (*CALIBRATION_TOOLS,'generate_plan') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
         if readiness is not None and primary and primary['id'] in ('execute','manual_execute') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
-        if primary and primary['id']!='prepare_collection' and (not runtime['connected'] or holder != business):
+        if primary and primary['id'] not in ('prepare_collection','inference_run',*INFERENCE_MODEL_TOOLS) and (not runtime['connected'] or holder != business):
             primary.update(allowed=False,reason='请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有')
         if business=='collection':
             for action in (*COLLECTION_TOOLS,'execute'):
                 reason=('请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有' if holder!=business else
-                    '请先完成数采环境准备' if preparing else '请先生成并审阅当前执行计划' if action=='execute' and not review else None)
+                    '请先完成数采环境准备' if preparing and action!='collection_prepare' else '请先生成并审阅当前执行计划' if action=='execute' and not review else None)
                 if reason:allowed[action]=dict(allowed=False,reason=reason)
             for entry in value.get('collection',{}).get('actions',{}).values():entry.update(allowed[entry['id']])
+        if business=='inference':
+            for action in ('inference_preview','execute'):
+                reason=('请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有' if holder!=business else
+                    '当前推理请求或执行尚未结束' if value.get('busy') else
+                    '请先准备并审阅本轮推理' if action=='execute' and not review else
+                    allowed['confirm' if action=='execute' else 'preview'].get('reason') if not allowed['confirm' if action=='execute' else 'preview']['allowed'] else None)
+                if reason:allowed[action]=dict(allowed=False,reason=reason)
+            if primary and primary['id'] in (*INFERENCE_TOOLS,'execute'):primary.update(allowed[primary['id']])
+            reason=self.inference_run_reason(device,workflow,runtime,workflow_view=value,
+                workflow_views=workflow_views,holder_runtime=holder_runtime)
+            allowed['inference_run']=dict(allowed=reason is None,reason=reason)
+            if workflow and hasattr(workflow,'refresh_models'):
+                for action in INFERENCE_MODEL_TOOLS:
+                    if value.get('busy'):allowed[action]=dict(allowed=False,reason='当前推理请求或执行尚未结束')
+                    else:allowed[action]=dict(allowed=True,reason=None)
+            info=value.setdefault('inference',{})
+            info['run_context']=self.inference_context(device,runtime,workflow)
+            info['run_action']=dict(id='inference_run',**allowed['inference_run'])
+            if primary and primary['id'] in INFERENCE_MODEL_TOOLS:primary.update(allowed[primary['id']])
+        return_task=getattr(device,'cup_return_task',None) if business=='collection' else None
+        return_install=(preparation or {}).get('installed') or {}
+        restored=((getattr(device,'scene_recovery_state',{}) or {}).get('last_completed') or {}).get('task_kind') in ('cup_return','scene_initialization')
+        recovery_error=getattr(device,'scene_recovery_error',None)
+        physical_return=getattr(device,'physical_cup_return_candidate',None)
+        return_source=bool(getattr(device,'cup_return_inputs',None)) if environment=='fake' else bool(physical_return and Path(physical_return).is_file())
+        if environment=='physical' and return_source:
+            from robot_workbench.cup_return import installed_pair
+            return_install=installed_pair(device)
+        return_allowed=bool(business=='collection'
+            and return_source and return_install.get('verified') and not value.get('busy')
+            and not restored and not recovery_error and holder=='collection' and allowed['preview']['allowed'])
+        allowed['return_cup']=dict(allowed=return_allowed,
+            reason=None if return_allowed else str(recovery_error) if recovery_error else '场景已恢复；完成下一轮放杯后可再次恢复' if restored else
+            '需已安装标定和完成检查的还原计划，且当前无动作')
+        if return_task:
+            if preparation and 'warmup' not in value['collection']:
+                value['collection']['warmup']=dict(status='ready' if preparation['status']=='ready' else 'not_started',
+                    message=preparation.get('message') or '普通数采尚未预热；场景恢复无需检测器或 cuRobo 预热。')
+            allowed['execute']=dict(allowed=bool(review and review.get('purpose')=='cup_return' and allowed['confirm']['allowed']),
+                reason=allowed['confirm']['reason'] or (None if review else '请重新生成取回计划并审阅'))
+            value['collection']['actions']['execute'].update(allowed['execute'])
+        if return_task and value.get('busy'):
+            for name in ('collection_prepare','collection_plan','generate_plan','return_cup'):
+                allowed[name]=dict(allowed=False,reason='请等待取回动作结束')
         raw = (runtime.get('calibration_feedback') or {}).get('qpos')
         limits = runtime.get('joint_limits')
         manual = {}
         if raw and limits:
             from arx_env.joint_head_jaw_mapping import feedback_gaps
             from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
+            gaps=feedback_gaps(raw)
+            valid=(runtime.get('calibration_feedback') or {}).get('gripper_feedback_valid',[True,True])
             manual=dict(joint_names=[side+' J'+str(i) for side in ('左','右') for i in range(1,7)],
-                positions=raw[:6]+raw[7:13], limits=limits[:6]+limits[7:13],jaw_gaps_mm=feedback_gaps(raw),
+                positions=raw[:6]+raw[7:13], limits=limits[:6]+limits[7:13],
+                jaw_gaps_mm=[value if valid[i] else None for i,value in enumerate(gaps)],
+                disabled_grippers=list(runtime.get('passive_jaws') or []),
                 position_noise_rad=position_noise_rad(environment),
                 default_joint_speed_rad_s=DEFAULT_VELOCITY,default_jaw_speed_mm_s=10.)
         manual['queue']=queue
         calibration=device.workflows.get('calibration')
-        arrival=(calibration.snapshot().get('arrival_statistics') if calibration and hasattr(calibration,'snapshot') else None) or {'error':'未配置标定到位统计；协议 Fake 不生成统计数据'}
+        arrival=(workflow_views.get('calibration') or {}).get('arrival_statistics') or {'error':'未配置标定到位统计；协议 Fake 不生成统计数据'}
         history=getattr(device,'collection_history',None) if business=='collection' else None
+        inference_flow=device.workflows.get('inference')
+        inference_execution=inference_flow.execution_settings() if hasattr(inference_flow,'execution_settings') else None
+        allowed['inference_execution_settings']=dict(allowed=bool(inference_execution and inference_execution['allowed'] and not settings_job_busy),
+            reason='当前请求尚未结束' if settings_job_busy else inference_execution.get('reason') if inference_execution else '当前环境未配置推理服务')
+        from .maintenance import public_state
+        with self.lock:maintenance=public_state(self.maintenance.get(environment))
+        if maintenance:
+            for action,gate in allowed.items():
+                if action!='stop':gate.update(allowed=False,reason='服务维护中：'+maintenance['purpose'])
+            if value.get('primary_action'):value['primary_action'].update(allowed=False,reason='服务维护中')
         return dict(schema='robot-workbench-ui.v1',server_instance_id=self.server_instance_id,
-            revision=revision,server_wall_ns=time.time_ns(),csrf=self.csrf,
+            revision=revision,revision_semantics='response_order_within_server_instance',server_wall_ns=time.time_ns(),csrf=self.csrf,
             device=dict(id=device.id,label=device.label,environment=environment),runtime=runtime,
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
             results=(workflow.results() if workflow else [])+(history.results() if history else []),diagnostics=[
                 {'label':'控制器状态','value':runtime.get('state','未知')},
                 {'label':'控制器当前原因','value':runtime.get('reason') or '未提供当前状态原因'},
-                {'label':'服务线程异常','value':device.error or '未报告服务线程异常'},*value.get('diagnostics',[])],
+                {'label':'服务线程异常','value':device.error or '未报告服务线程异常'},
+                *([{'label':'历史录制目录未就绪','value':device.collection_history_error}] if getattr(device,'collection_history_error',None) else []),
+                *value.get('diagnostics',[])],
             mesh=workflow.mesh() if workflow and hasattr(workflow,'mesh') else {'requested':False,'applied':False},manual=manual,
-            arrival_statistics=arrival,preview=preview)
+            arrival_statistics=arrival,preview=preview,inference_execution=inference_execution,
+            maintenance=maintenance)
 
     def action(self, action, body):
         if not isinstance(body,dict) or body.get('business') not in BUSINESSES:
             raise ValueError('业务与请求对象必需')
         environment,business=body.get('environment'),body['business']
         device=self.device(environment)
+        from .maintenance import ACTIONS as MAINTENANCE_ACTIONS, apply as maintenance_apply
+        if action in MAINTENANCE_ACTIONS:
+            if not isinstance(body.get('request_id'),str) or not 1<=len(body['request_id'])<=128:
+                raise ValueError('有效的维护请求身份必需')
+            return maintenance_apply(self,device,action,body)
+        if action=='release' and 'maintenance_token' in body:
+            return maintenance_apply(self,device,'release_control',body)
+        if action=='stop':return self._action(action,body)
+        with self.lock:
+            maintenance=self.maintenance.get(environment)
+            if maintenance:
+                raise ValueError('服务维护中，请等待维护结果；停止仍可独立使用')
+            self.action_calls[environment]+=1
+        try:
+            return self._action(action,body)
+        finally:
+            with self.lock:self.action_calls[environment]-=1
+
+    def _action(self, action, body):
+        environment,business=body.get('environment'),body['business']
+        device=self.device(environment)
+        if self.operations_managed and action in ('connect','release','recover'):
+            raise ValueError('operation_required：设备接入、释放与恢复必须通过运维维护窗口执行')
+        if action=='prepare_collection' and not callable(
+                getattr(device.collection_preparation,'collection_prepare_operation',None) or getattr(device,'collection_prepare_operation',None)):
+            raise ValueError('operation_required：数采环境准备需要运维 Operation；请从统一运维入口发起')
+        if action=='collection_prepare':
+            workflow=device.workflows.get('collection')
+            if business!='collection' or workflow is None:raise ValueError('请先在服务运维准备数采资产与常驻服务')
+            permission=workflow.allowed(action)
+            if permission.get('allowed')is not True:raise ValueError(permission.get('reason') or '业务预热条件尚未满足')
+        if action in (*INFERENCE_TOOLS,'inference_run'):
+            extra=({'model_id','expected_bundle_digest'} if action=='inference_select' else set())
+            if action=='inference_preview':extra.add('reference_feedforward_sha256')
+            if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported'}
+            if business!='inference' or set(body)-{'environment','business','request_id','seed','duration_s'}-extra:
+                raise ValueError('推理请求包含未支持的字段；模型须来自 checkpoint 目录')
+            if type(body.get('seed',0)) is not int or not 0<=body.get('seed',0)<2**32:
+                raise ValueError('随机种子须为 0～4294967295 的整数')
+            episode_duration(body.get('duration_s',120))
+            if action=='inference_run' and not {'seed','model_id','expected_bundle_digest','expected_context','state_wall_ns'}.issubset(body):
+                raise ValueError('Run 缺少本轮模型、种子或控制上下文')
         request_id=body.get('request_id')
         if not isinstance(request_id,str) or not 1 <= len(request_id) <= 128:
             raise ValueError('有效的单次请求身份必需')
@@ -420,19 +808,70 @@ class Application:
                 if previous['body'] != body or previous['action'] != action:
                     raise ValueError('同一请求身份不可绑定不同操作')
                 return previous['response']
+        if action=='inference_execution_settings':
+            if business not in ('calibration','inference') or set(body)!={'environment','business','request_id','execute_steps','expected_revision'}:
+                raise ValueError('请从标定或推理页面提交执行长度和当前设置版本')
+            flow=device.workflows.get('inference')
+            if not hasattr(flow,'set_execution_steps'):raise ValueError('当前环境未配置推理服务')
+            with self.lock:
+                previous=self.requests.get(key)
+                if previous:
+                    if previous['body']!=original_body:raise ValueError('同一请求身份不可绑定不同操作')
+                    return previous['response']
+                if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
+                    raise ValueError('当前请求尚未结束，请稍后应用推理设置')
+                value=flow.set_execution_steps(body['execute_steps'],body['expected_revision'])
+                self.reviews.pop((environment,'inference'),None)
+                self.inference_generations[environment]+=1
+                result=dict(inference_execution=value,message='推理执行长度已保存；旧推理确认已撤销，下一轮生效。')
+                self.requests[key]=dict(body=original_body,action=action,response=result)
+                while len(self.requests)>256:self.requests.popitem(last=False)
+            return result
+        if action=='inference_run':body=dict(body,duration_s=body.get('duration_s',120))
         if action=='stop':
-            result=device.submit(business,{'action':'stop'})
-            self.invalidate(environment,clear_manual=True)
-            for workflow in device.workflows.values():
-                threading.Thread(target=workflow.cancel,daemon=True).start()
-            return {**result,'message':'停止已受理；请查看控制器确认状态'}
+            return self.stop_device(device)
+        if action=='cancel' and business=='inference':
+            workflow=device.workflows.get('inference')
+            with self.lock:
+                self.inference_generations[environment]+=1
+                self.reviews.pop((environment,business),None)
+                active=self.jobs.get((environment,business)) or {}
+                own_connection=active.get('action')=='inference_run' and active.get('status')=='running'
+            if own_connection:device.stop_latched=True
+            if device.runtime is not None and (device.runtime.holder=='inference' or own_connection):
+                device.submit(business,{'action':'stop'})
+            if workflow:threading.Thread(target=workflow.cancel,daemon=True).start()
+            return dict(message='本轮推理准备或执行已撤销，不会自动重试')
+        if action not in ('preview_target','preview_overview','preview_mesh','preview_recover','mesh','select_result',*HISTORY_ACTIONS):
+            with self.lock:
+                if any(row.get('status')=='running' and row.get('action')=='inference_run'
+                        for (env,_),row in self.jobs.items() if env==environment):
+                    raise ValueError('本轮 Run 正在接入或提交；可停止或取消后再更改配置')
+        if action=='inference_run':
+            workflow=device.workflows.get('inference');runtime=device.snapshot('inference')
+            reason=self.inference_run_reason(device,workflow,runtime)
+            if reason:raise ValueError(reason)
+            if body.get('physical_clearance') is not True or body.get('scene_reset') is not True:
+                raise ValueError('Run 前须确认场景已复位、工作区无人并允许本轮控制')
+            if not runtime.get('connected') and environment=='physical' and body.get('arms_supported') is not True:
+                raise ValueError('连接前须在本次 Run 中确认双臂已可靠支撑')
+            stamp=body.get('state_wall_ns')
+            if type(stamp) is not int or not 0<=time.time_ns()-stamp<=5_000_000_000:
+                raise ValueError('Run 页面状态已失鲜，请重新核验后确认')
+            if body.get('expected_context')!=self.inference_context(device,runtime,workflow):
+                raise ValueError('Run 控制上下文已变化，请重新确认')
+            info=workflow.snapshot().get('inference') or {}
+            if (not isinstance(body.get('model_id'),str) or body['model_id']!=(info.get('selected_model_id') or (info.get('model') or {}).get('id'))
+                    or not isinstance(body.get('expected_bundle_digest'),str)
+                    or body['expected_bundle_digest']!=(info.get('bundle_digest') or (info.get('model') or {}).get('bundle_digest'))):
+                raise ValueError('Run checkpoint 选择或内容已变化，请重新确认')
         if (environment=='fake' and business=='calibration' and action in WARM_C_ACTIONS
                 and (getattr(device,'diagnostic_calibration',None) or {}).get('mode')=='warm_diagnostic'):
             raise ValueError(WARM_C_REASON)
         if action in ('preview_target','preview_overview','preview_mesh','preview_recover'):
             provider=device.preview
             if provider is None:raise ValueError('目标图像服务未配置')
-            fields={'preview_target':{'q12','jaw_gap_mm','display_context','renderer_id','view_revision','presented_through_revision'},'preview_overview':{'yaw','pitch','zoom','pan_y'},
+            fields={'preview_target':{'q12','jaw_gap_mm','display_context','renderer_id','view_revision','presented_through_revision'},'preview_overview':{'yaw','pitch','zoom','pan_y','top_view'},
                     'preview_mesh':{'enabled','camera','candidate_id'},'preview_recover':set()}[action]
             if set(body)-{'environment','business','request_id'}-fields:raise ValueError('unknown display action field')
             # Serialize only these cache/queue writes. Owner stop/state never takes this lock.
@@ -460,7 +899,7 @@ class Application:
                         presented_through_revision=body.get('presented_through_revision'))
                     result=dict(result,display_context=context['display_context'],renderer_id=context['renderer_id'],view_revision=context['revisions']['overview'],
                         position_normalization=dict(environment=environment,corrections=corrections))
-                elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.))
+                elif action=='preview_overview':result=provider.overview(body['yaw'],body['pitch'],body['zoom'],body.get('pan_y',0.),**({'top_view':body['top_view']}if 'top_view'in body else{}))
                 elif action=='preview_mesh':result=provider.mesh(body['enabled'],camera=body.get('camera','head'),candidate_id=body.get('candidate_id'))
                 else:
                     if not hasattr(provider,'recover') or not provider.state().get('recovery',{}).get('allowed'):raise ValueError('渲染器当前不可恢复')
@@ -495,14 +934,55 @@ class Application:
                 while len(self.requests)>256:self.requests.popitem(last=False)
             self.invalidate(environment,clear_manual=True)
             return result
+        if action=='execution_settings':
+            if set(body)!={'environment','business','request_id','settings','expected_revision'}:
+                raise ValueError('执行误差设置须包含完整设置与当前版本')
+            runtime=device.runtime
+            if runtime is None:raise ValueError('请先连接设备')
+            with self.lock:
+                previous=self.requests.get(key)
+                if previous:
+                    if previous['body']!=original_body or previous['action']!=action:raise ValueError('同一请求身份不可绑定不同操作')
+                    return previous['response']
+                if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
+                    raise ValueError('当前请求尚未结束，请稍后应用执行误差设置')
+                if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+                    raise ValueError('业务任务仍在进行，请稍后应用执行误差设置')
+                if type(body['expected_revision']) is not int or body['expected_revision']!=runtime.execution_settings_snapshot(business)['revision']:
+                    raise ValueError('执行误差设置已变化，请重新读取当前设置后应用')
+                result=runtime.update_execution_settings(device.credentials[business],body['settings'])
+                result=dict(execution_settings=result,message='执行误差设置已生效；原执行审批已撤销，请重新审阅轨迹')
+                self.requests[key]=dict(body=original_body,action=action,response=result)
+                while len(self.requests)>256:self.requests.popitem(last=False)
+            self.invalidate(environment,clear_manual=True)
+            return result
         if action=='prepare_collection':
             if business!='collection' or set(body)!={'environment','business','request_id'} or device.collection_preparation is None:
                 raise ValueError('当前数采后台准备入口未配置')
             state=device.collection_preparation.snapshot()
             if not state['can_retry']:raise ValueError(state['retry_reason'] or '当前数采准备不能重试')
-        if business=='collection' and action in ('generate_plan','execute',*COLLECTION_TOOLS) and device.collection_preparation:
-            if device.collection_preparation.snapshot()['status']!='ready':
-                raise ValueError('数采环境尚未准备成功；已有标定保留，请先完成环境准备')
+        if business=='collection' and action in ('generate_plan','execute','collection_plan') and device.collection_preparation:
+            return_review=action=='execute' and (self.reviews.get((environment,business)) or {}).get('purpose')=='cup_return'
+            preparation=device.collection_preparation.snapshot()
+            if preparation['status']!='ready' and not return_review:
+                restoring=action=='generate_plan' and body.get('restore_frozen_plan') is True
+                if (preparation.get('busy') or action=='collection_plan' or body.get('replan')
+                        or 'operator_assisted_request_id' in body or not (restoring or frozen_collection_scope(device))):
+                    raise ValueError('数采环境尚未准备成功；已有标定保留，请先完成环境准备')
+                workflow=device.workflows.get('collection');playground=getattr(workflow,'playground',None)
+                generation=self.generations[environment]
+                if playground is None:raise ValueError('当前没有可恢复的冻结计划')
+                # Reuse the complete artifact/binding/current-joint validator.
+                # A request flag never certifies warmup, control, or a valid plan.
+                playground.restore_prepared()
+                state=playground.snapshot()
+                if (generation!=self.generations[environment] or not frozen_collection_scope(device)
+                        or not state.get('can_execute') or state.get('plan',{}).get('validated') is not True):
+                    raise ValueError('冻结计划或当前控制状态未通过恢复核验')
+        if (getattr(device,'cup_return_task',None) or {}).get('submitted') and action not in ('manual_execute','execute'):
+            from robot_workbench.cup_return import view as return_view
+            if return_view(device,device.snapshot(business),{}).get('busy'):
+                raise ValueError('取回动作尚未结束；停止始终可用')
         if action in ('manual_execute','execute'):
             review_id=body.get('review_id')
             with self.lock:
@@ -513,6 +993,13 @@ class Application:
                     raise ValueError('审批已过期或不属于当前任务，请重新生成计划')
                 if body.get('physical_clearance') is not True:
                     raise ValueError('执行前必须明确确认本批轨迹与净空')
+                if review.get('purpose')=='cup_return' and body.get('offset_xy_mm',[0.,0.])!=review.get('offset_xy_mm',[0.,0.]):
+                    raise ValueError('场景恢复偏移已变化，请重新生成并确认')
+                if business=='inference' and (body.get('seed',review.get('seed'))!=review.get('seed')
+                        or episode_duration(body.get('duration_s',120))!=review.get('duration_s',120)):
+                    raise ValueError('本轮推理种子或时长已变化，请重新准备并审阅')
+                if review.get('purpose')=='cup_return' and (getattr(device,'cup_return_task',None) or {}).get('review_id')!=review_id:
+                    raise ValueError('场景恢复任务已撤销，请重新生成并确认')
                 if review.get('speed_scale') is not None and (type(body.get('speed_scale',review['speed_scale'])) not in (int,float)
                         or body.get('speed_scale',review['speed_scale'])!=review['speed_scale']):
                     raise ValueError('执行速度已变化，请重新审阅')
@@ -534,18 +1021,37 @@ class Application:
                 task=self.manual_tasks.get((environment,business))
                 if action=='manual_execute' and task and task['id']==review_id:
                     task['submitted_monotonic_s']=time.monotonic()
-            if action=='manual_execute':
+                return_task=None
+                if review.get('purpose')=='cup_return':
+                    return_task=getattr(device,'cup_return_task',None)
+                    if not return_task or return_task.get('review_id')!=review_id:
+                        raise ValueError('场景恢复任务已撤销，请重新生成并确认')
+                    return_task.update(submitted=True,submitted_monotonic_s=time.monotonic())
+            if action=='manual_execute' or review.get('purpose')=='cup_return':
                 try:
-                    return device.submit(business,dict(action='confirm',token=review['token'],
+                    if return_task is not None:
+                        from robot_workbench.physical_cup_return import mark_submitted
+                        mark_submitted(device,review_id)
+                    result=device.submit(business,dict(action='confirm',token=review['token'],
                         confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+                    return result
                 except Exception:
-                    with self.lock:self.manual_tasks.pop((environment,business),None)
+                    with self.lock:
+                        self.manual_tasks.pop((environment,business),None)
+                        if return_task is not None and getattr(device,'cup_return_task',None) is return_task:
+                            return_task['submitted']=False
                     raise
             body={**body,'token':review['token']}
             if review.get('speed_scale') is not None:body['speed_scale']=review['speed_scale']
-        if action not in {'connect','prepare_collection','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*HISTORY_ACTIONS}:
+        if action not in {'connect','prepare_collection','inference_run','fake_scene_update','return_cup','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
-        if action not in ('connect','prepare_collection','mesh','select_result','cancel',*HISTORY_ACTIONS):
+        if business=='collection' and action in ('generate_plan','collection_plan','collection_prepare','fake_scene_update'):
+            with self.lock:
+                if (self.reviews.get((environment,business)) or {}).get('purpose')=='cup_return':
+                    self.reviews.pop((environment,business),None)
+            from robot_workbench.cup_return import clear
+            clear(device)
+        if action not in ('connect','prepare_collection','inference_run',*INFERENCE_MODEL_TOOLS,'mesh','select_result','cancel',*HISTORY_ACTIONS):
             if device.runtime is None:raise ValueError('请先连接设备')
             if device.runtime.holder != business:
                 raise PermissionError('请先交接控制权限：当前由 '+device.runtime.holder+' 持有')
@@ -557,15 +1063,21 @@ class Application:
                 return previous['response']
             active=self.jobs.get((environment,business))
             if active and active['status']=='running':raise ValueError('当前请求仍在处理；停止始终可用')
+            if action=='inference_run' and any(row.get('status')=='running' for (env,_),row in self.jobs.items() if env==environment):
+                raise ValueError('设备其他请求正在处理，本轮 Run 未开始')
+            if action=='inference_run' and body['expected_context']!=self.inference_context(device,device.snapshot('inference'),device.workflows['inference']):
+                raise ValueError('本轮 Run 受理前控制上下文已变化')
             job=dict(id=secrets.token_hex(12),action=action,status='running',started_wall_ns=time.time_ns())
             self.jobs[(environment,business)]=job
-            if action in ('generate_plan','manual_preview','manual_queue','manual_queue_preview','cancel',*CALIBRATION_TOOLS,*COLLECTION_TOOLS):
+            if action in ('generate_plan','manual_preview','manual_queue','manual_queue_preview','cancel',*CALIBRATION_TOOLS,*INFERENCE_TOOLS,'collection_plan'):
                 self.manual_tasks.pop((environment,business),None)
                 self.reviews.pop((environment,business),None)
             response=dict(message='请求已受理，请查看当前任务状态',job_id=job['id'])
             self.requests[key]=dict(body=original_body,action=action,response=response)
             generation=self.generations[environment]
-            if action=='connect':device.stop_latched=False
+            inference_generation=self.inference_generations[environment]
+            flow_generation=getattr(device.workflows.get('inference'),'generation',None)
+            if action=='connect' or action=='inference_run' and device.runtime is None:device.stop_latched=False
             while len(self.requests)>256:self.requests.popitem(last=False)
         def work():
             try:
@@ -573,12 +1085,14 @@ class Application:
                     if generation != self.generations[environment]:
                         job.update(status='cancelled',finished_wall_ns=time.time_ns())
                         return
-                result=self.perform(device,business,action,body,request_job_id=job['id'])
+                result=(self.run_inference(device,device.workflows['inference'],body,job,generation,inference_generation,flow_generation)
+                        if action=='inference_run' else self.perform(device,business,action,body,request_job_id=job['id']))
                 with self.lock:
-                    job.update(status='completed' if generation==self.generations[environment] else 'cancelled',
+                    valid=generation==self.generations[environment] and (action!='inference_run' or inference_generation==self.inference_generations[environment])
+                    job.update(status='completed' if valid else 'cancelled',
                                result=result,finished_wall_ns=time.time_ns())
             except Exception as error:
-                with self.lock:job.update(status='failed',error=str(error),finished_wall_ns=time.time_ns())
+                with self.lock:job.update(status='cancelled' if generation!=self.generations[environment] or action=='inference_run' and inference_generation!=self.inference_generations[environment] else 'failed',error=str(error),finished_wall_ns=time.time_ns())
         threading.Thread(target=work,daemon=True,name='workbench-'+action).start()
         return response
 
@@ -616,7 +1130,7 @@ class Application:
             details=[{'label':'审批身份','value':task['id']},{'label':'轨迹身份','value':' / '.join(task['plan_sha256'])}],
             outcomes=dict(motion=status,data='not_applicable',simulation='not_applicable',task=status))
 
-    def invalidate(self, environment, *, clear_manual=False):
+    def invalidate(self, environment, *, clear_manual=False, workflow_async=False,preserve_collection=False):
         with self.lock:
             self.generations[environment] += 1
             for business in BUSINESSES:
@@ -624,7 +1138,12 @@ class Application:
                 self.reviews.pop(key,None)
                 if clear_manual or not (self.manual_tasks.get(key) or {}).get('submitted_monotonic_s'):
                     self.manual_tasks.pop(key,None)
-        for workflow in self.device(environment).workflows.values():workflow.invalidate()
+        for business,workflow in self.device(environment).workflows.items():
+            if preserve_collection and business=='collection':continue
+            if workflow_async:
+                callback=getattr(workflow,'invalidate',None)
+                if callable(callback):threading.Thread(target=callback,daemon=True).start()
+            else:workflow.invalidate()
 
     def invalidate_collection_preparation(self,device):
         """Replacing D preparation revokes its review/checkpoint, never C or motors."""
@@ -635,10 +1154,38 @@ class Application:
     def perform(self, device, business, action, body, *, request_job_id=None):
         if action=='connect':return device.connect(body)
         if action=='prepare_collection':return device.collection_preparation.retry()
+        if business=='inference' and action in INFERENCE_MODEL_TOOLS:
+            workflow=device.workflows.get('inference')
+            if workflow is None:raise ValueError('推理工作流未配置')
+            if action=='inference_refresh':return workflow.refresh_models()
+            if action=='inference_select':
+                return workflow.select_model(body.get('model_id'),expected_bundle_digest=body.get('expected_bundle_digest'))
+            if device.runtime is not None and device.runtime.holder=='inference':
+                return workflow.action(action,body)  # Preserve the connected prepare/bind diagnostic flow.
+            if hasattr(workflow,'prepare_model'):return workflow.prepare_model(seed=body.get('seed',0))
+            return workflow.action(action,body)  # Legacy fixed-model diagnostic endpoint.
         runtime=device.runtime
         if runtime is None and action not in ('mesh','select_result',*HISTORY_ACTIONS):raise ValueError('请先连接设备')
         if runtime is not None and runtime.holder != business and action not in ('mesh','select_result','cancel',*HISTORY_ACTIONS):
             raise PermissionError('请先交接控制权限：当前由 '+runtime.holder+' 持有')
+        if action=='return_cup':
+            if business!='collection':raise ValueError('场景恢复只允许数采业务')
+            if set(body)-{'environment','business','request_id','offset_xy_mm'}:raise ValueError('场景恢复只接受前后、左右偏移，不接受其他目标或速度')
+            from robot_workbench.cup_return import installed_pair
+            if not installed_pair(device).get('verified'):
+                raise ValueError('请先核验原轨迹使用的标定安装组')
+            with self.lock:self.reviews.pop((device.environment,business),None)
+            from robot_workbench.cup_return import prepare,clear
+            clear(device)
+            result=prepare(device,body.get('offset_xy_mm'))
+            self.add_review(device,business,result['preview'],'execute',result['summary'],request_job_id=request_job_id)
+            return {'message':'场景恢复计划已准备，请确认执行'}
+        if action=='fake_scene_update':
+            if device.environment!='fake' or business!='collection' or not callable(getattr(device,'fake_scene_update',None)):
+                raise ValueError('场景移动仅允许完整 fake 数采环境')
+            if set(body)-{'environment','business','request_id','cup_xy_m','machine_xy_m'}:
+                raise ValueError('场景移动只接受杯子和咖啡机的平面偏移')
+            return device.fake_scene_update({key:body[key] for key in ('cup_xy_m','machine_xy_m') if key in body})
         if action in ('manual_preview','manual_queue','manual_queue_preview'):
             if business!='calibration':raise ValueError('人工姿态工具需要交接到标定业务')
             gate=device.snapshot(business)['allowed_operations']['preview']
@@ -657,7 +1204,8 @@ class Application:
                     speeds12=body.get('speeds12',[DEFAULT_VELOCITY]*12),jaw_gap_mm=body.get('jaw_gap_mm'),jaw_speed_mm_s=body.get('jaw_speed_mm_s',10.))])
                 preview=device.submit(business,command)
             self.add_review(device,business,preview,'manual_execute',
-                f"人工{'队列' if action=='manual_queue_preview' else '姿态'}：{len(preview.get('plans',[]))} 个路径点，预计运动 {preview['total_motion_duration_s']:.2f} 秒；按冻结的关节/夹爪速度整体执行",
+                f"人工{'队列' if action=='manual_queue_preview' else '姿态'}：{len(preview.get('plans',[]))} 个路径点，预计运动 {preview['total_motion_duration_s']:.2f} 秒；按冻结的关节/夹爪速度整体执行"+
+                ('。粗球自碰撞检查通过；未检查外部障碍物。' if (preview.get('collision_check') or {}).get('scope')=='robot_self_spheres' else ''),
                 request_job_id=request_job_id)
             return {'message':'轨迹已准备，等待确认执行'}
         if action=='recover':
@@ -666,6 +1214,12 @@ class Application:
                 owner_pid=state['pid'],command_epoch=state['command_epoch']))
         workflow=device.workflows.get(business)
         if workflow is None:raise ValueError('当前业务后端尚未配置')
+        if action in INFERENCE_TOOLS:
+            gate=device.snapshot(business)['allowed_operations']['preview']
+            if not gate['allowed']:raise ValueError(gate['reason'] or '当前设备不允许准备推理任务')
+            if hasattr(workflow,'allowed'):
+                gate=workflow.allowed(action)
+                if not gate['allowed']:raise ValueError(gate.get('reason') or '当前推理操作不可用')
         if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan'):
             gate=device.snapshot(business)['allowed_operations']['preview']
             if not gate['allowed']:raise ValueError(gate['reason'] or '当前设备不允许更改标定任务')
@@ -683,10 +1237,14 @@ class Application:
         with self.lock:
             generation=preview.get('workflow_generation')
             if generation is not None and (workflow is None or generation!=workflow.generation):return
-            if business=='collection' and device.collection_preparation:
-                if device.collection_preparation.snapshot()['status']!='ready':return
+            if business=='collection' and device.collection_preparation and preview.get('purpose')!='cup_return':
+                if device.collection_preparation.snapshot()['status']!='ready':
+                    if not frozen_collection_scope(device):return
+                    with workflow.playground.lock:plan=workflow.playground.state.get('plan') or {}
+                    if plan.get('validated') is not True or plan.get('timeline_digest')!=preview['token']:return
             review=dict(id=secrets.token_hex(16),action=action,
                 token=preview['token'],summary=summary,physical_clearance_required=device.environment=='physical',
+                purpose=preview.get('purpose'),
                 speed_scale=preview.get('speed_scale') if business=='collection' else None,
                 owner_preview=bool(preview.get('owner_pid')),
                 manual_revision=manual_revision,
@@ -696,6 +1254,14 @@ class Application:
                 runtime_nonce=preview.get('runtime_nonce',state['runtime_nonce']),epoch=preview['command_epoch'],
                 calibration_revision=state.get('calibration_revision'))
             self.reviews[(device.environment,business)]=review
+            if business=='inference':
+                review.update(seed=preview.get('seed',0),duration_s=preview.get('duration_s',120),
+                              execution_duration_s=preview.get('execution_duration_s',preview.get('duration_s',120)))
+            if preview.get('purpose')=='cup_return':
+                review['request_job_id']=request_job_id
+                device.cup_return_task['review_id']=review['id']
+                for name in ('offset_xy_mm','origin_position_m','goal_position_m'):
+                    if name in preview:review[name]=deepcopy(preview[name])
             if action=='manual_execute':
                 from arx_env.joint_head_jaw_mapping import command_gap_mm
                 review.update(request_job_id=request_job_id,total_motion_duration_s=preview['total_motion_duration_s'],
@@ -734,6 +1300,16 @@ def handler(app):
             try:
                 if path.path=='/api/state':
                     return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0]))
+                if path.path=='/api/environment':
+                    if set(query)!={'environment'} or len(query['environment'])!=1:raise ValueError('one explicit environment required')
+                    return self.send(200,app.environment_state(query['environment'][0]))
+                if path.path=='/api/fake-scene':
+                    if query.get('environment',[''])[0]!='fake' or query.get('business',[''])[0]!='collection':
+                        raise ValueError('仿真场景实测只读入口仅用于 Fake 数采诊断')
+                    device=app.device('fake')
+                    snapshot=getattr(device,'fake_scene_snapshot',None)
+                    if not callable(snapshot):raise ValueError('当前设备未配置仿真场景实测')
+                    return self.send(200,snapshot())
                 if path.path=='/api/preview-media':
                     exact={}
                     if 'revision' in query:
@@ -752,16 +1328,34 @@ def handler(app):
                     if business not in BUSINESSES:raise ValueError('未知业务')
                     workflow=device.workflows.get(business)
                     result_id=query.get('result_id',[''])[0]
-                    file=workflow.media(result_id) if workflow else None
+                    returned=getattr(device,'cup_return_task',None) if business=='collection' else None
+                    return_media=bool(returned and returned.get('media_id')==result_id)
+                    file=Path(returned['directory'])/'plan.json' if return_media else workflow.media(result_id) if workflow else None
                     history=getattr(device,'collection_history',None) if business=='collection' else None
                     if file is None and history is not None:file=history.media(result_id)
                     if file is None:return self.send(404,{'error':'本轮或所选历史媒体尚未就绪'})
                     from robot_workbench.http_media import serve_file
                     kind=mimetypes.guess_type(str(file))[0]
                     current_plan=(kind=='application/json' and business=='collection'
-                        and (workflow.snapshot().get('trajectory') or {}).get('id')==result_id)
+                        and (return_media or workflow and (workflow.snapshot().get('trajectory') or {}).get('id')==result_id))
                     if kind not in ('video/mp4','image/png','image/jpeg') and not current_plan:raise ValueError('不支持的回放媒体类型')
                     return serve_file(self,file,content_type=kind)
+                if path.path=='/api/recording-quality':
+                    device=app.device(query.get('environment',['fake'])[0]);business=query.get('business',[''])[0]
+                    if business not in ('collection','inference'):raise ValueError('recording business required')
+                    result_id=query.get('result_id',[''])[0];workflow=device.workflows.get(business)
+                    file=workflow.media(result_id) if workflow else None
+                    from .recording_quality import download_for_playback
+                    download=download_for_playback(Path(file).parent) if file and Path(file).suffix=='.mp4' else None
+                    history=getattr(device,'collection_history',None) if business=='collection' else None
+                    if download is None and history is not None:
+                        reader=getattr(history,'quality_report',None)
+                        if reader:download=reader(result_id)
+                    if download is None:return self.send(404,{'error':'quality report not available'})
+                    report=download['report']
+                    value=dict(report,download_identity=dict(result_id=result_id,sidecar_sha256=download['sidecar_sha256'],
+                        raw_manifest_sha256=report['raw_manifest_sha256'],environment=device.environment,business=business))
+                    return self.send(200,value,headers={'Content-Disposition':'attachment; filename="recording-quality.json"'})
                 if path.path.startswith('/api/media/'):
                     device=app.device(query.get('environment',['fake'])[0])
                     name=path.path.removeprefix('/api/media/')
@@ -771,7 +1365,7 @@ def handler(app):
                     if self.headers.get('If-None-Match')==meta['etag']:return self.send(304,b'','image/jpeg',headers)
                     return self.send(200,raw,'image/jpeg',headers)
                 resource=path.path.removeprefix('/web') if path.path.startswith('/web/') else path.path
-                if resource not in ('/','/index.html','/app.js','/style.css','/session.js'):
+                if resource not in ('/','/index.html','/app.js','/style.css','/session.js','/site_cameras.js'):
                     return self.send(404,{'error':'not found'})
                 file=ROOT/'web'/('index.html' if resource=='/' else resource[1:])
                 return self.send(200,file.read_bytes(),mimetypes.guess_type(str(file))[0] or 'application/octet-stream')
@@ -791,11 +1385,12 @@ def handler(app):
                 if size>4*1024*1024:return self.send(413,{'error':'small JSON required'})
                 if size<=0:raise ValueError('small JSON required')
                 path=urlsplit(self.path).path
-                if not path.startswith('/api/actions/'):return self.send(404,{'error':'not found'})
+                if not path.startswith(('/api/actions/','/api/maintenance/')):return self.send(404,{'error':'not found'})
                 raw=self.rfile.read(size)
                 if len(raw)!=size:raise ValueError('request body is incomplete')
                 self.close_connection=not keep_alive
-                result=app.action(path.removeprefix('/api/actions/'),json.loads(raw))
+                result=(app.maintenance_action(path.removeprefix('/api/maintenance/'),json.loads(raw))
+                    if path.startswith('/api/maintenance/') else app.action(path.removeprefix('/api/actions/'),json.loads(raw)))
                 self.send(202 if result.get('job_id') else 200,result)
             except (ValueError,KeyError,TypeError,PermissionError) as error:self.send(409,{'error':str(error)})
             except Exception as error:self.send(503,{'error':str(error)})

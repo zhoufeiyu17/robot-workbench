@@ -198,7 +198,7 @@ class PreviewHTTPTests(unittest.TestCase):
         original_bind=self.preview.bind_context;original_state=self.preview.state
         def binding(context):
             if threading.current_thread().name=='old-epoch':
-                locked.append(self.app.lock.locked());entered.set()
+                locked.append(self.app.lock._is_owned());entered.set()
                 if not release.wait(1):raise TimeoutError('controlled old binding was not released')
             original_bind(context)
         def state():

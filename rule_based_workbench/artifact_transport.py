@@ -8,10 +8,12 @@ Trusted roots must be owned by this task (no concurrent untrusted writers).
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -142,18 +144,62 @@ def _worker(request):
         raise ValueError('unknown operation')
 
 
-def ssh_argv(endpoint, request):
+def validate_endpoint(endpoint):
+    if (not isinstance(endpoint,dict) or not {'host','port','key'}<=set(endpoint)
+            or set(endpoint)-{'host','port','key','known_hosts','host_key_alias'}):
+        raise ValueError('explicit SSH endpoint fields required')
     host, port, key = endpoint['host'], endpoint['port'], endpoint['key']
     if not isinstance(host, str) or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@:-]*', host):
         raise ValueError('explicit SSH host required')
-    if type(port) is not int or not 1 <= port <= 65535 or not Path(key).is_absolute():
+    if type(port) is not int or not 1 <= port <= 65535 or not isinstance(key,str) or not Path(key).is_absolute() or '..' in Path(key).parts or any(ord(c)<32 for c in key):
         raise ValueError('explicit SSH port and absolute key required')
+    if 'known_hosts' in endpoint:
+        path=endpoint['known_hosts']
+        if not isinstance(path,str) or not Path(path).is_absolute() or '..' in Path(path).parts or any(ord(c)<32 for c in path):raise ValueError('absolute known-hosts file required')
+    if 'host_key_alias' in endpoint and (not isinstance(endpoint['host_key_alias'],str) or not re.fullmatch(r'[A-Za-z0-9_.@\[\]:-]+',endpoint['host_key_alias'])):
+        raise ValueError('explicit SSH host-key alias required')
+    return dict(endpoint)
+
+
+def ssh_command(endpoint, command):
+    endpoint=validate_endpoint(endpoint)
+    argv=['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes',
+          '-o','ForwardAgent=no','-o','ClearAllForwardings=yes','-o','ConnectTimeout=15']
+    if endpoint.get('known_hosts'):argv+=['-o','UserKnownHostsFile='+endpoint['known_hosts']]
+    if endpoint.get('host_key_alias'):argv+=['-o','HostKeyAlias='+endpoint['host_key_alias']]
+    # OpenSSH owns the private socket and idle master; commands are never retried.
+    directory=Path.home()/'.ssh'
+    try:owner=directory.lstat()
+    except OSError:owner=None
+    if (owner is not None and hasattr(os,'getuid') and owner.st_uid==os.getuid()
+            and stat.S_ISDIR(owner.st_mode) and stat.S_IMODE(owner.st_mode)==0o700):
+        identity=hashlib.sha256(json.dumps(endpoint,sort_keys=True).encode()).hexdigest()[:20]
+        socket=directory/('rwb-'+identity)
+        if len(os.fsencode(socket))<100:
+            argv+=['-o','ControlMaster=auto','-o','ControlPersist=60','-o','ControlPath='+str(socket)]
+    return [*argv,'-p',str(endpoint['port']),'-i',endpoint['key'],'--',endpoint['host'],command]
+
+
+def ssh_argv(endpoint, request):
     source = base64.b64encode(Path(__file__).read_bytes()).decode('ascii')
     data = base64.b64encode(json.dumps(request).encode()).decode('ascii')
     code = f"import base64; exec(compile(base64.b64decode('{source}'),'<transport>','exec')); _worker(json.loads(base64.b64decode('{data}')))"
-    return ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
-            '-o', 'ConnectTimeout=15', '-p', str(port), '-i', key, '--', host,
-            shlex.join(['python3', '-B', '-c', code])]
+    return ssh_command(endpoint,shlex.join(['python3', '-B', '-c', code]))
+
+
+def run_transport_command(argv, *, stage, **kwargs):
+    """Keep encoded inputs/tokens in the private cause, never the UI message."""
+    from cancellable_process import run
+    try:
+        return run(argv, **kwargs)
+    except subprocess.TimeoutExpired as error:
+        failure=TimeoutError(stage+'超时；本次操作已停止，未自动重试')
+        failure.stage=stage
+        raise failure from error
+    except subprocess.CalledProcessError as error:
+        failure=RuntimeError(f'{stage}失败（进程退出码 {error.returncode}）；请查看本次诊断')
+        failure.stage=stage
+        raise failure from error
 
 
 def transfer(*, direction, local_root, local_directory, remote_root,
@@ -178,15 +224,13 @@ def transfer(*, direction, local_root, local_directory, remote_root,
             archive.seek(0)
             if endpoint is None:
                 return unpack(remote_root, remote_directory, expected, archive)
-            from cancellable_process import run
-            run(ssh_argv(endpoint, request), stdin=archive, stdout=subprocess.DEVNULL,
+            run_transport_command(ssh_argv(endpoint, request),stage='数据上传',stdin=archive, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, check=True, timeout=timeout, cancel=cancel)
             return str(PurePosixPath(remote_root) / remote_directory)
         if endpoint is None:
             pack(contained(remote_root, remote_directory), expected, archive)
         else:
-            from cancellable_process import run
-            run(ssh_argv(endpoint, request), stdout=archive, stderr=subprocess.PIPE,
+            run_transport_command(ssh_argv(endpoint, request),stage='数据下载',stdout=archive, stderr=subprocess.PIPE,
                 check=True, timeout=timeout, cancel=cancel)
         archive.seek(0)
         return unpack(local_root, local_directory, expected, archive)

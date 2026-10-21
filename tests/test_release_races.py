@@ -77,13 +77,15 @@ class ReleaseRaceTests(unittest.TestCase):
         for command in ({'action':'stop'},{'action':'preview_home','active_arm':'left'}):
             with self.subTest(action=command['action']):
                 runtime,device=self.create()
-                replacement=SimpleNamespace(submit=Mock(side_effect=AssertionError('sent to replacement runtime')))
-                lines,start=inspect.getsourcelines(Device.submit)
+                replacement=SimpleNamespace(submit=Mock(side_effect=AssertionError('sent to replacement runtime')),
+                    request_stop=Mock(side_effect=AssertionError('stopped replacement runtime')))
+                method=Device.request_stop if command['action']=='stop' else Device.submit
+                lines,start=inspect.getsourcelines(method)
                 dispatch=start+next(i for i,line in enumerate(lines)
-                                    if '.submit(' in line and 'return' in line)
+                                    if ('runtime.request_stop(' if command['action']=='stop' else 'runtime.submit(') in line and 'return' in line)
                 reached=threading.Event()
                 def complete_release(frame,event,arg):
-                    if frame.f_code is Device.submit.__code__ and event=='line' and frame.f_lineno==dispatch and not reached.is_set():
+                    if frame.f_code is method.__code__ and event=='line' and frame.f_lineno==dispatch and not reached.is_set():
                         reached.set()
                         runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))
                         self.tick(runtime);runtime.close()
@@ -102,7 +104,7 @@ class ReleaseRaceTests(unittest.TestCase):
                             device.submit('calibration',command)
                 finally:sys.settrace(previous)
                 self.assertTrue(reached.is_set(),'release/dispatch barrier was not exercised')
-                replacement.submit.assert_not_called()
+                replacement.submit.assert_not_called();replacement.request_stop.assert_not_called()
 
     def test_partial_close_error_is_not_retried_by_resident_cleanup(self):
         # Compile the actual resident cleanup only: importing/running its Isaac

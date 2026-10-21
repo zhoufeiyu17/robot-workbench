@@ -134,6 +134,24 @@ class BridgeTests(unittest.TestCase):
                 a.hardware_overlay_frame(True)
         self.assertEqual(self.calls,[])
 
+    def test_a1_manual_uses_shared_self_spheres_before_owner_preview(self):
+        a=self.app;a.geometry_id='geometry';a.plan=None;a.queue=[];a.hardware_connected=lambda:True
+        a.state=lambda:{'qpos':[0.]*12}
+        calls=[];checks=[]
+        a.control_request=lambda action,body=None,**kwargs:calls.append(action) or {'token':'t','plans':[]}
+        a.geometry.with_gaps=lambda *args:self.fail('A1 manual path must not call full-mesh checks')
+        def check(start,target):
+            checks.append(np.asarray(target).tolist())
+            return {'ok':len(checks)>1,'fraction':.5,'collisions':[['left/link4','right/link4']]}
+        a.manual_self_collision=SimpleNamespace(check_path=check,
+            description={'scope':'robot_self_spheres','environment_checked':False,'exact_support_depth_checked':False})
+        rows=[{'q':[0.]*12,'speeds':[.2]*12}]
+        with self.assertRaisesRegex(ValueError,'left/link4/right/link4'):a.hardware_trajectory_preview({'waypoints':rows})
+        self.assertEqual(calls,[])
+        result=a.hardware_trajectory_preview({'waypoints':rows})
+        self.assertEqual(calls,['trajectory-preview'])
+        self.assertEqual(result['collision_check']['scope'],'robot_self_spheres')
+
     def test_unplanned_motion_is_path_checked_before_the_robot_sees_it(self):
         a=self.app
         a.geometry_id='geometry';a.plan=None;a.queue=[];a.hardware_connected=lambda:True
@@ -496,6 +514,77 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(calls,[('jaw-preview',{'active_arm':'both','sdk_gap_mm':{'left':39.4,'right':38.65}})])
         with self.assertRaises(ValueError):a.action('/api/hardware-jaw-preview',{'gap_mm':{'left':-1,'right':43}})
         self.assertEqual(len(calls),1)
+
+    def test_manual_preview_rechecks_frozen_owner_path_with_coarse_checker(self):
+        # Exercise the real hardware_trajectory_preview -> control_request
+        # chain. Stubbing control_request here previously hid a second slow gate.
+        a=self.app;a.config={'model_family':'ac_one'}
+        a.hardware_connected=lambda:True;a.current_pose=lambda:np.zeros(12)
+        a.queue_is_plan_checked=lambda rows:False
+        a.geometry.support_path_check=lambda *args:self.fail('old fine support gate returned')
+        checked=[];transport=[]
+        def check(start,target):
+            checked.append((list(start),list(target)))
+            return {'ok':True,'scope':'robot_self_spheres'}
+        a.manual_self_collision=SimpleNamespace(check_path=check,description={'scope':'robot_self_spheres'})
+        owner_start=[.01]*14;owner_target=[.1]*14
+        a._control_request=lambda action,body=None:transport.append(action) or {
+            'token':'coarse-review','expires_in_s':30.,'plans':[{'q_start':owner_start,'q_target':owner_target}]}
+        result=a.hardware_trajectory_preview({'waypoints':[{'q':[.1]*12}]})
+        self.assertEqual(checked,[([0.]*12,[.1]*12),([.01]*12,[.1]*12)])
+        self.assertEqual(transport,['trajectory-preview'])
+        self.assertEqual(result['collision_checks'],[{'ok':True,'scope':'robot_self_spheres'}])
+        self.assertNotIn('support_checks',result)
+        self.assertIn('coarse-review',a.hardware_tokens)
+        trace=json.loads(next((a.output/'diagnostics').glob('manual-preview-*.json')).read_text())
+        self.assertGreaterEqual(trace['phase_timings']['owner_request_s'],0.)
+        self.assertGreaterEqual(trace['phase_timings']['frozen_path_check_s'],0.)
+
+    def test_manual_frozen_coarse_rejection_or_invalid_owner_path_never_registers_token(self):
+        a=self.app;a.config={'model_family':'ac_one'}
+        a.hardware_connected=lambda:True;a.current_pose=lambda:np.zeros(12)
+        a.queue_is_plan_checked=lambda rows:False
+        a.geometry.support_path_check=lambda *args:self.fail('old fine support gate returned')
+        for invalid in (False,True):
+            with self.subTest(invalid=invalid):
+                calls=[]
+                def check(start,target):
+                    calls.append(True)
+                    return {'ok':len(calls)==1,'collisions':[['left/link3','right/link4']]}
+                a.manual_self_collision=SimpleNamespace(check_path=check,description={'scope':'robot_self_spheres'})
+                a._control_request=lambda action,body=None:{'token':'rejected','plans':[
+                    {'q_start':[0.]*14,'q_target':[.1]*(13 if invalid else 14)}]}
+                with self.assertRaisesRegex(ValueError,'无效冻结关节位置' if invalid else '自碰撞粗检查'):
+                    a.hardware_trajectory_preview({'waypoints':[{'q':[.1]*12}]})
+                self.assertFalse(a.hardware_tokens)
+                self.assertEqual(len(calls),1 if invalid else 2)
+
+    def test_manual_noise_projection_is_logged_without_rewriting_owner_feedback(self):
+        from copy import deepcopy
+        a=self.app;a.config={'model_family':'ac_one','environment':'fake','simulation_only':True}
+        a.hardware_connected=lambda:True;a.queue_is_plan_checked=lambda rows:False
+        raw=[0.]*12;raw[1]=-.004;a.current_pose=lambda:np.asarray(raw)
+        a.geometry.limits[1]=[0.,3.5]
+        seen=[]
+        def strict_check(start,target):
+            seen.append((list(start),list(target)))
+            return {'ok':bool(start[1]>=0 and target[1]>=0)}
+        a.manual_self_collision=SimpleNamespace(check_path=strict_check,description={'scope':'robot_self_spheres'})
+        start=[0.]*14;start[1]=-.004;start[6]=start[13]=.04
+        target=[.1]*14;target[6]=target[13]=.04
+        plans=[{'q_start':start,'q_target':target,'sha256':'owner-kept'}];before=deepcopy(plans)
+        a._control_request=lambda action,body=None:{'token':'bounded-review','plans':plans,'expires_in_s':30.}
+        result=a.hardware_trajectory_preview({'waypoints':[{'q':[.1]*12}]})
+        self.assertEqual(len(seen),2,'keep both current and frozen-path checks')
+        self.assertEqual([row[0][1] for row in seen],[0.,0.])
+        self.assertEqual(plans,before);self.assertEqual(raw[1],-.004)
+        self.assertEqual(result['plans'][0]['q_start'][1],-.004)
+        trace=json.loads(next((a.output/'diagnostics').glob('manual-preview-*.json')).read_text())
+        correction=trace['collision_checks'][0]['position_boundary']['q_start']
+        self.assertEqual(correction['requested_q'][1],-.004)
+        self.assertEqual(correction['command_q'][1],0.)
+        self.assertEqual(correction['corrections'][0]['delta_rad'],.004)
+        self.assertIn('bounded-review',a.hardware_tokens)
 
     def test_hardware_sync_manual_queue_is_draft_without_preview_token(self):
         a=self.app

@@ -323,7 +323,7 @@ def reset_policy_check():
             'robot_sim.tasks.manager_based.coffee_make.generalization_execution':SimpleNamespace(ControlSpec=lambda *a,**kw:SimpleNamespace()),
             'robot_sim.tasks.manager_based.coffee_make.interaction_evaluation':SimpleNamespace(EpisodeAcceptanceSpec=SimpleNamespace(development=Acceptance))}
         with TemporaryDirectory() as directory:
-            args=SimpleNamespace(assets=Path(directory),output=Path(directory),gpu=0,environment='fake')
+            args=SimpleNamespace(assets=Path(directory),output=Path(directory),gpu=0,environment='fake',mode='replay')
             with patch.dict(sys.modules,modules),patch('playground_sim.apply_whitebox_materials'),\
                     patch('playground_sim.bind_effective_gripper_identity'),patch('playground_sim.close_runtime'),\
                     patch('playground_sim.traceback.print_exc'):

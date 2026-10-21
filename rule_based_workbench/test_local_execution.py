@@ -15,7 +15,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
-from local_execution import TARGET,validate,gpu_check
+from local_execution import TARGET,PHYSICAL_TARGET,compute_resource,validate,gpu_check
 from run_pipeline import PATH_KEYS,PIPELINE_LANES,transport,ssh,isaac_environment,load_config,build_plan,bounded_command,pinned_files,digest
 from playground_pipeline import native_stage,geometry_stage,fetch
 from planner_service import startup_config,validate_config
@@ -60,16 +60,16 @@ class LocalExecutionTest(unittest.TestCase):
         (self.root/'contract.json').write_text(json.dumps(self.contract))
         (self.root/'config.json').write_text(json.dumps(self.config))
 
-    def process(self,pid,argv,*,session=None,start='123',mask='1',extra_env=None):
+    def process(self,pid,argv,*,session='cpu-session',start='123',mask='1',extra_env=None):
         root=self.proc/str(pid);root.mkdir(exist_ok=True)
         (root/'stat').write_text(str(pid)+' (fixture) '+' '.join(['S']+['0']*18+[start]))
         (root/'cmdline').write_bytes(b'\0'.join(v.encode() for v in argv)+b'\0')
         (root/'environ').write_text('CUDA_VISIBLE_DEVICES='+mask+'\0'+('ROBOT_WORKBENCH_SESSION_ID='+session+'\0' if session else '')+
             ''.join(k+'='+v+'\0' for k,v in (extra_env or {}).items()))
 
-    def query(self,pids=(101,),*,uuid=TARGET['gpu_uuid'],free=40000,memory=1000):
+    def query(self,pids=(101,),*,uuid=TARGET['gpu_uuid'],free=40000,memory=1000,gpu=1):
         def result(argv,**kwargs):
-            self.assertEqual(argv,['nvidia-smi','-i','1','-q','-x'])
+            self.assertEqual(argv,['nvidia-smi','-i',str(gpu),'-q','-x'])
             rows=''.join(f'<process_info><pid>{pid}</pid><type>C+G</type><used_memory>{memory} MiB</used_memory></process_info>' for pid in pids)
             return f'<nvidia_smi_log><gpu><uuid>{uuid}</uuid><fb_memory_usage><free>{free} MiB</free></fb_memory_usage><processes>{rows}</processes></gpu></nvidia_smi_log>'
         return result
@@ -88,6 +88,7 @@ class LocalExecutionTest(unittest.TestCase):
         for stage in stages:
             self.assertNotIn('root@47.116.111.83',stage['argv'])
             self.assertNotIn('HostKeyAlias',str(stage['argv']))
+
         with patch('run_pipeline.ssh',side_effect=AssertionError('SSH fallback')):
             self.assertEqual(transport(cfg,'dsw-scene','command'),clean_command(['bash','-c','command']))
             with self.assertRaises(ValueError):transport({**cfg,'execution':{**cfg['execution'],'gpu_index':0}},'dsw-scene','command')
@@ -105,11 +106,260 @@ class LocalExecutionTest(unittest.TestCase):
         self.assertEqual(bounded[bounded.index('--timeout')+1],str(seconds))
         self.assertEqual(bounded[bounded.index('--failure-result')+1],native['result_path'])
 
+    def test_physical_binding_reaches_inner_command_in_local_and_remote_compute(self):
+        from real_pipeline import preparation_stages
+        capture='/remote/input/capture';binding='/remote/input/binding.json'
+        contract=deepcopy(self.contract)
+        contract['provenance']['input_sha256']={p:'a'*64 for p in (capture+'/profile.json',capture+'/rgbd-manifest.json',binding)}
+        for environment in ('fake','physical'):
+            for remote in (False,True):
+                config=deepcopy(self.config);config.update(environment=environment,record_raw=True,prompt_file='/remote/input/prompt.json',simulation_speed_scale=1.)
+                if environment=='physical':config['execution']=self.physical_execution()
+                if remote:config['compute_transport']=dict(endpoint=dict(host='fixture.invalid',port=739,key='/fixture/key'),
+                    contract_file=str(self.root/'contract.json'),contract_sha256='a'*64,
+                    config_root=self.execution['plant']['scope']+'/configs')
+                config.pop('planning_backend')
+                stages=preparation_stages(config,contract,capture,binding)
+                config['planning_backend']='motiongen'
+                stages+=preparation_stages(config,contract,capture,binding,scene_only=True)
+                for stage in stages:
+                    if stage['name'] not in ('bridge','export','physical-target-replay'):continue
+                    actual=shlex.split(stage['argv'][-1])[-1] if remote else stage['argv'][-1]
+                    self.assertEqual(actual,stage['transport_command'])
+                    inner=shlex.split(actual)[-1]
+                    if stage['name']=='bridge':
+                        self.assertIn('--physical-binding '+config['remote_run_root']+'/physical-detection-binding.json',inner)
+                        self.assertNotIn('--simulation-initial-suite',inner)
+                    elif stage['name']=='export':self.assertIn('hardware_binding=',inner)
+                    else:
+                        self.assertIn('--hardware-binding',inner);self.assertIn('--independent-replay',inner)
+                        self.assertNotIn('--barrier',inner)
+
+    def physical_execution(self,*,gpu_context_required=False,target=TARGET):
+        value=deepcopy(self.execution);owner=value.pop('plant')
+        script=self.root/'serve_physical_device.py';script.write_text('# CPU deployment contract fixture; never connected\n')
+        owner['argv'][owner['argv'].index(owner['script'])]=str(script)
+        owner.update(script=str(script),script_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),gpu_context_required=gpu_context_required)
+        value.update(target,environment='physical',owner=owner)
+        owner['argv'][owner['argv'].index('--gpu')+1]=str(target['gpu_index'])
+        self.config.update(environment='physical',execution=value)
+        self.contract['execution']=deepcopy(value)
+        self.contract['resources']['lanes']={target['instance_id']:[target['gpu_index']]}
+        self.contract['provenance']['code_sha256'][str(script)]=owner['script_sha256']
+        self.process(owner['pid'],owner['argv'],session=value['session_id'],mask=str(target['gpu_index']))
+        self.save();return value
+
+    def test_fake739_uses_gpu_zero_with_owner_session_uuid_and_budget_checks(self):
+        execution=deepcopy(self.execution);execution.update(PHYSICAL_TARGET)
+        plant=execution['plant'];plant['argv'][plant['argv'].index('--gpu')+1]='0'
+        self.config['execution']=execution;self.contract['execution']=deepcopy(execution)
+        self.contract['resources']['lanes']={execution['instance_id']:[0]};self.save()
+        self.process(101,plant['argv'],mask='0')
+        config,contract,_=load_config(self.root/'config.json')
+        self.assertEqual(isaac_environment(config,'dsw-scene')['CUDA_VISIBLE_DEVICES'],'0')
+        self.assertIn('--gpu 0',native_stage(config,'geometry-inputs',config['remote_run_root']+'/scene')['argv'][-1])
+        query=lambda pids=(101,),**kwargs:self.query(pids,gpu=0,uuid=execution['gpu_uuid'],**kwargs)
+        self.assertEqual(gpu_check(config,proc_root=self.proc,query=query())['gpu'],0)
+        for kwargs in ({'pids':(101,999)},{'memory':13000},{'free':1}):
+            with self.assertRaises(ValueError):gpu_check(config,proc_root=self.proc,query=query(**kwargs))
+        with self.assertRaises(ValueError):gpu_check(config,proc_root=self.proc,query=self.query(gpu=0,uuid=TARGET['gpu_uuid']))
+        for changes in ({'mask':'1'},{'session':'foreign'},{'start':'124'}):
+            self.process(101,plant['argv'],**{'mask':'0',**changes})
+            with self.assertRaises(ValueError):gpu_check(config,proc_root=self.proc,query=query())
+
+    def test_physical_uses_same_local_pipeline_with_explicit_compute_owner_not_fake_plant(self):
+        from local_execution import owner_scope
+        execution=self.physical_execution()
+        cfg,contract,_=load_config(self.root/'config.json')
+        self.assertNotIn('plant',cfg['execution']);self.assertEqual(owner_scope(cfg['execution']),execution['owner']['scope'])
+        with patch('run_pipeline.ssh',side_effect=AssertionError('physical must not fall back to old DSW lanes')):
+            self.assertEqual(transport(cfg,'dsw-scene','command'),clean_command(['bash','-c','command']))
+            self.assertEqual(isaac_environment(cfg,'dsw-scene')['CUDA_VISIBLE_DEVICES'],'1')
+            self.assertEqual(isaac_environment(cfg,'dsw-scene')['ROBOT_WORKBENCH_SESSION_ID'],'cpu-session')
+        stages=build_plan(cfg,contract)
+        self.assertTrue(all(any(value.endswith('/owned_process.py') for value in stage['argv']) for stage in stages))
+        self.assertNotIn('HostKeyAlias',str(stages));self.assertNotIn('serve_physx_device.py',str(execution))
+        self.config['resident_deadline_wall_ns']=None
+        self.contract['resources'].update(resident_deadline_wall_ns=None,persistent_service=True,
+            service_lifetime_seconds=None,max_wall_time_minutes=120)
+        self.save();prepared=startup_config(self.root/'config.json',self.root/'physical-startup')
+        configured,_,_=load_config(prepared)
+        self.assertEqual(configured['environment'],'physical')
+        self.assertTrue(configured['planner_service']['persistent_service'])
+        self.assertEqual(configured['execution'],execution)
+
+    def test_physical_compute_admission_keeps_uuid_session_pid_and_explicit_gpu_ownership(self):
+        execution=self.physical_execution();owner=execution['owner']
+        result=gpu_check(self.config,proc_root=self.proc,query=self.query(pids=()))
+        self.assertEqual(result['gpu_uuid'],TARGET['gpu_uuid']);self.assertEqual(result['processes'],[])
+        for kwargs in ({'pids':(101,)},{'pids':(999,)},{'pids':(),'uuid':'another-GPU'}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):gpu_check(self.config,proc_root=self.proc,query=self.query(**kwargs))
+        for change in ({'session':'someone-else'},{'start':'999'},{'mask':'0'}):
+            self.process(101,owner['argv'],**{'session':'cpu-session',**change})
+            with self.assertRaises(ValueError):gpu_check(self.config,proc_root=self.proc,query=self.query(pids=()))
+        self.process(101,owner['argv'],session='cpu-session')
+        for change in ('missing-owner','missing-gpu-policy','fake-script','wrong-scope','both-owners'):
+            bad=deepcopy(self.config)
+            if change=='missing-owner':bad['execution'].pop('owner')
+            elif change=='missing-gpu-policy':bad['execution']['owner'].pop('gpu_context_required')
+            elif change=='fake-script':bad['execution']['owner']['script']=str(self.root/'serve_physx_device.py')
+            elif change=='wrong-scope':bad['execution']['owner']['scope']+='/different'
+            else:bad['execution']['plant']=deepcopy(self.execution['plant'])
+            with self.subTest(change=change),self.assertRaises(ValueError):validate(bad)
+        gpu=self.physical_execution(gpu_context_required=True)
+        self.assertEqual(gpu_check(self.config,proc_root=self.proc,query=self.query())['processes'][0]['pid'],101)
+
+    def test_physical_739_frozen_resource_routes_both_workers_without_relaxing_identity(self):
+        from local_execution import stamp_plan
+        execution=self.physical_execution(target=PHYSICAL_TARGET)
+        cfg,contract,_=load_config(self.root/'config.json')
+        self.assertEqual(compute_resource(execution),PHYSICAL_TARGET)
+        for side in PIPELINE_LANES:
+            self.assertEqual(isaac_environment(cfg,side)['CUDA_VISIBLE_DEVICES'],'0')
+            self.assertEqual(transport(cfg,side,'true'),clean_command(['bash','-c','true']))
+        stage=native_stage(cfg,'geometry-inputs',cfg['remote_run_root']+'/scene')
+        self.assertIn('--gpu 0',stage['argv'][-1]);self.assertIn(PHYSICAL_TARGET['instance_id'],stage['argv'][-1])
+        prepared=startup_config(self.root/'config.json',self.root/'739-planner')
+        loaded,frozen,_=load_config(prepared)
+        self.assertEqual(loaded['planner_service']['compute_resource'],PHYSICAL_TARGET)
+        plan=stamp_plan({},compute_resource(execution))
+        self.assertEqual(plan['gpu'],0);self.assertEqual(plan['compute_resource'],dict(PHYSICAL_TARGET,logical_cuda_index=0))
+        wrong=deepcopy(loaded);wrong['planner_service']['compute_resource']=dict(TARGET)
+        wrong_contract=deepcopy(frozen);wrong_contract['planner_service']=deepcopy(wrong['planner_service'])
+        with self.assertRaisesRegex(ValueError,'compute resource differs'):validate_config(wrong,wrong_contract)
+        for change in ({'gpu_uuid':TARGET['gpu_uuid']},{'instance_id':TARGET['instance_id']},
+                       {'gpu_index':1},{'vulkan_gpu':1},{'gpu_index':False}):
+            with self.subTest(change=change),self.assertRaises(ValueError):validate({'execution':dict(execution,**change)})
+        fake=dict(self.execution,**PHYSICAL_TARGET)
+        with self.assertRaises(ValueError):validate({'execution':fake})
+        fake=deepcopy(fake);fake['plant']['argv'][fake['plant']['argv'].index('--gpu')+1]='0'
+        self.assertEqual(validate({'execution':fake}),fake)
+        # Physical source validation deliberately carries no simulated GPU lane;
+        # converted plans retain the actual compute provenance through import.
+        from test_physical_motiongen import fake_inputs
+        from physical_motiongen import freeze_physical
+        from real_contract import validate_real_plan
+        from frozen_executor import FrozenExecutor
+        source,model,binding=fake_inputs()
+        stamp_plan(model,PHYSICAL_TARGET)
+        physical=freeze_physical(model,source,binding)
+        validate_real_plan(physical,source,binding)
+        executor=FrozenExecutor(physical,source,sink=lambda _:self.fail('no motion in CPU admission test'),
+            gate=lambda:False,stop=lambda _:None,source_validator=lambda p,s:validate_real_plan(p,s,binding))
+        self.assertEqual(executor.plan['compute_resource'],dict(PHYSICAL_TARGET,logical_cuda_index=0))
+        self.assertNotIn('instance_id',source);self.assertNotIn('gpu',source)
+
+    def test_physical_739_admission_checks_same_card_detectors_planners_pid_session_and_memory(self):
+        from local_execution import detector_environment
+        from detector_service import launch_command
+        execution=self.physical_execution(target=PHYSICAL_TARGET)
+        cfg=deepcopy(self.config);owner=execution['owner']
+        query=lambda pids=(),**kwargs:self.query(pids,gpu=0,uuid=PHYSICAL_TARGET['gpu_uuid'],**kwargs)
+        self.assertEqual(gpu_check(cfg,proc_root=self.proc,query=query())['gpu'],0)
+        detector=self.root/'detector739';detector.mkdir()
+        spec=dict(root=str(detector),socket=str(detector/'s'),owner_token='739-private-token-fixture',identity={'code':'pinned'},
+            allowed_read_roots=[str(self.root)],allowed_output_root=str(self.root/'jobs'),max_memory_mib=8000,
+            min_free_memory_mib=2000,max_lifetime_seconds=1200)
+        cfg['detector_service']=spec
+        state=dict(spec,pid=202,process_start_ticks='123',service_root=str(detector),status='ready',
+            gpu=0,physical_gpu=0,logical_cuda_index=0)
+        (detector/'status.json').write_text(json.dumps(state))
+        argv=['python3',cfg['detection_script'],'--serve','--service-root',str(detector),'--owner-token',spec['owner_token']]
+        env=detector_environment(cfg);self.process(202,argv,mask='0',session=execution['session_id'],extra_env=env)
+        self.assertIn('CUDA_VISIBLE_DEVICES=0',launch_command(cfg))
+        result=gpu_check(cfg,require='detector',proc_root=self.proc,query=query((202,)))
+        self.assertEqual(result['processes'][0]['type'],'C+G')
+        for kwargs in ({'pids':(202,999)},{'pids':(202,101)},{'pids':(202,),'memory':9000},{'pids':(202,),'free':1}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=query(**kwargs))
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=self.query((202,),gpu=0,uuid=TARGET['gpu_uuid']))
+        for change in ({'mask':'1'},{'session':'other'},{'start':'124'}):
+            self.process(202,argv,**{'mask':'0','session':execution['session_id'],'extra_env':env,**change})
+            with self.subTest(change=change),self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=query((202,)))
+        self.process(202,argv,mask='0',session=execution['session_id'],extra_env=env)
+        state['physical_gpu']=1;(detector/'status.json').write_text(json.dumps(state))
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=query((202,)))
+        state['physical_gpu']=0;(detector/'status.json').write_text(json.dumps(state))
+        planner=self.root/'planner739';planner.mkdir()
+        private=dict(root=str(planner),socket=str(planner/'s'),session_id=execution['session_id'],owner_token='739-private-planner-fixture',
+            identity='a'*64,allowed_read_roots=[str(self.root)],allowed_output_root=str(self.root/'jobs'),
+            max_memory_mib=8000,min_free_memory_mib=2000,max_lifetime_seconds=1200)
+        pspec={k:v for k,v in private.items() if k!='owner_token'};pspec['spec_sha256']='b'*64;cfg['planner_service']=pspec
+        pstate=dict(private,spec_sha256=pspec['spec_sha256'],status='ready',pid=303,process_start_ticks='123',model_initialized=True)
+        (planner/'status.json').write_text(json.dumps(pstate))
+        pargv=['python3',cfg['workbench_code']+'/curobo_worker.py','--service-spec-file',pspec['allowed_output_root']+'/planner-spec.json']
+        self.process(303,pargv,mask='0',session=execution['session_id'])
+        with patch('planner_service.load_private_spec',return_value=private):
+            rows=gpu_check(cfg,require='planner',proc_root=self.proc,query=query((202,303)))['processes']
+            self.assertEqual({row['pid'] for row in rows},{202,303})
+            with self.assertRaises(ValueError):gpu_check(cfg,require='planner',proc_root=self.proc,query=query((202,)))
+        self.process(owner['pid'],owner['argv'],mask='0',session='foreign')
+        with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=query((202,303)))
+
+    def test_physical_739_role_argv_registration_and_actual_mask_stay_frozen(self):
+        from local_execution import role_argv,register_role
+        execution=self.physical_execution(target=PHYSICAL_TARGET)
+        scope=self.root/'owned739';scope.mkdir()
+        owner=execution['owner'];owner['scope']=str(scope)
+        owner['argv'][owner['argv'].index('--output')+1]=str(scope)
+        preview=scope/'preview';preview.mkdir();config=preview/'config.json';config.write_text('{}')
+        script=scope/'display.py';script.write_text('# CPU-only role fixture\n')
+        auxiliary=scope/'aux.py';auxiliary.write_text('# CPU-only auxiliary fixture\n')
+        sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
+        execution.update(max_processes=5,roles=dict(preview=dict(root=str(preview),registration=str(scope/'preview.json'),
+            script=str(script),script_sha256=sha(script),config_path=str(config),config_sha256=sha(config),
+            token_file=str(preview/'token'),port=19001,max_memory_mib=8000),
+            auxiliary=dict(root=str(scope),registration=str(scope/'auxiliary.json'),entrypoints={str(auxiliary):sha(auxiliary)},max_memory_mib=9000)))
+        validate({'execution':execution})
+        argv=['python3',str(script),'--config',str(config),'--output',str(preview/'frames'),
+            '--token-file',str(preview/'token'),'--port','19001','--render-gpu','0','--duration-s','600','--display-only',
+            '--execution-json',json.dumps(execution)]
+        role_argv(execution,'preview',argv,str(script))
+        wrong=list(argv);wrong[wrong.index('--render-gpu')+1]='1'
+        with self.assertRaises(ValueError):role_argv(execution,'preview',wrong,str(script))
+        aux=['python3',str(auxiliary),'--output',str(scope/'replay'),'--gpu','0','--execution-json',json.dumps(execution)]
+        role_argv(execution,'auxiliary',aux,str(auxiliary))
+        aux[aux.index('--gpu')+1]='1'
+        with self.assertRaises(ValueError):role_argv(execution,'auxiliary',aux,str(auxiliary))
+        self.process(404,argv,mask='0',session=execution['session_id'])
+        locks=[]
+        with patch('local_execution.os.getpid',return_value=404),patch('local_execution._role_locks',locks),\
+                patch.dict(os.environ,{'CUDA_VISIBLE_DEVICES':'0','ROBOT_WORKBENCH_SESSION_ID':execution['session_id']}):
+            try:
+                register_role(execution,'preview',script,instance_id='f'*32,proc_root=self.proc)('ready')
+                row=json.loads((scope/'preview.json').read_text());self.assertEqual(row['pid'],404)
+                with patch.dict(os.environ,{'CUDA_VISIBLE_DEVICES':'1'}),self.assertRaisesRegex(ValueError,'CUDA mask differs'):
+                    register_role(execution,'preview',script,instance_id='f'*32,proc_root=self.proc)
+            finally:
+                for fd in locks:os.close(fd)
+
     def test_local_fetch_uses_local_transport(self):
         source=self.root/'source';source.write_bytes(b'owned output')
         with patch('run_pipeline.ssh',side_effect=AssertionError('SSH fallback')):
             fetch(str(source),self.root/'copy',execution_config=self.config)
         self.assertEqual((self.root/'copy').read_bytes(),source.read_bytes())
+
+    def test_persistent_workers_retain_bounded_jobs_and_require_explicit_contract(self):
+        from playground_pipeline import resident_wait_budget
+        from planner_service import validate_spec
+        self.config['resident_deadline_wall_ns']=None
+        self.contract['resources'].update(resident_deadline_wall_ns=None,
+            persistent_service=True,service_lifetime_seconds=None,max_wall_time_minutes=120)
+        self.save()
+        prepared=startup_config(self.root/'config.json',self.root/'persistent-startup')
+        config,contract,_=load_config(prepared)
+        self.assertIsNone(config['planner_service']['max_lifetime_seconds'])
+        self.assertTrue(config['planner_service']['persistent_service'])
+        self.assertEqual(resident_wait_budget(config,contract),7200)
+        private=json.loads((prepared.parent/'planner-spec.json').read_text())
+        validate_spec(private,private=True)
+        del private['persistent_service']
+        with self.assertRaises(ValueError):validate_spec(private,private=True)
+        for change in ({'persistent_service':False},{'persistent_service':'true'},
+                       {'service_lifetime_seconds':600},{'max_wall_time_minutes':121},
+                       {'resident_deadline_wall_ns':1}):
+            original=deepcopy(self.contract['resources']);self.contract['resources'].update(change);self.save()
+            with self.subTest(change=change),self.assertRaises(ValueError):load_config(self.root/'config.json')
+            self.contract['resources']=original
 
     def test_local_output_is_an_explicit_strict_child_of_its_plant_scope(self):
         scope=str(self.root/'resident');output=scope+'/collection/jobs'
@@ -256,11 +506,12 @@ class LocalExecutionTest(unittest.TestCase):
 
     def test_local_worker_supervisor_keeps_eof_and_terminate_cleanup(self):
         from detector_service import LOCAL_SUPERVISOR
-        for mode,stop in (('no-stdin','eof'),('hold-stdin','terminate')):
-            marker=self.root/(mode+'.pid')
+        for mode,stop,lifetime in (('no-stdin','eof','60'),('hold-stdin','terminate','60'),
+                                  ('no-stdin','eof','persistent'),('hold-stdin','terminate','persistent')):
+            marker=self.root/(mode+'-'+lifetime+'.pid')
             script='import os,time,pathlib;pathlib.Path('+repr(str(marker))+').write_text(str(os.getpid()));time.sleep(60)'
             supervisor=subprocess.Popen([sys.executable,'-c',LOCAL_SUPERVISOR,
-                json.dumps([sys.executable,'-c',script]),'60',mode,str(WB)],stdin=subprocess.PIPE,
+                json.dumps([sys.executable,'-c',script]),lifetime,mode,str(WB)],stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
             try:
                 deadline=time.monotonic()+3
@@ -311,6 +562,19 @@ class LocalExecutionTest(unittest.TestCase):
         with self.assertRaises(ValueError):gpu_check(cfg,proc_root=self.proc,query=self.query((101,404,405)))
         bad=deepcopy(execution);bad['max_processes']=4
         with self.assertRaises(ValueError):validate({'execution':bad})
+        six=deepcopy(execution);six['max_processes']=6
+        with self.assertRaises(ValueError):validate({'execution':six})
+        scene=self.root/'scene_worker.py';scene.write_text('# owned scene fixture\n')
+        six['roles']['scene']=dict(root=str(scope),registration=str(scope/'scene.json'),
+            entrypoints={str(scene):digest(scene)},max_memory_mib=9000)
+        self.assertEqual(validate({'execution':six}),six)
+        from local_execution import role_argv
+        argv=['python3',str(scene),'--output',str(scope/'scene-state'),'--execution-json',json.dumps(six)]
+        role_argv(six,'scene',argv,str(scene))
+        escaped=list(argv);escaped[escaped.index('--output')+1]='/tmp/unowned-scene-state'
+        with self.assertRaises(ValueError):role_argv(six,'scene',escaped,str(scene))
+        six['roles']['scene']['registration']='/tmp/unowned.json'
+        with self.assertRaises(ValueError):validate({'execution':six})
 
     def test_asset_conversion_uses_physical_gpu_one_with_logical_cuda_zero(self):
         from a1_isaac_assets import conversion_device,main

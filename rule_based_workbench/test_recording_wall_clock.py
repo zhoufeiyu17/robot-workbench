@@ -1,8 +1,10 @@
 """Real recorder/spool CPU fixtures with injected wall time; no plant or SDK."""
 from copy import deepcopy
+from contextlib import contextmanager
 import json
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from shutil import rmtree
+from tempfile import mkdtemp
 import time
 import threading
 import unittest
@@ -28,10 +30,29 @@ def plan_fixture(count,environment):
     model['planning_validation']['timeline_digest']=model['timeline_digest']
     model['control_validation']=validate_control(model)
     plan=freeze_physical(model,source,binding,environment=environment)
-    return source,plan,binding,build(plan)
+    limits={side+'_arm_joints':[[-3.,3.]]*6 for side in ('left','right')}
+    limits.update(left_gripper=[0.,83.],right_gripper=[0.,83.])
+    timeline=build(plan,current_state=source['initial_state']['measured_reported'],limits=limits,
+        environment=environment,held_arms=source['initial_state'].get('held_arms',()))
+    return source,plan,binding,timeline
 
 
 class RecordingWallClockTest(unittest.TestCase):
+    # The long fixture seals 13,593 RGB-D files; this is an IO watchdog,
+    # independent of the injected recording/stall/lease time assertions below.
+    io_timeout_s=120
+
+    @contextmanager
+    def session_directory(self):
+        directory=mkdtemp();previous=getattr(self,'session',None)
+        try:yield directory
+        finally:
+            session=getattr(self,'session',None)
+            if session is not previous:self.close_session(session)
+            # If joining failed, retain the directory instead of deleting files
+            # beneath the still-running writer and masking the original failure.
+            rmtree(directory)
+
     def wait_for(self,predicate,session=None,seconds=5):
         deadline=time.monotonic()+seconds
         while not predicate():
@@ -40,7 +61,7 @@ class RecordingWallClockTest(unittest.TestCase):
             time.sleep(.001)
 
     def setup_session(self,root,count=300,environment='fake',budget=900,recorder_factory=RealRecorder,
-                      session_factory=RecordingSession,capacity=512):
+                      session_factory=RecordingSession,capacity=512,persistent=False):
         self.wall=[1_000_000_000_000];self.start=self.wall[0]
         self.source,self.plan,self.binding,self.timeline=plan_fixture(count,environment)
         for camera in CAMERAS:(root/camera).mkdir()
@@ -52,15 +73,17 @@ class RecordingWallClockTest(unittest.TestCase):
             environment=environment,execution_timeline=self.timeline,execution_owner=owner if environment=='fake' else None,
             recorder_factory=recorder_factory,
             camera_directories=self.directories,clock_ns=lambda:self.wall[0],on_fault=self.faults.append,
-            **({'resident_deadline_wall_ns':self.start+round((budget+45)*1e9)} if environment=='fake' else {}))
-        self.addCleanup(self.close_session)
-        self.wait_for(lambda:all((Path(path)/'recording-request.json').exists() for path in self.directories.values()),self.session)
+            **({'persistent_service':True,'max_wall_time_seconds':budget} if persistent else
+                {'resident_deadline_wall_ns':self.start+round((budget+45)*1e9)} if environment=='fake' else {}))
+        self.wait_for(lambda:all((Path(path)/'recording-request.json').exists() for path in self.directories.values()),self.session,
+                      seconds=self.io_timeout_s)
         self.tokens={camera:json.loads((Path(path)/'recording-request.json').read_text())['run_id']
             for camera,path in self.directories.items()}
 
-    def close_session(self):
-        if hasattr(self,'session') and not self.session.done.is_set():
-            self.session.finish('stopped');self.session.done.wait(5)
+    def close_session(self,session):
+        if not session.done.is_set():session.finish('stopped')
+        session.thread.join(self.io_timeout_s)
+        self.assertFalse(session.thread.is_alive(),'CPU recorder fixture writer did not stop: '+str(session.snapshot()))
 
     def publish(self,index,*,sample_wall_ns=None,changes=None):
         source_ns=100_000_000_000+index*1_000_000_000//30
@@ -97,7 +120,7 @@ class RecordingWallClockTest(unittest.TestCase):
 
     def test_slow_source_and_cross_six_hundred_wall_seconds_keep_complete_raw_and_one_spool(self):
         for count,slowdown in ((300,4),(300,24),(4530,4)):
-            with self.subTest(source_seconds=count/30,slowdown=slowdown),TemporaryDirectory() as temp:
+            with self.subTest(source_seconds=count/30,slowdown=slowdown),self.session_directory() as temp:
                 root=Path(temp);self.setup_session(root,count)
                 self.publish(0);self.submit_feedback(0)
                 self.assertTrue(self.session.ready.wait(5),self.session.error)
@@ -129,7 +152,7 @@ class RecordingWallClockTest(unittest.TestCase):
                     self.assertLessEqual(request['deadline_wall_ns']-request['start_wall_ns'],600_000_000_000)
                     self.assertLessEqual(request['deadline_wall_ns'],self.start+900_000_000_000)
                     if count>300:self.assertGreater(request['deadline_wall_ns'],self.start+600_000_000_000)
-                self.session.finish('completed');self.assertTrue(self.session.done.wait(5),self.session.error)
+                self.session.finish('completed');self.assertTrue(self.session.done.wait(self.io_timeout_s),self.session.error)
                 self.assertFalse(self.faults);self.assertEqual(self.session.manifest['capture_status'],'complete')
                 self.assertEqual(self.session.manifest['execution_duration_s'],count/30)
                 self.assertEqual(self.session.manifest['camera_frames'],dict.fromkeys(CAMERAS,count+1))
@@ -140,20 +163,31 @@ class RecordingWallClockTest(unittest.TestCase):
 
     def test_source_stall_and_fixed_parent_deadline_fail_data_and_remove_leases(self):
         for cause in ('source_stall','resident_deadline'):
-            with self.subTest(cause=cause),TemporaryDirectory() as temp:
+            with self.subTest(cause=cause),self.session_directory() as temp:
                 root=Path(temp);self.setup_session(root,budget=60 if cause=='source_stall' else 10)
                 if cause=='source_stall':
                     self.publish(0);self.submit_feedback(0);self.assertTrue(self.session.ready.wait(5),self.session.error)
                     self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
                 self.wall[0]+=30_001_000_000 if cause=='source_stall' else 10_000_000_000
-                self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+                self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertTrue(self.faults)
                 self.assertIn('stalled' if cause=='source_stall' else 'fixed resident wall deadline',self.session.error)
                 self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
                 self.assertEqual(self.session.manifest['capture_status'],'incomplete')
                 self.assertTrue(all(not (Path(path)/'recording-request.json').exists() for path in self.directories.values()))
 
+    def test_persistent_service_recording_still_expires_its_own_job_and_removes_leases(self):
+        with self.session_directory() as temp:
+            self.setup_session(Path(temp),budget=10,persistent=True)
+            for path in self.directories.values():
+                lease=json.loads((Path(path)/'recording-request.json').read_text())
+                self.assertEqual(lease['deadline_wall_ns'],self.start+10_000_000_000)
+            self.wall[0]+=10_000_000_000
+            self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertTrue(self.faults)
+            self.assertIn('fixed per-job wall-time budget',self.session.error)
+            self.assertTrue(all(not (Path(path)/'recording-request.json').exists() for path in self.directories.values()))
+
     def test_fake_first_frame_uses_actual_feedback_not_wall_age_or_future_reference(self):
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             self.setup_session(Path(temp))
             # A genuine frame may spend >500ms awaiting encoding/IO. Keep its old
             # actual wall stamp while supplying same-source Owner evidence later.
@@ -177,7 +211,7 @@ class RecordingWallClockTest(unittest.TestCase):
 
     def test_fake_rejects_source_lag_instance_change_and_feedback_regression(self):
         for cause in ('source_lag','wrong_frame_clock','wrong_feedback_clock','feedback_regression'):
-            with self.subTest(cause=cause),TemporaryDirectory() as temp:
+            with self.subTest(cause=cause),self.session_directory() as temp:
                 self.setup_session(Path(temp))
                 self.publish(0);self.submit_feedback(0)
                 self.assertTrue(self.session.ready.wait(5),self.session.error)
@@ -189,7 +223,7 @@ class RecordingWallClockTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         if cause=='wrong_feedback_clock':self.submit_feedback(1,source_clock_id='other-plant')
                         else:self.submit_feedback(0,source_time_ns=99_995_833_333,physics_step=23999)
-                self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+                self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertTrue(self.faults)
                 self.assertIn({'source_lag':'source lag exceeds 0.5','wrong_frame_clock':'source clock differs',
                     'wrong_feedback_clock':'source clock differs','feedback_regression':'repeated or regressed'}[cause],self.session.error)
                 self.assertEqual(self.session.manifest['controller_outcome'],'unverified')
@@ -213,7 +247,7 @@ class RecordingWallClockTest(unittest.TestCase):
                     if not release.wait(5):raise TimeoutError('CPU fixture did not release archive writer')
                 camera_turns.append((len(self.feedback),test.session.events.qsize()))
                 return super().record_rgbd(camera,blob)
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             count=120;root=Path(temp)
             self.setup_session(root,count=count,recorder_factory=DelayedRecorder)
             self.publish(0);self.submit_feedback(0)
@@ -233,12 +267,12 @@ class RecordingWallClockTest(unittest.TestCase):
             for camera,rows in self.session.recorder.frames.items():
                 self.assertEqual([row['frame_number'] for row in rows],list(range(count+1)))
                 self.assertEqual(self.session.spool_heads[camera]['index'],count+1)
-            self.session.finish('completed');self.assertTrue(self.session.done.wait(5),self.session.error)
+            self.session.finish('completed');self.assertTrue(self.session.done.wait(self.io_timeout_s),self.session.error)
             self.assertFalse(self.faults);self.assertEqual(self.session.manifest['capture_status'],'complete')
             verify_raw(root/'raw',environment='fake')
 
     def test_fresh_spool_does_not_hide_missing_execution_start_coverage(self):
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             count=30;first_frame=6;self.setup_session(Path(temp),count=count)
             for index in range(count+1):
                 self.wall[0]=self.start+index*50_000_000
@@ -247,7 +281,7 @@ class RecordingWallClockTest(unittest.TestCase):
                 self.submit_feedback(index)
             self.wait_for(lambda:len(self.session.recorder.feedback)==count+1
                 and all(len(rows)==count-first_frame+1 for rows in self.session.recorder.frames.values()),self.session)
-            self.session.finish('completed');self.assertTrue(self.session.done.wait(5),self.session.error)
+            self.session.finish('completed');self.assertTrue(self.session.done.wait(self.io_timeout_s),self.session.error)
             self.assertFalse(self.faults)
             self.assertEqual(self.session.manifest['capture_status'],'incomplete')
             self.assertEqual(set(self.session.manifest['validation']['problems']),
@@ -255,7 +289,7 @@ class RecordingWallClockTest(unittest.TestCase):
             self.assertEqual(self.session.manifest['controller_outcome'],'completed')
 
     def test_fake_camera_source_stall_is_bounded_even_when_owner_keeps_advancing(self):
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             self.setup_session(Path(temp));self.publish(0);self.submit_feedback(0)
             self.assertTrue(self.session.ready.wait(5),self.session.error)
             self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
@@ -265,7 +299,7 @@ class RecordingWallClockTest(unittest.TestCase):
                 self.submit_feedback(index,source_time_ns=100_000_000_000+index*1_000_000_000//240,
                     physics_step=24000+index)
                 time.sleep(.02)
-            self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+            self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertTrue(self.faults)
             self.assertIn('native RGB-D source stalled for 30 wall seconds',self.session.error)
 
     def test_camera_stays_ahead_but_owner_reaches_each_previously_pending_frame(self):
@@ -304,7 +338,7 @@ class RecordingWallClockTest(unittest.TestCase):
 
     def test_diagnostic_write_failure_keeps_primary_error_and_still_attempts_seal(self):
         for fail_seal in (False,True):
-            with self.subTest(fail_seal=fail_seal),TemporaryDirectory() as temp:
+            with self.subTest(fail_seal=fail_seal),self.session_directory() as temp:
                 class FailedDiagnosticRecorder(RealRecorder):
                     def write_json(self,name,value):
                         if name=='recording-diagnostics.json':raise OSError('diagnostic storage failure')
@@ -313,7 +347,7 @@ class RecordingWallClockTest(unittest.TestCase):
                     def record_rgbd(self,camera,blob):raise ValueError('original frame failure')
                 self.setup_session(Path(temp),recorder_factory=FailedDiagnosticRecorder)
                 self.publish(0);self.submit_feedback(0)
-                self.assertTrue(self.session.done.wait(5),self.session.snapshot())
+                self.assertTrue(self.session.done.wait(self.io_timeout_s),self.session.snapshot())
                 self.assertEqual(self.session.error,'original frame failure')
                 self.assertEqual(self.faults,['original frame failure'])
                 self.assertEqual(self.session.snapshot()['diagnostics_error'],'OSError: diagnostic storage failure')
@@ -330,7 +364,7 @@ class RecordingWallClockTest(unittest.TestCase):
 
     def test_physical_first_frame_and_running_freshness_remain_five_hundred_wall_ms(self):
         for stale_at_start in (False,True):
-            with self.subTest(stale_at_start=stale_at_start),TemporaryDirectory() as temp:
+            with self.subTest(stale_at_start=stale_at_start),self.session_directory() as temp:
                 self.setup_session(Path(temp),environment='physical')
                 if stale_at_start:self.wall[0]+=501_000_000
                 self.publish(0,sample_wall_ns=self.start)
@@ -338,22 +372,22 @@ class RecordingWallClockTest(unittest.TestCase):
                     self.assertTrue(self.session.ready.wait(5),self.session.error)
                     self.wait_for(lambda:all(self.session.recorder.frames.values()),self.session)
                     self.wall[0]+=501_000_000
-                self.assertTrue(self.session.done.wait(5));self.assertTrue(self.faults)
+                self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertTrue(self.faults)
                 self.assertIn('absent or stale' if stale_at_start else 'recording stalled',self.session.error)
 
     def test_physical_lease_retains_source_duration_plus_fifteen_and_completion_stops_renewal(self):
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             self.setup_session(Path(temp),environment='physical')
             for path in self.directories.values():
                 request=json.loads((Path(path)/'recording-request.json').read_text())
                 self.assertEqual(request['deadline_wall_ns']-request['start_wall_ns'],25_000_000_000)
             self.session.finish('stopped','explicit completion during preparation')
-            self.assertTrue(self.session.done.wait(5));self.assertFalse(self.faults)
+            self.assertTrue(self.session.done.wait(self.io_timeout_s));self.assertFalse(self.faults)
             self.assertTrue(all(not (Path(path)/'recording-request.json').exists() for path in self.directories.values()))
 
     def test_renewal_rejects_changed_expired_and_no_longer_active_lease(self):
         for cause in ('other_owner','expired','changed_during_write','finished'):
-            with self.subTest(cause=cause),TemporaryDirectory() as temp:
+            with self.subTest(cause=cause),self.session_directory() as temp:
                 path=Path(temp)/'recording-request.json';token='a'*32
                 lease=dict(run_id=token,start_wall_ns=1_000_000_000,deadline_wall_ns=601_000_000_000)
                 if cause=='other_owner':lease['run_id']='b'*32
@@ -370,7 +404,7 @@ class RecordingWallClockTest(unittest.TestCase):
                 self.assertEqual(list(Path(temp).iterdir()),[path])
 
     def test_deferred_renewal_keeps_identity_and_original_frame_admission(self):
-        with TemporaryDirectory() as temp:
+        with self.session_directory() as temp:
             root=Path(temp);source,plan,binding,_=plan_fixture(300,'fake')
             now=[1_000_000_000_000];origin=now[0];current=[];active=[True]
             owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce=FAKE_RUNTIME_NONCE)
@@ -383,6 +417,7 @@ class RecordingWallClockTest(unittest.TestCase):
                 camera_directories={camera:str(spool.root) for camera,spool in spools.items()},clock_ns=lambda:now[0],
                 resident_deadline_wall_ns=origin+1245_000_000_000,defer_execution=True,execution_instance_id='renewal-instance',
                 preparation_active=lambda:active[0],preparation_deadline_monotonic=time.monotonic()+1)
+            self.session=session
             current.append(session)
             def publish(index,wall_stamp):
                 stamp=100_000_000_000+index*1_000_000_000//30

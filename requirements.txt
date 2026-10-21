@@ -1,2 +1,4 @@
 -r calibration/requirements.txt
 PyYAML==6.0.3
+trimesh==4.5.1
+rtree==1.3.0

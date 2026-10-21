@@ -10,13 +10,23 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'rule_based_workbench')]
-from robot_workbench.joint_bounds import project_joint_positions
+from robot_workbench.joint_bounds import project_joint_positions, inspect_joint_feedback
 from joint_space import project_model_state, reported_command
 from execution_timeline import build, validate
 from test_frozen_executor import fixture
 
 
 class PositionBoundsTests(unittest.TestCase):
+    def test_two_degree_feedback_allowance_never_expands_command_projection(self):
+        import math
+        margin=math.radians(2.)
+        raw=[-margin,1+margin]
+        bounded,changes=inspect_joint_feedback(raw,[(0,1)]*2,environment='physical')
+        self.assertEqual(bounded,[0,1]);self.assertEqual(len(changes),2);self.assertEqual(raw,[-margin,1+margin])
+        with self.assertRaises(ValueError):inspect_joint_feedback([-margin-.000001],[(0,1)],environment='physical')
+        with self.assertRaises(ValueError):project_joint_positions(raw,[(0,1)]*2,environment='physical')
+        with self.assertRaises(ValueError):inspect_joint_feedback(raw,[(0,1)]*2,environment='fake')
+
     def test_policy_boundary_and_raw_evidence(self):
         for environment, allowance in (('fake',.005),('physical',.01)):
             raw=[-allowance,1+allowance]
@@ -72,11 +82,16 @@ class PositionBoundsTests(unittest.TestCase):
     def test_remote_reconstruction_preserves_fake_policy_and_digest(self):
         import playground_pipeline as pipeline
         _,plan=fixture();plan['stages']=[dict(name='home',start_tick=0)]
+        from integration import _digest
+        for row in plan['ticks']:
+            row['target']['right_arm_joints']=deepcopy(plan['ticks'][0]['target']['right_arm_joints'])
+        plan['timeline_digest']=_digest(plan['ticks'])
         current=deepcopy(plan['ticks'][0]['target']);current['left_arm_joints'][0]=-.004
         limits={side+'_arm_joints':[[-3.,3.]]*6 for side in ('left','right')}
         limits['left_arm_joints'][0]=[0.,3.]
         limits.update(left_gripper=[0.,83.],right_gripper=[0.,83.])
-        timeline=build(plan,current_state=current,limits=limits,environment='fake')
+        timeline=build(plan,current_state=current,limits=limits,environment='fake',
+            disabled_grippers=['right'],held_arms=['right'])
         with TemporaryDirectory() as folder:
             parent=Path(folder)/'plan.json';parent.write_text(json.dumps(plan))
             config=dict(workbench_code=str(ROOT/'rule_based_workbench'),remote_run_root=folder)

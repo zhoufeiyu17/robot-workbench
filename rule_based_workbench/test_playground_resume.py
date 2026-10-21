@@ -48,8 +48,16 @@ def main():
         raw=root/'raw'/'run';recorder=RealRecorder(raw,source,plan,binding)
         recorder.seal('failed','startup failure with zero commands')
         save(execution/'recording-directory.json',{'directory':str(raw)})
-        assert restore_plan({},root,bridge)==prepared
-        assert json.loads((root/'prepared-plan.json').read_text())['execution_pending'] is False
+        # A sealed recorder can contain no commands after actual motion; it is not
+        # an execution authority or evidence that a confirm was never accepted.
+        manifest=json.loads((raw/'manifest.json').read_text())
+        for outcome in ('completed','unknown'):
+            manifest.update(command_count=0,controller_outcome=outcome,
+                camera_frames=dict.fromkeys(('base_0','left_wrist_0','right_wrist_0'),0))
+            save(raw/'manifest.json',manifest)
+            for pending in (True,False):  # Also reject checkpoints refunded by the old bug.
+                save(root/'prepared-plan.json',dict(checkpoint,execution_pending=pending))
+                assert restore_plan({},root,bridge) is None, (outcome,pending)
         save(root/'prepared-plan.json',checkpoint)
         manifest=json.loads((raw/'manifest.json').read_text());manifest['command_count']=1;save(raw/'manifest.json',manifest)
         assert restore_plan({},root,bridge) is None,'partial physical execution resumed'
@@ -57,6 +65,6 @@ def main():
         try:restore_plan({},root,bridge)
         except ValueError:pass
         else:raise AssertionError('changed scene identity resumed')
-    print('PASS pre-action checkpoint, calibration/source checks, zero-command recovery, unknown/partial execution rejection; no motion')
+    print('PASS pre-action recovery, calibration/source checks, raw-zero/completed/unknown/partial execution rejection; no motion')
 
 if __name__=='__main__':main()

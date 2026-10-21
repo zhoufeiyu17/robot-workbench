@@ -39,13 +39,17 @@ class PreviewSubscriptionTest(unittest.TestCase):
         self.assertEqual(renderer.calls,[]);self.assertEqual(renderer.products,{'actual':False,'preview':False})
         session.command('/preview',{'q':[.1]*12,'jaw_gap_mm':[80.,80.],'revision':1});session.tick(renderer,.033)
         self.assertEqual(renderer.calls,['target']);self.assertEqual(session.frame_metadata['preview']['target_revision'],1)
+        np.testing.assert_array_equal(session.actual_q,np.zeros(12),'target-only rendering leaves the overview state untouched')
         self.assertEqual(session.status,'READY','the first successful dedicated target establishes renderer readiness')
         session.tick(renderer,.033);self.assertEqual(renderer.products,{'actual':False,'preview':False})
         session.command('/display-view',{'view':'overview'});session.tick(renderer,.033)
         self.assertEqual(renderer.calls,['target','overview']);self.assertFalse(renderer.products['preview'])
+        np.testing.assert_array_equal(session.actual_q,[.1]*12,'display-only overview shows the last target')
+        self.assertEqual(session.frame_metadata['actual']['source'],'kinematic_overview')
+        self.assertFalse(session.frame_metadata['actual']['measurement_qualified'])
         session.command('/display-view',{'view':'target'});session.command('/preview',{'q':[.2]*12,'jaw_gap_mm':[80.,80.],'revision':2});session.tick(renderer,.033)
         self.assertEqual(renderer.calls,['target','overview','target']);self.assertFalse(renderer.products['actual'])
-        np.testing.assert_array_equal(session.actual_q,np.zeros(12))
+        np.testing.assert_array_equal(session.actual_q,[.1]*12,'a subsequent target does not render an unsubscribed overview')
         with self.assertRaises(ValueError):session.command('/execute',{})
 
     def test_ordinary_renderer_rejects_subscription_and_keeps_actual_rendering(self):

@@ -291,6 +291,18 @@ class CaptureFlowTests(unittest.TestCase):
         self.assertNotIn('capture-ack',[action for action,_ in self.calls])
         self.assertEqual(manifest['failure']['timing']['owner_pid'],123)
 
+    def test_persistent_fake_keeps_slow_source_capture_but_bounds_each_batch(self):
+        self.app.config['persistent_service']=True
+        completion,_=self.clocked_capture(resident_s=None,ready_wall_s=160.)
+        self.assertTrue(completion['passed'])
+        self.assertEqual(completion['timing']['budget_origin'],'persistent_fake_finite_batch')
+        with tempfile.TemporaryDirectory() as root:
+            self.app.output=Path(root).resolve();self.acknowledged=False
+            completion,_=self.clocked_capture(resident_s=None,ready_wall_s=7300.)
+        self.assertFalse(completion['passed'])
+        self.assertIn('采集超时',completion['reason'])
+        self.assertEqual(completion['timing']['deadline_monotonic_s'],7200.)
+
     def test_slow_fake_still_rejects_source_regression_instance_and_epoch_changes(self):
         for corruption in ('source_regression','source_instance','epoch'):
             with self.subTest(corruption=corruption),tempfile.TemporaryDirectory() as root:

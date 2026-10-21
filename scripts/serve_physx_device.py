@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bounded resident fake device: one plant, one clock, shared control and cameras."""
 import argparse
+import errno
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict,replace
 import hashlib
 import json
 import math
@@ -10,7 +11,9 @@ import os
 from pathlib import Path
 import queue
 import secrets
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -55,6 +58,94 @@ def bootstrap_calibration(workbench,*,notify=None,runtime=None):
     return snapshot
 
 
+def inference_profile_provider(output, calibration, template_path, *, diagnostic_source=None):
+    from robot_workbench.calibration_profile import installed_profile_provider
+    return installed_profile_provider(config_path=output/'calibration-config.json',capture_root=output/'calibration-workbench',
+        registration=output/'registration.json',profile_template=template_path,output=output,
+        installed_snapshot=calibration.installed_pair,environment='fake',diagnostic_source=diagnostic_source)
+
+
+def inference_options(setup):
+    """Use the shared trusted model-deployment validation, preserving the fake default."""
+    from robot_workbench.device_bootstrap import _inference_options
+    from robot_workbench.inference_transport import MODEL_ID
+    return _inference_options(dict(inference=dict(setup,model_id=setup.get('model_id',MODEL_ID)),disabled_grippers=[]))
+
+
+def inference_source(root):
+    """Pin only existing Infer settings/history and indexed playback files."""
+    from robot_workbench.collection_history import _file, _pin
+    root=Path(root)
+    if not root.is_absolute() or root.resolve()!=root or root.is_symlink() or not root.is_dir():
+        raise ValueError('retained inference source requires a canonical absolute directory')
+    files={};ids=set()
+    for name in ('execution-settings.json','history.json'):
+        if not (root/name).exists() and not (root/name).is_symlink():continue
+        path=_file(root,name)
+        if path.stat().st_size>32*1024*1024:raise ValueError('retained inference metadata exceeds 32 MiB')
+        value=json.loads(path.read_bytes());files[name]=_pin(path)
+        if not isinstance(value,dict):raise ValueError('retained inference metadata must be an object')
+        if name=='execution-settings.json':
+            if (type(value.get('execute_steps')) is not int or not 1<=value['execute_steps']<=60
+                    or type(value.get('revision')) is not int or value['revision']<0):
+                raise ValueError('invalid retained inference execution settings')
+            continue
+        if value.get('schema')!='inference_history.v1' or not isinstance(value.get('entries'),list):
+            raise ValueError('unknown retained inference history schema')
+        for entry in value['entries']:
+            if not isinstance(entry,dict) or not isinstance(entry.get('result'),dict):
+                raise ValueError('invalid retained inference history entry')
+            identity=entry['result'].get('id')
+            if not isinstance(identity,str) or not identity or identity in ids:
+                raise ValueError('missing or duplicate retained inference result ID')
+            ids.add(identity);relative=entry.get('path')
+            if relative is None:continue
+            if (not isinstance(relative,str) or not relative or '\\' in relative
+                    or Path(relative).is_absolute() or '..' in Path(relative).parts
+                    or Path(relative).as_posix()!=relative or Path(relative).suffix!='.mp4'):
+                raise ValueError('retained inference media path escapes source or is not an MP4')
+            files[relative]=_pin(_file(root,relative))
+    return dict(schema='inference_retained_source.v1',root=str(root),files=files) if files else None
+
+
+def validate_inference_source(source):
+    if (not isinstance(source,dict) or set(source)!={'schema','root','files'}
+            or source['schema']!='inference_retained_source.v1' or not isinstance(source['root'],str)
+            or not isinstance(source['files'],dict) or not source['files']):
+        raise ValueError('explicit pinned inference source required')
+    if inference_source(source['root'])!=source:
+        raise ValueError('retained inference file set, SHA or size changed')
+    return deepcopy(source)
+
+
+def restore_inference(source,output):
+    """Restore historical metadata/playback only; no model or execution state."""
+    from robot_workbench.collection_history import _file, _pin
+    source=validate_inference_source(source);root=Path(source['root']);output=Path(output)
+    if (not output.is_absolute() or output.resolve()!=output or output.exists()
+            or output.is_symlink() or output.is_relative_to(root)):
+        raise ValueError('inference restore destination must be a new independent directory')
+    output.mkdir(parents=True);transports={}
+    for relative,pin in source['files'].items():
+        original=_file(root,relative);target=output/relative;target.parent.mkdir(parents=True,exist_ok=True)
+        linked=False
+        if relative.endswith('.mp4'):
+            try:os.link(original,target,follow_symlinks=False);linked=True
+            except OSError as error:
+                if error.errno!=errno.EXDEV:raise
+        if not linked:
+            with original.open('rb') as src,target.open('xb') as dst:shutil.copyfileobj(src,dst)
+        if _pin(_file(output,relative))!=pin or _pin(_file(root,relative))!=pin:
+            raise ValueError('retained inference file changed during restore')
+        transports[relative]='hardlink_readonly_playback' if linked else 'copy'
+    validate_inference_source(source)
+    receipt=dict(status='restored',source=source,files=transports,restored_wall_ns=time.time_ns(),
+                 scope='historical Infer settings and playback; no new execution, model loading or raw export',
+                 original_receipt_paths_preserved=True)
+    with (output/'restore-receipt.json').open('x') as stream:json.dump(receipt,stream,ensure_ascii=False,allow_nan=False,indent=2)
+    return receipt
+
+
 def nominal_inputs(path):
     config = json.loads(path.read_text())
     if config.get('model_family') != 'ac_one' or config.get('simulation_only') is not True:
@@ -88,7 +179,7 @@ def printed_marker_fixture(candidate):
 
 
 def configure_calibration(nominal, output, intrinsics, ports, gateway_port, token_file, *, source_clock, auto_confirm=False,
-                          resident_deadline_wall_ns=None,robot_id=None):
+                          resident_deadline_wall_ns=None,robot_id=None,persistent_service=False):
     from robot_workbench.physx_camera import CAMERAS
     keys=('urdf','mesh_manifest','scene_seed','candidate','camera_seed','jaw_mapping_file','model_family',
           'asset_geometry_id','asset_seal_sha256','parking_support_contact','wrist_nominal_mounts',
@@ -113,7 +204,10 @@ def configure_calibration(nominal, output, intrinsics, ports, gateway_port, toke
         hardware_camera_serials={role:intrinsics[name]['serial'] for role,name in CAMERAS.items()},
         wrist_simulation_cameras={side:dict(intrinsics[CAMERAS[side]],rectified=True) for side in ('left','right')},
         pipeline_auto_confirm=auto_confirm,bind_host='127.0.0.1')
-    if resident_deadline_wall_ns is not None:
+    if persistent_service:
+        if resident_deadline_wall_ns is not None:raise ValueError('persistent service cannot include a deadline')
+        config.update(persistent_service=True,resident_deadline_wall_ns=None)
+    elif resident_deadline_wall_ns is not None:
         if type(resident_deadline_wall_ns) is not int or resident_deadline_wall_ns<=0:
             raise ValueError('fixed positive resident calibration deadline required')
         config['resident_deadline_wall_ns']=resident_deadline_wall_ns
@@ -123,13 +217,13 @@ def configure_calibration(nominal, output, intrinsics, ports, gateway_port, toke
 
 def run(args, base, nominal):
     resident_deadline_wall_ns=args.resident_deadline_wall_ns
-    deadline=time.monotonic()+max(0.,(resident_deadline_wall_ns-time.time_ns())/1e9)
+    deadline=None if resident_deadline_wall_ns is None else time.monotonic()+max(0.,(resident_deadline_wall_ns-time.time_ns())/1e9)
     os.environ['ROBOT_SIM_ASSET_ROOT']=base['pipeline_config']['assets']
     from isaaclab.app import AppLauncher
     app=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',active_gpu=args.gpu,multi_gpu=False,
         kit_args=f'--/renderer/activeGpu={args.gpu} --/renderer/multiGpu/enabled=false '
         '--/renderer/multiGpu/autoEnable=false --/renderer/gpuEnumeration/glInterop/enabled=false').app
-    env=producer=device=ui=gateway=collection_preparation=task_observer=preview_service=None
+    env=producer=device=ui=gateway=collection_preparation=task_observer=preview_service=model_process=None
     done=threading.Event();requests=queue.Queue(maxsize=1)
     events=queue.Queue(maxsize=4096);logging_failed=threading.Event()
     writer_done=threading.Event()
@@ -147,6 +241,12 @@ def run(args, base, nominal):
                         owner,receipt=row['owner'],row['receipt']
                         try:
                             result=write_task_receipt(args.output/'native-tasks',owner,receipt)
+                            try:
+                                from robot_workbench.cup_return import remember_success
+                                remember_success(device,row.get('runner'),receipt,result)
+                            except Exception as recovery_error:
+                                result['scene_recovery_error']=str(recovery_error)
+                                device.scene_recovery_error=str(recovery_error)
                             row=dict(kind='native_task_receipt_written',wall_ns=time.time_ns(),**result)
                         except Exception as error:
                             with owner.lock:
@@ -191,7 +291,18 @@ def run(args, base, nominal):
             from cup_presets import configure,bind_preset_identity
             bind_preset_identity(env._m2_runtime.physical_identity,preset)
             configure(sim_utils.get_current_stage(),env._m2_runtime.root,preset['stiffness_n_m'],preset['damping_n_s_m'])
+        maintenance=(args.collection_spec or {}).get('maintenance_restore') or {}
         env.reset(options={'episode':episode})
+        if maintenance.get('scene'):
+            from robot_workbench.fake_scene import restore_episode_poses,normalize_restored_scene
+            restored_scene,orientation_corrections=normalize_restored_scene(maintenance['scene'])
+            restored=EpisodeScene.from_dict(restored_scene)
+            restored,final_corrections=restore_episode_poses(env,restored,episode)
+            orientation_corrections+=final_corrections
+            env.sim.forward();env.scene.update(dt=env.physics_dt)
+            save(args.output/'scene-restored.json',dict(status='restored',episode=asdict(restored),orientation_corrections=orientation_corrections,
+                purpose='maintenance state restoration; not a completed return motion',
+                parent=maintenance.get('cup_return_parent',{}).get('native_receipt')))
         import numpy as np
         from scipy.spatial.transform import Rotation
         robot=env.scene['robot'];base_index=robot.body_names.index('base_link')
@@ -218,7 +329,7 @@ def run(args, base, nominal):
         from robot_workbench.resident_collection import NativeTaskObserver,CollectionPreparation
         def task_receipt(owner,receipt):
             if logging_failed.is_set():raise RuntimeError('resident evidence writer unavailable')
-            events.put_nowait(dict(kind='_native_task_receipt',owner=owner,receipt=receipt))
+            events.put_nowait(dict(kind='_native_task_receipt',owner=owner,receipt=receipt,runner=owner.runner))
         task_observer=NativeTaskObserver(env._m2_runtime,backend,plant_fixture,task_receipt)
         intrinsics=camera_intrinsics(env.cfg.d405_rig)
         def recording_guard(lease):
@@ -227,16 +338,18 @@ def run(args, base, nominal):
             return recording is not None and recording.lease_active(lease)
         producer=CameraProducer(intrinsics,args.camera_spool_root,recording_guard=recording_guard)
         ports=producer.start_servers(dict(zip(CAMERAS,args.camera_ports)))
-        from real_recording import RecordingSession
+        from robot_workbench.recording_process import ProcessRecordingSession
         recording_root=args.output/'collection-raw'
         recording_root.mkdir(exist_ok=False)
         def recording_factory(payload,on_fault):
-            binding=json.loads((args.output/'collection-binding.json').read_text())
-            return RecordingSession(recording_root/secrets.token_hex(16)/'raw',
-                payload['source'],payload['plan'],binding,camera_directories=producer.directories,
+            return ProcessRecordingSession(recording_root/secrets.token_hex(16)/'raw',
+                plan_ref=payload['plan_ref'],camera_channels=producer.channels,storage_format='segments',
                 execution_timeline=payload.get('execution_timeline'),environment='fake',
                 execution_owner=payload.get('execution_owner'),on_fault=on_fault,
-                resident_deadline_wall_ns=resident_deadline_wall_ns,**payload.get('recording_preparation',{}))
+                resident_deadline_wall_ns=resident_deadline_wall_ns,persistent_service=args.persistent,
+                max_wall_time_seconds=min(args.collection_spec['resources']['max_wall_time_minutes']*60,7200) if args.persistent else None,
+                **payload.get('recording_preparation',{}))
+        recording_factory.supports_deferred_preparation=True
         token_files={};tokens={}
         for business in ('calibration','collection'):
             path=args.output/(business+'-gateway-token')
@@ -254,8 +367,13 @@ def run(args, base, nominal):
             if 'error' in request:raise RuntimeError(request['error'])
             return request['runtime']
         robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
-        device=Device(robot_id,'fake',factory,label='A1 PhysX · 同源三相机',
+        from robot_workbench.device_bootstrap import create_device,install_business_workflows
+        device=create_device(robot_id,'fake',runtime_factory=factory,label='A1 PhysX · 同源三相机',
                       drive=lambda runtime,closed:closed.wait())
+        device.camera_service=producer.common
+        device.camera_restart=producer.restart
+        device.camera_start=producer.start
+        device.camera_stop=producer.stop
         if args.collection_history is not None:device.collection_history=args.collection_history
         if args.resume_source:device.label='A1 PhysX · 日常开发（复用标定）'
         if args.diagnostic_source:
@@ -264,10 +382,28 @@ def run(args, base, nominal):
             device.diagnostic_calibration=diagnostic_metadata(args.diagnostic_source)
         application=Application({'fake':device,
             'physical':Device('physical-unconfigured','physical',None,label='真机 · 未配置')})
+        application.operations_managed=True
+        from robot_workbench.fake_scene import FakeScene
+        scene=FakeScene(env,episode,device,application,event)
+        def update_scene(payload=None,*,read_only=False):
+            request={'ready':threading.Event(),'cancelled':False,'lock':threading.Lock(),
+                     'scene_payload':deepcopy(payload),'scene_read_only':read_only}
+            requests.put_nowait(request)
+            if not request['ready'].wait(30):
+                with request['lock']:
+                    if not request['ready'].is_set():
+                        request['cancelled']=True
+                        raise TimeoutError('场景移动尚未完成；请核验诊断，不自动重试')
+            if 'error' in request:raise RuntimeError(request['error'])
+            return request['result']
+        device.fake_scene_update=update_scene
+        device.fake_scene_snapshot=lambda:update_scene(read_only=True)
+        from robot_workbench.cup_return import configure as configure_recovery
+        configure_recovery(device,args.output,maintenance)
         gateway,_=start_control_gateway(device,tokens,port=args.gateway_port)
         calibration_config=configure_calibration(nominal,args.output,intrinsics,ports,gateway.server_port,
             token_files['calibration'],source_clock=source_clock,auto_confirm=args.calibration_auto_confirm,
-            resident_deadline_wall_ns=resident_deadline_wall_ns,robot_id=robot_id)
+            resident_deadline_wall_ns=resident_deadline_wall_ns,robot_id=robot_id,persistent_service=args.persistent)
         if args.resume_source:
             from robot_workbench.calibration_profile import restore_calibration
             calibration_config['calibration_resume']=restore_calibration(args.resume_source,calibration_config,args.output)
@@ -281,7 +417,7 @@ def run(args, base, nominal):
         if args.diagnostic_source:
             from robot_workbench.calibration_profile import diagnostic_mesh_view
             mesh_workbench,device.diagnostic_mesh_candidates=diagnostic_mesh_view(calibration,args.diagnostic_source)
-        if args.collection_spec is not None and args.collection_spec['resources']['max_workers']==5:
+        if args.collection_spec is not None and args.collection_spec['resources']['max_workers'] in (5,6):
             from robot_workbench.preview_service import prepare_preview_roles,resident_execution,PreviewService,calibration_mesh_inputs
             from arx_env.joint_head_workbench_geometry import jaw_gaps
             prepare_preview_roles(args.collection_spec,args.output,calibration_config)
@@ -313,16 +449,27 @@ def run(args, base, nominal):
             install_notification(device.workflows['calibration'],calibration,collection_preparation.notify)
             if args.diagnostic_source:collection_preparation.notify(diagnostic_snapshot(args.diagnostic_source))
             if args.resume_source:bootstrap_calibration(calibration,notify=collection_preparation.notify)
-        for role,name in CAMERAS.items():
-            def frame(name=name):
-                value=producer.frames[name].snapshot()
-                if not value['status'].get('ready'):raise ValueError('PhysX相机尚未就绪或已过期')
-                return value['jpeg'],value['status']
-            device.media[role]=CameraMedia(role,role,frame,environment='fake')
+        inference=None;support_sample=None
+        inference_setup=(args.collection_spec or {}).get('inference_setup')
+        if inference_setup:
+            from robot_workbench.inference_workflow import InferenceWorkflow
+            if 'model_manifest' in inference_setup:
+                from robot_workbench.inference_transport import start_model_service
+                model_process,endpoint=start_model_service(inference_setup,args.output/'model-service',token_files['calibration'])
+                model_token=token_files['calibration']
+            else:
+                endpoint,model_token=inference_setup['model_endpoint'],inference_setup['model_token_file']
+            inference=InferenceWorkflow(device,args.output/'inference',camera_service=producer.common,
+                model_endpoint=endpoint,model_token_file=model_token,
+                **inference_options(inference_setup),
+                profile_provider=inference_profile_provider(args.output,calibration,
+                    args.collection_spec['collection_setup']['profile_template'],diagnostic_source=args.diagnostic_source),
+                support_provider=lambda now,feedback:deepcopy(support_sample),event=lambda name,data:event(name,**data))
+        install_business_workflows(device,application,camera_service=producer.common,inference=inference)
         ui=serve(application,port=args.port,browser_ports=args.browser_ports)
         threading.Thread(target=ui.serve_forever,daemon=True,name='resident-workbench-http').start()
         save(args.output/'service.json',dict(pid=os.getpid(),environment='fake',clock=source_clock,
-            resident_deadline_wall_ns=resident_deadline_wall_ns,
+            resident_deadline_wall_ns=resident_deadline_wall_ns,persistent_service=args.persistent,
             source_clock_id=backend.source_clock_id,ui_port=ui.server_port,gateway_port=gateway.server_port,
             browser_ports=args.browser_ports,allowed_hosts=sorted(ui.allowed_hosts),
             camera_ports=ports,camera_directories=producer.directories,gateway_token_files=token_files,
@@ -331,6 +478,7 @@ def run(args, base, nominal):
             collection_binding=str(args.output/'collection-binding.json'),
             collection_contract=str(args.collection_contract) if args.collection_contract else None,
             collection_enabled=args.collection_spec is not None,
+            inference_enabled=inference is not None,
             preview_enabled=preview_service is not None,
             full_pipeline_qualified=False,physical_hardware_connected=False,
             **({'calibration_resume':calibration_config['calibration_resume'],'fresh_C_completed':False} if args.resume_source else {}),
@@ -368,12 +516,17 @@ def run(args, base, nominal):
                         value.update(task_outcome='unverifiable',task_qualified=False,message=str(error))
                         owner.native_task_status=value
                 task_observer.active=None
-        while not done.is_set() and time.monotonic()<deadline:
+        while not done.is_set() and (deadline is None or time.monotonic()<deadline):
             try:request=requests.get_nowait()
             except queue.Empty:request=None
             if request is not None:
                 try:
                     if request['cancelled']:continue
+                    if 'scene_payload' in request:
+                        with request['lock']:
+                            if request['cancelled']:continue
+                            request['result']=scene.snapshot() if request.get('scene_read_only') else scene.apply(request['scene_payload'])
+                        continue
                     runtime=Runtime(ref,FakeSafety,lambda:backend,device_id=device.id,environment='fake',
                         lock_root=args.output/'owner-lock',control_clock=clock,event=event,
                         jaw_mapping_file=nominal['jaw_mapping_file'],
@@ -381,6 +534,13 @@ def run(args, base, nominal):
                         recording_factory=recording_factory,
                         initialize_backend=lambda value:value.set_damping_hold(manual=True))
                     backend.owner=runtime.owner
+                    settings_source=maintenance.get('execution_settings_source')
+                    if settings_source and not runtime.execution_settings_path.exists():
+                        raw=Path(settings_source['path']).read_bytes()
+                        if hashlib.sha256(raw).hexdigest()!=settings_source['sha256']:
+                            raise ValueError('retained execution settings changed')
+                        runtime.restore_execution_settings(json.loads(raw))
+                        save(runtime.execution_settings_path,runtime.export_execution_settings())
                     if args.diagnostic_source:
                         identity=hashlib.sha256(json.dumps(device.diagnostic_calibration,sort_keys=True).encode()).hexdigest()
                         runtime.notify_calibration_installed('diagnostic-calibration-'+identity)
@@ -401,6 +561,12 @@ def run(args, base, nominal):
             clock.advance(current or idle,backend,
                 after_physics=lambda:observe('after_advance',owner,physics_advanced=True))
             observe('after_advance',owner,physics_advanced=False)
+            if inference and owner and getattr(owner.runner,'is_inference',False) and clock.index%4==0:
+                try:
+                    from robot_workbench.physx_task import inference_tray_support
+                    support_sample=inference_tray_support(env._m2_runtime,backend)
+                except Exception as error:
+                    support_sample=dict(error=str(error),evidence_source='physx_support_unavailable')
             if current and not backend.is_connected:
                 current.close();device.closed.set()
                 device.runtime=None;device.credentials={}
@@ -442,7 +608,7 @@ def run(args, base, nominal):
                 runtime.close();device.closed.set()
             except Exception as error:event('teardown_error',error=str(error))
         if collection_preparation:
-            try:collection_preparation.close()
+            try:collection_preparation.close(lifecycle_admission=lambda action: action.startswith('stop:'))
             except Exception as error:event('teardown_error',error=str(error))
         if preview_service:
             try:preview_service.close()
@@ -451,9 +617,14 @@ def run(args, base, nominal):
             for workflow in list(device.workflows.values()):
                 try:workflow.cancel()
                 except Exception as error:event('teardown_error',error=str(error))
-                workflow.closed.set()
+                if callable(getattr(workflow,'close',None)):workflow.close()
+                elif hasattr(workflow,'closed'):workflow.closed.set()
             for media in device.media.values():media.closed.set()
         if gateway:gateway.shutdown();gateway.server_close()
+        if model_process and model_process.poll() is None:
+            model_process.terminate()
+            try:model_process.wait(timeout=30)
+            except subprocess.TimeoutExpired:event('teardown_error',error='owned model service did not exit; retain process identity for cleanup')
         if producer:producer.close()
         writer_done.set();writer.join(timeout=5)
         close_runtime(env,app)
@@ -468,7 +639,9 @@ def main():
     parser.add_argument('--port',type=int,default=0)
     parser.add_argument('--gateway-port',type=int,default=0)
     parser.add_argument('--camera-ports',type=int,nargs=3,default=[0,0,0])
-    parser.add_argument('--duration-wall-s',type=float,default=3600.)
+    lifetime=parser.add_mutually_exclusive_group()
+    lifetime.add_argument('--duration-wall-s',type=float)
+    lifetime.add_argument('--persistent',action='store_true',help='explicit persistent resource contract; no automatic service exit')
     parser.add_argument('--calibration-auto-confirm',action='store_true')
     parser.add_argument('--collection-contract',type=Path,
         help='explicit current resident GPU/resource contract; enables post-install background D preparation only')
@@ -481,9 +654,13 @@ def main():
     parser.add_argument('--dry-run',action='store_true')
     parser.add_argument('--deadline-wall-ns',type=int,help='optional absolute cap from the bounded fake manager')
     args=parser.parse_args();args.output=args.output.resolve()
+    if args.persistent:
+        if args.deadline_wall_ns is not None or not args.collection_contract:
+            raise ValueError('persistent service requires a resource contract and no deadline')
+    elif args.duration_wall_s is None:args.duration_wall_s=3600.
     if args.deadline_wall_ns is not None and args.deadline_wall_ns<=time.time_ns():
         raise ValueError('authorized fake session deadline expired')
-    if not 0<args.duration_wall_s<=86400 or any(not 0<=p<=65535 for p in [args.port,args.gateway_port,*args.camera_ports]):
+    if (not args.persistent and not 0<args.duration_wall_s<=86400) or any(not 0<=p<=65535 for p in [args.port,args.gateway_port,*args.camera_ports]):
         raise ValueError('bounded duration and valid loopback ports required')
     if args.output.exists():raise FileExistsError(args.output)
     args.collection_spec=None
@@ -494,6 +671,8 @@ def main():
         from robot_workbench.resident_collection import load_collection_contract
         args.collection_contract=args.collection_contract.resolve()
         args.collection_spec=load_collection_contract(args.collection_contract,args.output,args.gpu,args.duration_wall_s)
+        if (args.collection_spec.get('resources',{}).get('persistent_service') is True)!=args.persistent:
+            raise ValueError('CLI lifetime differs from collection contract')
     if args.calibration_resume_source and (args.collection_spec or {}).get('diagnostic_calibration_source') is not None:
         raise ValueError('dev_resume and warm_diagnostic are mutually exclusive')
     from robot_workbench.service import loopback_browser_hosts
@@ -511,8 +690,15 @@ def main():
     checked['plant_joint_offsets_rad']=list(args.plant_joint_offsets_rad)
     checked.update(browser_ports=args.browser_ports,browser_hosts=sorted(browser_hosts),
         camera_spool_root=str(args.camera_spool_root),
-        camera_spool_retention='consume only after durable raw archive; preserve remaining files for tracked cleanup')
+        camera_spool_retention='same-process bounded memory RGB-D; committed segments persist, no per-frame disk spool')
     if args.collection_spec:
+        retained_inference=(args.collection_spec.get('maintenance_restore') or {}).get('inference_source')
+        if retained_inference is not None:
+            validate_inference_source(retained_inference)
+            checked['retained_inference']=dict(root=retained_inference['root'],files=len(retained_inference['files']),
+                scope='historical settings/playback only; no new execution')
+        if args.collection_spec.get('inference_setup'):
+            inference_options(args.collection_spec['inference_setup'])  # Validate before importing Isaac or model runtimes.
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
             args.collection_spec['collection_setup']['detection_runtime_root'])
@@ -537,12 +723,12 @@ def main():
             jobs=args.history_source['spec']['jobs'],videos=len(args.history_source['entries']),readonly=True)
     retained=[]
     if args.collection_history_catalog:
-        from robot_workbench.collection_history import CollectionHistory
+        from robot_workbench.collection_history import load_history
         robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
         for path in args.collection_history_catalog:
             if not path.is_absolute() or path.resolve()!=path or path.is_symlink():
                 raise ValueError('retained history requires a canonical absolute catalog')
-            history=CollectionHistory(path)
+            history=load_history(path,environment='fake',robot_id=robot_id)
             if any(row['details']['robot_id']!=robot_id for row in history.results()):
                 raise ValueError('retained history belongs to another virtual robot')
             retained.append(history)
@@ -550,19 +736,20 @@ def main():
     if args.dry_run:
         print(json.dumps(dict(status='dry-run-passed',**checked)));return
     args.output.mkdir(parents=True)
+    retained_inference=((args.collection_spec or {}).get('maintenance_restore') or {}).get('inference_source')
+    if retained_inference is not None:restore_inference(retained_inference,args.output/'inference')
     if args.history_source is not None:
         from robot_workbench.collection_history import import_history
         args.collection_history=import_history(args.history_source,args.output/'collection-history')
     if retained:
         from robot_workbench.collection_history import CollectionHistoryGroup
         args.collection_history=CollectionHistoryGroup(retained+([args.collection_history] if args.collection_history else []))
-    args.camera_spool_root.mkdir(exist_ok=False)
-    started_wall_ns=time.time_ns();args.resident_deadline_wall_ns=started_wall_ns+round(args.duration_wall_s*1e9)
+    started_wall_ns=time.time_ns();args.resident_deadline_wall_ns=None if args.persistent else started_wall_ns+round(args.duration_wall_s*1e9)
     if args.deadline_wall_ns is not None:
         if args.deadline_wall_ns<=started_wall_ns:raise ValueError('authorized fake session deadline expired')
         args.resident_deadline_wall_ns=min(args.resident_deadline_wall_ns,args.deadline_wall_ns)
     save(args.output/'run.json',dict(pid=os.getpid(),started_wall_ns=started_wall_ns,duration_wall_s=args.duration_wall_s,
-        resident_deadline_wall_ns=args.resident_deadline_wall_ns,
+        resident_deadline_wall_ns=args.resident_deadline_wall_ns,persistent_service=args.persistent,
         base_sha256=hashlib.sha256(args.base.read_bytes()).hexdigest(),
         nominal_config_sha256=hashlib.sha256(args.nominal_config.read_bytes()).hexdigest(),**checked))
     run(args,base,nominal)

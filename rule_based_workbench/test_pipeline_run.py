@@ -23,6 +23,12 @@ def main():
     command = python_command('import sys,json; print(json.dumps(sys.argv[1:]))', large, tricky)
     assert len(command.encode()) < 32768
     assert json.loads(subprocess.check_output(shlex.split(command), text=True)) == [large, tricky]
+    import hashlib
+    pins={f'/task/assets/robot/geometry/{i:04d}.json':hashlib.sha256(str(i).encode()).hexdigest() for i in range(1200)}
+    repeated=json.dumps(dict(provenance={'input_sha256':pins},planner_inputs=pins))
+    command=python_command('import sys,hashlib; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())',repeated)
+    assert len(command.encode())<120000  # Linux per-argument limit, including SSH/shell wrappers.
+    assert subprocess.check_output(shlex.split(command),text=True).strip()==hashlib.sha256(repeated.encode()).hexdigest()
     with TemporaryDirectory(prefix="dual-dsw-cli-") as temp:
         root = Path(temp)
         remote = "/mnt/data/feiyu.zhou/runs/robot_sim/test-unique"

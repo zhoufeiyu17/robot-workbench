@@ -458,23 +458,12 @@ def legal_tray_contact(evaluator, sample, scene, contacts, dt):
     return math.isfinite(force) and 0<force<=a.support_force_max_n
 
 
-def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
-    """Frozen success timing and explicit, contact-scoped supported unloading."""
+def prepare_motiongen_replay_policy(plan):
+    """Full plan scans belong in the CPU compiler before native observation."""
     from gripper_distance_plan import NATIVE_DISTANCE_ENCODING, validate_release_control
-    if applied_context is not None and not callable(applied_context):
-        raise ValueError('applied command context must be callable')
     if (plan.get('planner_id') != CUROBO_PLANNER_ID or plan.get('schema_version') != 'dual_gpu_pipeline.v1'
             or plan.get('native_action_encoding') != NATIVE_DISTANCE_ENCODING):
         raise ValueError('success scheduling is limited to MotionGen simulation distance replay')
-    evaluator = runtime.evaluator
-    if (hasattr(runtime, '_motiongen_replay_policy') or hasattr(runtime, '_forced_diagnostic_events')
-            or getattr(evaluator, 'diagnostic_relax_guards', False) or getattr(evaluator, 'diagnostic_observe_only', False)
-            or evaluator.event is not None or runtime.loop.terminal):
-        raise ValueError('fresh non-diagnostic runtime required for frozen replay policy')
-    base = evaluator.spec
-    declared = plan.get('native_identity', {}).get('acceptance')
-    if not isinstance(declared, dict) or _digest(asdict(base)) != _digest(declared):
-        raise ValueError('runtime base acceptance differs from frozen plan')
     hz, nominal = plan['control']['physics_hz'], plan['control']['substeps']
     counts, ticks, stages = plan['native_substeps'], plan['ticks'], plan['stages']
     if (type(hz) is not int or type(nominal) is not int or nominal <= 0 or hz != 30*nominal
@@ -494,11 +483,37 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     policy = plan['gripper_distance_control']
     closed = policy['closed_metal_gap_mm']-policy['native_travel_offset_mm']
     validate_release_control(plan, closed=closed, opening=plan['gripper_opening_mm'], legacy=True)
+    return dict(timeline_digest=plan['timeline_digest'],physics_hz=hz,substeps=nominal,count=len(ticks),
+        stages=deepcopy(stages),acceptance=deepcopy(plan.get('native_identity',{}).get('acceptance')),
+        open_begin=begin,open_end=end,open_steps=sum(counts[begin:end]),total_steps=sum(counts),
+        before_open_steps=sum(counts[:begin]),through_open_steps=sum(counts[:end]),
+        final_gripper_travel_mm=ticks[-1]['target']['left_gripper'],cup_contact_preset=plan.get('cup_contact_preset'),
+        release_preload_mm=(plan['planning_validation']['gpu_final_acceptance']['closing']['end_m']*2000
+            if plan.get('cup_contact_preset') else None),placement_goal=deepcopy(plan.get('task_targets',{}).get('placement_goal')))
+
+
+def install_motiongen_replay_policy(runtime, plan, *, applied_context=None, prepared_policy=None):
+    """Frozen success timing and explicit, contact-scoped supported unloading."""
+    if applied_context is not None and not callable(applied_context):
+        raise ValueError('applied command context must be callable')
+    if prepared_policy is not None and (applied_context is None or prepared_policy['timeline_digest']!=plan['timeline_digest']):
+        raise ValueError('compiled policy requires its exact Owner-applied plan')
+    compiled=prepared_policy if prepared_policy is not None else prepare_motiongen_replay_policy(plan)
+    evaluator = runtime.evaluator
+    if (hasattr(runtime, '_motiongen_replay_policy') or hasattr(runtime, '_forced_diagnostic_events')
+            or getattr(evaluator, 'diagnostic_relax_guards', False) or getattr(evaluator, 'diagnostic_observe_only', False)
+            or evaluator.event is not None or runtime.loop.terminal):
+        raise ValueError('fresh non-diagnostic runtime required for frozen replay policy')
+    base = evaluator.spec
+    declared=compiled['acceptance']
+    if not isinstance(declared, dict) or _digest(asdict(base)) != _digest(declared):
+        raise ValueError('runtime base acceptance differs from frozen plan')
+    hz,nominal,count,stages=(compiled[key] for key in ('physics_hz','substeps','count','stages'))
+    begin,end,open_steps=(compiled[key] for key in ('open_begin','open_end','open_steps'))
     start = runtime.loop.physics_steps
     if type(start) is not int or start < 0 or evaluator.previous.physics_step != start:
         raise ValueError('evaluator and execution loop must share the starting physics step')
-    open_steps = sum(counts[begin:end])
-    deadline = start+sum(counts)
+    deadline = start+compiled['total_steps']
     effective = replace(base, release_timeout_s=base.release_timeout_s+open_steps/hz)
     configuration = dict(schema_version='motiongen_frozen_replay_policy.v1', timeline_digest=plan['timeline_digest'],
         start_physics_step=start, final_physics_step=deadline,
@@ -510,19 +525,19 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
         release_timeout_base_s=base.release_timeout_s, planned_open_duration_s=open_steps/hz,
         release_timeout_effective_s=effective.release_timeout_s,
         open_start_tick=begin, open_end_tick_exclusive=end,
-        first_open_physics_step=start+sum(counts[:begin])+1, last_open_physics_step=start+sum(counts[:end]),
+        first_open_physics_step=start+compiled['before_open_steps']+1, last_open_physics_step=start+compiled['through_open_steps'],
         physical_configuration_sha256=runtime.physical_sha256,
         physical_configuration_unchanged=True,
         final_native_success_required=True,
-        final_gripper_travel_mm=ticks[-1]['target']['left_gripper'],
+        final_gripper_travel_mm=compiled['final_gripper_travel_mm'],
         release_confirmation_policy='retain the actual native release window; continue all current native guards and final success checks')
     if applied_context is not None:
         configuration.update(execution_source='owner_applied_command', final_physics_step=None,
             success_policy='current native success at the actual Owner completion feedback step',
             first_open_physics_step=None,last_open_physics_step=None,
             initialization_scope='source_tick=None; no parent-plan tick or geometry qualification')
-    if plan.get('cup_contact_preset'):
-        configuration['release_preload_unload_until_model_gap_mm']=plan['planning_validation']['gpu_final_acceptance']['closing']['end_m']*2000
+    if compiled['cup_contact_preset']:
+        configuration['release_preload_unload_until_model_gap_mm']=compiled['release_preload_mm']
         configuration['release_preload_unload_scope']='simulation diagnosis; unchanged targets, grip force cap and2N release cap'
     configuration['incidental_claw_cup_collision']=dict(max_penetration_m=.003,shape='left finger metal meshes',grasp_credit=False,
         force_and_speed_limits='existing native contact and residual-force limits')
@@ -532,7 +547,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
                    progress=dict(deferred_success_count=0, first_deferred_success_step=None,release_confirmed_physics_step=None,
                                  last_observed_step=start, final_native_success=False))
     receipt['incidental_contacts']=grasp_policy['incidental_contacts']
-    receiving_goal=plan.get('task_targets',{}).get('placement_goal')
+    receiving_goal=compiled['placement_goal']
     if receiving_goal is not None:
         from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import OUTLET_TOLERANCE_M
         if (receiving_goal.get('schema_version')!='cup_outlet_goal.v1'
@@ -560,7 +575,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     receipt['progress'].update(placement_transition_substeps=0,
         transition_grasp_loss_observations=0,transition_slip_observations=0,
         max_transition_relative_speed_m_s=0.,max_transition_cup_speed_m_s=0.)
-    diagnostic_cup=bool(plan.get('cup_contact_preset'))
+    diagnostic_cup=bool(compiled['cup_contact_preset'])
     if diagnostic_cup:
         configuration['failure_policy']='grip loss/slip and transient speed are observations during scoped placement only; native collision/force/final stability remain required'
         configuration['supported_contact_policy']=dict(
@@ -590,7 +605,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
         scene=args[1] if len(args)>1 else kwargs.get('scene')
         contacts=args[2] if len(args)>2 else kwargs.get('contacts',())
         if applied_context is None:
-            tick_index=min(len(ticks)-1,(step-start-1)//nominal)
+            tick_index=min(count-1,(step-start-1)//nominal)
             stage=next(row['name'] for row in reversed(stages) if row['start_tick']<=tick_index)
             final_sample=step==deadline
         else:
@@ -605,11 +620,11 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
             tick_index=context.get('source_tick');stage=context.get('stage')
             if tick_index is None:
                 if stage!='initialize':raise ValueError('no parent tick is only valid for initialization')
-            elif (type(tick_index) is not int or not 0<=tick_index<len(ticks) or
+            elif (type(tick_index) is not int or not 0<=tick_index<count or
                     stage!=next(row['name'] for row in reversed(stages) if row['start_tick']<=tick_index)):
                 raise ValueError('applied stage differs from the frozen parent source tick')
             final_sample=context['final_sample']
-            if final_sample and tick_index!=len(ticks)-1:
+            if final_sample and tick_index!=count-1:
                 raise ValueError('final task sample requires the final actually applied parent command')
             receipt['progress'].update(last_observed_source_tick=tick_index,
                 last_observed_execution_id=context.get('execution_id'))
@@ -676,7 +691,7 @@ def install_motiongen_replay_policy(runtime, plan, *, applied_context=None):
     runtime._motiongen_replay_policy = receipt
     if applied_context is not None:
         runtime._motiongen_applied_context=applied_context
-        runtime._motiongen_final_source_tick=len(ticks)-1
+        runtime._motiongen_final_source_tick=count-1
     return receipt
 
 

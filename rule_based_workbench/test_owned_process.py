@@ -31,7 +31,13 @@ def test():
                     wait_owned(child, .1, .1)
                     raise AssertionError('worker failed to become ready')
                 pid = int(path.read_text())
-                assert wait_owned(child, .2, .2)==expected
+                try:
+                    # Worker readiness does not mean its parent has been scheduled
+                    # to exit; exercise cleanup of an actually exited parent.
+                    if mode=='exit':assert child.wait(timeout=5)==expected
+                finally:
+                    actual=wait_owned(child,.2,.2)
+                assert actual==expected
                 deadline = time.monotonic()+2
                 while live(pid) and time.monotonic()<deadline:
                     time.sleep(.02)
@@ -42,8 +48,9 @@ def test():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory)/'cli-child'
         command = "import os,time,sys; from pathlib import Path; Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
-        supervisor = subprocess.Popen([sys.executable, str(Path(__file__).with_name('owned_process.py')),
-                                       '--timeout', '60', '--', sys.executable, '-c', command, str(path)])
+        from launch_environment import owned_command
+        supervisor = subprocess.Popen(owned_command(Path(__file__).parent,
+            [sys.executable,'-c',command,str(path)],None))
         try:
             deadline = time.monotonic()+5
             while not path.exists() and time.monotonic()<deadline: time.sleep(.01)

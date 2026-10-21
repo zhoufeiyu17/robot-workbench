@@ -7,9 +7,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from unittest.mock import patch
 
 from artifact_transport import (PARTIAL, manifest, pack, relative, ssh_argv,
-                                transfer, unpack, verify)
+                                ssh_command, transfer, unpack, verify)
 
 
 def rejects(call):
@@ -21,7 +22,7 @@ def rejects(call):
 
 
 def run():
-    with tempfile.TemporaryDirectory() as directory:
+    with tempfile.TemporaryDirectory(prefix='rwb-',dir='/tmp') as directory:
         root = Path(directory).resolve()
         robot, dsw = root/'robot', root/'dsw'
         robot.mkdir(); dsw.mkdir()
@@ -32,6 +33,36 @@ def run():
         expected = manifest(capture, ['rgbd-manifest.json','profile.json','frames/000.npz','acquisition-binding.json'])
         args = dict(direction='upload', local_root=robot, local_directory='sealed-capture',
                     remote_root=dsw, remote_directory='new-capture', expected=expected)
+        endpoint=dict(host='user@example.com',port=739,key='/tmp/key')
+        home=root/'private-home';home.mkdir();ssh=home/'.ssh';ssh.mkdir(mode=0o700)
+        with patch('pathlib.Path.home',return_value=home):
+            first=ssh_command(endpoint,'true');same=ssh_command(dict(endpoint),'another-command')
+            def control_path(argv):return next(x for x in argv if x.startswith('ControlPath='))
+            assert control_path(first)==control_path(same)
+            for change in (dict(host='other@example.com'),dict(key='/tmp/other-key'),dict(port=740),
+                           dict(known_hosts='/tmp/known'),dict(host_key_alias='different')):
+                assert control_path(first)!=control_path(ssh_command(dict(endpoint,**change),'true'))
+            assert all(option in first for option in ('ControlMaster=auto','ControlPersist=60',
+                'StrictHostKeyChecking=yes','IdentitiesOnly=yes','ForwardAgent=no','ClearAllForwardings=yes'))
+            ssh.chmod(0o755)
+            assert not any(x.startswith('Control') for x in ssh_command(endpoint,'true'))
+            ssh.rename(home/'real-ssh');ssh.symlink_to(home/'real-ssh',target_is_directory=True)
+            assert not any(x.startswith('Control') for x in ssh_command(endpoint,'true'))
+        long_home=root/('h'*80);long_home.mkdir();(long_home/'.ssh').mkdir(mode=0o700)
+        with patch('pathlib.Path.home',return_value=long_home):
+            assert not any(x.startswith('Control') for x in ssh_command(endpoint,'true'))
+        secret_argv=['ssh','owner_token=private-test-token','base64-secret-'+('A'*10000)]
+        for direction in ('upload','download'):
+            for underlying in (subprocess.TimeoutExpired(secret_argv,.07),
+                               subprocess.CalledProcessError(255,secret_argv,stderr=b'private stderr')):
+                with patch('cancellable_process.run',side_effect=underlying) as command:
+                    try:transfer(**dict(args,direction=direction,endpoint=endpoint,timeout=.07))
+                    except (TimeoutError,RuntimeError) as error:
+                        assert error.__cause__ is underlying
+                        assert len(str(error))<150 and 'private-test-token' not in str(error) and 'base64' not in str(error)
+                        assert ('上传' if direction=='upload' else '下载') in str(error)
+                    else:raise AssertionError('transport failure was not propagated')
+                    assert command.call_count==1, 'transport silently retried'
         target = transfer(**args)
         verify(target, expected)
         assert transfer(**args) == target  # exact retry is idempotent

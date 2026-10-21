@@ -9,6 +9,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT/'scripts'),str(ROOT),str(ROOT/'rule_based_workbench')]
 from setup_resident_collection import live_parent,verify_parent
+from local_execution import TARGET
 
 
 class SetupResidentCollectionTest(unittest.TestCase):
@@ -17,8 +18,8 @@ class SetupResidentCollectionTest(unittest.TestCase):
             root=Path(temp).resolve();proc=root/'proc'/'17';proc.mkdir(parents=True)
             script=root/'old-frozen-code'/'serve_physx_device.py';script.parent.mkdir();script.write_text('# frozen original parent\n')
             base=root/'base.json';base.write_text('{"pipeline_config":{}}')
-            original=root/'original-contract.json';original.write_text('{"identity":{"session_id":"same-session"}}')
-            argv=['python',str(script),'--output',str(root),'--base',str(base),'--collection-contract',str(original)]
+            original=root/'original-contract.json'
+            argv=['python',str(script),'--output',str(root),'--base',str(base),'--collection-contract',str(original),'--gpu','1']
             (proc/'cmdline').write_bytes(b'\0'.join(v.encode() for v in argv)+b'\0')
             (proc/'stat').write_text('17 (parent) '+' '.join(['S']+['0']*18+['123']))
             deadline=time.time_ns()+180_000_000_000
@@ -28,8 +29,10 @@ class SetupResidentCollectionTest(unittest.TestCase):
             save('run.json',dict(pid=17,resident_deadline_wall_ns=deadline,base_sha256=hashlib.sha256(base.read_bytes()).hexdigest()))
             save('calibration-config.json',{});save('registration.json',{})
             save('calibrations/hardware/active/manifest.json',dict(simulation_only=True,robot_source='simulated',head={'id':'installed-head'},wrist={'id':'installed-wrist'}))
-            contract=dict(identity={'session_id':'same-session'},resources={'max_workers':4},
+            contract=dict(identity={'session_id':'same-session','instance':TARGET['instance_id']},
+                resources=dict(max_workers=4,gpu_index=1,cuda_visible_devices=[1],gpu_uuid=TARGET['gpu_uuid']),
                 collection_setup=dict(min_free_memory_mib=16384,plant_max_memory_mib=12288))
+            original.write_text(json.dumps(contract))
             before={str(path):path.read_bytes() for path in root.rglob('*') if path.is_file()}
             parent=live_parent(root,contract,proc_root=root/'proc');verify_parent(parent,proc_root=root/'proc')
             self.assertEqual(parent['execution']['plant']['script'],str(script))
@@ -40,6 +43,17 @@ class SetupResidentCollectionTest(unittest.TestCase):
             save('service.json',dict(pid=17,environment='fake',resident_deadline_wall_ns=deadline+600_000_000_000))
             with self.assertRaises(ValueError):live_parent(root,contract,proc_root=root/'proc')
             with self.assertRaises(ValueError):verify_parent(parent,proc_root=root/'proc')
+            contract['resources'].update(persistent_service=True,service_lifetime_seconds=None,resident_deadline_wall_ns=None)
+            original.write_text(json.dumps(contract))
+            argv.append('--persistent');(proc/'cmdline').write_bytes(b'\0'.join(v.encode() for v in argv)+b'\0')
+            save('service.json',dict(pid=17,environment='fake',persistent_service=True,resident_deadline_wall_ns=None))
+            save('run.json',dict(pid=17,persistent_service=True,resident_deadline_wall_ns=None,
+                base_sha256=hashlib.sha256(base.read_bytes()).hexdigest()))
+            parent=live_parent(root,contract,proc_root=root/'proc');verify_parent(parent,proc_root=root/'proc')
+            self.assertIsNone(parent['deadline'])
+            invalid=json.loads(json.dumps(contract));invalid['resources'].pop('persistent_service')
+            original.write_text(json.dumps(invalid))
+            with self.assertRaisesRegex(ValueError,'explicitly persistent'):live_parent(root,contract,proc_root=root/'proc')
 
 
 if __name__=='__main__':unittest.main()

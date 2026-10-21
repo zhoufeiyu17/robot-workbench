@@ -56,7 +56,9 @@ def validate_request(payload, state, adapter, context):
     read_roots = [Path(value) for value in state['allowed_read_roots']]
     if not any(manifest.is_relative_to(root) for root in read_roots):
         raise ValueError('manifest must be inside an allowed read root')
-    capture = adapter.load_manifest(manifest)
+    capture = adapter.load_manifest(manifest, **({'streaming':True} if payload.get('stream_id') else {}))
+    if payload.get('stream_id') and len(capture['frames']) != 1:
+        raise ValueError('stream request must contain exactly one captured frame')
     if capture['frame_id'] != context['catalog'].runtime_config.sensor_profile.optical_frame:
         raise ValueError('manifest optical frame differs from frozen release')
     for row in capture['frames']:
@@ -93,6 +95,7 @@ def serve(args, adapter):
                  progress=0, eta_s=155.0, error=None, pid=os.getpid(), gpu=0,
                  physical_gpu=int(os.environ['CUDA_VISIBLE_DEVICES']),logical_cuda_index=0,
                  process_start_ticks=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]),
+                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                  owner_token=args.owner_token, socket=str(address), service_root=str(root),
                  allowed_read_roots=[str(path) for path in args.allowed_read_root],
                  allowed_output_root=str(args.allowed_output_root),
@@ -160,6 +163,8 @@ def serve(args, adapter):
         # Validate supported lifecycle before advertising readiness, without model reload.
         context['runtime'] = context['runtime'].new_session(timeout=12)
         (root / 'startup-timing.json').write_text(json.dumps({'segments': timing['segments']}, indent=2))
+        active_stream = None
+        stream_identity = None
         state.update(status='ready', stage='ready', message='检测模型已就绪', progress=100, eta_s=0,
                      model_initialization_count=model_count(context))
         publish()
@@ -169,6 +174,30 @@ def serve(args, adapter):
                 connection.settimeout(600)
                 try:
                     payload = receive(connection)
+                    stream_id = payload.get('stream_id')
+                    if stream_id is not None:
+                        if (not isinstance(stream_id, str) or len(stream_id) != 32 or
+                                any(c not in '0123456789abcdef' for c in stream_id) or
+                                payload.get('owner_token') != state['owner_token'] or
+                                payload.get('expected_identity') != state['identity']):
+                            raise ValueError('stream ownership/identity mismatch')
+                        if payload.get('stream_end') is True:
+                            if active_stream != stream_id:
+                                raise ValueError('cannot end a different acquisition stream')
+                            context['runtime'] = context['runtime'].new_session(timeout=12)
+                            context.pop('_stream_source',None)
+                            active_stream = stream_identity = None
+                            send(connection, {'exit_code':0, 'cleanup_complete':True, 'stream_id':stream_id})
+                            continue
+                        if type(payload.get('stream_begin')) is not bool:
+                            raise ValueError('explicit stream begin flag required')
+                        if not payload['stream_begin'] and active_stream != stream_id:
+                            raise ValueError('frame belongs to another acquisition stream')
+                        timeout = payload.get('result_timeout_s')
+                        if type(timeout) not in (int,float) or not 0 < timeout <= 120:
+                            raise ValueError('bounded streaming result timeout required')
+                    if stream_id is None and active_stream is not None:
+                        raise ValueError('live acquisition owns detector tracking')
                     manifest, output = validate_request(payload, state, adapter, context)
                 except (ValueError, KeyError, TypeError, OSError) as error:
                     send(connection, {'exit_code': 2, 'error': str(error), 'service_status': 'ready'})
@@ -178,11 +207,27 @@ def serve(args, adapter):
                 request_args = SimpleNamespace(**vars(args))
                 request_args.manifest, request_args.run_dir = manifest, output
                 request_args.dry_run = False
+                request_args.streaming = stream_id is not None
+                if stream_id is not None:
+                    if payload['stream_begin']:
+                        # A new acquisition supersedes an abandoned cancelled stream,
+                        # after its last in-flight request has finished serially.
+                        context['runtime'] = context['runtime'].new_session(timeout=12)
+                        context.pop('_stream_source',None)
+                        active_stream = stream_id
+                        stream_identity = None
+                    request_args.result_timeout_s = payload['result_timeout_s']
                 try:
                     summary = adapter.run(request_args, prepared=context)
                     summary['service'] = {key: state[key] for key in
                                           ('pid', 'process_start_ticks', 'prepare_count', 'identity')}
                     summary['service']['model_initialization_count'] = model_count(context)
+                    if stream_id is not None:
+                        if stream_identity is None:
+                            stream_identity = summary['tracking_session_id']
+                        elif stream_identity != summary['tracking_session_id']:
+                            raise RuntimeError('tracking session changed inside acquisition')
+                        summary['stream_id'] = stream_id
                     adapter.write_json(output / 'summary.json', summary)
                 except Exception as error:
                     state.update(status='failed', stage='detect', error=str(error), message='检测服务失败')
@@ -193,9 +238,15 @@ def serve(args, adapter):
                              completed_requests=state['completed_requests'] + 1, active_run_dir=None)
                 publish()
                 try:
-                    send(connection, {'exit_code': 0, 'summary_path': str(output / 'summary.json'),
-                                      'tracking_session_id': summary['tracking_session_id'],
-                                      'service_status': 'ready'})
+                    response = {'exit_code': 0, 'summary_path': str(output / 'summary.json'),
+                                'tracking_session_id': summary['tracking_session_id'], 'service_status': 'ready'}
+                    if stream_id is not None:
+                        observations = [json.loads(line) for line in (output/'observations.jsonl').read_text().splitlines()]
+                        if len(observations) != 1:
+                            raise ValueError('stream request must contain exactly one frame')
+                        response.update(stream_id=stream_id, observation={k:v for k,v in observations[0].items()
+                            if k != 'diagnostics'}, summary=summary)
+                    send(connection, response)
                 except OSError:
                     pass  # Completed evidence remains available if the client disconnected.
     except BaseException as error:

@@ -34,12 +34,13 @@ def project_model_state(state, spec, *, environment, source=None):
     return result, changes
 
 
-def state_near(actual, expected, *, joint_rad=.01):
+def state_near(actual, expected, *, joint_rad=.01, disabled_grippers=()):
     validate_physical14(actual,gripper_min_mm=-1.)
     validate_physical14(expected,gripper_min_mm=-1.)
     return all(abs(a-b) <= joint_rad for side in ('left', 'right')
                for a,b in zip(actual[side+'_arm_joints'], expected[side+'_arm_joints'])) and all(
-                   abs(actual[side+'_gripper']-expected[side+'_gripper']) <= 2 for side in ('left', 'right'))
+                   abs(actual[side+'_gripper']-expected[side+'_gripper']) <= 2 for side in ('left', 'right')
+                   if side not in disabled_grippers)
 
 
 def validate_initial_state(initial, profile):
@@ -54,18 +55,27 @@ def validate_initial_state(initial, profile):
     if normalization not in ('clamp_to_profile_upper_limit_within_2mm', 'clamp_to_model_command_limits_within_2mm'):
         raise ValueError('explicit initial jaw normalization required')
     expected = deepcopy(measured)
+    disabled=initial.get('disabled_grippers',[])
+    if (not isinstance(disabled,list) or disabled not in ([],['left'],['right'],['left','right'])
+            or disabled and initial.get('disabled_gripper_model')!='profile_max_opening_mm_assumption_not_measured'):
+        raise ValueError('explicit disabled-gripper model assumption required')
+    if initial.get('held_arms',[]) not in ([],['right']):
+        raise ValueError('left-arm collection may only hold the observed right arm')
     for side in ('left', 'right'):
         key = side+'_gripper'
         expected[key] = min(measured[key], profile['gripper']['max_opening_mm'])
         if normalization == 'clamp_to_model_command_limits_within_2mm':
             expected[key] = max(expected[key], max(0., gripper_offset_mm(profile)))
-    if planned != expected or not state_near(measured, planned, joint_rad=.005):
+        if side in disabled:expected[key]=profile['gripper']['max_opening_mm']
+    if planned != expected or not state_near(measured, planned, joint_rad=.005,disabled_grippers=disabled):
         raise ValueError('initial target may only clamp measured jaw to model command limits within 2 mm; arms must be unchanged')
     if model != convert_state(planned, profile, to_reported=False):
         raise ValueError('initial model/reported conversion differs')
     evidence = initial.get('owner_samples')
     if not isinstance(evidence, list) or len(evidence) != 2:
         raise ValueError('initial state requires before/after observation owner samples')
+    if any(sample.get('disabled_grippers',[])!=disabled for sample in evidence):
+        raise ValueError('disabled grippers differ from observed Owner evidence')
     reported=initial.get('reported_joint_limits')
     if reported is not None:
         if any(sample.get('reported_joint_limits')!=reported for sample in evidence):
@@ -91,7 +101,7 @@ def validate_initial_state(initial, profile):
         clock=clock_for_source(initial,'fake')
         assert_progress(sample_stamp(evidence[0],clock,wall_key='sample_wall_ns'),sample_stamp(evidence[1],clock,wall_key='sample_wall_ns'))
     validate_physical_feedback(initial.get('after_observation_reported'),profile)
-    if not state_near(initial['after_observation_reported'], measured, joint_rad=.005):
+    if not state_near(initial['after_observation_reported'], measured, joint_rad=.005,disabled_grippers=disabled):
         raise ValueError('robot moved during observation')
     return initial
 
@@ -195,6 +205,12 @@ def validate(plan, source):
                     raise ValueError('invalid stationary initial-opening resume receipt')
                 first['left_gripper']=initial['planned_reported']['left_gripper']
             allowance = position_noise_rad(source.get('environment', 'physical'))
+            for side in initial.get('held_arms',[]):
+                key=side+'_arm_joints'
+                held=plan['ticks'][0]['target'][key]
+                if (any(abs(a-b)>allowance+1e-12 for a,b in zip(held,initial['planned_reported'][key]))
+                        or any(any(abs(a-b)>1e-8 for a,b in zip(row['target'][key],held)) for row in plan['ticks'])):
+                    raise ValueError('inactive right arm must remain at the newly observed pose throughout the plan')
             if (first is None or not state_near(first,initial['planned_reported'],joint_rad=allowance)
                     or not state_near(plan['ticks'][-1]['target'],initial['planned_reported'])):
                 raise ValueError(f'native first target must match measured start within {allowance:g} rad/2 mm; return within 0.01 rad/2 mm')

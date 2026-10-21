@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from contract import demo_state
+from contract import demo_state,validate_physical_feedback
 from integration import _digest
 from joint_space import validate, validate_initial_state
 from real_observation import read_initial_sample, seal_initial_state
@@ -31,6 +31,26 @@ def initial_fixture(profile):
 
 
 class InitialStateTest(unittest.TestCase):
+    def test_87mm_feedback_is_readable_but_does_not_expand_commands_or_start_normalization(self):
+        source,_=fixture();profile=a1_profile(source['calibration_profile'])
+        for gap in (85.019,87.):
+            state=demo_state();state['left_gripper']=gap
+            self.assertIs(validate_physical_feedback(state),state)
+            self.assertIs(validate_physical_feedback(state,profile),state)
+            before=read_initial_sample(lambda:owner(state),wall_ns=lambda:1_003_000_000)
+            after=read_initial_sample(lambda:owner(state,stamp=9_000_000_000),wall_ns=lambda:9_003_000_000)
+            self.assertEqual(before[0]['left_gripper'],gap)
+            with self.assertRaisesRegex(ValueError,'within 2 mm'):seal_initial_state(before,after,profile)
+        for gap in (-1.000001,87.000001):
+            state=demo_state();state['left_gripper']=gap
+            with self.assertRaises(ValueError):validate_physical_feedback(state)
+            with self.assertRaises(ValueError):validate_physical_feedback(state,profile)
+        other=deepcopy(profile);other['gripper']['max_opening_mm']=80.
+        state=demo_state();state['left_gripper']=81.;state['right_gripper']=80.
+        self.assertIs(validate_physical_feedback(state,other),state)
+        state['left_gripper']=81.000001
+        with self.assertRaises(ValueError):validate_physical_feedback(state,other)
+
     def test_measured_preserved_clamp_and_contract(self):
         source, plan = fixture()
         profile = a1_profile(source['calibration_profile'])
@@ -40,6 +60,7 @@ class InitialStateTest(unittest.TestCase):
         self.assertEqual(initial['planned_reported']['left_gripper'],83.)
         self.assertAlmostEqual(initial['model']['left_gripper'],82.992)
         self.assertAlmostEqual(initial['model']['left_arm_joints'][0],.14)
+        self.assertEqual(initial['held_arms'],['right'])
         source.update(schema_version='physical_collection_source.v1',calibration_profile=profile,initial_state=initial)
         for tick in plan['ticks']:tick['target']=deepcopy(initial['model'])
         physical_fixture(plan,source)
@@ -51,11 +72,38 @@ class InitialStateTest(unittest.TestCase):
         bad=deepcopy(plan);bad['initial_state_digest']='wrong'
         with self.assertRaisesRegex(ValueError,'sealed observation'):validate(bad,source)
         for mutate in (lambda x:x['planned_reported']['left_arm_joints'].__setitem__(0,.13),
-                       lambda x:x['measured_reported'].__setitem__('left_gripper',85.1),
+                       lambda x:x['measured_reported'].__setitem__('left_gripper',87.1),
                        lambda x:x['owner_samples'][1].__setitem__('command_epoch',4),
                        lambda x:x['after_observation_reported']['left_arm_joints'].__setitem__(0,.2)):
             bad=deepcopy(initial);mutate(bad)
             with self.assertRaises(ValueError):validate_initial_state(bad,profile)
+        # A matching start/end cannot hide a right-arm movement in the middle.
+        bad=deepcopy(plan);bad['ticks'][1]['target']['right_arm_joints'][0]+=.001
+        with self.assertRaisesRegex(ValueError,'inactive right arm'):validate(bad,source)
+
+    def test_disabled_jaw_is_unknown_and_not_a_measured_zero_for_planning(self):
+        source,_=fixture();profile=a1_profile(source['calibration_profile'])
+        state=demo_state();state['right_gripper']=0.;state['right_arm_joints']=[.2,.3,.4,.5,.6,.7]
+        def snapshot(stamp):
+            result=owner(state,stamp=stamp)
+            result['calibration_feedback'].update(gripper_feedback_valid=[True,False],
+                can_output_guard={'disabled_grippers':['right']})
+            return result
+        before=read_initial_sample(lambda:snapshot(1_000_000_000),wall_ns=lambda:1_003_000_000)
+        after=read_initial_sample(lambda:snapshot(9_000_000_000),wall_ns=lambda:9_003_000_000)
+        initial=seal_initial_state(before,after,profile)
+        self.assertEqual(initial['measured_reported']['right_gripper'],0.)
+        self.assertEqual(initial['disabled_grippers'],['right'])
+        self.assertIn('not_measured',initial['disabled_gripper_model'])
+        self.assertEqual(initial['planned_reported']['right_gripper'],83.)
+        self.assertEqual(initial['planned_reported']['right_arm_joints'],state['right_arm_joints'])
+        bad=deepcopy(initial);bad.pop('disabled_grippers')
+        with self.assertRaises(ValueError):validate_initial_state(bad,profile)
+        changed=deepcopy(after);changed[1]['disabled_grippers']=[]
+        with self.assertRaisesRegex(ValueError,'configuration changed'):seal_initial_state(before,changed,profile)
+        unapproved=snapshot(1_000_000_000);unapproved['calibration_feedback']['can_output_guard']={}
+        with self.assertRaisesRegex(ValueError,'not explicitly disabled'):
+            read_initial_sample(lambda:unapproved,wall_ns=lambda:1_003_000_000)
 
     def test_negative_measured_gap_preserved_and_legacy_upper_clamp(self):
         source, _ = fixture()

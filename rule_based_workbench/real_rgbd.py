@@ -1,15 +1,11 @@
-"""Collection-owned RealSense RGB-D preview; no robot SDK or motion.
-
-Keeps the calibration HardwareCameraAdapter HTTP/metadata contract. Its RGB
-producer is nested inside main and cannot be imported without starting another
-camera, so only RGB-D capture/transport lives here. Run one process per serial.
-"""
+"""RealSense raw ingress to the shared camera backend; one SDK owner per serial."""
 import argparse
 import io
 import json
 import math
 from pathlib import Path
 import signal
+import sys
 import shutil
 import uuid
 import threading
@@ -17,6 +13,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import zipfile
+
+
+def paired_timestamps(color_ms,depth_ms,color_domain,depth_domain,fps):
+    return (color_domain==depth_domain and all(math.isfinite(x)and x>=0 for x in (color_ms,depth_ms))
+        and abs(color_ms-depth_ms)<=1000/fps)
 
 
 def pair_metadata(*, serial, camera_name, color_number, depth_number,
@@ -27,7 +28,7 @@ def pair_metadata(*, serial, camera_name, color_number, depth_number,
             or not math.isfinite(depth_scale_m) or depth_scale_m <= 0
             or not math.isfinite(fps) or fps <= 0 or host_receive_ns <= 0):
         raise ValueError('invalid RGB-D frame metadata')
-    if color_domain != depth_domain or abs(color_ms-depth_ms) > 1000/fps:
+    if not paired_timestamps(color_ms,depth_ms,color_domain,depth_domain,fps):
         raise ValueError('RGB and depth timestamps do not form a contemporaneous pair')
     return dict(ready=True, serial=serial, camera_name=camera_name,
                 frame_number=color_number, depth_frame_number=depth_number,
@@ -129,7 +130,7 @@ class Frames:
             self.latest = frame
             self.condition.notify_all()
 
-    def snapshot(self):
+    def snapshot(self,formats=None):
         with self.condition:
             frame = dict(self.latest)
             status = dict(frame['status'])
@@ -158,7 +159,7 @@ def make_handler(frames):
                     while not frames.closed:
                         with frames.condition:
                             frames.condition.wait_for(lambda: frames.closed or frames.latest['status'].get('pair_id') != previous, 2)
-                        frame = frames.snapshot()
+                        frame = frames.snapshot(formats=('jpeg',))
                         status = frame['status']
                         if not status.get('ready') or status.get('pair_id') == previous:
                             return
@@ -172,7 +173,9 @@ def make_handler(frames):
                 except (BrokenPipeError, ConnectionResetError, TimeoutError):
                     pass
                 return
-            frame = frames.snapshot()
+            formats=(() if path=='/status' else ('color_png','depth_png') if path=='/snapshot.zip' else
+                     ('depth_png',) if path=='/depth.png' else ('jpeg',))
+            frame = frames.snapshot(formats=formats)
             status = frame['status']
             if path == '/status':
                 payload, mime = json.dumps(status).encode(), 'application/json'
@@ -207,24 +210,48 @@ class FrameProgress:
     def __init__(self, now):
         self.seen = self.published = None
         self.last_fresh = now
+        self.last_rejection=None
 
-    def accept(self, color, depth, now):
+    def accept(self, color, depth, now, *, timestamps=None):
         pair = (color, depth)
         if self.seen is not None and any(a < b for a, b in zip(pair, self.seen)):
             raise RuntimeError('camera frame number regressed')
         self.seen = pair
         if now - self.last_fresh >= 3:
             raise RuntimeError('camera produced no fresh RGB-D pair for 3 seconds')
-        if self.published is not None and any(a == b for a, b in zip(pair, self.published)):
+        if timestamps is not None and not paired_timestamps(*timestamps):
+            self.last_rejection='timestamp_mismatch'
             return False
+        if self.published is not None and any(a == b for a, b in zip(pair, self.published)):
+            self.last_rejection='reused_pair'
+            return False
+        self.last_rejection=None
         self.published, self.last_fresh = pair, now
         return True
+
+
+def _frame_counters(pair):
+    rgb,z=pair.get_color_frame(),pair.get_depth_frame()
+    return dict(rgb_number=rgb.get_frame_number() if rgb else None,
+        depth_number=z.get_frame_number() if z else None,
+        rgb_device_ms=rgb.get_timestamp() if rgb else None,
+        depth_device_ms=z.get_timestamp() if z else None)
 
 
 def capture(args, frames):
     import cv2
     import numpy as np
     import pyrealsense2 as rs
+    import fcntl
+    from robot_workbench.rgbd_service import CommonCameraService,CAMERAS
+    from robot_workbench.capture_diagnostics import CaptureDiagnostics
+    service=CommonCameraService.connect(args.service_descriptor)
+    if service.descriptor['environment']!='physical':raise ValueError('physical camera service required')
+    camera=CAMERAS[args.camera_name]
+    if service.descriptor['intrinsics'][camera]['serial']!=args.serial:raise ValueError('camera serial differs from shared service')
+    capture_instance=uuid.uuid4().hex
+    diagnostics=CaptureDiagnostics(args.output,capture_instance)
+    frames.capture_diagnostics=diagnostics
 
     pipeline, config = rs.pipeline(), rs.config()
     config.enable_device(args.serial)
@@ -232,8 +259,11 @@ def capture(args, frames):
     config.enable_stream(rs.stream.color, 640, 480, rs.format.yuyv, 30)
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
     frames.publish(status={'ready': False, 'phase': 'starting_camera', 'serial': args.serial})
-    profile = pipeline.start(config)
+    sdk_lease=(Path(service.directories[camera])/'capture.lock').open('a')
+    started=False
     try:
+        fcntl.flock(sdk_lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        profile=pipeline.start(config);started=True
         scale = profile.get_device().first_depth_sensor().get_depth_scale()
         align = rs.align(rs.stream.color)
         last_color = last_depth = None
@@ -248,29 +278,47 @@ def capture(args, frames):
         progress = FrameProgress(rate_start)
         reused_framesets = 0
         deadline = rate_start+args.duration_s if args.duration_s else math.inf
-        spool = RawSpool(args.output)
-        if args.record_raw:
-            start = time.time_ns()
-            with (args.output/'recording-request.json').open('x') as stream:
-                json.dump(dict(run_id=uuid.uuid4().hex, start_wall_ns=start,
-                               deadline_wall_ns=start+int(args.duration_s*1e9)), stream)
         while not frames.stop_requested.is_set() and time.monotonic() < deadline:
-            received = pipeline.wait_for_frames(3000)
-            stamp = time.time_ns()
-            aligned = align.process(received)
+            sampled_token=service.channels[camera].token()
+            diagnostics.active_stage='wait'
+            before_wait=time.monotonic_ns()
+            try:
+                received = pipeline.wait_for_frames(3000)
+                stamp = time.time_ns()
+            finally:
+                waited=time.monotonic_ns()-before_wait;diagnostics.stage('wait',waited)
+            raw_counters=_frame_counters(received)
+            diagnostics.active_stage='align'
+            before_align=time.monotonic_ns()
+            try:aligned = align.process(received)
+            finally:
+                aligned_ns=time.monotonic_ns()-before_align;diagnostics.stage('align',aligned_ns)
             color, depth = aligned.get_color_frame(), aligned.get_depth_frame()
             if not color or not depth:
+                diagnostics.attempt(raw_counters,_frame_counters(aligned),False,'missing_aligned_frame',host_receive_ns=stamp)
                 raise RuntimeError('missing aligned RGB-D frame')
             number, depth_number = color.get_frame_number(), depth.get_frame_number()
-            if not progress.accept(number, depth_number, time.monotonic()):
-                reused_framesets += 1
+            diagnostics.active_stage='pair_filter'
+            try:accepted=progress.accept(number,depth_number,time.monotonic(),timestamps=(
+                color.get_timestamp(),depth.get_timestamp(),str(color.get_frame_timestamp_domain()),
+                str(depth.get_frame_timestamp_domain()),30))
+            except RuntimeError:
+                diagnostics.attempt(raw_counters,_frame_counters(aligned),False,'counter_regressed_or_stalled',host_receive_ns=stamp)
+                raise
+            diagnostics.attempt(raw_counters,_frame_counters(aligned),accepted,'accepted' if accepted else progress.last_rejection,host_receive_ns=stamp,
+                stage_ns=dict(wait=waited,align=aligned_ns))
+            if not accepted:
+                if progress.last_rejection=='reused_pair':reused_framesets += 1
+                elif sampled_token:
+                    service.channels[camera].fail('RGB-D timestamp mismatch; invalid recording pair',sampled_token=sampled_token)
+                diagnostics.active_stage=None
                 continue
             if last_color is not None:
                 color_missing += max(0, number-last_color-1)
                 depth_missing += max(0, depth_number-last_depth-1)
             last_color, last_depth = number, depth_number
             intr = color.profile.as_video_stream_profile().get_intrinsics()
-            intrinsic = dict(width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy,
+            intrinsic = dict(serial=args.serial,width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy,
                              cx=intr.ppx, cy=intr.ppy, distortion_model=str(intr.model),
                              coefficients=list(intr.coeffs), rectified=False)
             status = pair_metadata(serial=args.serial, camera_name=args.camera_name,
@@ -279,47 +327,61 @@ def capture(args, frames):
                                    color_domain=str(color.get_frame_timestamp_domain()),
                                    depth_domain=str(depth.get_frame_timestamp_domain()),
                                    host_receive_ns=stamp, depth_scale_m=scale, intrinsics=intrinsic)
+            before_convert=time.monotonic_ns()
+            diagnostics.active_stage='convert'
             raw = np.asanyarray(color.get_data()).view(np.uint8).reshape(intr.height, intr.width, 2)
-            bgr = cv2.cvtColor(raw, cv2.COLOR_YUV2BGR_YUY2)
+            rgb = cv2.cvtColor(raw, cv2.COLOR_YUV2RGB_YUY2)
             depth_array = np.asanyarray(depth.get_data())
-            if depth_array.dtype != np.uint16 or depth_array.shape != bgr.shape[:2]:
+            if depth_array.dtype != np.uint16 or depth_array.shape != rgb.shape[:2]:
                 raise RuntimeError('depth must be aligned uint16 with color dimensions')
-            encoded = []
-            for suffix, array, options in [('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 90]),
-                                            ('.png', bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1]),
-                                            ('.png', depth_array, [cv2.IMWRITE_PNG_COMPRESSION, 1])]:
-                ok, value = cv2.imencode(suffix, array, options)
-                if not ok:
-                    raise RuntimeError('RGB-D image encoding failed')
-                encoded.append(value.tobytes())
+            rgb_payload=rgb.tobytes();depth_payload=depth_array.astype('<u2',copy=False).tobytes()
+            diagnostics.stage('convert',time.monotonic_ns()-before_convert)
+            diagnostics.active_stage=None
             count += 1
             status.update(phase='capturing', reused_framesets=reused_framesets, delivered_fps=count/(time.monotonic()-rate_start),
-                          color_missing_frames=color_missing, depth_missing_frames=depth_missing)
-            jpeg, color_png, depth_png = encoded
-            spool.write(status, color_png, depth_png)
-            frames.publish(status=status, jpeg=jpeg, color_png=color_png, depth_png=depth_png)
+                color_missing_frames=color_missing,depth_missing_frames=depth_missing,
+                capture_instance_id=capture_instance,environment='physical',simulation_only=False,
+                evidence_source='physical_rgbd',clock_domain='host_wall',source_clock_id=None,
+                host_receive_ns=stamp,data_valid=True,capture_diagnostics=diagnostics.summary())
+            event=diagnostics.take_event()
+            if event:status['capture_gap_evidence']=event
+            before_publish=time.monotonic_ns()
+            diagnostics.active_stage='publish'
+            try:
+                service.publish(camera,status,rgb_payload,depth_payload,
+                    width=intr.width,height=intr.height,sampled_token=sampled_token)
+            finally:
+                diagnostics.stage('publish',time.monotonic_ns()-before_publish)
+                del rgb_payload,depth_payload
+            diagnostics.active_stage=None
     finally:
-        pipeline.stop()
+        stop_reason='capture_exception' if sys.exc_info()[0] else 'stop_requested' if frames.stop_requested.is_set() else 'duration_complete'
+        try:
+            if started:pipeline.stop()
+        finally:
+            diagnostics.close(reason=stop_reason)
+            sdk_lease.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
     parser.add_argument('--camera-name', required=True, choices=('head', 'left', 'right'))
-    parser.add_argument('--port', type=int, required=True)
+    parser.add_argument('--port', type=int,default=None)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--duration-s', type=float, default=0)
-    parser.add_argument('--record-raw', action='store_true')
+    parser.add_argument('--service-descriptor',type=Path,required=True,
+                        help='the same shared three-camera service descriptor for all serials')
     args = parser.parse_args()
-    if (not args.serial.isascii() or not args.serial.isdecimal() or not 1024 <= args.port <= 65535
+    if (not args.serial.isascii() or not args.serial.isdecimal() or args.port is not None and not 1024 <= args.port <= 65535
             or not math.isfinite(args.duration_s) or args.duration_s < 0):
         parser.error('decimal serial, unprivileged port and nonnegative duration required')
-    if args.record_raw and not 0 < args.duration_s <= 600:
-        parser.error('--record-raw requires --duration-s in (0, 600]')
     args.output.mkdir(parents=True, exist_ok=False)
-    frames = Frames()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(frames))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    from robot_workbench.rgbd_service import CommonCameraService,CAMERAS
+    service=CommonCameraService.connect(args.service_descriptor)
+    ports=service.start_servers({role:args.port if role==args.camera_name and args.port else 0 for role in CAMERAS})
+    if args.port and ports[args.camera_name]!=args.port:raise ValueError('preview port differs from shared camera service')
+    frames=service.frames[CAMERAS[args.camera_name]]
     previous_handlers = {sig: signal.signal(sig, frames.request_stop) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         capture(args, frames)
@@ -328,14 +390,13 @@ def main():
                                'error': f'{type(exc).__name__}: {exc}'})
         raise
     finally:
+        diagnostics=getattr(frames,'capture_diagnostics',None)
+        if diagnostics is not None:diagnostics.close()
         final = {**frames.snapshot()['status'], 'ready': False, 'phase': 'stopped',
                  'stop_signal': frames.stop_signal, 'stopped_wall_ns': str(time.time_ns())}
+        if diagnostics is not None:final['capture_diagnostics']=diagnostics.summary()
+        frames.publish(status=final)
         (args.output/'status.json').write_text(json.dumps(final, indent=2))
-        with frames.condition:
-            frames.closed = True
-            frames.condition.notify_all()
-        server.shutdown()
-        server.server_close()
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
 

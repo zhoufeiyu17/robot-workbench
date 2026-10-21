@@ -61,6 +61,7 @@ class BoundaryTest(unittest.TestCase):
         q=[0.]*14;q[6]=command_sdk('left',40.);q[13]=command_sdk('right',40.)
         backend.send('left',q);backend.send('right',q)
         self.assertEqual(backend.applied_contexts,dict(left=None,right=None))
+
         backend.advance(1/240)
         expected=dict(execution_id='execution-one',execution_tick=0,source_tick=None,stage='initialize',
                       execution_instance_id=None,
@@ -75,6 +76,26 @@ class BoundaryTest(unittest.TestCase):
         self.assertEqual(backend.applied_contexts['left'],expected)
         backend.set_damping_hold()
         self.assertEqual(backend.applied_contexts,dict(left=None,right=None))
+
+    def test_policy_context_stays_bound_to_accepted_owner_on_physics_application(self):
+        from types import SimpleNamespace as NS
+        backend=PhysxBackend(LaggingPlant(),joint_offsets=[0.]*12)
+        context=dict(execution_id='policy-config',execution_instance_id='episode',execution_tick=0,
+            source_tick=None,stage='model_initial_hold',runtime_nonce='owner',command_epoch=7,command_id='hold')
+        runner=NS(is_inference=True,command_context=context)
+        backend.owner=NS(epoch=7,runtime_nonce='owner',execution_instance_id='episode',runner=runner,
+                         stop_requested=False,release_requested=False)
+        q=backend.read_calibration_state()['qpos']
+        backend.send('left',q);backend.send('right',q);backend.advance(1/240)
+        self.assertEqual(backend.applied_contexts,{'left':context,'right':context})
+        context=dict(context,stage='model_inference',execution_tick=1,command_id='prediction-1')
+        runner.command_context=context
+        backend.send('left',q);backend.send('right',q);backend.advance(2/240)
+        self.assertEqual(backend.applied_contexts,{'left':context,'right':context})
+        runner.command_context=dict(context,execution_instance_id='stale')
+        previous=backend.sequence
+        with self.assertRaisesRegex(ValueError,'accepted Owner'):backend.send('left',q)
+        self.assertEqual(previous,backend.sequence)
 
     def test_readback_trace_is_bounded_and_preserves_steps_targets_and_rendering(self):
         import json

@@ -52,6 +52,7 @@ def load(config):
             validate_real_plan(plan,source,binding,environment=environment)
             from frozen_executor import FrozenExecutor
             frozen = FrozenExecutor(plan,source,sink=lambda _:None,gate=lambda:True,stop=lambda _:None,
+                                    disabled_grippers=(source.get('initial_state') or {}).get('disabled_grippers',()),
                                     source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment))
             if plan['control']['physics_hz']/plan['control']['substeps'] != 30:
                 raise ValueError('真实采集轨迹必须使用 30 Hz 冻结指令')

@@ -37,7 +37,7 @@ class LaunchEnvironmentTest(unittest.TestCase):
             execution=dict(TARGET,session_id='cpu-pollution',max_processes=4,min_free_memory_mib=1,
                 plant=dict(session_id='cpu-pollution',pid=1,process_start_ticks='1',scope=str(root),script=str(script),
                     script_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
-                    argv=['python3',str(script),'--output',str(root)],max_memory_mib=1))
+                    argv=['python3',str(script),'--output',str(root),'--gpu',str(TARGET['gpu_index'])],max_memory_mib=1))
             commands=[shlex.split(python_command(report)),owned_command(WB,worker_command,5),
                 transport({'execution':execution,'workbench_code':str(WB)},'dsw-scene',shlex.join(worker_command),timeout=5)]
             payload=root/'commands.json';payload.write_text(json.dumps(commands))

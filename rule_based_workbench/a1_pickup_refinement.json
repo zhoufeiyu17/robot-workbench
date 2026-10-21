@@ -1,0 +1,36 @@
+{
+  "schema": "a1_pickup_refinement.v1",
+  "profile": "pickup-c10-v1",
+  "additional_binary_levels": 3,
+  "left_sphere_cap": 1145,
+  "total_sphere_cap": 1817,
+  "cells": {
+    "/World/envs/env_0/Robot/left_link7/collisions/left_link7/node_STL_BINARY_/mesh/cooked_19": [
+      "0/0"
+    ],
+    "/ac_one_A1_pending_calibration_r2/left_link6/collisions/left_link6/node_STL_BINARY_/mesh": [
+      "15",
+      "3/0",
+      "3/1/0",
+      "3/1/1",
+      "6/0/1"
+    ],
+    "/World/envs/env_0/Robot/left_link7/collisions/left_link7/node_STL_BINARY_/mesh/cooked_2": [
+      "0/1/1"
+    ],
+    "/World/envs/env_0/Robot/left_link8/collisions/left_link8/node_STL_BINARY_/mesh/cooked_25": [
+      "0"
+    ]
+  },
+  "part_sha256": {
+    "/ac_one_A1_pending_calibration_r2/left_link6/collisions/left_link6/node_STL_BINARY_/mesh": "883fdd8383d1226a80f6cd24d1e7a12d41f6c1ac7d8eaea0c56343125e675039",
+    "/World/envs/env_0/Robot/left_link7/collisions/left_link7/node_STL_BINARY_/mesh/cooked_2": "bba1ec9c5443b0f4b5324c43d007b88566684fc9cba061798402a01c8b033b29",
+    "/World/envs/env_0/Robot/left_link7/collisions/left_link7/node_STL_BINARY_/mesh/cooked_19": "5f0ec96f71dff077420962caed95c0147ec47dda28fe70f51749a1140335b5d8",
+    "/World/envs/env_0/Robot/left_link8/collisions/left_link8/node_STL_BINARY_/mesh/cooked_25": "dd2e9610357b45599852723d880cf99e1c5803b53ddc91421046c8c64e95b18a"
+  },
+  "parent_model_code_sha256": "1a08584d7c4f1707e113ed17ce9f9814e9336d732f0529a80f8d3f71897d212e",
+  "parent_asset_recipe_sha256": "35998e9392b693834f39d533c461e23ed782d872b4b72be0b5e9f7e5796e7e01",
+  "parent_effective_recipe_sha256": "4fbd968513c4666a8e0e939ce5fe6570983aed273cd7be6df674b15a37f0c9de",
+  "source_parts_sha256": "c00f4285d0381e8b7fc9188016074cb878ccc6a9e8fc349af276e0e4efa86818",
+  "diagnosis_receipts_sha256": "93b13ed10117ac3f2eca0004d271e0618dfe725b67cb57439ca8e0006f38d064"
+}

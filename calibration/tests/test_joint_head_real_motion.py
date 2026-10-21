@@ -19,6 +19,40 @@ def feedback(t, q, *, v=None, sdk=None):
 
 
 class RealMotionTest(unittest.TestCase):
+    def test_motion_record_is_bounded_and_does_not_relabel_cached_native_timestamps(self):
+        q=[0.]*14
+        plan=make_plan('right',q,q,limits(),duration_s=20.,created_at_s=8500.)
+        runner=MotionRunner(plan,begin=lambda q:q,send=lambda q:None,stop=lambda reason:None)
+        state=feedback(8500.,q);state['controller_telemetry']={'sample_wall_ns':123,'arms':{}}
+        runner.start(8500.,state)
+        for n in range(1,1201):
+            state=feedback(8500.+n*.01,q);state['controller_telemetry']={'sample_wall_ns':123,'arms':{}}
+            runner.tick(8500.+n*.01,state)
+        record=runner.motion_record()
+        self.assertEqual(len(record['rows']),1024);self.assertTrue(record['truncated'])
+        self.assertEqual(record['sample_count'],1201);self.assertEqual(len(record['native_samples']),1)
+        self.assertEqual(record['native_samples'][0]['sample_wall_ns'],123)
+        self.assertEqual(record['columns'][-1],'previous_command14')
+
+    def test_disabled_jaw_keeps_other_tracking_guards_and_fault_evidence(self):
+        for failed_axis in (0,13):
+            q = [0.]*14
+            plan = make_plan('both',q,q,limits(),kind='workbench',duration_s=1.,created_at_s=8500.)
+            stopped = []
+            runner = MotionRunner(plan,begin=lambda q:q,send=lambda q:None,stop=stopped.append,
+                                  disabled_grippers=('left',))
+            runner.start(8500.,feedback(8500.,q))
+            for n in range(1,30):
+                if n > 10:q[failed_axis] = .1 if failed_axis == 0 else .02
+                runner.tick(8500.+n*.05,feedback(8500.+n*.05,q))
+                if runner.status == 'FAULT':break
+            self.assertEqual(runner.status,'FAULT')
+            self.assertIn('measured arm=',runner.reason)
+            self.assertTrue(stopped)
+            self.assertNotIn('left',runner.target_error['jaw_mm'])
+            metric = 'joint_rad' if failed_axis == 0 else 'jaw_mm'
+            self.assertGreater(runner.target_error['tracking'][metric], .08 if failed_axis == 0 else 4.)
+
     def test_reviewed_two_hundredths_arrival_still_rejects_larger_error(self):
         for error, expected in ((.0151, 'READY'), (.0201, 'FAULT')):
             q = [0.] * 14
@@ -62,7 +96,7 @@ class RealMotionTest(unittest.TestCase):
 
     def test_measured_endpoint_tolerance_keeps_commands_bounded(self):
         from arx_env.joint_head_jaw_mapping import FEEDBACK, GAP_MM, command_sdk, interpolate
-        for gap in (-2., -.5, 83.74, 85.):
+        for gap in (-2., -.5, 83.74, 85.019,87.,89.):
             start = [0.] * 14
             for side, i in [('left', 6), ('right', 13)]:
                 start[i] = interpolate(gap, GAP_MM[side], FEEDBACK[side])
@@ -72,11 +106,11 @@ class RealMotionTest(unittest.TestCase):
             held = feedback_to_command(start)
             for side, i in [('left', 6), ('right', 13)]:
                 self.assertEqual(held[i], command_sdk(side, min(83., max(0., gap))))
-        for gap in (-2.01, 85.01):
+        for gap in (-2.000001, 89.000001):
             start[6] = interpolate(gap, GAP_MM['left'], FEEDBACK['left'])
             with self.assertRaisesRegex(ValueError, 'feedback tolerance'):
                 feedback_to_command(start)
-        for gap in (-2., 85.):
+        for gap in (-2.,83.1,87.,89.):
             with self.assertRaises(ValueError):
                 command_sdk('left', gap)
 
@@ -444,7 +478,9 @@ class RealMotionTest(unittest.TestCase):
         self.tick_until(runner, runner.started + runner.plan.duration_s + .2, target)
         self.assertEqual(runner.status, "SETTLING")
         v = [0.] * 14; v[7] = .07
-        self.tick_until(runner, runner.previous + .04, target, v=v)
+        # Stationarity intentionally uses measured position, not noisy SDK qvel.
+        moving = target.copy(); moving[7] += .006
+        self.tick_until(runner, runner.previous + .04, moving, v=v)
         self.assertIsNone(runner.settled_since)
         self.tick_until(runner, runner.previous + .45, target)
         self.assertEqual(runner.status, "SETTLING")
@@ -474,6 +510,9 @@ class RealMotionTest(unittest.TestCase):
         self.tick_until(runner, runner.started + runner.plan.duration_s + 3.1, outside, v=v)
         self.assertEqual(runner.status, "FAULT")
         self.assertIn("settle deadline", runner.reason)
+        self.assertIn("arrival_tolerance=0.050000 rad", runner.reason)
+        self.assertIn("not joint position limit", runner.reason)
+        self.assertEqual(runner.target_error['arrival_deadline']['failure_kind'],'target_tolerance_exceeded')
         runner, _, start, target = self.setup_runner()
         self.start_running(runner, start)
         self.tick_until(runner, runner.started + runner.plan.duration_s + 1., target)
@@ -487,6 +526,21 @@ class RealMotionTest(unittest.TestCase):
         self.tick_until(runner, runner.previous + .3, drift)
         self.assertEqual(runner.status, "FAULT")
         self.assertIn("tracking error", runner.reason)
+
+    def test_deadline_reports_confirmation_failure_when_current_error_is_inside_tolerance(self):
+        runner,_,start,target=self.setup_runner();self.start_running(runner,start)
+        end=runner.started+runner.plan.duration_s+3.0
+        outside=target.copy();outside[7]+=.0501
+        self.tick_until(runner,end-.04,outside)
+        # Model the observed threshold chatter while retaining the same quiet position window.
+        runner.stationary.update=lambda *args:True
+        self.tick_until(runner,end+.001,target)
+        self.assertEqual(runner.status,'FAULT','diagnostics must not change the deadline or success policy')
+        detail=runner.target_error['arrival_deadline']
+        self.assertTrue(detail['instantaneous_joints_in_tolerance']);self.assertTrue(detail['stationary'])
+        self.assertEqual(detail['failure_kind'],'arrival_not_confirmed_before_deadline')
+        self.assertLess(detail['continuous_confirmation_s'],.5)
+        self.assertIn('continuous_confirmation=',runner.reason)
 
     def test_noisy_velocity_requires_stationary_position_window(self):
         runner, calls, start, target = self.setup_runner()
@@ -527,14 +581,14 @@ class RealMotionTest(unittest.TestCase):
         self.assertFalse(window.update(.41, q, v))
         self.assertEqual(window.last_diagnostic['reason'], 'nonmonotonic')
         self.assertEqual(window.last_diagnostic['sample_gap_s'], 0.)
-        moved = q.copy(); moved[3] = .0031; moved[6] = .0021
+        moved = q.copy(); moved[3] = math.radians(.301); moved[6] = .0021
         self.assertFalse(window.update(.45, moved, v))
         d = window.last_diagnostic
         self.assertEqual(d['reason'], 'position_span')
         self.assertEqual(d['position_exceeded_indices'], [3, 6])
         self.assertEqual(d['sample_count'], 2)
         self.assertEqual(len(window.samples), 1)
-        self.assertAlmostEqual(d['position_span'][3], .0031)
+        self.assertAlmostEqual(d['position_span'][3], math.radians(.301))
         self.assertAlmostEqual(d['position_span'][6], abs(feedback_gaps(moved)[0] - feedback_gaps(q)[0]))
         self.assertEqual(d['position_units'][6], 'mm')
         self.assertEqual(d['raw_qpos_units'][6], 'SDK_units')
@@ -552,15 +606,16 @@ class RealMotionTest(unittest.TestCase):
         window.reset()
         self.assertIs(window.last_diagnostic, d)
 
-    def test_stationary_position_span_three_milliradian_boundary(self):
-        for span, expected in ((.002288818359375, True), (.003, True), (.003001, False)):
-            window = StationaryWindow()
-            for n in range(7):
-                q = [0.] * 14
-                q[2] = span if n == 6 else 0.
-                ready = window.update(n * .05, q, [0.] * 14)
-            self.assertEqual(ready, expected)
-            self.assertEqual(window.last_diagnostic['position_thresholds'][2], .003)
+    def test_stationary_position_span_point_three_degree_boundary(self):
+        for axis in (*range(6), *range(7,13)):
+            for span, expected in ((.0034332275390625, True), (math.radians(.3), True), (math.radians(.3001), False)):
+                window = StationaryWindow()
+                for n in range(7):
+                    q = [0.] * 14
+                    q[axis] = span if n == 6 else 0.
+                    ready = window.update(n * .05, q, [0.] * 14)
+                self.assertEqual(ready, expected)
+                self.assertEqual(window.last_diagnostic['position_thresholds'][axis], math.radians(.3))
 
     def test_stationary_window_gaps_jaws_and_velocity_is_diagnostic(self):
         q = [0.] * 14

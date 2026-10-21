@@ -123,6 +123,7 @@ sys.exit(wait_owned(child,10,grace=1,failure_result=sys.argv[2]))
         stage=dict(name='playground-geometry-inputs',result_path=str(self.result),failure_result=str(self.result),terminate_grace_s=25)
         service=Playground(self.root/'ui',Bridge(),lambda:{'status':'ready'})
         service.state['environment']={'ready':True,'checks':[dict(key='dsw',status='ready')]}
+        service.state['warmup']={'status':'ready','message':'CPU fixture: model initialization already completed'}
         def plan(config,output,bridge,speed,progress=None,cancel=None):
             return run_stages([stage,dict(name='must-not-run')],output,{'resources':{'max_wall_time_minutes':1}},progress,cancel)
         def fetch(source,destination,**kwargs):Path(destination).write_bytes(Path(source).read_bytes())

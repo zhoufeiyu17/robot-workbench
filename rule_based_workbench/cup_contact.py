@@ -6,6 +6,7 @@ Negative eta shifts the native activation boundary without making small sphere
 radii negative (negative radii would disable collision checking entirely).
 """
 from dataclasses import fields
+from copy import deepcopy
 
 CLAW_LINKS = frozenset(('left_link7', 'left_link8'))
 ALLOWANCE_M = .003
@@ -133,13 +134,20 @@ class CupContact:
         if not seen:raise ValueError('native claw/cup cost missing')
         self.report['current_claw_allowance_m']=ALLOWANCE_M if allowed else 0.
 
-    def __init__(self, generator, config, world, model_report=None):
+    def _bind_inward_envelope(self,world,prepared=None):
+        from cup_envelope import prepare,validate_prepared
+        selected=prepare(world) if prepared is None else prepared
+        validate_prepared(selected,cup_geometry_digest(world))
+        self.inward_envelope=deepcopy(selected)
+
+    def __init__(self, generator, config, world, model_report=None, *, prepared_cup_envelope=None):
         from curobo.geom.sdf.world import WorldCollisionConfig
         from curobo.geom.sdf.world_mesh import WorldMeshCollision
         from curobo.geom.types import WorldConfig
         self.model_report=model_report
         self.generator=generator
         self.inward_proxy=bool(model_report and model_report.get('cup_proxy_mode')=='inward_surface_3mm')
+        if self.inward_proxy:self._bind_inward_envelope(world,prepared_cup_envelope)
         meshes=cup_meshes(world)
         self.names=tuple(mesh.name for mesh in meshes)
         self.main=generator.world_coll_checker
@@ -196,6 +204,9 @@ class CupContact:
         geometry=cup_geometry_digest(world)
         if hasattr(self,'geometry_digest') and geometry!=self.geometry_digest:
             raise ValueError('cup geometry changed; recreate the scoped collision checker')
+        if self.inward_proxy:
+            from cup_envelope import validate_prepared
+            validate_prepared(self.inward_envelope,geometry)
         self.geometry_digest=geometry;self.first_cup_pose=list(meshes[0].pose)
         self.active=True;self.held_spheres=None;self.held_locks=None
         for mesh in meshes:
@@ -203,9 +214,9 @@ class CupContact:
             self.checker.update_obstacle_pose(mesh.name,Pose.from_list(mesh.pose,tensor_args=self.checker.tensor_args))
             self.checker.enable_obstacle(mesh.name,True)
         if self.inward_proxy:
-            from cup_envelope import prepare,transformed_spheres
+            from cup_envelope import transformed_spheres
             from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
-            prepared=prepare(world)
+            prepared=self.inward_envelope
             first=RigidTransform(tuple(self.first_cup_pose[:3]),tuple(self.first_cup_pose[3:]))
             rows=transformed_spheres(prepared,self.geometry_digest,first,self.model_report['cup_active_spheres'])
             self.world_proxy_spheres=self.generator.tensor_args.to_device(rows)

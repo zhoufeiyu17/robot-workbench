@@ -6,6 +6,7 @@ success. Plant truth is fixed at construction, independent of installed fits.
 from copy import deepcopy
 import json
 import math
+import random
 import secrets
 import time
 
@@ -47,6 +48,13 @@ class PhysxBackend:
         self.sample_wall_ns = time.time_ns()
         self.actual, self.velocity = self.plant.read()
         self.active = deepcopy(self.actual)
+        # Nominal Owner commands remain separate from the simulated actuator.
+        self.actuation_targets = deepcopy(self.actual)
+        self.error_model = dict(enabled=False, joint_bias_max_rad=0., seed=0)
+        self._error_random = random.Random(0)
+        self._error_draw = 0
+        self._error_execution = None
+        self._error_sides = set()
         self.pending = {}
         self.pending_contexts = {}
         self.applied_contexts = dict(left=None, right=None)
@@ -73,6 +81,87 @@ class PhysxBackend:
     def read_gains(self):
         return {'profile': 'native-physx-drives', 'hardware_gain_qualification': False}
 
+    def configure_error_model(self, config):
+        """Idle-only configuration; never moves the plant or changes held targets."""
+        if (not isinstance(config, dict) or set(config) != {'enabled', 'joint_bias_max_rad', 'seed'}
+                or type(config['enabled']) is not bool
+                or type(config['joint_bias_max_rad']) not in (int, float)
+                or not math.isfinite(config['joint_bias_max_rad'])
+                or not 0 <= config['joint_bias_max_rad'] <= .05
+                or type(config['seed']) is not int or not 0 <= config['seed'] <= 2**32-1):
+            raise ValueError('fake bias requires enabled, amplitude 0..0.05 rad and unsigned 32-bit seed')
+        runner = getattr(self.owner, 'runner', None)
+        if self.pending or getattr(runner, 'status', None) in ('VERIFYING', 'RUNNING', 'SETTLING'):
+            raise ValueError('fake actuator configuration requires an idle Owner')
+        if config != self.error_model:
+            self.error_model = deepcopy(config)
+            self._error_random = random.Random(config['seed'])
+            self._error_draw = 0
+        return deepcopy(self.error_model)
+
+    def error_model_evidence(self):
+        return dict(schema='fake_actuation_bias.v1', config=deepcopy(self.error_model),
+                    source_clock_id=self.source_clock_id,
+                    execution=deepcopy(self._error_execution),
+                    applied_plant_targets=deepcopy(self.actuation_targets))
+
+    def _begin_error_model(self):
+        instance = getattr(self.owner, 'execution_instance_id', None)
+        if self._error_execution is not None and self._error_execution['execution_instance_id'] == instance:
+            return
+        if not self.error_model['enabled']:
+            self._error_sides.clear()
+            self._error_execution = None
+            return
+        if not isinstance(instance, str) or not instance:
+            raise ValueError('fake actuator bias requires an accepted execution identity')
+        amplitude = self.error_model['joint_bias_max_rad']
+        self._error_draw += 1
+        self._error_sides.clear()
+        self._error_execution = dict(execution_instance_id=instance, command_epoch=self.owner.epoch,
+            config=deepcopy(self.error_model), draw_index=self._error_draw,
+            sampled_joint_bias_rad=[self._error_random.uniform(-amplitude, amplitude) for _ in range(12)],
+            ramp_source_seconds=.5, first_applied_physics_step=None, last_applied_physics_step=None,
+            first_applied_physics_step_by_side={}, ramp_fraction_by_side={},
+            ramp_fraction=0., applied_joint_bias_rad=[0.]*12, limit_corrections=[],
+            limit_correction_count=0, maximum_limit_correction_rad=0., state='prepared')
+        self.event('actuation_bias_prepared', **deepcopy(self._error_execution))
+
+    def _apply_error_model(self, new_commands):
+        evidence = self._error_execution
+        runner = getattr(self.owner, 'runner', None)
+        status = getattr(runner, 'status', None)
+        if (not evidence or not self._error_sides or evidence['first_applied_physics_step'] is None
+                or status not in ('RUNNING', 'SETTLING', 'HOLD_UNSETTLED', 'READY')
+                or status in ('HOLD_UNSETTLED', 'READY') and not new_commands
+                or self.owner.execution_instance_id != evidence['execution_instance_id']
+                or self.owner.epoch != evidence['command_epoch']
+                or self.owner.stop_requested or self.owner.release_requested):
+            return
+        step = self.physics_step+1
+        corrections = []
+        for n, side in enumerate(('left', 'right')):
+            if side not in self._error_sides:
+                continue
+            fraction = min(1., (step-evidence['first_applied_physics_step_by_side'][side])/120)
+            weight = (fraction*fraction*(3-2*fraction) if status in ('RUNNING', 'SETTLING')
+                      else evidence['ramp_fraction_by_side'].get(side, 0.))
+            evidence['ramp_fraction_by_side'][side] = weight
+            target = list(self.active[side])
+            for i, (lo, hi) in enumerate(self.plant.limits[side]):
+                requested = target[i] + weight*evidence['sampled_joint_bias_rad'][n*6+i]
+                target[i] = max(lo, min(hi, requested))
+                evidence['applied_joint_bias_rad'][n*6+i] = target[i]-self.active[side][i]
+                if target[i] != requested:
+                    corrections.append(dict(side=side, joint=i+1, requested_rad=requested,
+                                            applied_rad=target[i], correction_rad=target[i]-requested))
+            self.actuation_targets[side] = target
+        evidence.update(last_applied_physics_step=step, ramp_fraction=max(evidence['ramp_fraction_by_side'].values()),
+                        limit_corrections=corrections, state='applied')
+        evidence['limit_correction_count'] += len(corrections)
+        evidence['maximum_limit_correction_rad'] = max(evidence['maximum_limit_correction_rad'],
+            max((abs(row['correction_rad']) for row in corrections), default=0.))
+
     def read_calibration_state(self):
         self._check()
         q, v = [], []
@@ -97,6 +186,7 @@ class PhysxBackend:
     def begin(self, side, measured):
         self._check()
         self.command_guard()
+        self._begin_error_model()
         self.mode = 'simulated_position_control'
         return tuple(measured)
 
@@ -119,7 +209,14 @@ class PhysxBackend:
         epoch = self.owner.epoch if self.owner is not None else None
         runner = getattr(self.owner, 'runner', None)
         context = None
-        if runner is not None and getattr(runner, 'runtime', None) is not None and hasattr(runner, 'frozen'):
+        if runner is not None and getattr(runner, 'is_inference', False):
+            context = deepcopy(runner.command_context)
+            if (not isinstance(context, dict) or context.get('stage') not in ('model_initial_hold','model_inference')
+                    or context.get('execution_instance_id') != getattr(self.owner, 'execution_instance_id', None)
+                    or context.get('command_epoch') != epoch
+                    or context.get('runtime_nonce') != getattr(self.owner, 'runtime_nonce', None)):
+                raise ValueError('policy command has no current accepted Owner identity')
+        elif runner is not None and getattr(runner, 'runtime', None) is not None and hasattr(runner, 'frozen'):
             index = runner.frozen.command_index
             if type(index) is not int or not 0 <= index < len(runner.frozen.ticks):
                 raise ValueError('collection command has no current compiled tick')
@@ -141,6 +238,10 @@ class PhysxBackend:
         self.pending_contexts.clear()
         self.applied_contexts = dict(left=None, right=None)
         self.active = deepcopy(self.actual)
+        self.actuation_targets = deepcopy(self.actual)
+        self._error_sides.clear()
+        if self._error_execution is not None:
+            self._error_execution.update(state='held', held_at_physics_step=self.physics_step)
         self.applied_sequences = dict(left=None, right=None)
         self.mode = 'simulated_measured_position_hold'
         self.event('hold', physics_step=self.physics_step, mode=self.mode,
@@ -152,11 +253,22 @@ class PhysxBackend:
         if (type(sim_time) not in (int, float) or not math.isfinite(sim_time) or
                 not math.isclose(sim_time, expected, rel_tol=0., abs_tol=1e-12)):
             raise ValueError('PhysX source time must advance exactly one 240 Hz step')
+        new_commands = set()
         for side, (target, epoch, sequence) in self.pending.items():
             revoked = self.owner is not None and (epoch != self.owner.epoch or
                         self.owner.stop_requested or self.owner.release_requested)
             if not revoked:
+                new_commands.add(side)
                 self.active[side] = target
+                self.actuation_targets[side] = target
+                evidence = self._error_execution
+                if (evidence is not None and self.error_model['enabled']
+                        and getattr(self.owner, 'execution_instance_id', None) == evidence['execution_instance_id']
+                        and epoch == evidence['command_epoch'] and evidence['state'] != 'held'):
+                    self._error_sides.add(side)
+                    evidence['first_applied_physics_step_by_side'].setdefault(side, self.physics_step+1)
+                    if evidence['first_applied_physics_step'] is None:
+                        evidence['first_applied_physics_step'] = self.physics_step+1
                 self.applied_sequences[side] = sequence
                 self.applied_contexts[side] = self.pending_contexts.get(side)
             self.event('revoked' if revoked else 'applied', side=side, sequence=sequence,
@@ -165,7 +277,8 @@ class PhysxBackend:
                        source_clock_id=self.source_clock_id,source_time_ns=(self.physics_step+1)*1_000_000_000//240)
         self.pending.clear()
         self.pending_contexts.clear()
-        self.plant.step(self.active)
+        self._apply_error_model(new_commands)
+        self.plant.step(self.actuation_targets)
         self.physics_step += 1
         self.actual, self.velocity = self.plant.read()
         self.sample_sequences = dict(self.applied_sequences)
@@ -175,6 +288,7 @@ class PhysxBackend:
         self.pending.clear()
         self.pending_contexts.clear()
         self.applied_contexts = dict(left=None, right=None)
+        self._error_sides.clear()
         self.is_connected = False
 
 

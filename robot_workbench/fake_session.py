@@ -1,4 +1,4 @@
-"""A loopback, CPU-only entry point for explicitly started bounded fake sessions."""
+"""A loopback, CPU-only entry point for explicitly started fake sessions."""
 from copy import deepcopy
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -96,12 +96,17 @@ def stop_owned(child, owned, grace_s):
 
 class FakeSession:
     def __init__(self, prepare, *, state_dir, deadline_wall_ns, profile='protocol_fake',
-                 start_guard=None, on_stopped=None, poll_s=.2, grace_s=5.):
+                 start_guard=None, on_stopped=None, on_started=None, poll_s=.2, grace_s=5., persistent=False,
+                 operations_managed=False):
         if profile not in ('protocol_fake', 'full_fake'):
             raise ValueError('only explicit fake profiles can be managed')
-        if type(deadline_wall_ns) is not int or deadline_wall_ns <= 0:
+        if type(persistent) is not bool or (persistent and deadline_wall_ns is not None):
+            raise ValueError('persistent sessions require an explicit absent deadline')
+        if not persistent and (type(deadline_wall_ns) is not int or deadline_wall_ns <= 0):
             raise ValueError('an explicit finite wall-clock deadline is required')
+        if type(operations_managed) is not bool:raise ValueError('explicit operations_managed boolean required')
         self.prepare, self.start_guard, self.on_stopped = prepare, start_guard, on_stopped
+        self.on_started,self.operations_managed=on_started,operations_managed
         self.profile, self.deadline_wall_ns = profile, deadline_wall_ns
         self.state_dir = Path(state_dir); self.state_dir.mkdir(parents=True, exist_ok=True)
         self.poll_s, self.grace_s = poll_s, grace_s
@@ -119,24 +124,33 @@ class FakeSession:
         self.status = self.stage = status; self.message = message
 
     def remaining(self):
-        return max(0., (self.deadline_wall_ns-time.time_ns())/1e9)
+        return None if self.deadline_wall_ns is None else max(0., (self.deadline_wall_ns-time.time_ns())/1e9)
+
+    def expired(self):
+        return self.deadline_wall_ns is not None and self.remaining() <= 0
 
     def snapshot(self):
         with self.lock:
-            start = self.status in ('stopped', 'failed') and self.cleanup_ok and self.child is None and self.worker is None and self.remaining() > 0 and not self.closed.is_set()
+            start = self.status in ('stopped', 'failed') and self.cleanup_ok and self.child is None and self.worker is None and not self.expired() and not self.closed.is_set()
             if self.profile == 'full_fake' and self.start_guard is None:
                 start = False
             stop = self.status in ('starting', 'ready', 'failed') and (self.child is not None or self.worker is not None)
+            if self.operations_managed:start=stop=False
+            migration='旧入口只读；启动、停止与恢复请使用统一服务运维'
             return dict(schema='fake-session.v1', managed=True, profile=self.profile, manager_instance_id=self.manager_instance_id,
                 csrf=self.csrf, generation=self.generation, status=self.status, message=self.message, error=self.error,
-                allowed=dict(start=dict(allowed=start, reason='' if start else '当前状态或已授权时段不允许启动'),
-                             stop=dict(allowed=stop, reason='' if stop else '没有可停止的自有 fake 服务')),
-                deadline_wall_ns=self.deadline_wall_ns, remaining_wall_s=self.remaining(),
+                lifecycle_owner='operations' if self.operations_managed else 'standalone',
+                operations_url='/operations?environment=fake' if self.operations_managed else None,
+                allowed=dict(start=dict(allowed=start, reason=migration if self.operations_managed else '' if start else '当前状态或已授权时段不允许启动'),
+                             stop=dict(allowed=stop, reason=migration if self.operations_managed else '' if stop else '没有可停止的自有 fake 服务')),
+                persistent_service=self.deadline_wall_ns is None, deadline_wall_ns=self.deadline_wall_ns, remaining_wall_s=self.remaining(),
                 cleanup_verified=self.worker is None and self.child is None and self.cleanup_ok,
                 stage=dict(id=self.stage, label=self.message, elapsed_s=time.monotonic()-self.stage_started),
                 current_run=deepcopy(self.current_run), workbench_url='/')
 
     def request(self, action, body):
+        if self.operations_managed:
+            raise PublicSessionError('旧入口只读；启动、停止与恢复请使用统一服务运维')
         if not isinstance(body, dict) or body.get('manager_instance_id') != self.manager_instance_id:
             raise ValueError('管理器已变化，请刷新状态')
         ident = body.get('request_id')
@@ -152,16 +166,13 @@ class FakeSession:
             else:
                 if type(body.get('generation')) is not int or body['generation'] != self.generation:
                     raise ValueError('fake 服务已变化，请刷新后操作')
-                if self.remaining() <= 0 or self.closed.is_set():
+                if self.expired() or self.closed.is_set():
                     raise ValueError('本次已授权时段已结束')
                 if action == 'start':
                     if (self.status not in ('stopped', 'failed') or self.child is not None or self.worker is not None
                             or not self.cleanup_ok or (self.profile == 'full_fake' and self.start_guard is None)):
                         raise ValueError('当前不能启动 fake 服务')
-                    self.generation += 1; self.cancel = threading.Event(); self.error = None
-                    self.backend_port = None; self.current_run = None; self._set('starting', '正在准备 fake 服务')
-                    self.worker = threading.Thread(target=self._run, args=(self.generation, self.cancel), daemon=True)
-                    self.worker.start()
+                    self._start_locked()
                 elif action == 'stop':
                     if body.get('confirm') is not True:
                         raise ValueError('停止会中断当前 fake 作业，必须明确确认')
@@ -174,6 +185,21 @@ class FakeSession:
                 if len(self.requests) > 128:
                     self.requests.pop(next(iter(self.requests)))
         return self.snapshot()
+
+    def _start_locked(self):
+        self.generation += 1; self.cancel = threading.Event(); self.error = None
+        self.backend_port = None; self.current_run = None; self._set('starting', '正在准备 fake 服务')
+        self.worker = threading.Thread(target=self._run, args=(self.generation, self.cancel), daemon=True)
+        self.worker.start()
+
+    def start_once(self):
+        """Fixed local launcher admission; never exposed as an HTTP operation."""
+        with self.lock:
+            if not self.operations_managed or self.generation or self.closed.is_set() or self.expired():
+                raise ValueError('single-attempt launcher cannot start or resume another generation')
+            if self.profile=='full_fake' and self.start_guard is None:
+                raise ValueError('full-fake resource admission is required')
+            self._start_locked()
 
     def _log_failure(self):
         with (self.state_dir/'manager-errors.log').open('a') as stream:
@@ -207,7 +233,7 @@ class FakeSession:
             if self.start_guard is not None and self.start_guard(generation, self.remaining()) is False:
                 raise PermissionError('fake resource admission refused')
             spec = self.prepare(generation, self.remaining())
-            if cancel.is_set() or self.remaining() <= 0:
+            if cancel.is_set() or self.expired():
                 return
             if (not isinstance(spec, dict) or not isinstance(spec.get('argv'), list)
                     or not spec['argv'] or not all(isinstance(x, str) and x for x in spec['argv'])):
@@ -220,15 +246,19 @@ class FakeSession:
                 # Spawn is the only small local operation inside this lock: a
                 # stop/deadline cannot slip between the final gate and creation.
                 with self.lock:
-                    if cancel.is_set() or self.remaining() <= 0 or self.closed.is_set():
+                    if cancel.is_set() or self.expired() or self.closed.is_set():
                         return
+                    started_wall_ns=time.time_ns()
                     child = subprocess.Popen(spec['argv'], cwd=spec['cwd'], env=spec.get('env'),
                         stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
             remember_owned(child, owned)
             with self.lock:
                 self.child = child; self.current_run = dict(id=run.name, generation=generation, pid=child.pid, process_start_ticks=owned.get(child.pid))
+            if self.on_started is not None:
+                self.on_started(spec,dict(pid=child.pid,start_ticks=owned.get(child.pid),argv=deepcopy(spec['argv']),
+                    started_wall_ns=started_wall_ns,output=spec.get('output_path'),log=str(log)))
             last_health = 0.; misses = 0
-            while not cancel.is_set() and self.remaining() > 0 and not self.closed.is_set():
+            while not cancel.is_set() and not self.expired() and not self.closed.is_set():
                 remember_owned(child, owned)
                 if child.poll() is not None:
                     raise RuntimeError('child exited')
@@ -249,7 +279,7 @@ class FakeSession:
                         ('plant-fixture.json', '正在准备物理相机'), ('registration.json', '正在准备物理场景'),
                         ('run.json', '正在加载 fake 运行环境')) if (service.parent/name).exists()), None)
                     with self.lock:
-                        if not cancel.is_set() and self.remaining() > 0:
+                        if not cancel.is_set() and not self.expired():
                             if healthy:
                                 misses = 0; self.backend_port = port; self.error = None
                                 self.current_run['server_instance_id'] = healthy
@@ -274,7 +304,8 @@ class FakeSession:
                     receipt = stop_owned(child, owned, self.grace_s)
                 except Exception:
                     self._log_failure(); receipt['all_owned_exited'] = False
-            receipt.update(generation=generation, checked_wall_ns=time.time_ns())
+            receipt.update(generation=generation, checked_wall_ns=time.time_ns(),
+                           child_exit_code=child.poll() if child is not None else None)
             if self.on_stopped is not None:
                 try:
                     self.on_stopped(spec, receipt)
@@ -286,7 +317,7 @@ class FakeSession:
                 self.cleanup_ok = receipt['all_owned_exited'] and not receipt.get('callback_failed')
                 self.error = ('自有进程清退尚未核验，禁止重新启动' if not self.cleanup_ok
                               else public_error or 'fake 启动或运行失败，诊断已保存在本任务目录' if failed else None)
-                if self.remaining() <= 0:
+                if self.expired():
                     self._set('expired', '本次已授权时段已结束')
                 elif self.error:
                     self._set('failed', self.error)
@@ -294,8 +325,8 @@ class FakeSession:
                     self._set('stopped', 'fake 服务已停止；结果保留')
 
     def _deadline(self):
-        while not self.closed.wait(min(.2, max(.01, self.remaining()))):
-            if self.remaining() <= 0:
+        while not self.closed.wait(.2 if self.deadline_wall_ns is None else min(.2, max(.01, self.remaining()))):
+            if self.expired():
                 with self.lock:
                     self.backend_port = None; self.cancel.set(); self._set('expired', '本次已授权时段已结束')
                 return
@@ -334,12 +365,15 @@ def serve_session(manager, *, port=0, browser_ports=(), web_dir=ROOT/'web'):
             if path.path in ('/api/session/start', '/api/session/stop') and body is not None:
                 if not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), manager.csrf):
                     return self.send(403, {'error': 'invalid manager token'})
+                if manager.operations_managed:
+                    return self.send(410,dict(error='旧入口只读；启动、停止与恢复请使用统一服务运维',
+                                             code='operation_required',operations_url='/operations?environment=fake'))
                 try:
                     return self.send(202, manager.request(path.path.rsplit('/', 1)[1], json.loads(body)))
                 except (ValueError, TypeError) as error:
                     return self.send(409, {'error': str(error)})
             with manager.lock:
-                backend = manager.backend_port if manager.status == 'ready' and manager.remaining() > 0 else None
+                backend = manager.backend_port if manager.status == 'ready' and not manager.expired() else None
             static = {'/session': ('session.html', 'text/html; charset=utf-8'),
                       '/web/session.js': ('session.js', 'text/javascript'), '/web/style.css': ('style.css', 'text/css')}
             if path.path in static or (path.path == '/' and not backend):
@@ -351,7 +385,7 @@ def serve_session(manager, *, port=0, browser_ports=(), web_dir=ROOT/'web'):
                 except OSError:
                     return self.send(503, {'error': 'manager page unavailable'})
             allowed = path.path in ('/', '/index.html', '/app.js', '/style.css', '/web/app.js',
-                '/web/index.html', '/api/state', '/api/preview-media', '/api/calibration-file', '/api/result-media')
+                '/web/index.html', '/api/state', '/api/fake-scene', '/api/preview-media', '/api/calibration-file', '/api/result-media')
             allowed |= bool(re.fullmatch(r'/api/(?:actions/[a-z_]+|media/[A-Za-z0-9_-]+)', path.path))
             if not allowed:
                 return self.send(404, {'error': 'not found'})

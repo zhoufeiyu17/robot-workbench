@@ -24,7 +24,9 @@ def configure_native(native_code):
         sys.modules[name]=module
 
 
-def load(path, source, native_code, assets):
+def load(path, source, native_code, assets, *, maintenance_source=None):
+    from maintenance_geometry import validate_export
+    data=validate_export(path,source,maintenance_source)
     configure_native(native_code)
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from robot_sim.asset_cfg.objects.cup import CupBand, CupInteractionProfile
@@ -37,9 +39,8 @@ def load(path, source, native_code, assets):
     from robot_sim.tasks.manager_based.coffee_make.m1_robot_geometry import M1RobotKinematics
     from robot_sim.tasks.manager_based.coffee_make.a1_support_contact import load_support_contact
     from robot_sim.policies.rule_coffee import RuleObservation
-    if json.loads(Path(path).with_name('result.json').read_text()).get('status')!='geometry-inputs-ready':
-        raise ValueError('native geometry export did not complete')
-    data=json.loads(Path(path).read_text())
+    from real_contract import validate_assisted_cup_geometry
+    validate_assisted_cup_geometry(source,data['cup'])
     urdf=ac_one_asset_spec(assets).urdf_path
     if data['source_digest']!=_digest(source) or data['urdf_sha256']!=hashlib.sha256(urdf.read_bytes()).hexdigest():
         raise ValueError('exported geometry source or robot differs')
@@ -56,6 +57,11 @@ def load(path, source, native_code, assets):
     planner.gripper_mode='distance'
     planner.open_position_m=data['open_position_m'];planner.parts=tuple(HandPart(**v) for v in data['parts'])
     planner.cup=CupInteractionProfile(**{**data['cup'],'bands':tuple(CupBand(**b) for b in data['cup']['bands'])})
+    if source.get('adapter')=='operator_assisted_rgbd':
+        from gripper_distance_plan import requested_metal_gap_mm
+        planner.operator_assisted_cup_geometry=source['cup_geometry']
+        planner.operator_assisted_cup_envelope=Path(assets)/'operator-assisted-cup-envelope.json'
+        planner.requested_metal_gap_mm=requested_metal_gap_mm(source)
     planner.table=primitive(data['table']);planner.obstacles=tuple(map(primitive,data['obstacles']))
     planner.fk=M1RobotKinematics(urdf);planner.support_contact=load_support_contact(urdf)
     planner.identity=data['planner_identity'];planner.geo=None
@@ -138,9 +144,9 @@ def main(args):
         checked=time.monotonic()
         plan=retime(base,source,args.speed_scale,**({'environment':'fake'} if getattr(args,'environment','physical')=='fake' else {}))
         if getattr(args,'execution_json',None):
-            from local_execution import validate,TARGET,stamp_plan
-            validate({'execution':json.loads(args.execution_json)})
-            stamp_plan(plan,TARGET)
+            from local_execution import validate,compute_resource,stamp_plan
+            execution=validate({'execution':json.loads(args.execution_json)})
+            stamp_plan(plan,compute_resource(execution))
         from frozen_executor import validate_plan_evidence
         validate_plan_evidence(plan,source)
         save(args.output/'plan.json',plan)

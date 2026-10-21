@@ -72,7 +72,7 @@ class SourceClockTest(unittest.TestCase):
                     monotonic=lambda:wall[0],sleep=lambda seconds:wall.__setitem__(0,wall[0]+seconds))
             self.assertFalse((path/'rgbd-manifest.json').exists())
 
-    def test_slow_simulation_seals_nine_source_spaced_pairs_after_thirty_wall_seconds(self):
+    def test_slow_simulation_seals_nine_pairs_spanning_three_source_seconds(self):
         source,_,binding=fake_inputs();wall=[0.];base=1_000_000_000_000;reads=[]
         def read():
             step=int(wall[0]*60)  # .25 source seconds per wall second at 240 Hz.
@@ -84,10 +84,10 @@ class SourceClockTest(unittest.TestCase):
                 wall_deadline_ns=base+60_000_000_000,wall_ns=lambda:base+round(wall[0]*1e9),
                 monotonic=lambda:wall[0],sleep=lambda seconds:wall.__setitem__(0,wall[0]+seconds))
             manifest=json.loads((path/'rgbd-manifest.json').read_text());rows=manifest['frames']
-            self.assertEqual(wall[0],32.)
+            self.assertEqual(wall[0],12.)
             self.assertEqual(len(rows),9);self.assertGreater(len(reads),len(rows))
-            self.assertEqual([row['source_stamp_ns'] for row in rows],[i*1_000_000_000 for i in range(9)])
-            self.assertEqual([row['physics_step'] for row in rows],[i*240 for i in range(9)])
+            self.assertEqual([row['source_stamp_ns'] for row in rows],[i*375_000_000 for i in range(9)])
+            self.assertEqual([row['physics_step'] for row in rows],[i*90 for i in range(9)])
             self.assertTrue(all(row['source_time_ns']==row['source_stamp_ns'] for row in rows))
             self.assertFalse((path/'capture-diagnostic.json').exists())
 
@@ -160,12 +160,12 @@ class SourceClockTest(unittest.TestCase):
             return snapshot(index[0],lambda meta:meta.update(host_receive_ns=index[0]*10_000_000))
         with TemporaryDirectory() as folder:
             path=Path(folder)/'capture'
-            with self.assertRaisesRegex(TimeoutError,'physical observation'):
+            with self.assertRaisesRegex(TimeoutError,'真机观测失败'):
                 capture(read,profile,binding,path,monotonic=lambda:wall[0],
                     sleep=lambda seconds:wall.__setitem__(0,wall[0]+seconds))
             evidence=json.loads((path/'capture-diagnostic.json').read_text())
             self.assertEqual(evidence['elapsed_wall_s'],30.)
-            self.assertEqual(evidence['retained_frame_count'],30)
+            self.assertEqual(evidence['retained_frame_count'],3)
             self.assertEqual(evidence['timeout_meaning'],'total_wall_watchdog')
             self.assertFalse((path/'rgbd-manifest.json').exists())
 
@@ -246,7 +246,7 @@ class SourceClockTest(unittest.TestCase):
             path=Path(folder)/'capture'
             capture(lambda:next(frames),profile,binding,path,monotonic=lambda:wall[0],
                 sleep=lambda seconds:wall.__setitem__(0,wall[0]+seconds))
-            self.assertEqual(wall[0],33.)
+            self.assertEqual(wall[0],28.)
             self.assertTrue((path/'acquisition-binding.json').exists())
 
     def test_equal_time_wrong_frame_step_invalidates_raw_without_motion_fault(self):

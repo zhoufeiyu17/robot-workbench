@@ -1,6 +1,7 @@
 // CPU only: node rule_based_workbench/test_playground_ui.js
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const html=fs.readFileSync(__dirname+'/index.html','utf8'),script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+assert.match(html,/id="pg-speed" type="range" min="30" max="170"/);
 new Function(script);
 const nodes=new Map(),events={},requests=[],posts=[],timers=new Map();let nonce=0,blob=0;
 function node(){return {value:'',dataset:{},children:[],hidden:false,open:true,checked:false,
@@ -42,8 +43,9 @@ const settle=async()=>{for(let i=0;i<12;i++)await Promise.resolve()};
  assert.equal(get('#pg-sim').src,'http://localhost:8119/api/playground/frame.jpg');assert(get('#pg-sim').hidden,'not evidence until load event');get('#pg-sim').onload();assert(!get('#pg-sim').hidden);
  assert.equal(get('#pg-videos').children.length,1);
  render({...ready,can_execute:true});assert(get('#pg-sim').hidden);assert.equal(get('#pg-sim').src,undefined,'new scene without frame cannot show old frame');
+ get('#pg-speed').value='170';
  const action=vm.runInContext("pgAction('execute')",ctx);assert(get('#pg-execute').disabled);await settle();
- assert.equal(posts.length,1);assert.equal(posts[0].payload.speed_scale,.3);assert.equal(posts[0].payload.action,'execute');
+ assert.equal(posts.length,1);assert.equal(posts[0].payload.speed_scale,1.7);assert.equal(posts[0].payload.action,'execute');
  await vm.runInContext("pgAction('execute')",ctx);assert.equal(posts.length,1,'no duplicate request while awaiting authoritative state');
  requests[0].resolve({ok:true,json:async()=>({...ready,busy:true,can_execute:false})});await action;assert(get('#pg-execute').disabled);
  // A read begun before a click must not re-enable execution with pre-action state.

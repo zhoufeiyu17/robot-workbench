@@ -41,7 +41,7 @@ def read_failure_result(path):
 
 def wait_owned(child, timeout, grace=30, *, failure_result=None):
     """Caller must create child with start_new_session=True; never discover PIDs."""
-    if timeout <= 0 or grace <= 0:
+    if (timeout is not None and not 0 < timeout < float('inf')) or grace <= 0:
         raise ValueError('positive timeout and shutdown grace required')
     timed_out = False
     try:
@@ -49,12 +49,12 @@ def wait_owned(child, timeout, grace=30, *, failure_result=None):
             if failure_result is None:
                 return_code = child.wait(timeout=timeout)
             else:
-                deadline=time.monotonic()+timeout
+                deadline=None if timeout is None else time.monotonic()+timeout
                 while True:
                     if read_failure_result(failure_result):
                         return_code=1
                         break
-                    remaining=deadline-time.monotonic()
+                    remaining=.1 if deadline is None else deadline-time.monotonic()
                     if remaining<=0:raise subprocess.TimeoutExpired(child.args,timeout)
                     try:
                         return_code=child.wait(timeout=min(.1,remaining))
@@ -92,13 +92,15 @@ def main():
     import argparse
     import sys
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--timeout', type=float, required=True)
+    lifetime=parser.add_mutually_exclusive_group(required=True)
+    lifetime.add_argument('--timeout', type=float)
+    lifetime.add_argument('--persistent', action='store_true',help='owned service with no automatic expiry')
     parser.add_argument('--failure-result',type=Path,
                         help='optional absent current-run result; only status=failed ends the child early')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    if not command or not 0 < args.timeout < float('inf'):
+    if not command or (not args.persistent and not 0 < args.timeout < float('inf')):
         parser.error('a command and finite positive timeout are required')
     if args.failure_result is not None and (not args.failure_result.is_absolute()
             or args.failure_result.exists() or args.failure_result.is_symlink()):

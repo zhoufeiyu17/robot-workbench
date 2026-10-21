@@ -34,5 +34,16 @@ def owned_command(workbench,command,timeout,*,failure_result=None):
     if failure_result is not None:
         if not Path(failure_result).is_absolute():raise ValueError('absolute native failure result required')
         extra=['--failure-result',str(failure_result)]
+    lifetime=['--persistent'] if timeout is None else ['--timeout',str(timeout)]
     return clean_command([HOST_PYTHON,'-I','-B',str(Path(workbench)/'owned_process.py'),
-                          '--timeout',str(timeout),*extra,'--',*command])
+                          *lifetime,*extra,'--',*command])
+
+
+def persistent_service(resources):
+    """Missing budgets never opt into an unbounded service implicitly."""
+    value=resources.get('persistent_service',False)
+    if type(value) is not bool:raise ValueError('persistent_service must be an explicit boolean')
+    if value and ('service_lifetime_seconds' not in resources or resources['service_lifetime_seconds'] is not None
+            or resources.get('resident_deadline_wall_ns') is not None):
+        raise ValueError('persistent service requires explicit null lifetime and no resident deadline')
+    return value

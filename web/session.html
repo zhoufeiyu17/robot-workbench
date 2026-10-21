@@ -8,23 +8,21 @@
 </head>
 <body>
   <main id="session-management" class="session-page">
-    <header class="session-heading"><span class="eyebrow">ROBOT WORKBENCH · FAKE</span><h1>开发服务</h1><p id="session-profile">正在核验开发服务类型。这里不连接真机。</p></header>
+    <header class="session-heading"><span class="eyebrow">ROBOT WORKBENCH · FAKE</span><h1>开发服务 · 兼容状态入口</h1><p id="session-profile">正在核验开发服务类型。这里不连接真机。</p></header>
     <section class="panel session-card" aria-labelledby="session-state">
       <div class="panel-heading"><h2 id="session-state">正在核验服务…</h2><span class="badge">每秒更新</span></div>
       <p id="session-message" role="status" aria-live="polite"></p>
       <p id="session-stage" class="hint"></p>
-      <dl class="detail-list session-times"><dt>本次驻留截止</dt><dd id="session-deadline">等待核验</dd><dt>剩余时间</dt><dd id="session-remaining">等待核验</dd></dl>
-      <p id="session-guidance" class="hint">启动只准备开发环境，之后仍需在工作台连接设备、审阅并执行任务。</p>
+      <dl class="detail-list session-times"><dt>服务期限</dt><dd id="session-deadline">等待核验</dd><dt>退出方式</dt><dd id="session-remaining">等待核验</dd></dl>
+      <p id="session-guidance" class="hint">此入口只读。开发服务的准备、停止与设备接入均在统一服务运维完成。</p>
       <p id="session-error" class="alert" role="alert" hidden></p>
       <p id="session-request" class="request-status" role="status" aria-live="polite"></p>
-      <div class="session-actions">
-        <div><button id="session-start" aria-describedby="session-start-reason" disabled>启动开发服务</button><p id="session-start-reason" class="action-reason">等待核验</p></div>
-        <div><button id="session-stop" class="danger" aria-describedby="session-stop-reason" disabled>停止开发服务</button><p id="session-stop-reason" class="action-reason">等待核验</p></div>
-      </div>
+      <p>此兼容入口只读。环境启停、准备与恢复由同一个运维执行者管理。</p>
+      <a id="session-operations" class="session-enter" href="/operations?environment=fake&amp;business=calibration">进入统一服务运维 →</a>
       <a id="session-enter" class="session-enter" href="/" hidden>进入工作台 →</a>
       <details class="technical-details"><summary>服务诊断信息</summary><pre id="session-details">等待核验</pre></details>
     </section>
-    <section class="session-notes"><h2>停止与恢复</h2><p>停止会中断正在运行的 fake 任务，并保留已保存的数据。重新启动不会自动续跑旧动作；进入工作台后重新核对状态与计划。</p><p>到期后服务会自动清退。此页面不延长驻留时间；需要继续使用时，应先取得新的服务时间与资源授权。</p></section>
+    <section class="session-notes"><h2>停止与恢复</h2><p>停止会中断正在运行的 fake 任务，并保留已保存的数据。重新启动不会自动续跑旧动作；进入工作台后重新核对状态与计划。</p><p id="session-lifetime-guidance">正在核验服务期限与退出方式。</p></section>
   </main>
   <script type="module" src="/web/session.js"></script>
 </body>

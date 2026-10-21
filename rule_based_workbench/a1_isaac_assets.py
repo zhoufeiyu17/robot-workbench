@@ -82,7 +82,7 @@ def prepare(bundle, base, output, *, native_code=None):
     if support:
         sidecar,certificates,proof=support
         writable(output,ROBOT+'source/acone/urdf/a1_support_contact.json').write_bytes(sidecar)
-        directory=model.parent/'derived-certificates';directory.mkdir(exist_ok=False)
+        directory=writable(output,ROBOT+'source/acone/urdf/derived-certificates');directory.mkdir()
         for name,data in certificates.items():(directory/name).write_bytes(data)
         (model.parent/PROOF).write_text(json.dumps(proof,indent=2,allow_nan=False)+'\n')
     for name in ('acone.urdf','acone_no_handle.urdf','acone_no_handle_d405.urdf'):

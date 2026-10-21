@@ -143,7 +143,8 @@ def build_contact_certificate(planner,data,state,cup,*,source_digest,candidate_i
     actual=cup.inverse().compose(planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(state)['left_link6'])))
     normal=cup.inverse().rotate(planner.table.world_from_shape.rotate((0.,0.,1.)))
     region=analyze_contact_pose(planner,data,actual,closed_jaw_m=closed_jaw_m,table_normal_cup=normal)
-    if region.get('passed') is not True:raise ValueError('actual MotionGen pose lacks 2 mm contact-band reserve: '+str(region.get('reason')))
+    if region.get('passed') is not True:raise ValueError('actual MotionGen pose lacks 2 mm contact-band reserve: '+str(region.get('reason'))+
+        (': '+region['error']if region.get('error')else''))
     closing=source_closing(planner,state,cup)
     native_path=dict(contact_geometry_stops_m=closing['contact_geometry_stops_m'],
         terminal_jaw_position_m=closing['terminal_state']['left_joint7'],

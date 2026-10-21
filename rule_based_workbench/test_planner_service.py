@@ -47,6 +47,46 @@ def main():
         long=startup_config(local/'long-config.json',local)
         assert load_config(long)[0]['planner_service']['max_lifetime_seconds']==172800
         assert load_config(long)[1]['resources']['max_wall_time_minutes']==20
+        # Explicit remote persistence preserves the dual-DSW lanes and finite per-job budgets.
+        persistent_contract=deepcopy(contract)
+        persistent_contract['resources'].update(persistent_service=True,service_lifetime_seconds=None)
+        runtime='/remote/input/runtime'
+        persistent_contract['provenance']['code_sha256'].update({runtime+'/scripts/run_online_detection_episode.py':'b'*64,
+            runtime+'/ros2/online_detection_ros/node.py':'c'*64})
+        persistent_file=local/'persistent-contract.json';persistent_file.write_text(json.dumps(persistent_contract))
+        persistent_config=dict(config,contract_path=str(persistent_file),detection_runtime_root=runtime)
+        persistent_input=local/'persistent.json';persistent_input.write_text(json.dumps(persistent_config))
+        persistent=startup_config(persistent_input,local)
+        remote,remote_contract,_=load_config(persistent)
+        assert remote['planner_service']['persistent_service'] is True
+        assert remote['planner_service']['max_lifetime_seconds'] is None and 'execution' not in remote
+        assert remote_contract['resources']['lanes']==contract['resources']['lanes']
+        assert remote_contract['resources']['max_wall_time_minutes']==20
+        remote_stages={s['name']:s for s in build_plan(remote,remote_contract)}
+        assert 'ROBOT_WORKBENCH_DETECTOR_RUNTIME_ROOT='+runtime in remote_stages['detect']['argv'][-1]
+        for change in ({'service_lifetime_seconds':7200}, {'persistent_service':False},
+                       {'require_gpu_idle_check':False}, {'max_wall_time_minutes':None},
+                       {'lanes':{'foreign':[0]}}):
+            bad=deepcopy(persistent_contract);bad['resources'].update(change)
+            persistent_file.write_text(json.dumps(bad))
+            try:load_config(persistent_input)
+            except ValueError:pass
+            else:raise AssertionError('remote persistent contract weakened required boundaries')
+        persistent_file.write_text(json.dumps(persistent_contract))
+        for root in ('/outside/runtime','/remote/input/unpinned-runtime'):
+            persistent_input.write_text(json.dumps(dict(persistent_config,detection_runtime_root=root)))
+            try:load_config(persistent_input)
+            except ValueError:pass
+            else:raise AssertionError('remote detector runtime escaped declared SHA-pinned roots')
+        persistent_input.write_text(json.dumps(persistent_config))
+        state=dict(remote['planner_service'],status='ready',pid=123,process_start_ticks='999',model_initialized=False)
+        process=NS(stdin=io.StringIO(),stdout=io.StringIO(json.dumps({'type':'service-state','service':state})+'\n'),poll=lambda:None,wait=lambda timeout:0)
+        persistent_manager=PlannerService()
+        with patch('subprocess.Popen',return_value=process) as spawn:
+            persistent_manager.start(persistent,local/'persistent-manager');persistent_manager.thread.join(timeout=2)
+        assert 'persistent hold-stdin' in spawn.call_args.args[0][-1]
+        assert 'selected GPU is not idle' in spawn.call_args.args[0][-1]
+        persistent_manager.close();assert process.stdin.closed
         private=json.loads((prepared.parent/'planner-spec.json').read_text())
         assert 'owner_token' not in spec
         assert spec['session_id']=='test-session' and current['remote_run_root'].startswith(spec['allowed_output_root']+'/')
@@ -68,7 +108,13 @@ def main():
             manager.recover(timeout=2)
         wait.assert_called_once();assert wait.call_args.args==('dsw-scene',)
         assert manager.status()['status']=='ready' and 'resume' in spawn.call_args.args[0][-1]
+        with patch.object(manager,'close') as close,patch.object(manager,'start') as start:
+            manager.recover(timeout=2)
+            with patch.object(manager,'status',side_effect=[dict(status='busy'),dict(status='ready',model_initialized=True)]),patch('time.sleep'):
+                assert manager.recover(timeout=2)['model_initialized'] is True
+            close.assert_not_called();start.assert_not_called()
         # A busy/ghost release wait failure must not launch a replacement model.
+        manager.state=dict(status='failed',error='worker exited',model_initialized=False)
         with patch('detector_service.wait_for_gpu_idle',side_effect=RuntimeError('release wait expired')),patch('subprocess.Popen') as spawn:
             try:manager.recover(timeout=2)
             except RuntimeError as error:assert 'release wait expired' in str(error)
@@ -134,6 +180,11 @@ def main():
         with patch.object(worker,'load_geometry',side_effect=AssertionError('bad binding reached geometry')) as loaded:
             result=worker.plan(request)
         assert not loaded.called and 'observation differs' in result['error']
+        (local/'binding.json').write_text(json.dumps(binding));request['output']=local/'warm-valid'
+        with patch.object(worker,'warmup',return_value=dict(model_initialized=True,model_key='model',policy_planned=False)) as initialized, \
+                patch.object(worker,'plan',side_effect=AssertionError('warmup planned a policy')):
+            result=worker.warmup_request(request)
+        assert initialized.call_count==1 and result['status']=='motiongen-warm-ready' and result['motion_requested'] is False
 
         state=dict(**private,status='ready',pid=123,process_start_ticks='999',model_initialized=False)
         rows=['']
@@ -155,7 +206,8 @@ def main():
         # Exercise the actual Unix socket server with a non-planning worker.
         reads=local/'reads';reads.mkdir();outputs=local/'outputs';outputs.mkdir()
         for name in ('planning-input.json','result.json','source.json'):(reads/name).write_text('{}')
-        ipc=dict(private,root='/tmp/rbw-planner-'+uuid4().hex[:16],allowed_read_roots=[str(reads)],allowed_output_root=str(outputs),max_lifetime_seconds=30)
+        ipc=dict(private,root='/tmp/rbw-planner-'+uuid4().hex[:16],allowed_read_roots=[str(reads)],allowed_output_root=str(outputs),
+                 persistent_service=True,max_lifetime_seconds=None)
         ipc['socket']=ipc['root']+'/p';validate_spec(ipc,private=True)
         payload=json.dumps(ipc,sort_keys=True,separators=(',',':')).encode()
         specfile=outputs/'planner-spec.json';specfile.write_bytes(payload);specfile.chmod(0o600)
@@ -185,7 +237,7 @@ def main():
         except ValueError:pass
         else:raise AssertionError('public capability file accepted')
         specfile.chmod(0o600)
-        program='''import json,sys\nfrom pathlib import Path\nfrom unittest.mock import patch\nfrom curobo_worker import serve\nclass Fake:\n def __init__(self):self.engine_cache={};self.calls=0\n def plan(self,r):\n  self.calls+=1;r['output'].mkdir();self.engine_cache['engine']=True\n  value=dict(type='result',passed=True,status='motiongen-plan-ready',output=str(r['output']),calls=self.calls)\n  (r['output']/'result.json').write_text(json.dumps(value));return value\ns=json.loads(sys.argv[1])\nwith patch('curobo_worker.process_start_ticks',return_value='999'):serve(Fake(),s,tuple(Path(p).resolve() for p in s['allowed_read_roots']),Path(s['allowed_output_root']).resolve(),dict(type='ready',passed=True))\n'''
+        program='''import json,sys\nfrom pathlib import Path\nfrom unittest.mock import patch\nfrom curobo_worker import serve\nclass Fake:\n def __init__(self):self.engine_cache={};self.calls=0\n def warmup_request(self,r):\n  r['output'].mkdir();self.engine_cache.update(engine=True,key='cpu-model')\n  value=dict(type='result',passed=True,status='motiongen-warm-ready',output=str(r['output']),model_initialized=True,policy_planned=False,motion_requested=False)\n  (r['output']/'result.json').write_text(json.dumps(value));return value\n def plan(self,r):\n  self.calls+=1;r['output'].mkdir();self.engine_cache['engine']=True\n  value=dict(type='result',passed=True,status='motiongen-plan-ready',output=str(r['output']),calls=self.calls)\n  (r['output']/'result.json').write_text(json.dumps(value));return value\ns=json.loads(sys.argv[1])\nwith patch('curobo_worker.process_start_ticks',return_value='999'):serve(Fake(),s,tuple(Path(p).resolve() for p in s['allowed_read_roots']),Path(s['allowed_output_root']).resolve(),dict(type='ready',passed=True))\n'''
         child=subprocess.Popen([sys.executable,'-B','-c',program,json.dumps(ipc)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
             env=dict(os.environ,PYTHONPATH=str(Path(__file__).parent)))
         try:
@@ -193,6 +245,9 @@ def main():
             first=json.loads(line);assert first['service']['status']=='ready' and 'owner_token' not in first['service']
             ready=json.loads(child.stdout.readline());assert ready['passed']
             request=dict(input=str(reads/'planning-input.json'),source=str(reads/'source.json'),output=str(outputs/'one'))
+            warmed=request_service(ipc['socket'],ipc['owner_token'],dict(request,operation='warmup',output=str(outputs/'warm')),timeout=5)
+            assert warmed['model_initialized'] and warmed['policy_planned'] is False and warmed['motion_requested'] is False
+            assert json.loads((Path(ipc['root'])/'status.json').read_text())['model_initialized'] is True
             assert request_service(ipc['socket'],ipc['owner_token'],request,timeout=5)['calls']==1
             request['output']=str(outputs/'two')
             assert request_service(ipc['socket'],ipc['owner_token'],request,timeout=5)['calls']==2
@@ -216,20 +271,21 @@ def main():
         # server's next idle select. Exercise its real child group without GPU.
         from detector_service import SUPERVISOR
         import time
-        busy=local/'busy.json'
         workload='import json,os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(json.dumps({"pid":os.getpid()})); time.sleep(30)'
-        supervisor=subprocess.Popen([sys.executable,'-B','-c',SUPERVISOR,json.dumps([sys.executable,'-B','-c',workload,str(busy)]),'20','hold-stdin'],stdin=subprocess.PIPE)
-        try:
-            deadline=time.monotonic()+5
-            while not busy.exists() and time.monotonic()<deadline:time.sleep(.01)
-            assert busy.exists(),'busy child never started'
-            pid=json.loads(busy.read_text())['pid']
-            supervisor.stdin.close();supervisor.wait(timeout=5)
-            try:os.kill(pid,0)
-            except ProcessLookupError:pass
-            else:raise AssertionError('busy owned child survived stdin cancellation')
-        finally:
-            if supervisor.poll() is None:supervisor.kill();supervisor.wait()
+        for lifetime in ('20','persistent'):
+            busy=local/('busy-'+lifetime+'.json')
+            supervisor=subprocess.Popen([sys.executable,'-B','-c',SUPERVISOR,json.dumps([sys.executable,'-B','-c',workload,str(busy)]),lifetime,'hold-stdin'],stdin=subprocess.PIPE)
+            try:
+                deadline=time.monotonic()+5
+                while not busy.exists() and time.monotonic()<deadline:time.sleep(.01)
+                assert busy.exists(),'busy child never started'
+                pid=json.loads(busy.read_text())['pid']
+                supervisor.stdin.close();supervisor.wait(timeout=5)
+                try:os.kill(pid,0)
+                except ProcessLookupError:pass
+                else:raise AssertionError('busy owned child survived stdin cancellation')
+            finally:
+                if supervisor.poll() is None:supervisor.kill();supervisor.wait()
     assert 'torch' not in sys.modules
     print('planner formal source, frozen scope, IPC reuse/EOF, and owned GPU admission checks passed')
 

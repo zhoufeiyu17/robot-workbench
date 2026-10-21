@@ -15,7 +15,7 @@ import time
 from uuid import uuid4
 
 from contract import demo_state
-from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING
+from gripper_distance_plan import HOLDING_STAGES, NATIVE_DISTANCE_ENCODING, release_targets
 from integration import CUROBO_PLANNER_ID, DualGpuPipeline, PIPELINE_LANES, SIM_POLICY_ID, _digest
 from a1_asset_derivation import CERTIFICATES,PROOF,certificate_path
 
@@ -73,10 +73,12 @@ def gripper_geometry(planner, urdf_path):
     if abs(opening-measured[1]['open_travel_mm']) > 1e-9 or abs(opening-planner.open_position_m*2000) > 1e-9:
         raise ValueError('URDF and exported gripper opening differ')
     offset = sum(row['native_travel_offset_mm'] for row in measured)/2
-    if not math.isfinite(offset) or not 0 <= 65.-offset <= opening:
+    metal=getattr(planner,'requested_metal_gap_mm',65.)
+    if (type(metal) not in (int,float) or metal not in (61.,65.)
+            or not math.isfinite(offset) or not 0 <= metal-offset <= opening):
         raise ValueError('reviewed metal target outside derived model travel')
     return dict(native_travel_offset_mm=offset, open_travel_mm=opening, max_metal_gap_mm=opening+offset,
-                closed_metal_gap_mm=65., closed_travel_mm=65.-offset, rubber_gap_mm=62.,
+                closed_metal_gap_mm=metal, closed_travel_mm=metal-offset, rubber_gap_mm=metal-3.,
                 pad_thickness_m=spec.rubber_thickness_m, finger_contact_spec_sha256=spec.digest(), measured=measured)
 
 
@@ -270,8 +272,9 @@ def stage_position_normalization(stage):
 
 def scaled_stages(stages, speed, spec, opening, *, fixed_stages=WAITS):
     """Uniformly resample source time; preserve stage endpoints and fixed waits."""
-    if type(speed) not in (int, float) or not math.isfinite(speed) or not .1 <= speed <= 1.:
-        raise ValueError('speed must be between 0.1 and 1.0')
+    # The internal motion-limit repair may slow below the user-facing 30% floor.
+    if type(speed) not in (int, float) or not math.isfinite(speed) or not .1 <= speed <= 1.7:
+        raise ValueError('internal stage speed must be between 0.1 and 1.7')
     scale = Fraction(str(speed))
     result, mapping = [], []
     from isaac_lane import native_target
@@ -330,6 +333,19 @@ def enforce_stage_motion_limits(stages, control, spec, opening):
     return result, adjustments
 
 
+def check_requested_speed(stages, speed, control, spec, opening):
+    """Check each finalized prefix before planning the remaining task geometry."""
+    from control_motion import validate_control
+    normalized,_=enforce_stage_motion_limits(stages,control,spec,opening)
+    scaled,_=scaled_stages(normalized,speed,spec,opening,fixed_stages=WAITS|{'open'})
+    ticks,starts=[],[]
+    for stage in scaled:
+        offset=len(ticks)
+        starts.append(dict(name=stage['name'],substage=stage.get('substage'),start_tick=offset))
+        ticks.extend(dict(tick=offset+i,time_s=(offset+i)/30,target=row) for i,row in enumerate(stage['rows']))
+    if len(ticks)>1:validate_control(dict(ticks=ticks,stages=starts,control=control,speed_scale=speed))
+
+
 def freeze(stages, source, data, grip, spec, *, run_id):
     from isaac_lane import native_target
     ticks, actions, starts = [], [], []
@@ -363,14 +379,13 @@ def freeze(stages, source, data, grip, spec, *, run_id):
         motion_profile='curobo-motiongen-30hz',
         simulation=dict(validated=False, outcome='not_run'),
         gripper_distance_control=dict(schema_version='sim_gripper_distance_control.v1',
-            closed_metal_gap_mm=65., rubber_gap_mm=62., pad_thickness_m=.0015,
+            closed_metal_gap_mm=grip['closed_metal_gap_mm'], rubber_gap_mm=grip['rubber_gap_mm'], pad_thickness_m=.0015,
             native_travel_offset_mm=grip['native_travel_offset_mm'], max_metal_gap_mm=grip['max_metal_gap_mm'],
             open_model_travel_mm=grip['open_travel_mm'], holding_stages=sorted(HOLDING_STAGES),
             geometry_derivation=grip, contact_detection=False, force_control=False),
         gripper_closing=dict(schema_version='commanded_gap_closing.v1',maximum_step_mm=2.,
                              initial_model_gap_mm=grip['open_travel_mm'],target_model_gap_mm=grip['closed_travel_mm'],arm_motion=False),
-        gripper_release=dict(schema_version='commanded_gap_release.v3', duration_s=1.5,maximum_gap_speed_mm_s=20.,
-                             initial_model_gap_mm=grip['closed_travel_mm'], arm_motion=False))
+        gripper_release=release_targets(grip['closed_travel_mm'],grip['open_travel_mm'])[1])
     from control_motion import validate_control
     plan['control_validation']=validate_control(plan)
     preset=plan['native_identity'].get('physical_configuration',{}).get('cup_contact_preset')
@@ -390,6 +405,10 @@ def code_identity(urdf_path=None):
              'grasp_contact_geometry','grasp_contact_certificate')
     paths = [Path(__file__).resolve(),Path(__file__).with_name('a1_conservative_refinement.json'),Path(__file__).with_name('a1_self_domain_certificate.json'),Path(__file__).with_name('a1_grasp_contact.json'),Path(__file__).with_name('a1_cup_inset.json'), Path(__file__).with_name('a1_support_domain.json'), Path(__file__).with_name('a1_support_near.json'), Path(__file__).with_name('a1_fixed_domain.json'), *(Path(importlib.import_module(name).__file__).resolve() for name in names)]
     paths.append(Path(__file__).with_name('a1_asset_derivation.py'))
+    for name in ('a1_pickup_refinement.json','a1_pickup_refinement_v2.json',
+                 'physical_cup_return_geometry.py','physical_cup_maintenance.py','pickup_pregrasp.py'):
+        path=Path(__file__).with_name(name)
+        if path.exists():paths.append(path)
     if urdf_path is not None:
         paths.extend(certificate_path(name,urdf_path) for name in CERTIFICATES)
         proof=Path(urdf_path).resolve().with_name(PROOF)
@@ -397,59 +416,113 @@ def code_identity(urdf_path=None):
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
 
-def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=None):
-    """Prepare/warm one solver; shared by environment warmup and actual requests."""
+def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=None, *, pickup_profile=None):
+    """Reuse frozen geometry/solver; bind every request to its actual world and joints."""
+    began=time.perf_counter()
     from curobo_robot_model import build_conservative_robot_model, fixed_world_mesh_descriptors
+    from curobo_planning import robot_config
     from motiongen_motion import MotionGenerator
-    model_key=None if engine_cache is None else _digest(dict(parts=data['parts'],urdf=data['urdf_sha256'],opened=opened,
+    request_config,kinematics=robot_config(urdf_path,planner.fk.movable,opened)
+    if kinematics['urdf_sha256']!=data['urdf_sha256']:
+        raise ValueError('current URDF differs from exported geometry')
+    for a,b in (('left_joint7','left_joint8'),('right_joint17','right_joint18')):
+        if abs(opened[a]-opened[b])>1e-9:
+            raise ValueError('A1 mechanically linked jaws require symmetric model positions')
+    model_key=_digest(dict(parts=data['parts'],urdf=data['urdf_sha256'],
         planner_identity=planner.identity,ignores=sorted(sorted(pair) for pair in planner.geo.whole.ignores),
         rules={name:hashlib.sha256(certificate_path(name,urdf_path).read_bytes()).hexdigest()
-               for name in ('a1_conservative_refinement.json','a1_self_domain_certificate.json')}))
-    if engine_cache is not None and engine_cache.get('model_key')==model_key:
+               for name in CERTIFICATES}))
+    if pickup_profile is not None:
+        model_key=_digest(dict(c9_model_key=model_key,pickup_profile=pickup_profile,
+            pickup_recipe_sha256=hashlib.sha256(Path(__file__).with_name('a1_pickup_refinement.json').read_bytes()).hexdigest(),
+            descendant_recipe_sha256=(hashlib.sha256(Path(__file__).with_name('a1_pickup_refinement_v2.json').read_bytes()).hexdigest()
+                if pickup_profile=='pickup-c11-v1' else None)))
+    model_reused=engine_cache is not None and engine_cache.get('model_key')==model_key
+    model_build_seconds=0.
+    if model_reused:
         config,proxy,fixed_meshes=deepcopy(engine_cache['model'])
     else:
-        config, proxy = build_conservative_robot_model(data, urdf_path, planner.fk.movable, opened, ignored_link_pairs=planner.geo.whole.ignores)
-        fixed_meshes = fixed_world_mesh_descriptors(data, proxy, planner.fk, opened)
+        build_started=time.perf_counter()
+        config,proxy=build_conservative_robot_model(data,urdf_path,planner.fk.movable,opened,
+            ignored_link_pairs=planner.geo.whole.ignores,**({'pickup_profile':pickup_profile}if pickup_profile is not None else {}))
+        fixed_meshes=fixed_world_mesh_descriptors(data,proxy,planner.fk,opened)
+        model_build_seconds=time.perf_counter()-build_started
         if engine_cache is not None:
             engine_cache.update(model_key=model_key,model=deepcopy((config,proxy,fixed_meshes)))
-    control = data['native_identity']['control']
-    velocity, acceleration = control['max_target_velocity_rad_s'], control['max_target_acceleration_rad_s2']
-    config['kinematics']['cspace'].update(velocity_scale=[min(1., velocity/proxy['kinematics']['joints'][n]['velocity']) for n in LEFT],
-                                         max_acceleration=float(acceleration))
-    proxy['robot_config_sha256'] = _digest(config)
-    proxy['motion_control_limits'] = dict(max_velocity_rad_s=velocity, max_acceleration_rad_s2=acceleration)
-    world, cup_names, world_description = world_config(planner, observation.sample.world_from_cup, fixed_meshes)
-    preparation_started=time.perf_counter()
-    cache_key=_digest(config)
+    # The proxy is local link geometry. Only its FK placement and locked-joint
+    # metadata depend on this request; never reuse a previous right-arm pose.
+    frames=planner.fk.forward(opened)
+    for mesh in fixed_meshes:
+        mesh['base_from_shape']=asdict(planner.fk.pose(frames[mesh['link']]))
+    config['kinematics']['lock_joints']=dict(request_config['kinematics']['lock_joints'])
+    # A stable URDF-derived solver seed is independent of the measured start.
+    # Every solve still receives its actual starting joints explicitly.
+    config['kinematics']['cspace']['retract_config']=[max(kinematics['joints'][name]['lower'],
+        min(kinematics['joints'][name]['upper'],0.)) for name in LEFT]
+    proxy['kinematics']=kinematics
+    proxy['fixed_world_geometry']['locked_positions']={name:value for name,value in
+        config['kinematics']['lock_joints'].items() if name.startswith('right_')}
+    proxy['world_sha256']=_digest([*data['observation']['scene']['shapes'],data['table'],*data['obstacles']])
+    control=data['native_identity']['control']
+    velocity,acceleration=control['max_target_velocity_rad_s'],control['max_target_acceleration_rad_s2']
+    config['kinematics']['cspace'].update(velocity_scale=[min(1.,velocity/kinematics['joints'][n]['velocity']) for n in LEFT],
+                                        max_acceleration=float(acceleration))
+    proxy['robot_config_sha256']=_digest(config)
+    if pickup_profile is not None:proxy['pickup_promotion']['robot_config_sha256']=proxy['robot_config_sha256']
+    proxy['motion_control_limits']=dict(max_velocity_rad_s=velocity,max_acceleration_rad_s2=acceleration)
+    world,cup_names,world_description=world_config(planner,observation.sample.world_from_cup,fixed_meshes)
+    from cup_envelope import prepare as prepare_cup
+    # Reject a mismatched frozen cup proof before creating or updating GPU models.
+    cup_envelope=prepare_cup(world,path=getattr(planner,'operator_assisted_cup_envelope',None))
+    model_preparation_seconds=time.perf_counter()-began
+    signature=deepcopy(config)
+    signature['kinematics']['lock_joints']=sorted(signature['kinematics']['lock_joints'])
+    cache_key=_digest(dict(model_key=model_key,config=signature,cup=data['cup'],
+        cup_envelope_sha256=_digest(cup_envelope),
+        world_geometry=[{k:v for k,v in item.items() if k!='base_from_shape'} for item in world_description]))
     reused=engine_cache is not None and engine_cache.get('key')==cache_key
+    section=time.perf_counter()
+    dynamic_update_seconds=initialization_wall=0.
     if reused:
         engine=engine_cache['engine']
         engine.generator.detach_object_from_robot(link_name='attached_object')
-        engine.update_world(world)
-        engine.update_locked_joints(config['kinematics']['lock_joints'])
+        engine.grasp_contact_certificate=None
         engine.receipts=[]
+        engine.locked_joint_updates=[]
+        engine.cup_contact.model_report=proxy
+        engine.update_world(world)
+        engine.update_locked_joints(config['kinematics']['lock_joints'],update_right=True)
+        engine.generator.reset_seed()
+        dynamic_update_seconds=time.perf_counter()-section
     else:
-        engine=MotionGenerator(config,world,model_report=proxy)
+        engine=MotionGenerator(config,world,model_report=proxy,prepared_cup_envelope=cup_envelope)
         prepared_contact=json.loads(certificate_path('a1_grasp_contact.json',urdf_path).read_text())
         gap=prepared_contact['terminal_jaw_position_m']
         engine.update_locked_joints({**config['kinematics']['lock_joints'],'left_joint7':gap,'left_joint8':gap})
         engine.update_locked_joints(config['kinematics']['lock_joints'])
         engine.warmup()
+        initialization_wall=time.perf_counter()-section
         if engine_cache is not None:engine_cache.update(key=cache_key,engine=engine)
-    initialization_wall=0. if reused else time.perf_counter()-preparation_started
-    engine.grasp_contact_certificate=None  # No request may inherit a previous selected contact pose.
-    # Keep fresh warmup state; reused requests must not inherit prior sampling.
-    if reused: engine.generator.reset_seed()
+    engine.grasp_contact_certificate=None
     return dict(config=config,proxy=proxy,fixed_meshes=fixed_meshes,world=world,cup_names=cup_names,
-        world_description=world_description,engine=engine,reused=reused,initialization_wall=initialization_wall)
+        cup_envelope=cup_envelope,
+        world_description=world_description,engine=engine,reused=reused,initialization_wall=initialization_wall,
+        model_reused=model_reused,model_preparation_seconds=model_preparation_seconds,
+        model_build_seconds=model_build_seconds,dynamic_update_seconds=dynamic_update_seconds,
+        engine_initialization_wall_seconds=initialization_wall,
+        cold_preparation_seconds=model_build_seconds+initialization_wall,
+        preparation_wall_seconds=time.perf_counter()-began)
 
 
 def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1., diagnostic=lambda name, value: None, engine_cache=None, physical_binding=None, environment='physical'):
+    if type(speed_scale) not in (int,float) or not math.isfinite(speed_scale) or not .3<=speed_scale<=1.7:
+        raise ValueError('运动速度必须在 30% 至 170% 之间')
+    from control_motion import MotionLimitError
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from robot_sim.specs.action import ac_one_dual_arm_zero_home_action_spec
     from curobo_robot_model import build_conservative_robot_model, fixed_world_mesh_descriptors
     from gpu_acceptance import closing_geometry, jaw_sweep, SupportBounds, fixed_world_check, fixed_self_check, task_check
-    from cup_envelope import prepare as prepare_cup, attach as attach_prepared_cup
+    from cup_envelope import attach as attach_prepared_cup
     from motiongen_motion import MotionGenerator
     from motiongen_targets import generate_targets, carry_targets, straight_waypoints
     from robot_sim.tasks.manager_based.coffee_make.outlet_alignment import outlet_distance
@@ -472,9 +545,14 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     start, initial = initial_motion_state(planner, data, source, spec, opening)
     diagnostic('initial-command.json', initial)
     right, home_q = [start[name] for name in RIGHT], [start[name] for name in LEFT]
+    from real_contract import fixed_right_collision_policy,skipped_fixed_right_acceptance
+    fixed_policy=fixed_right_collision_policy(source)
+    fixed_skip=skipped_fixed_right_acceptance(source,right,initial)
     initial_gap, right_gap = (start['left_joint7']+start['left_joint8'])*1000, (start['right_joint17']+start['right_joint18'])*1000
     action_cache = {}
+    target_started=time.perf_counter()
     targets = generate_targets(planner, observation, data,urdf_path=urdf_path,closed_jaw_m=closed/2000)
+    target_preparation_seconds=time.perf_counter()-target_started
     diagnostic('targets.json', targets)
     if not targets['grasp_candidates'] or not targets['placement_candidates']:
         raise ValueError('no supported task-space targets')
@@ -485,13 +563,22 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
     diagnostic('robot-model.json',dict(config=config,proxy=proxy))
     engine.cup_contact.allow_claw_contact(True)
     support_checker=SupportBounds(engine,planner,urdf_path)
-    fixed_acceptance=dict(world=fixed_world_check(engine,planner,data,observation.sample.world_from_cup),self=fixed_self_check(engine,planner,data))
+    if fixed_skip is not None:
+        # Fixed-right gates only. Its original meshes/locks remain in every moving-left/cup query.
+        fixed_acceptance=skipped_fixed_right_acceptance(source,
+            [engine.config['kinematics']['lock_joints'][name] for name in RIGHT],initial)
+    else:
+        fixed_acceptance=dict(world=fixed_world_check(engine,planner,data,observation.sample.world_from_cup),self=fixed_self_check(engine,planner,data))
     diagnostic("fixed-gpu-acceptance.json",fixed_acceptance)
-    if not all(row["passed"] for row in fixed_acceptance.values()):raise ValueError("static GPU acceptance unresolved")
+    if fixed_skip is None and not all(row["passed"] for row in fixed_acceptance.values()):raise ValueError("static GPU acceptance unresolved")
     jaw_acceptance=[]
-    envelope=prepare_cup(world)
-    diagnostic('motiongen-initialization.json', dict(initialization_seconds=engine.initialization_seconds,
-        warmup_seconds=engine.warmup_seconds, self_collision_partition=engine.self_collision_partition))
+    envelope=prepared['cup_envelope']
+    preparation_timing={key:prepared[key] for key in ('model_reused','model_preparation_seconds',
+        'model_build_seconds','dynamic_update_seconds','cold_preparation_seconds','preparation_wall_seconds')}
+    diagnostic('motiongen-initialization.json', dict(initialization_seconds=0. if reused else engine.initialization_seconds,
+        warmup_seconds=0. if reused else engine.warmup_seconds,self_collision_partition=engine.self_collision_partition,
+        engine_reused=reused,engine_initialization_wall_seconds=initialization_wall,
+        target_preparation_seconds=target_preparation_seconds,**preparation_timing))
     base_from_world = planner.geo.mount.inverse()
     source_digest = _digest(source)
     stages = []
@@ -507,6 +594,13 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
 
     def add(name, rows, substage=None, receipt_index=None):
         stages.append(encode(dict(name=name, substage=substage or name, rows=rows, receipt_index=receipt_index)))
+
+    def check_speed(completed):
+        try:check_requested_speed(completed,speed_scale,data['native_identity']['control'],spec,opening)
+        except MotionLimitError as error:
+            diagnostic('motion-limit-failure.json',error.failure)
+            diagnostic('candidate-speed-prefix.json',dict(executable=False,stages=completed))
+            raise
 
     def hold(name, q, gap, seconds):
         add(name, [target(q, right, gap, right_gap) for _ in range(round(seconds*30))])
@@ -572,16 +666,19 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             path,receipt=move('plan_pose',home_q,[base_pose(grasp['world_from_pregrasp'])],'approach_pre')
             add('approach_pre',[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)
             stages[-1]=continuous_stage(stages[-1:],'approach_pre','approach_pre',opening,duration_s=2.)
+            check_speed(stages)
             path,_=move('plan_pose',stages[-1]['rows'][-1]['left_arm_joints'],[base_pose(grasp['world_from_tool'])],
                 'approach',hold_orientation=True,linear_approach=True)
             add('approach',[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)
             stages[-1]=continuous_stage(stages[-1:],'approach','approach',opening,tcp_speed=.08,frontloaded=True)
+            check_speed(stages)
             grasp_q=stages[-1]['rows'][-1]['left_arm_joints'];hold('preclose_settle',grasp_q,opening,.1)
             grasp_state={**opened,**dict(zip(LEFT,grasp_q))}
             closing=closing_geometry(engine,planner,grasp_state,observation.sample.world_from_cup,
                 data=data,source_digest=source_digest,candidate_id=grasp['candidate_id'],closed_jaw_m=closed/2000)
             if closing.get('passed') is not True:raise ValueError('GPU closing failed: '+str(closing.get('error')))
             break
+        except MotionLimitError:raise
         except ValueError as error:
             stages=stages[:prefix_count];engine.grasp_contact_certificate=None
             grasp_failures.append(dict(candidate_id=grasp['candidate_id'],error=str(error)))
@@ -641,6 +738,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                 if not proof['support']['passed']:raise ValueError('normal-v31 Cartesian stage exceeds original support domain')
                 emitted['cartesian_derivation']=proof
                 trial.append(emitted)
+                check_speed(stages+trial)
                 current=joints[-1]
             place_state = {**contact, **dict(zip(LEFT, current))}
             placed_tool = planner.geo.mount.compose(planner.fk.pose(planner.fk.forward(place_state)['left_link6']))
@@ -652,8 +750,8 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             if receiving_distance>targets['placement_goal']['tolerance_m']:
                 raise ValueError('MotionGen endpoint misses receiving goal: '+str(receiving_distance))
             trial.append(encode(dict(name='support_settle', rows=[target(current, right, closed, right_gap)]*3)))
-            trial.append(encode(dict(name='open',rows=[target(current,right,
-                closed+(opening-closed)*(1-math.cos(math.pi*i/44))/2,right_gap) for i in range(45)])))
+            trial.append(encode(dict(name='open',rows=[target(current,right,gap,right_gap)
+                for gap in release_targets(closed,opening)[0]])))
             trial.append(encode(dict(name='release_hold', rows=[target(current, right, opening, right_gap)]*6)))
             engine.generator.detach_object_from_robot(link_name='attached_object')
             world, _, world_description = world_config(planner, placed_cup, fixed_meshes)
@@ -667,13 +765,18 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                 'retreat_insert',hold_orientation=True)
             trial.append(encode(dict(name='retreat',substage='retreat_insert',
                 rows=[target(q,right,opening,right_gap) for q in path],receipt_index=len(engine.receipts)-1)))
+            check_speed(stages+trial)
             engine.cup_contact.allow_claw_contact(False)
             path, _ = move('plan_joint', trial[-1]['rows'][-1]['left_arm_joints'], home_q, 'home')
             trial.append(encode(dict(name='home', rows=[target(q, right, opening, right_gap) for q in path], receipt_index=len(engine.receipts)-1)))
+            check_speed(stages+trial)
             jaw_acceptance.extend(trial_jaws)
             stages.extend(trial)
             selected_placement = candidate
             break
+        except MotionLimitError:
+            engine.generator.detach_object_from_robot(link_name='attached_object')
+            raise
         except ValueError as error:
             engine.generator.detach_object_from_robot(link_name='attached_object')
             failures.append(dict(candidate_id=candidate['candidate_id'], error=str(error)))
@@ -732,6 +835,9 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             distance_m=receiving_distance,tolerance_m=targets['placement_goal']['tolerance_m']),
         online_cpu_mesh_audit=True,online_cpu_mesh_scope='selected-pose native closing and unresolved source support checks; not IK or path search',
         contact_source_preparation_seconds=certificate.get('source_preparation_seconds'),retimed_collision_audit=False)
+    if fixed_policy is not None:
+        acceptance.update(static_collision_checked=False,fixed_right_collision_policy_digest=_digest(fixed_policy),
+            validation_scope='moving_left_and_cup; fixed_right_static_checks_skipped_by_operator')
     diagnostic('gpu-final-acceptance.json',acceptance)
     if not acceptance['passed']:
         failed=[name for name in ('closing','support','task_semantics','receiving_goal') if not acceptance[name]['passed']]
@@ -750,6 +856,7 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                      placement_goal=targets['placement_goal'],carry_route=route,
                      attachment=attachment,failed_grasp_candidates=grasp_failures,failed_motiongen_candidates=failures)
     for value in (base, plan):
+        if fixed_policy is not None:value['fixed_right_collision_policy']=deepcopy(fixed_policy)
         value['simulation_initial_command'] = deepcopy(initial['simulation_initial_command'])
         value['initial_state_validation'] = deepcopy(initial)
         value['planning_backend'] = deepcopy(backend)
@@ -765,13 +872,16 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
             motiongen_method_counts=dict(Counter(row['method'] for row in engine.receipts)),
             selected_motiongen_method_counts=dict(Counter(engine.receipts[index]['method'] for index in selected_receipts)),
             cpu_search_fallback=False, source_robot_identity=data['planner_identity'], hardware_validated=False)
+        if fixed_policy is not None:
+            value['planning_validation'].update(static_collision_checked=False,
+                fixed_right_collision_policy_digest=_digest(fixed_policy))
         value['planning_validation']['continuous_cross']=[stage['cross_continuity'] for stage in stages
             if stage.get('cross_continuity')]
         value['planning_validation']['continuous_motion']=[stage['motion_continuity'] for stage in stages if stage.get('motion_continuity')]
         value['planning_validation']['cartesian_stages']=[stage['cartesian_derivation'] for stage in stages if stage.get('cartesian_derivation')]
         value['normal_recipe']=dict(id='normal-v31-dynamic-targets',nominal_speed_scale=1.,
             requested_speed_scale=speed_scale if value is plan else 1.,
-            fixed_release_duration_s=1.5,source_fixture_replayed=False,
+            fixed_release_duration_s=value['gripper_release']['duration_s'],source_fixture_replayed=False,
             endpoint_source='current calibrated model and fresh observed scene')
         value['planning_validation']['native_output_control_time_adjustments']=control_adjustments
     plan['planning_validation']['derivation'] = dict(method='uniform_source_time_stage_scale',
@@ -790,13 +900,16 @@ def plan_loaded(planner, observation, data, source, urdf_path, *, speed_scale=1.
                 offline_candidate=True, synthetic_fixture=True, dual_dsw_e2e_completed=False)
     return base, plan, dict(planning_backend=backend, gpu_final_acceptance=acceptance, grip=grip,
         motiongen_receipts=engine.receipts, selected_placement=selected_placement,
-        motiongen_initialization_seconds=engine.initialization_seconds, motiongen_warmup_seconds=engine.warmup_seconds,
+        motiongen_initialization_seconds=0. if reused else engine.initialization_seconds,
+        motiongen_warmup_seconds=0. if reused else engine.warmup_seconds,
         engine_reused=reused,initialization_wall_seconds=initialization_wall,
-        initialization_breakdown=getattr(engine,'initialization_breakdown',{}),
+        initialization_breakdown={} if reused else getattr(engine,'initialization_breakdown',{}),
         cuda_graph_calls={key:value-graph_start.get(key,0) for key,value in getattr(engine,'cuda_graph_calls',{}).items()},
         cuda_graph_counter_scope='native API invocations including failed attempts; entire planning request',
         full_planning_wall_seconds=time.perf_counter()-planning_started,
-        full_hot_planning_wall_seconds=time.perf_counter()-planning_started-initialization_wall)
+        full_hot_planning_wall_seconds=time.perf_counter()-planning_started-prepared['cold_preparation_seconds'],
+        hot_timing_scope='whole planning request excluding cold geometry build and engine initialization; includes dynamic world, targets and validation',
+        target_preparation_seconds=target_preparation_seconds,**preparation_timing)
 
 
 def main(args):
@@ -830,10 +943,11 @@ def main(args):
                                            speed_scale=args.speed_scale, diagnostic=diagnostic,physical_binding=binding,
                                            environment=getattr(args,'environment','physical'))
         if getattr(args,'execution_json',None):
-            from local_execution import validate,TARGET,stamp_plan
-            validate({'execution':json.loads(args.execution_json)})
-            stamp_plan(base,TARGET);stamp_plan(plan,TARGET)
-            evidence['compute_resource']=dict(TARGET,logical_cuda_index=0)
+            from local_execution import validate,compute_resource,stamp_plan
+            execution=validate({'execution':json.loads(args.execution_json)})
+            resource=compute_resource(execution)
+            stamp_plan(base,resource);stamp_plan(plan,resource)
+            evidence['compute_resource']=dict(resource,logical_cuda_index=0)
         write_new(args.output/'base-plan.json', base)
         write_new(args.output/'plan.json', plan)
         result.update(status='motiongen-plan-ready', timeline_digest=plan['timeline_digest'],
@@ -841,6 +955,7 @@ def main(args):
                       source_sha256=hashlib.sha256(args.source.read_bytes()).hexdigest(), **evidence)
     except Exception as error:
         result['error'] = f'{type(error).__name__}: {error}'
+        if getattr(error,'failure',None):result['failure']=error.failure
     result['elapsed_seconds'] = time.monotonic()-started
     write_new(args.output/'result.json', result)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))

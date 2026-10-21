@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from playground import Playground
 
@@ -36,6 +36,13 @@ def rejected(fn):
     raise AssertionError('request should have been rejected')
 
 
+def in_process_execution_fixture(config,output,bridge_config,plan,progress=None,cancel=None):
+    # UI state tests stub the process boundary; the spawn/HTTP suite tests its implementation.
+    import sys
+    return sys.modules['playground_pipeline'].execute(config,output,SimpleNamespace(config=bridge_config),plan,progress=progress)
+
+
+@patch('playground_execution_process.execute',in_process_execution_fixture)
 def main():
     executed = []
 
@@ -106,6 +113,16 @@ def main():
     fake = SimpleNamespace(prepare_environment=lambda config: [dict(key='dsw', status='ready'),
                                                                dict(key='simulation', status='ready')],
                            plan=plan, execute=execute,restore_plan=restore)
+    with TemporaryDirectory() as tmp, patch.dict('sys.modules',playground_pipeline=fake):
+        bridge=Bridge();service=Playground(tmp,bridge,lambda:{'status':'ready'})
+        error=RuntimeError('scene setup failed')
+        error.preparation_failure=dict(stage='scene_setup',native_status='failed',native_phase='setup',
+            native_reason='reset characterization rejected: cup_table_recontact_or_invalid_support')
+        service.prepare_services=Mock(side_effect=error)
+        service.start({'action':'prepare','arms_supported':True});service.thread.join(3)
+        assert service.state['warmup']['failure']==error.preparation_failure
+        assert not service.state['busy'] and not service.state['environment']['ready']
+        service.prepare_services.assert_called_once();assert bridge.commands==[], 'failure must not retry or acquire control'
     with TemporaryDirectory() as tmp, patch.dict('sys.modules', playground_pipeline=fake):
         bridge = Bridge()
         service = Playground(tmp, bridge, lambda: {'status': 'ready'})
@@ -124,11 +141,18 @@ def main():
         assert bridge.commands == [{'action': 'acquire', 'confirmation': 'ARMS_SUPPORTED_CONNECT'}]
         assert service.snapshot()['can_execute'] is False
         previous_prepare = service.state['timing_history']['prepare']
-        service.start({'action': 'prepare'})
+        previous_output=service.state['output']
+        assert service.start({'action': 'prepare'})['reused'] is True
         service.thread.join(3)
-        assert service.state['progress']['estimate_s'] == previous_prepare
-        assert service.state['progress']['estimate_source'] == '上次成功耗时'
+        assert service.state['output']==previous_output
+        assert service.state['timing_history']['prepare']==previous_prepare
         assert len(bridge.commands) == 1, 'preparation timing must not reconnect an existing owner'
+        initialization=service.initialization
+        service.initialization=lambda:{'status':'ready','planner':{'status':'ready','model_initialized':True},
+            'scene':{'status':'stopped','model_initialized':False}}
+        assert service.snapshot()['warmup']['status']=='invalidated'
+        assert not service.snapshot()['environment']['ready']
+        service.initialization=initialization
         service.start({'action': 'plan', 'speed_scale': .3})
         service.thread.join(3)
         assert service.snapshot()['can_execute'] is True, service.state
@@ -141,9 +165,11 @@ def main():
         bridge.pedal = False
         service.state.update(errors={'controller': 'old attempt'}, recording={'directory': '/old/raw'},
                              simulation={'status': 'old'}, physical_outcome='failed', task_outcome='old')
-        service.start({'action': 'execute', 'speed_scale': .25})
+        for invalid in (.29,1.71,True,float('nan')):
+            rejected(lambda: service.start({'action':'execute','speed_scale':invalid}))
+        service.start({'action': 'execute', 'speed_scale': 1.7})
         service.thread.join(3)
-        assert executed[0]['speed_scale'] == .25
+        assert executed[0]['speed_scale'] == 1.7
         assert service.state['status'] == 'stopped'
         assert service.snapshot()['can_execute'] is False, 'a submitted plan is consumed'
         assert service.media('video-0') is None, 'media revision required'
@@ -182,7 +208,7 @@ def main():
         rejected(lambda: service.start({'action': 'plan'}))
         assert service.snapshot()['can_execute'] is False
     # A restart/prepare reuses an approved plan without planning or automatic motion.
-    for sent_count in (0,3,None):
+    for outcome,sent_count in (('completed',0),('unknown',0),('unknown',3),('unknown',None),('pre_action',None)):
         counts={'plan':0,'execute':0}
         def counted_plan(config,output,bridge,speed,progress=None):
             counts['plan']+=1
@@ -191,8 +217,12 @@ def main():
             counts['execute']+=1
             checkpoint=json.loads((output.parents[1]/'prepared-plan.json').read_text())
             assert checkpoint['execution_pending'] and checkpoint['execution_output']==str(output)
+            (output/'execution-phase.json').write_text(json.dumps(dict(
+                phase='pre_action' if outcome=='pre_action' else 'confirm_requested',timeline_digest=descriptor['timeline_digest'])))
             if sent_count is None:raise RuntimeError('connection lost; execution unknown')
-            return dict(status='failed',videos=[],recording={'manifest':{'command_count':sent_count}})
+            return dict(status='failed',videos=[],physical_outcome=outcome,
+                recording={'manifest':{'command_count':sent_count,'controller_outcome':outcome,
+                    'camera_frames':dict.fromkeys(('base_0','left_wrist_0','right_wrist_0'),0)}})
         candidate=SimpleNamespace(prepare_environment=fake.prepare_environment,plan=counted_plan,
                                   execute=failed_execute,restore_plan=restore)
         with TemporaryDirectory() as tmp,patch.dict('sys.modules',playground_pipeline=candidate):
@@ -204,17 +234,18 @@ def main():
             assert json.loads(checkpoint.read_text())['execution_pending'] is False
             before=checkpoint.read_bytes()
             restarted=Playground(tmp,bridge,lambda:{'status':'ready'})
-            assert restarted.snapshot()['environment']['ready'] and not restarted.snapshot()['can_execute']
+            assert not restarted.snapshot()['environment']['ready'] and not restarted.snapshot()['can_execute']
+            assert restarted.snapshot()['warmup']['status']=='invalidated'
             restarted.start({'action':'prepare'});restarted.thread.join(3)
             assert restarted.snapshot()['can_execute'] and counts=={'plan':1,'execute':0}
             assert checkpoint.read_bytes()==before, 'prepare replaced the frozen checkpoint'
             restarted.start({'action':'execute'});restarted.thread.join(3)
             assert counts=={'plan':1,'execute':1}
-            assert json.loads(checkpoint.read_text())['execution_pending'] is (sent_count!=0)
-            assert restarted.snapshot()['can_execute'] is (sent_count==0)
+            assert json.loads(checkpoint.read_text())['execution_pending'] is (outcome!='pre_action')
+            assert restarted.snapshot()['can_execute'] is (outcome=='pre_action')
             after=Playground(tmp,bridge,lambda:{'status':'ready'})
             after.start({'action':'prepare'});after.thread.join(3)
-            assert after.snapshot()['can_execute'] is (sent_count==0)
+            assert after.snapshot()['can_execute'] is (outcome=='pre_action')
             assert counts=={'plan':1,'execute':1}, 'prepare must not replan or replay actions'
             assert bridge.commands==[], 'recovery should not reconnect an existing owner'
     # Stage clocks reset independently; repeated updates and snapshots do not reset them.

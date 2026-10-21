@@ -325,6 +325,8 @@ class Bridge:
                     raise ValueError('home requires exactly one active arm')
                 return self.request('/operator', dict(action={'/api/home-preview':'preview_home', '/api/arm-home-preview':'preview_arm_home'}[path], **body))
             if path.endswith('preview'):
+                if set(body)=={'active_arm','q_active','max_velocity'}:
+                    return self.request('/operator',dict(action='preview',**body))
                 if set(body) != {'active_arm', 'q_target'} or body['active_arm'] not in ('left', 'right'):
                     raise ValueError('single arm and full target required')
                 q = body['q_target']

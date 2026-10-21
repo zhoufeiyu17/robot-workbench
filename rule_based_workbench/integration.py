@@ -20,7 +20,7 @@ from contract import validate_physical14
 PROFILE_SCHEMA = "calibration_profile.v1"
 SCENE_SCHEMA = "scene_snapshot.v1"
 RECEIPT_SCHEMA = "trajectory_receipt.v1"
-WINDOW_NS = 5_000_000_000
+WINDOW_NS = 3_000_000_000
 # Numerical/statistical motion floor, independent of collision clearances.
 # Unknown noise requires a full candidate window before motion classification.
 EARLY_CUP_MOTION_THRESHOLD_M = 1e-3
@@ -206,7 +206,7 @@ class ObservationWindow:
                          threshold_source="bootstrap_persistent_change")
             self.reobserve_events.append(event)
             # The bootstrap identified an earlier change boundary. Keep its
-            # post-change samples; they still must pass a full fresh 5s test.
+            # post-change samples; they still must pass a full fresh 3s test.
             del self.frames[:split]
             return event
         self.cup_position_jitter_m = jitter
@@ -282,7 +282,7 @@ class ObservationWindow:
 
     def finalize(self) -> dict[str, Any]:
         if not self.status()["ready"]:
-            raise ValueError("5 second stationary observation window is incomplete")
+            raise ValueError("3 second stationary observation window is incomplete")
         frame = self.frames[0]
         transform = self.profile["frames"]["environment_from_camera"]
         machine_positions, machine_quaternions, cup_positions = [], [], []
@@ -386,7 +386,77 @@ def _pipeline_lane(payload: Any, side: str) -> None:
         raise ValueError(f"{side} requires {expected['instance_id']} GPU {expected['gpu']}")
 
 
-def _validate_scene(scene: Any) -> None:
+def validate_assisted_scene(scene):
+    """One accepted physical RGB-D estimate; never an automatic stable window."""
+    import re
+    observation=scene['source'];receipt=observation.get('assistance_receipt')
+    if (not isinstance(receipt,dict) or receipt.get('schema_version')!='operator_assisted_rgbd_scene.v1'
+            or receipt.get('status')!='operator_accepted' or receipt.get('scope')!='single_observation'
+            or observation.get('automatic_window_qualified') is not False
+            or observation.get('assistance_receipt_digest')!=_digest(receipt)):
+        raise ValueError('explicit single-observation operator assistance receipt required')
+    for key in ('request_id','robot_id','machine_asset'):
+        if not isinstance(receipt.get(key),str) or not receipt[key].strip():raise ValueError('assistance '+key+' required')
+    def sha(value):return isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value)
+    if any(not sha(receipt.get(key)) for key in ('calibration_profile_digest','initial_state_digest')):
+        raise ValueError('assistance requires calibration and measured-start digests')
+    cameras=receipt.get('camera_serials')
+    if (not isinstance(cameras,dict) or set(cameras)!={'head','left','right'}
+            or any(not isinstance(v,str) or not v for v in cameras.values()) or len(set(cameras.values()))!=3):
+        raise ValueError('assistance requires three camera identities')
+    frames=receipt.get('frames')
+    if not isinstance(frames,list) or not 1<=len(frames)<=256:raise ValueError('bounded actual RGB-D evidence required')
+    paths=set();stamps=[]
+    for frame in frames:
+        if (not isinstance(frame,dict) or frame.get('camera') not in cameras
+                or frame.get('camera_serial')!=cameras[frame['camera']]
+                or not isinstance(frame.get('path'),str) or not frame['path'].startswith('/')
+                or frame['path'] in paths or not sha(frame.get('sha256'))
+                or type(frame.get('source_stamp_ns')) is not int or frame['source_stamp_ns']<=0
+                or not isinstance(frame.get('frame_id'),str) or not frame['frame_id']):
+            raise ValueError('assistance RGB-D frame identity/hash is invalid')
+        paths.add(frame['path']);stamps.append(frame['source_stamp_ns'])
+    if (type(receipt.get('accepted_wall_ns')) is not int or receipt['accepted_wall_ns']<max(stamps)
+            or observation.get('window_start_ns')!=min(stamps) or observation.get('window_end_ns')!=max(stamps)
+            or observation.get('sample_count')!=len(frames)):
+        raise ValueError('assistance must retain actual evidence timestamps/counts')
+    estimation=receipt.get('estimation')
+    if (not isinstance(estimation,dict) or any(not isinstance(estimation.get(k),str) or not estimation[k].strip()
+            for k in ('method','provenance_summary'))):
+        raise ValueError('assistance estimation method and provenance required')
+    for key in ('machine_asset','environment_from_machine_root','environment_from_cup'):
+        if receipt.get(key)!=scene.get(key):raise ValueError('scene differs from accepted assistance geometry')
+    geometry=receipt.get('cup_geometry')
+    if (not isinstance(geometry,dict) or geometry.get('origin')!='bottom_center' or geometry.get('units')!='m'
+            or not sha(geometry.get('profile_sha256'))):
+        raise ValueError('assisted cup requires bottom-center metric geometry and actual profile digest')
+    dimensions=_vec(geometry.get('dimensions_m'),3,'assisted cup dimensions')
+    if any(value<=0 for value in dimensions):raise ValueError('positive assisted cup dimensions required')
+    bands=geometry.get('bands')
+    if not isinstance(bands,list) or not 1<=len(bands)<=32:raise ValueError('assisted cup collision bands required')
+    previous=0.;radius=0.;names=set()
+    for band in bands:
+        if not isinstance(band,dict):raise ValueError('cup band must be an object')
+        lo,hi,r=(_finite(band.get(k),'assisted cup '+k) for k in ('z_min_m','z_max_m','radius_m'))
+        ends=[_finite(band[k] if band.get(k) is not None else r,'assisted cup '+k)
+              for k in ('radius_start_m','radius_end_m')]
+        name=band.get('shape_path')
+        if (lo<0 or hi<=lo or r<=0 or abs(lo-previous)>1e-9 or min(ends)<=0 or max(ends)>r+1e-9
+                or not isinstance(name,str) or not name.startswith('/Cup/Collisions/') or name in names):
+            raise ValueError('finite contiguous assisted cup collision geometry required')
+        previous=hi;radius=max(radius,r);names.add(name)
+    if any(abs(a-b)>1e-9 for a,b in zip(dimensions,(2*radius,2*radius,previous))):
+        raise ValueError('assisted cup dimensions differ from actual collision bands')
+    grasp=receipt.get('grasp_command')
+    if (not isinstance(grasp,dict) or grasp.get('units')!='metal_inner_gap_mm'
+            or grasp.get('controlled_gripper')!='left_gripper'
+            or type(grasp.get('metal_gap_mm')) not in (int,float)
+            or grasp['metal_gap_mm'] not in (61.,65.)):
+        raise ValueError('assisted observation requires the explicitly requested 61/65 mm left metal gap')
+    return receipt
+
+
+def _validate_scene(scene: Any, *, allow_operator_assisted=False) -> None:
     if not isinstance(scene, dict) or scene.get("schema_version") != SCENE_SCHEMA:
         raise ValueError(f"source scene must use {SCENE_SCHEMA}")
     if scene.get("scene_digest") != _digest({k: v for k, v in scene.items() if k != "scene_digest"}):
@@ -403,11 +473,15 @@ def _validate_scene(scene: Any) -> None:
     observation = scene.get("source")
     if not isinstance(observation, dict):
         raise ValueError("scene observation window is required")
+    if observation.get('observation_mode')=='operator_assisted_rgbd':
+        if not allow_operator_assisted:raise ValueError('operator-assisted scene requires an explicit physical source binding')
+        validate_assisted_scene(scene)
+        return
     for key in ("window_start_ns", "window_end_ns", "sample_count"):
         if type(observation.get(key)) is not int or observation[key] <= 0:
             raise ValueError(f"scene source {key} must be positive integer")
     if observation["sample_count"] < 2 or observation["window_end_ns"] - observation["window_start_ns"] < WINDOW_NS:
-        raise ValueError("scene requires a complete 5 second observation window")
+        raise ValueError("scene requires a complete 3 second observation window")
 
 
 def validate_sim_distance_plan(plan, source):

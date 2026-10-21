@@ -32,6 +32,9 @@ sys.path[:0] = [str(runtime_root/'scripts'), str(runtime_root/'ros2/online_detec
 
 from run_online_detection_episode import current_pose, render, sha256, source_identity, write_json
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from robot_workbench.observation_window import ContinuousObservationWindow
+
 
 def timing_mark(timing, previous_s, stage, **details):
     now = time.perf_counter()
@@ -45,7 +48,7 @@ def timing_mark(timing, previous_s, stage, **details):
     return now
 
 
-def load_manifest(path):
+def load_manifest(path, *, streaming=False):
     path = path.resolve(strict=True)
     manifest = json.loads(path.read_text())
     if (manifest.get('depth_convention') != 'optical_z_m'
@@ -68,8 +71,8 @@ def load_manifest(path):
             raise ValueError('each frame must be a distinct file inside the manifest directory')
         seen.add(frame)
         previous = stamp, sequence
-    if rows[-1]['source_stamp_ns'] - rows[0]['source_stamp_ns'] < 5_000_000_000:
-        raise ValueError('capture window must span at least 5 seconds; timestamps must come from capture')
+    if not streaming and rows[-1]['source_stamp_ns'] - rows[0]['source_stamp_ns'] < 3_000_000_000:
+        raise ValueError('capture window must span at least 3 seconds; timestamps must come from capture')
     return manifest
 
 
@@ -145,17 +148,10 @@ def extract(batch, camera_position, camera_q, canonical_from_mesh):
 
 
 def continuous_pair_window(observations):
-    current, previous_pair = [], None
+    window = ContinuousObservationWindow()
     for observation in observations:
-        pair = (observation['tracking_session_id'], tuple(sorted(
-            (track['object_type'], track['track_id'], json.dumps(track['provenance']['asset'], sort_keys=True))
-            for track in observation['tracks']))) if observation['pair_valid'] else None
-        if pair is None or pair != previous_pair:
-            current = []
-        if pair is not None:
-            current.append(observation['source_stamp_ns'])
-        previous_pair = pair
-    return current
+        window.add(observation)
+    return window.status()['valid_stamps_ns']
 
 
 def initialize_detection(args, summary, timing, checkpoint, expected_frame_id=None):
@@ -214,7 +210,8 @@ def run(args, prepared=None):
                   segments=[])
     checkpoint = timing_mark(timing, _SCRIPT_STARTED_S if prepared is None else time.perf_counter(),
                              'python_imports_and_cli')
-    manifest = load_manifest(args.manifest)
+    streaming = getattr(args, 'streaming', False)
+    manifest = load_manifest(args.manifest, streaming=streaming)
     # Validate every capture before loading a model or creating output.
     inputs = []
     for row in manifest['frames']:
@@ -222,8 +219,12 @@ def run(args, prepared=None):
         read_frame(path)
         inputs.append(dict(row, sha256=sha256(path)))
     checkpoint = timing_mark(timing, checkpoint, 'input_validation')
+    source = prepared.get('_stream_source') if streaming and prepared is not None else None
+    if source is None:
+        source = source_identity()
+        if streaming and prepared is not None:prepared['_stream_source'] = source
     summary = dict(schema_version='isaac_rgbd_detection.v1', status='INPUT_VALIDATED',
-                   source=source_identity(), adapter_sha256=sha256(Path(__file__).resolve()),
+                   source=source, adapter_sha256=sha256(Path(__file__).resolve()),
                    manifest_sha256=sha256(args.manifest), inputs=inputs,
                    timing=timing,
                    measurement_boundary='offline RGB-D replay; camera extrinsics only; no object GT')
@@ -288,23 +289,30 @@ def run(args, prepared=None):
                     valid_stamps.append(stamp)
                 checkpoint = timing_mark(timing, checkpoint, 'frame_extract_render_output',
                                          capture_sequence_id=row['capture_sequence_id'])
-        window = continuous_pair_window(window_observations)
-        span = (window[-1] - window[0]) / 1e9 if len(window) >= 2 else 0
+        checked_window = ContinuousObservationWindow()
+        for observation in window_observations:checked_window.add(observation)
+        checked_status = checked_window.status()
+        window = checked_status['valid_stamps_ns']
+        span = checked_status['span_s']
         summary.update(valid_pair_frames=len(valid_stamps),
                        valid_pair_span_s=(valid_stamps[-1] - valid_stamps[0]) / 1e9 if len(valid_stamps) >= 2 else 0,
                        continuous_valid_pair_span_s=span,
                        continuous_valid_pair_stamps_ns=window,
-                       window_semantics="terminal consecutive captured samples with unchanged track/asset identity",
-                       status='DETECTION_WINDOW_READY' if span >= 5 else 'INCOMPLETE_DETECTION_WINDOW',
+                       window_semantics="terminal valid samples; >=3 source seconds, >=9 frames, <=1s gaps, cup pairwise span <6mm",
+                       observation_window=checked_status, reobserve_events=checked_window.events,
+                       status='DETECTION_FRAME_READY' if streaming else 'DETECTION_WINDOW_READY' if checked_status['ready'] else 'INCOMPLETE_DETECTION_WINDOW',
                        runtime_stats=asdict(runtime.stats))
-        if span < 5:
-            raise RuntimeError('continuous valid coffee-machine/cup observations do not span 5 seconds')
+        if not streaming and not checked_status['ready']:
+            raise RuntimeError('continuous valid coffee-machine/cup observations do not span 3 seconds')
     except Exception as error:
         summary.update(status='FAILED', error=str(error))
         raise
     finally:
         checkpoint = timing_mark(timing, checkpoint, 'finalize_or_error')
-        if prepared is None:
+        if streaming:
+            summary['cleanup_complete'] = True
+            summary['cleanup_boundary'] = 'stream frame complete; tracking retained until acquisition end'
+        elif prepared is None:
             summary['cleanup_complete'] = runtime is None or runtime.close(timeout=12)
         else:
             summary['cleanup_complete'] = False
@@ -417,7 +425,9 @@ def self_test():
     observations[2] = dict(observations[2], pair_valid=False)
     assert len(continuous_pair_window(observations)) == 3
     observations[4] = dict(observations[4], tracking_session_id='restarted')
-    assert len(continuous_pair_window(observations)) == 1
+    try:continuous_pair_window(observations)
+    except ValueError:pass
+    else:raise AssertionError('changed tracking session accepted')
     print('Isaac RGB-D adapter CPU boundary check: PASS (no inference)')
 
 

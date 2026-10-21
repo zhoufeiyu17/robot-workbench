@@ -98,6 +98,12 @@ def collection_live_view(value,runtime):
 
 
 class CalibrationWorkflow:
+    def environment_status(self):
+        with self.lock:
+            return {**{key:deepcopy(self.value.get(key)) for key in ('busy','status','stage_id')},
+                'busy':bool(self.value.get('busy') or self.active and self.value.get('status') not in ('failed','stopped','completed')),
+                'generation':self.generation}
+
     def __init__(self, app, device, service):
         self.app,self.device,self.service=app,device,service
         self.lock=threading.Lock()
@@ -427,6 +433,19 @@ class CalibrationWorkflow:
 
     def manual_preview(self,body,*,queue=False):
         from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
+        if body.get('active_arm') is not None:
+            from arx_env.joint_head_real_motion import ARM_SLICES
+            side=body['active_arm']
+            if queue or side not in ARM_SLICES or body.get('jaw_gap_mm') is not None:
+                raise ValueError('single-arm preview requires one arm, no queue or jaw target')
+            q=self.app.geometry._q(body.get('q12')).tolist()
+            speeds=body.get('speeds12',[DEFAULT_VELOCITY]*12)
+            a=0 if side=='left' else 6
+            if (not isinstance(speeds,list) or len(speeds)!=12
+                    or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<v<=.5 for v in speeds)
+                    or len(set(speeds[a:a+6]))!=1):
+                raise ValueError('single-arm preview requires one shared arm speed in (0, 0.5]')
+            return self.app.control_request('motion-preview',dict(active_arm=side,q_active=q[a:a+6],max_velocity=speeds[a]))
         if queue:
             current=self.manual_queue_state()
             if not current.get('available') or body.get('queue_revision')!=current['revision']:
@@ -622,12 +641,107 @@ class CalibrationWorkflow:
 class CollectionWorkflow:
     def __init__(self, playground, device, service):
         self.playground,self.device,self.service=playground,device,service
+        self.playground.managed_lifecycle=True
         self.lock=threading.Lock();self.closed=threading.Event()
         self.value=dict(status='connecting',busy=False,stage_id='connecting',title='数采',primary_action=None,outcomes={})
         self.catalog=[];self.review_key=None;self.speed_scale=None
         self.generation=0
         self.media_files={}
+        self._quality_cache={}
         self.thread=threading.Thread(target=self.monitor,daemon=True,name='collection-view');self.thread.start()
+
+    def environment_status(self):
+        """Read existing service facts without building a business review."""
+        with self.playground.lock:
+            state=self.playground.state
+            result={key:deepcopy(state.get(key)) for key in ('status','busy','error','warmup','progress')}
+            environment_ready=bool((state.get('environment') or {}).get('ready'))
+        initialization=self.playground.initialization()
+        services={'detector':{k:deepcopy(v) for k,v in initialization.items() if k not in ('planner','scene')}}
+        for name in ('planner','scene'):
+            if initialization.get(name):services[name]=initialization[name]
+        services_ready=all(item.get('status') in ('ready','busy') for item in services.values())
+        ready=services_ready and environment_ready and (result['warmup'] or {}).get('status')=='ready' and all(
+            name=='detector' or item.get('model_initialized') is True for name,item in services.items())
+        return dict(result,ready=bool(ready),needs_warmup=not ready,services=services,
+            declared_roles=list(services),services_ready=services_ready)
+
+    def operations_prepare(self,*,still_current,lifecycle_admission):
+        from .resident_collection import require_collection_control
+        if (not callable(still_current) or not callable(lifecycle_admission)
+                or not getattr(self.device,'maintenance',False) or not still_current()):
+            raise ValueError('数采准备需要当前有效的运维维护窗口')
+        require_collection_control(self.device)
+        def admission(action):
+            return (getattr(self.device,'maintenance',False) and
+                (action.startswith('stop:') or still_current()) and lifecycle_admission(action) is True)
+        services=self.playground.initialization()
+        unavailable=services.get('status') in ('failed','stopped','unknown') or any(
+            (services.get(role) or {}).get('status') in ('failed','stopped','unknown') for role in ('planner','scene'))
+        hook=getattr(self.playground,'operations_prepare_services',None)
+        preparation=None
+        if callable(hook):
+            def launch(create):
+                with self.service.lock:
+                    if admission('start:collection')is not True:raise InterruptedError('运维服务启动已撤销')
+                    return create()
+            if admission('start:collection')is not True:raise InterruptedError('运维服务准备已撤销')
+            preparation=hook(still_current=still_current,launch=launch)
+            if not isinstance(preparation,dict) or not isinstance(preparation.get('service_steps'),list):
+                raise ValueError('固定配置运维hook未提供准备证据')
+            if unavailable or any(row.get('needs_warmup') or row.get('outcome')!='reused' for row in preparation['service_steps']):
+                with self.playground.lock:self.playground.state['warmup']={'status':'invalidated'}
+        elif unavailable:raise ValueError('当前固定配置未装配受控运维准备hook，不支持自动恢复')
+        if not still_current():raise ValueError('数采准备运维操作已撤销')
+        value=self.environment_status()
+        if not value['services_ready']:raise ValueError('数采服务尚未准备完成；未启动业务预热')
+        return dict(services_ready=True,ready=value['ready'],needs_warmup=value['needs_warmup'],environment=value,
+            service_steps=(preparation or {}).get('service_steps',[]),service_preparation=preparation)
+
+    def warmup_reason(self):
+        preparation=getattr(self.device,'collection_preparation',None)
+        if preparation is not None and (getattr(preparation,'parts',None) is None or preparation.snapshot().get('busy')):
+            return '请先在服务运维准备当前数采资产与常驻服务'
+        if preparation is not None and preparation.closed.is_set():return '数采服务生命周期已结束，请在服务运维核验'
+        state=preparation.environment_status() if preparation is not None else self.environment_status()
+        if state.get('services_ready') is not True:return '数采计算服务未就绪，请在服务运维准备或恢复对应服务'
+        from .resident_collection import require_collection_control
+        try:require_collection_control(self.device)
+        except ValueError as error:return str(error)
+        return None
+
+    def business_warmup(self,body):
+        """Business jobs may initialize models, never own service lifecycle or SDK acquisition."""
+        reason=self.warmup_reason()
+        if reason:raise ValueError(reason)
+        speed=body.get('speed_scale',.3)
+        if type(speed) not in (int,float) or not math.isfinite(speed) or not .3<=speed<=1.7:
+            raise ValueError('运动速度必须在 30% 至 170% 之间')
+        generation=self.service.generations[self.device.environment];runtime=self.device.runtime
+        preparation=getattr(self.device,'collection_preparation',None)
+        def current():
+            return (not self.closed.is_set() and not getattr(self.device,'maintenance',False)
+                and self.device.runtime is runtime and generation==self.service.generations[self.device.environment])
+        if preparation is not None:
+            snapshot=preparation.installed_snapshot()
+            if not snapshot or snapshot.get('verified')is not True:raise ValueError('当前安装组无效，请在服务运维核验')
+            identity=preparation.installation(snapshot)
+            if preparation.parts is None or identity!=preparation.identity:
+                raise ValueError('当前安装资产尚未准备，请在服务运维重新核验')
+            active=current
+            def current():
+                return (active() and not preparation.closed.is_set() and preparation.parts is not None and preparation.parts.workflow is self
+                    and snapshot==preparation.installed_snapshot() and identity==preparation.identity)
+            preparation._verify_parts(current)
+            for name in ('detector','planner','scene'):
+                manager=getattr(preparation.parts,name,None)
+                if manager is not None:
+                    if manager.status().get('status')!='ready':raise ValueError(name+' 服务未就绪，请在服务运维恢复')
+                    manager.probe()
+        if not current():raise InterruptedError('业务预热上下文已变化')
+        result=self.playground.start(dict(action='prepare',speed_scale=speed),
+            lifecycle_admission=lambda step:step=='warmup:collection' and current())
+        return result if result.get('reused') else self.accepted(result,'prepare')
 
     def monitor(self):
         while not self.closed.is_set():
@@ -658,21 +772,16 @@ class CollectionWorkflow:
         data_outcome=(dict(status='invalid',message=data_error) if data_error else
             {'passed':'valid','failed':'invalid'}.get(validation.get('status')) or recording.get('status') or
             ('pending' if recording.get('done') else 'recording' if recording.get('ready') else '未录制'))
-        primary=dict(id='generate_plan',label='采集新观测并生成计划' if ready else '准备数采环境',
-                     allowed=not busy,reason='数采任务正在进行' if busy else None)
-        review_request=None
+        prepare_reason='数采任务正在进行' if busy else self.warmup_reason()
+        plan_reason=prepare_reason or '数采服务已就绪；请在本页完成业务环境准备（初始化与预热）' if not ready else None
+        primary=dict(id='generate_plan',label='采集新观测并生成计划',
+                     allowed=not busy and ready,reason=prepare_reason if busy else plan_reason)
         if plan.get('validated') and state.get('can_execute') and not busy:
-            key=(plan.get('timeline_digest'),plan.get('output'),speed)
-            with self.lock:needs_review=key!=self.review_key
-            if needs_review:
-                owner=self.device.snapshot('collection')
-                review_request=(dict(token=plan['timeline_digest'],command_epoch=owner['command_epoch'],
-                    expires_in_s=30,workflow_generation=generation,speed_scale=speed),
-                    (plan.get('summary') or '当前起点变化时使用慢初始化段')+f'；执行速度 {speed*100:g}%，静止等待不缩放')
             primary.update(label='重新预览冻结计划',allowed=True)
         value=dict(id=state.get('output'),status=state.get('status','idle'),busy=busy,
             stage_id='collection.'+(state.get('action') if state.get('action') in ('prepare','plan','execute') else 'idle'),title=title,
             message=state.get('error') or state.get('capture_warning') or state.get('message',''),
+            failure=deepcopy(state.get('failure')) if state.get('status')=='failed' else None,
             primary_action=primary,progress=None,speed_scale=speed,execution_binding=execution_binding,outcomes=dict(motion=state.get('physical_outcome','未执行'),
                 data=data_outcome,
                 simulation=state.get('simulation','未验证'),task=state.get('task_outcome','未验证')),
@@ -681,10 +790,11 @@ class CollectionWorkflow:
                      {'label':'计划身份','value':plan.get('timeline_digest','尚未生成')}])
         actions={name:dict(id=action,label=label,allowed=not busy and ready if name=='plan' else
                           not busy and bool(state.get('can_execute')) if name=='execute' else not busy,
-                          reason='数采任务正在进行' if busy else '请先完成环境准备' if name=='plan' and not ready else
+                          reason='数采任务正在进行' if busy else plan_reason if name=='plan' and not ready else
                           '请先生成并审阅可执行计划' if name=='execute' and not state.get('can_execute') else None)
                  for name,action,label in (('prepare','collection_prepare','准备数采环境'),
                      ('plan','collection_plan','采集新观测并生成计划'),('execute','execute','审阅并执行本批'))}
+        actions['prepare'].update(label='初始化与预热',allowed=prepare_reason is None,reason=prepare_reason)
         relations=dict(plan={key:deepcopy(plan[key]) for key in ('output','timeline_digest','plan_path','duration_s','speed_scale') if key in plan},
                        source={},calibration={})
         for key in ('source_path','hardware_binding'):
@@ -698,6 +808,7 @@ class CollectionWorkflow:
                 else:relations['calibration'].update({name:artifact[name] for name in ('robot_id','camera_serials','calibration_profile_digest','environment') if name in artifact})
             except (OSError,ValueError,TypeError) as error:relations.setdefault('errors',{})[key]=str(error)
         value['collection']=dict(actions=actions,timing=deepcopy(progress),relations=relations,
+            warmup=deepcopy(state.get('warmup') or {'status':'not_started','message':'点击初始化与预热。'}),
             environment=deepcopy(state.get('environment') or {}),recording=deepcopy(recording),native_task=deepcopy(native),
             simulation=deepcopy(state.get('simulation')),errors=deepcopy(state.get('errors') or {}),
             execution_wait=deepcopy(progress.get('execution_wait') or state.get('execution_wait')),
@@ -741,17 +852,16 @@ class CollectionWorkflow:
                 camera=path.stem.removeprefix(prefix)
                 if path.stem.startswith(prefix) and camera in ('base_0','left_wrist_0','right_wrist_0'):
                     replay_identity=dict(camera=camera,role=role)
+            from .recording_quality import view_for_playback
+            quality=view_for_playback(path.parent,video_ready=True,
+                controller_outcome=(recording.get('manifest') or {}).get('controller_outcome'),cache=getattr(self,'_quality_cache',None))
             catalog.append(dict(id=identity,label=row.get('label','录制视频'),kind='recording',status=state.get('status','unknown'),
+                run_id=state.get('output'),recording_quality=quality,
                 media=dict(id=identity,label=row.get('label','录制视频'),kind='replay',ready=True,mime_type='video/mp4',
                     url=media_url(self.device.environment,'collection',identity),**replay_identity)))
         with self.lock:
             if generation!=self.generation:return
             self.value=value;self.catalog=catalog;self.media_files=files
-            if review_request:
-                if self.review_key==key:review_request=None
-                else:self.review_key=key
-        if review_request:
-            self.service.add_review(self.device,'collection',review_request[0],'execute',review_request[1])
 
     def accepted(self,result,action):
         """Publish the accepted task before its short HTTP request completes.
@@ -763,7 +873,7 @@ class CollectionWorkflow:
             self.generation+=1;self.review_key=None
             self.value.update(id=result['output'],status='running',busy=True,stage_id='collection.'+action,
                 title={'prepare':'准备数采环境','plan':'采集新观测并生成计划','execute':'执行与录制'}[action],
-                message='本轮任务已启动，正在更新阶段进度。',progress={'indeterminate':True},execution_binding=None,outcomes={},replan_action=None,
+                message='本轮任务已启动，正在更新阶段进度。',failure=None,progress={'indeterminate':True},execution_binding=None,outcomes={},replan_action=None,
                 primary_action=dict(id='generate_plan',label='采集新观测并生成计划',allowed=False,reason='数采任务正在进行'))
             self.value.pop('view_error',None)
         with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
@@ -780,21 +890,43 @@ class CollectionWorkflow:
         value=self.snapshot()
         if action in COLLECTION_TOOLS:
             if value.get('busy'):return dict(allowed=False,reason='数采任务正在进行')
+            if action=='collection_prepare':
+                reason=self.warmup_reason()
+                return dict(allowed=reason is None,reason=reason)
             return deepcopy(value.get('collection',{}).get('actions',{}).get(
                 'prepare' if action=='collection_prepare' else 'plan',dict(allowed=False,reason='正在读取数采环境状态')))
-        yes=action=='cancel' and value.get('busy') or action in ('generate_plan','execute') and not value.get('busy')
+        with self.playground.lock:busy=self.playground.state.get('busy',False)
+        yes=action=='cancel' and busy or action in ('generate_plan','execute') and not busy
         return dict(allowed=bool(yes),reason=None if yes else '当前数采阶段不允许此操作')
     def action(self,action,body):
-        if not self.allowed(action)['allowed']:raise ValueError(self.allowed(action)['reason'])
+        restore=body.get('restore_frozen_plan',False)
+        if ('restore_frozen_plan' in body and (action!='generate_plan' or type(restore) is not bool)
+                or restore and (body.get('replan') or 'operator_assisted_request_id' in body)):
+            raise ValueError('恢复冻结计划只用于明确的重新审阅，不能同时请求重新规划')
+        assisted=body.get('operator_assisted_request_id')
+        if 'operator_assisted_request_id' in body:
+            if (action!='collection_plan' or self.device.environment!='physical'
+                    or not isinstance(assisted,str) or not assisted.strip() or len(assisted)>256):
+                raise ValueError('辅助定位身份仅用于本次真机数采规划')
+            if self.playground.snapshot().get('busy'):raise ValueError('数采任务正在进行')
+        elif action!='collection_prepare' and not self.allowed(action)['allowed']:raise ValueError(self.allowed(action)['reason'])
+        if action=='collection_prepare':
+            return self.business_warmup(body)
         if action in ('generate_plan',*COLLECTION_TOOLS):
+            if restore:self.playground.restore_prepared()
             state=self.playground.snapshot()
             plan=state.get('plan') or {}
+            if restore and (plan.get('validated') is not True or not state.get('can_execute')):
+                raise ValueError('冻结计划已核验，但当前控制状态不允许审阅执行；不会自动预热或重新观测')
             speed=body.get('speed_scale',getattr(self,'speed_scale',None) or plan.get('speed_scale',.3))
-            if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1:
-                raise ValueError('运动速度必须在 10% 至 100% 之间')
+            if type(speed) not in (int,float) or not math.isfinite(speed) or not .3<=speed<=1.7:
+                raise ValueError('运动速度必须在 30% 至 170% 之间')
             if action in COLLECTION_TOOLS:
-                stage='prepare' if action=='collection_prepare' else 'plan'
-                result=self.playground.start(dict(action=stage,speed_scale=speed))
+                if not state.get('environment',{}).get('ready'):
+                    raise ValueError(self.warmup_reason() or '数采服务已就绪；请在本页完成业务环境准备（初始化与预热）')
+                stage='plan'
+                result=self.playground.start(dict(action=stage,speed_scale=speed,
+                    **({'operator_assisted_request_id':assisted} if assisted is not None else {})))
                 with self.lock:self.speed_scale=speed
                 return self.accepted(result,stage)
             replan=body.get('replan',False)
@@ -810,7 +942,9 @@ class CollectionWorkflow:
                     workflow_generation=generation,speed_scale=speed),
                     summary=(plan.get('summary') or '重新审阅冻结路径，不重新观测')+f'；执行速度 {speed*100:g}%，静止等待不缩放')
             with self.service.lock:self.service.reviews.pop((self.device.environment,'collection'),None)
-            stage='plan' if state.get('environment',{}).get('ready') else 'prepare'
+            if not state.get('environment',{}).get('ready'):
+                raise ValueError(self.warmup_reason() or '数采服务已就绪；请在本页完成业务环境准备（初始化与预热）')
+            stage='plan'
             result=self.playground.start(dict(action=stage,speed_scale=speed))
             with self.lock:self.speed_scale=speed
             return self.accepted(result,stage)
@@ -818,8 +952,8 @@ class CollectionWorkflow:
             plan=self.playground.snapshot().get('plan') or {}
             if plan.get('timeline_digest')!=body['token']:raise ValueError('本轮计划身份已变化，请重新审阅')
             speed=body.get('speed_scale',getattr(self,'speed_scale',None) or plan.get('speed_scale',.3))
-            if type(speed) not in (int,float) or not math.isfinite(speed) or not .1<=speed<=1:
-                raise ValueError('运动速度必须在 10% 至 100% 之间')
+            if type(speed) not in (int,float) or not math.isfinite(speed) or not .3<=speed<=1.7:
+                raise ValueError('运动速度必须在 30% 至 170% 之间')
             return self.accepted(self.playground.start({'action':'execute','speed_scale':speed}),'execute')
         if action=='cancel':return self.cancel()
         raise ValueError('未知数采操作')

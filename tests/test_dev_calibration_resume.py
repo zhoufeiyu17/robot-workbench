@@ -183,13 +183,21 @@ class DevResumeTest(unittest.TestCase):
             prep=CollectionPreparation(contract={},output=self.current,base=self.base,device=device,application=application,
                 ports={},directories={},control_url='http://127.0.0.1:1',token_file='unused',
                 deadline_wall_ns=time.time_ns()+120_000_000_000,installed_snapshot=app.installed_pair)
-        bootstrap_calibration(app,notify=prep.notify);self.assertEqual(prep.notifications.get_nowait(),snapshot)
+        bootstrap_calibration(app,notify=prep.notify)
+        self.assertTrue(prep.notifications.empty())
+        self.assertEqual(prep.snapshot()['status'],'awaiting_prepare')
+        self.assertEqual(prep.last_install,snapshot)
         self.new_install();changed=bootstrap_calibration(app,notify=prep.notify)
-        self.assertEqual(prep.notifications.get_nowait(),changed)
+        self.assertTrue(prep.notifications.empty())
+        self.assertEqual(prep.last_install,changed)
         self.assertFalse(prep.closed.is_set());self.assertFalse(prep.diagnostic_invalidated)
         app.geometry_id='changed'
+        drifted=bootstrap_calibration(app,runtime=runtime)
+        self.assertTrue(drifted['verified']);self.assertFalse(drifted['workbench_fingerprint_matches'])
+        self.assertEqual(runtime.notify_calibration_installed.call_count,2)
+        app.config['asset_geometry_id']='different-asset'
         with self.assertRaisesRegex(ValueError,'geometry'):bootstrap_calibration(app,runtime=runtime)
-        self.assertEqual(runtime.notify_calibration_installed.call_count,1)
+        self.assertEqual(runtime.notify_calibration_installed.call_count,2)
 
     def test_cli_dry_run_is_read_only_and_modes_are_exclusive(self):
         spec_path=self.root/'resume.json';warm.write(spec_path,self.spec)

@@ -19,7 +19,10 @@ def main(native_code):
         module.__path__ = [str(root.joinpath(*suffix.split('.'))) if suffix else str(root)]
         sys.modules[name] = module
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform as Pose
-    from motiongen_targets import REFERENCE, generate_targets, carry_targets, retreat_target, straight_waypoints
+    from robot_sim.asset_cfg.objects.cup import CupBand
+    from robot_sim.tasks.manager_based.coffee_make.interaction_evaluation import InteractionEvaluator
+    from motiongen_targets import (REFERENCE, generate_targets, carry_targets, retreat_target,
+                                   straight_waypoints, placement_support_profile,supported_cup_pose)
     # Placement/frame tests use a declared geometric candidate; the separate
     # LP tests exercise actual source convex meshes and reserve failures.
     def selected(planner,observation,data,ref,seed,**kwargs):
@@ -65,8 +68,9 @@ def main(native_code):
         def inverse(self, *args, **kwargs):
             raise AssertionError('task-space generation must not call CPU IK')
 
-    bands = [NS(shape_path='middle', z_min_m=0., z_max_m=.13, radius_m=.0347)]
-    cup = NS(profile_sha256=REFERENCE['cup_profile_sha256'], bands=bands, candidate_grasp_band_m=(.04, .065))
+    bands = [CupBand(shape_path='middle', z_min_m=0., z_max_m=.13, radius_m=.0347)]
+    cup = NS(profile_sha256=REFERENCE['cup_profile_sha256'], bands=bands, bottom_radius_m=.0347,
+             candidate_grasp_band_m=(.04, .065))
     vertices = [(x, y, z) for x in (-.01, .01) for y in (-.003, .003) for z in (-.01, .01)]
     parts = [NS(name=link+'/body', link=link, vertices=vertices) for link in ('left_link6', 'left_link7', 'left_link8')]
     planner = NS(fk=FakeFK(), home_state=dict(left_joint7=.02, left_joint8=.02), parts=parts, cup=cup,
@@ -82,6 +86,41 @@ def main(native_code):
     observation = NS(scene=scene, sample=NS(world_from_cup=Pose((.4, .25, .75))))
     data = dict(urdf_sha256=REFERENCE['urdf_sha256'], native_identity=dict(acceptance=dict(edge_margin_m=.002)))
     result = generate_targets(planner, observation, data)
+    # Cylindrical/standard footprints retain byte-value identical task targets.
+    with patch('motiongen_targets.placement_support_profile',side_effect=lambda value:value):
+        assert generate_targets(planner,observation,data)==result
+    original=deepcopy(cup)
+    support_profile=placement_support_profile(cup)
+    assert cup.__dict__==original.__dict__ and support_profile is not cup
+    assert support_profile.bands[0].radius_m==cup.bottom_radius_m
+    assert not hasattr(support_profile.bands[0],'mesh')
+    tapered=deepcopy(planner)
+    tapered.cup.bands=[CupBand(shape_path='MiddleBody',z_min_m=0.,z_max_m=.10884090462674108,
+        radius_m=.040782812401732614,radius_start_m=.027216776927613505,radius_end_m=.040782812401732614)]
+    tapered.cup.bottom_radius_m=.027216776927613505
+    narrow_outlet=deepcopy(observation)
+    narrow_outlet.scene.support_polygon_world_m=tuple(support.transform_point(point) for point in
+        ((-.1145164147,-.0894999951,0.),(.1145164147,-.0894999951,0.),
+         (.1145164147,.0894999951,0.),(-.1145164147,.0894999951,0.)))
+    narrow_outlet.scene.sites=(NS(site_id='liquid_outlet',position_world_m=support.transform_point((0.,-.0511140937,.2))),)
+    source_cup=deepcopy(tapered.cup)
+    with patch('motiongen_targets.placement_support_profile',side_effect=lambda value:value):
+        assert generate_targets(tapered,narrow_outlet,data)['placement_candidates']==[]
+    repaired=generate_targets(tapered,narrow_outlet,data)
+    assert repaired['placement_candidates']
+    assert tapered.cup.__dict__==source_cup.__dict__
+    assert tapered.cup.bands[0].radius_m==.040782812401732614
+    assert all(row['planning_edge_margin_m']==.009000000000000001 for row in repaired['placement_candidates'])
+    flat,height=supported_cup_pose(scene,cup,(1.,0.,0.,0.),(.01,-.02))
+    assert flat==Pose(support.transform_point((.01,-.02,0.))) and height==0.
+    tilted_support=deepcopy(scene)
+    angle=math.radians(3.1104688098372932)
+    tilted_support.world_from_support=Pose(support.position,(math.cos(angle/2),0.,math.sin(angle/2),0.))
+    touching,height=supported_cup_pose(tilted_support,tapered.cup,(1.,0.,0.,0.),(.01,-.02))
+    local=tilted_support.world_from_support.inverse().compose(touching)
+    assert np.allclose(local.position[:2],(.01,-.02)) and touching.orientation_wxyz==(1.,0.,0.,0.)
+    assert abs(InteractionEvaluator._lowest_z(NS(cup=tapered.cup),local))<1e-12
+    assert abs(height-tapered.cup.bottom_radius_m*math.sin(angle))<1e-12
     grasp, placement = result['grasp_candidates'][0], result['placement_candidates'][0]
     assert placement['preferred'] and placement['support_xy_m'] == (0.,.001)
     assert placement['nominal_support_xy_m']==(0.,0.) and placement['inward_bias_m']==.001

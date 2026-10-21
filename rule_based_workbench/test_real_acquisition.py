@@ -62,6 +62,22 @@ def main():
         assert len(samples) == 2 and start['owner_samples'][0]['pid'] == 1234
         assert start['measured_reported'] == samples[0]['physical_feedback']
         assert start['owner_samples'][1]['sample_wall_ns'] > start['owner_samples'][0]['sample_wall_ns']
+        # Physical streaming gets a 300 s ceiling, bounded by the current task
+        # budget and any fixed resident cutoff (with its existing 45 s reserve).
+        for task_minutes,resident_after,expected_seconds in ((20,None,300.),(.5,None,30.),(20,60,15.)):
+            stream_pipeline=json.loads((root/'pipeline.json').read_text())
+            stream_pipeline.update(detector_service={'fixture':True},
+                resident_deadline_wall_ns=None if resident_after is None else int((1000+resident_after)*1e9))
+            stream_contract=deepcopy(contract);stream_contract['resources']['max_wall_time_minutes']=task_minutes
+            with patch('real_acquisition.validate_config',return_value=(stream_pipeline,stream_contract)),\
+                    patch('real_acquisition.time.time_ns',return_value=1_000_000_000_000),\
+                    patch('real_acquisition.time.monotonic',return_value=10.),\
+                    patch('real_observation.capture',side_effect=ValueError('budget fixture')) as capture:
+                try:prepare_inputs(config,root/'budget',read_snapshot=lambda:None)
+                except ValueError as error:assert str(error)=='budget fixture'
+                else:raise AssertionError('capture boundary not reached')
+                assert capture.call_args.kwargs['timeout_s']==300.
+                assert capture.call_args.kwargs['wall_deadline_ns']==int((1000+expected_seconds)*1e9)
         bad = deepcopy(config)
         bad['acquisition']['transport']['remote_root'] = '/outside/authorized/roots'
         try:

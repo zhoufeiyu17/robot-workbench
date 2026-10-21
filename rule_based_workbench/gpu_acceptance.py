@@ -4,6 +4,13 @@ import time
 from a1_asset_derivation import certificate_path
 
 
+def jaw_input_digest(engine,q,locked):
+    from integration import _digest
+    keys=sorted(set(locked)-{'left_joint7','left_joint8'})
+    arm=engine.tensor_args.to_device(q);fixed=engine.tensor_args.to_device([locked[k]for k in keys])
+    return _digest(dict(dtype=str(arm.dtype),arm=arm.tolist(),lock_names=keys,locked=fixed.tolist()))
+
+
 def jaw_sweep(engine, planner, q, start, end, *, centering=None):
     """Translate native finger spheres, then use the installed native GPU costs.
 
@@ -88,6 +95,7 @@ def jaw_sweep(engine, planner, q, start, end, *, centering=None):
     if any(not torch.isfinite(v).all() for v in arrays):raise ValueError('nonfinite GPU jaw sweep')
     claw_ok=(claw<=0)|(bound<=.003)
     result=dict(passed=bool((self_value<=0).all() and (environment<=0).all() and (wrist<=0).all() and (cup_world<=0).all() and claw_ok.all()),
+        model_arm_q=list(q),model_locked_joints=dict(locked),native_input_digest=jaw_input_digest(engine,q,locked),
         samples=count,self_max=float(self_value.max()),environment_max=float(environment.max()),
         cup_claw_max=float(claw.max()),cup_wrist_max=float(wrist.max()),cup_world_max=float(cup_world.max()),
         unresolved_claw_samples=int((~claw_ok).sum()),

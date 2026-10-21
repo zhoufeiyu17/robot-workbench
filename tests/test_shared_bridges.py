@@ -36,6 +36,11 @@ class SharedBridgeTest(unittest.TestCase):
             calls=[]
             def dispatch(business,command):
                 self.assertEqual(business,'collection');self.assertEqual(command['action'],'preview_frozen')
+                from robot_workbench.control_plan import RawPreview
+                self.assertIsInstance(command,RawPreview)
+                # This mocked receiver is an explicit CPU audit; the real
+                # Owner decode/initialization boundary has its own pressure test.
+                command=json.loads(command.raw)
                 # Validate the actual legacy frozen plan without starting its follower or SDK.
                 frozen=FrozenExecutor(command['plan'],command['source'],sink=lambda _:self.fail('motion started'),gate=lambda:False,stop=lambda _:None)
                 self.assertEqual(len(frozen.ticks),count);calls.append(business)

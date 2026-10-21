@@ -12,25 +12,47 @@ import unittest
 from unittest.mock import patch
 from unittest.mock import Mock
 
-ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT),str(ROOT/'rule_based_workbench')]
+ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT),str(ROOT/'rule_based_workbench'),str(ROOT/'calibration/infra')]
 from robot_workbench.preview_service import prepare_preview_roles,resident_execution,PreviewService
-from local_execution import validate,register_role,_role_locks,TARGET
+from local_execution import validate,register_role,_role_locks,TARGET,PHYSICAL_TARGET
 
 
 class PreviewServiceTest(unittest.TestCase):
     def setUp(self):
         self.tmp=TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name).resolve()
-        self.contract=dict(identity={'session_id':'cpu-preview-session'},resources={'max_workers':5},
+        self.contract=dict(identity={'session_id':'cpu-preview-session','instance':TARGET['instance_id']},
+            resources=dict(max_workers=5,gpu_index=1,gpu_uuid=TARGET['gpu_uuid'],cuda_visible_devices=[1]),
             collection_setup=dict(plant_max_memory_mib=12288,min_free_memory_mib=16384),
             preview_setup=dict(port=19011,max_memory_mib=12288,auxiliary_max_memory_mib=16384))
         self.roles=prepare_preview_roles(self.contract,self.root,{'model_family':'ac_one','mesh_rendering_enabled':True})
         self.proc=self.root/'proc';current=self.proc/str(os.getpid());current.mkdir(parents=True)
-        self.write_process(current,['python3',str(ROOT/'scripts/serve_physx_device.py'),'--output',str(self.root)])
+        self.write_process(current,['python3',str(ROOT/'scripts/serve_physx_device.py'),'--output',str(self.root),'--gpu','1'])
         self.execution=resident_execution(self.contract,self.root,proc_root=self.proc)
 
     def write_process(self,path,argv):
         (path/'cmdline').write_bytes(b'\0'.join(v.encode() for v in argv)+b'\0')
         (path/'stat').write_text(str(os.getpid())+' (fixture) '+' '.join(['S']+['0']*18+['123']))
+
+    def test_three_camera_inputs_follow_wrist_head_contract(self):
+        import numpy as np
+        from types import SimpleNamespace
+        from robot_workbench.preview_service import calibration_mesh_inputs
+        head=dict(id='head-a',joint_offsets_rad={'left':[0.]*6,'right':[0.]*6},camera_T_world_optical=np.eye(4).tolist())
+        wrist=dict(id='wrist-a',left={'T_link6_camera':np.eye(4).tolist()},right={'T_link6_camera':np.eye(4).tolist()})
+        workbench=SimpleNamespace(calibration_results=lambda:[{'id':'head-a','parameters':head}],wrist_results=lambda:[wrist],
+            wrist_overlay_error=lambda row:None,wrist_contract=lambda row:{'head_snapshot':head},
+            geometry=SimpleNamespace(frames=lambda q:{side:{'link6':np.eye(4)} for side in ('left','right')}))
+        class Frame:
+            def __init__(self,name):self.name=name
+            def snapshot(self):return {'jpeg':b'jpeg-'+self.name.encode(),'status':{'ready':True,'data_valid':True,'frame_readback':{'qpos':[0.]*14}}}
+        names=('base_0','left_wrist_0','right_wrist_0')
+        producer=SimpleNamespace(frames={name:Frame(name) for name in names},intrinsics={name:{} for name in names})
+        group=calibration_mesh_inputs(workbench,producer,'all','wrist-a')
+        self.assertEqual([group[name][4]['id'] for name in ('head','left','right')],['head-a','wrist-a','wrist-a'])
+        self.assertEqual(group['right'][4]['head_result_id'],'head-a')
+        with self.assertRaises(ValueError):calibration_mesh_inputs(workbench,producer,'all','head-a')
+        workbench.calibration_results=lambda:[]
+        with self.assertRaises(ValueError):calibration_mesh_inputs(workbench,producer,'all','wrist-a')
 
     def test_contract_and_launch_freeze_fifth_role_without_starting_it(self):
         validate({'execution':self.execution})
@@ -44,6 +66,46 @@ class PreviewServiceTest(unittest.TestCase):
         self.assertEqual(json.loads(argv[argv.index('--execution-json')+1]),self.execution)
         four=deepcopy(self.contract);four['resources']['max_workers']=4
         with self.assertRaises(ValueError):prepare_preview_roles(four,self.root/'four',{})
+
+    def test_persistent_renderer_has_no_expiry_but_keeps_owned_wrapper(self):
+        self.contract['resources'].update(persistent_service=True,service_lifetime_seconds=None)
+        (self.root/'persistent').mkdir()
+        roles=prepare_preview_roles(self.contract,self.root/'persistent',{})
+        execution=deepcopy(self.execution);execution['roles']=roles;execution['plant']['argv'].append('--persistent')
+        service=PreviewService(execution=execution,deadline_wall_ns=None,deps='/approved/deps',mesh_inputs=None,validate_pose=None)
+        argv=service.launch(None,Path(roles['preview']['root'])/'frames-one')
+        self.assertIn('owned_process.py', ' '.join(argv));self.assertIn('--persistent',argv)
+        self.assertNotIn('--timeout',argv);self.assertEqual(argv[argv.index('--duration-s')+1],'0')
+        self.assertTrue(service.state()['recovery']['allowed'])
+        service.close();self.assertFalse(service.state()['recovery']['allowed'])
+
+    def test_fake739_resident_and_preview_bind_same_declared_gpu_zero(self):
+        self.contract['identity']['instance']=PHYSICAL_TARGET['instance_id']
+        self.contract['resources'].update(gpu_index=0,cuda_visible_devices=[0],gpu_uuid=PHYSICAL_TARGET['gpu_uuid'])
+        self.write_process(self.proc/str(os.getpid()),
+            ['python3',str(ROOT/'scripts/serve_physx_device.py'),'--output',str(self.root),'--gpu','0'])
+        execution=resident_execution(self.contract,self.root,proc_root=self.proc)
+        self.assertEqual(validate({'execution':execution}),execution)
+        self.assertEqual(execution['gpu_uuid'],PHYSICAL_TARGET['gpu_uuid'])
+        self.assertEqual(execution['gpu_index'],0);self.assertEqual(execution['vulkan_gpu'],0)
+        service=PreviewService(execution=execution,deadline_wall_ns=time.time_ns()+1_000_000_000_000,
+            deps='/approved/deps',mesh_inputs=None,validate_pose=None)
+        argv=service.launch(600,Path(self.roles['preview']['root'])/'frames739')
+        self.assertEqual(argv[argv.index('--render-gpu')+1],'0')
+        self.assertEqual(json.loads(argv[argv.index('--execution-json')+1]),execution)
+
+    def test_shared_model_contract_is_preserved_without_freezing_a_pid(self):
+        from robot_workbench.inference_model import BASE566_ID,BASE566_PINS
+        model=dict(service_receipt='/trusted/model.json',service_spec_sha256='a'*64,
+            service_script='/trusted/service.py',service_script_sha256='b'*64,service_argv_sha256='c'*64,
+            status_port=49379,worker_script='/trusted/worker.py',worker_script_sha256='d'*64,
+            model_id=BASE566_ID,checkpoint_sha256=BASE566_PINS['checkpoint'],max_memory_mib=16000)
+        self.contract['shared_model']=model
+        execution=resident_execution(self.contract,self.root,proc_root=self.proc)
+        self.assertEqual(execution['shared_model'],model);self.assertIsNot(execution['shared_model'],model)
+        validate({'execution':execution})
+        self.contract['shared_model']['pid']=123
+        with self.assertRaisesRegex(ValueError,'ownership fields'):resident_execution(self.contract,self.root,proc_root=self.proc)
 
     def test_registration_publishes_actual_command_and_rejects_live_slot_reuse(self):
         spec=self.roles['preview'];argv=['python3',spec['script'],'--config',spec['config_path'],

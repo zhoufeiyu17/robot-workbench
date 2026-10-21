@@ -171,7 +171,7 @@ class RealBridge:
                     robot_id=self.config['robot_id'], control_hz=30,capture_ready=capture_ready,
                     control_decoupled_from_rendering=True)
 
-    def control(self, payload):
+    def control(self, payload, *, cancel=None, before_confirm=None):
         if self.config.get('hardware_access_enabled', True) is False:
             raise ValueError('相机与控制权当前由标定工作台使用；数采工作台处于开发模式')
         action = payload.get('action')
@@ -188,8 +188,11 @@ class RealBridge:
             fields[action] = set(payload)
         elif action == 'confirm':
             self.inputs()
+            if cancel is not None and cancel():raise InterruptedError('执行确认前已中断')
+            if before_confirm is not None:before_confirm()
             fields[action] = {'action', 'token', 'confirmation', 'physical_clearance'}
         if action not in fields or set(payload) != fields[action]:
             raise ValueError('unsupported real control action or fields')
+        if action=='confirm' and cancel is not None and cancel():raise InterruptedError('执行确认前已中断')
         raw, _ = self.request(self.config['control_url'] + '/operator', payload, control=True)
         return json.loads(raw)

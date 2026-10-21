@@ -52,8 +52,8 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
     if (not isinstance(summary, dict) or summary.get("schema_version") != "isaac_rgbd_detection.v1"
             or summary.get("status") != "DETECTION_WINDOW_READY" or summary.get("cleanup_complete") is not True):
         raise ValueError("completed DETECTION_WINDOW_READY summary is required")
-    if _finite(summary.get("valid_pair_span_s"), "valid_pair_span_s") < 5:
-        raise ValueError("detection window must span 5 seconds")
+    if _finite(summary.get("valid_pair_span_s"), "valid_pair_span_s") < 3:
+        raise ValueError("detection window must span 3 seconds")
     for key in ("adapter_sha256", "manifest_sha256", "node_config_sha256", "release_manifest_digest",
                 "runtime_pack_digest", "runtime_config_id"):
         nonempty(summary.get(key), key)
@@ -62,34 +62,11 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
     inputs = summary.get("inputs")
     if not isinstance(inputs, list) or not isinstance(observations, list) or len(inputs) != len(observations):
         raise ValueError("every captured input must have one observation")
-    calibration_thresholds = profile["divergence_thresholds"]
-    summary_threshold = summary.get("cup_motion_threshold_m")
-    profile_threshold = calibration_thresholds.get("cup_motion_threshold_m")
-    explicit_threshold = summary_threshold if summary_threshold is not None else profile_threshold
-    explicit_jitter = calibration_thresholds.get("cup_position_jitter_m")
-    threshold_source = ("summary.cup_motion_threshold_m" if summary_threshold is not None
-                        else "calibration_profile" if profile_threshold is not None
-                        else "derived_from_initial_detection_jitter")
-    if explicit_threshold is None:
-        noise = summary.get("detection_noise")
-        if isinstance(noise, dict):
-            jitter = noise.get("cup_position_jitter_m")
-            if isinstance(jitter, (int, float)) and not isinstance(jitter, bool):
-                explicit_jitter = _finite(jitter, "detection_noise.cup_position_jitter_m")
-                if explicit_jitter < 0:
-                    raise ValueError("detection_noise.cup_position_jitter_m must be nonnegative")
-                explicit_threshold = max(3.0 * explicit_jitter, EARLY_CUP_MOTION_THRESHOLD_M)
-                threshold_source = "summary.detection_noise"
-    if explicit_threshold is None and explicit_jitter is not None:
-        explicit_jitter = _finite(explicit_jitter, "divergence_thresholds.cup_position_jitter_m")
-        if explicit_jitter < 0:
-            raise ValueError("divergence_thresholds.cup_position_jitter_m must be nonnegative")
-        explicit_threshold = max(3.0 * explicit_jitter, EARLY_CUP_MOTION_THRESHOLD_M)
-        threshold_source = "calibration_profile_jitter"
+    from robot_workbench.observation_window import ContinuousObservationWindow, CUP_SPAN_M
+    continuous = ContinuousObservationWindow()
     window = ObservationWindow(profile, [], mode="offline_replay", coordinates="world",
-                               cup_motion_threshold_m=explicit_threshold,
-                               cup_position_jitter_m=explicit_jitter,
-                               cup_motion_threshold_source=threshold_source)
+                               cup_motion_threshold_m=CUP_SPAN_M,
+                               cup_motion_threshold_source="approved_continuous_window_6mm")
     previous_stamp, previous_capture, previous_sequence = 0, -1, -1
     session, frame_id = None, None
     providers = []
@@ -117,10 +94,9 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
             raise ValueError("observation runtime, frame or session changed, or provider failed")
         if type(observation.get("pair_valid")) is not bool:
             raise ValueError("pair_valid must be boolean")
+        continuous.add(observation)
         if not observation["pair_valid"]:
-            window.frames.clear()
-            providers.clear()
-            continue  # Only the final contiguous run of valid pairs can define the scene.
+            continue
         tracks = observation.get("tracks")
         if (not isinstance(tracks, list) or len(tracks) != 2
                 or any(not isinstance(t, dict) or t.get("pose_current") is not True
@@ -128,12 +104,6 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
                        for t in tracks)):
             raise ValueError("valid pair requires two current tracks and unambiguous coffee-machine orientation")
         valid_stamps.append(stamp)
-        window_result = window.add(observation)
-        if window_result.get("reobserve_required"):
-            retained = {frame['source_stamp_ns'] for frame in window.frames}
-            providers = [item for item in providers if item['source_stamp_ns'] in retained]
-            if not retained:
-                continue  # Immediate movement still discards its boundary sample.
         provenance = {}
         for track in observation["tracks"]:
             if track.get("object_type") not in {"coffee_machine", "cup"}:
@@ -150,13 +120,21 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
                 raise ValueError("object mesh identity is required")
             provenance[track["object_type"]] = deepcopy(item)
         providers.append({"source_stamp_ns": stamp, "capture_sequence_id": captured, "tracks": provenance})
-        while len(window.frames) > 2 and stamp - window.frames[1]["source_stamp_ns"] >= WINDOW_NS:
-            window.frames.pop(0)
-            providers.pop(0)
     valid_span = (valid_stamps[-1] - valid_stamps[0]) / 1e9 if len(valid_stamps) >= 2 else 0
     if (type(summary.get("valid_pair_frames")) is not int or summary["valid_pair_frames"] != len(valid_stamps)
             or abs(summary["valid_pair_span_s"] - valid_span) > 1e-9):
         raise ValueError("summary valid window differs from observations")
+    status = continuous.status()
+    if not status['ready']:
+        raise ValueError('continuous stable detection requires nine valid frames spanning three seconds')
+    if (summary.get('continuous_valid_pair_stamps_ns') is not None and
+            summary['continuous_valid_pair_stamps_ns'] != status['valid_stamps_ns']):
+        raise ValueError('summary terminal window differs from independently checked observations')
+    for observation in continuous.frames:
+        window.add(observation)
+    window.reobserve_events = deepcopy(continuous.events)
+    accepted_stamps = set(status['valid_stamps_ns'])
+    providers = [item for item in providers if item['source_stamp_ns'] in accepted_stamps]
     scene = window.finalize()
     scene["source"]["detection"] = {"summary": deepcopy(summary), "providers": providers,
                                       "observations_digest": _digest(observations),
@@ -227,6 +205,61 @@ def convert(profile_path, detection_dir, output, run_id, physical_binding=None, 
         with (output / filename).open("x") as stream:
             json.dump(value, stream, indent=2, allow_nan=False)
             stream.write("\n")
+    return source
+
+
+def build_assisted_source(receipt, profile, run_id, physical_binding):
+    """Explicit one-off human-assisted source; no synthetic detection summaries."""
+    from integration import SCENE_SCHEMA, _validate_scene
+    from real_observation import validate_binding
+    from real_contract import validate_real_source
+    from joint_space import validate_initial_state
+    validate_binding(profile,physical_binding,environment='physical')
+    nonempty(run_id,'run_id')
+    initial=deepcopy(validate_initial_state(physical_binding.get('initial_state'),profile))
+    frames=receipt.get('frames') if isinstance(receipt,dict) else None
+    if not isinstance(frames,list) or not frames:raise ValueError('actual assistance RGB-D frames required')
+    stamps=[frame.get('source_stamp_ns') for frame in frames]
+    if any(type(stamp) is not int for stamp in stamps):raise ValueError('actual assistance frame timestamps required')
+    scene=dict(schema_version=SCENE_SCHEMA,episode_id=run_id,seed=0,
+        **{key:deepcopy(receipt.get(key)) for key in ('machine_asset','environment_from_machine_root','environment_from_cup')},
+        source=dict(frame_id='environment',observation_mode='operator_assisted_rgbd',input_coordinates='world',
+            automatic_window_qualified=False,window_start_ns=min(stamps),window_end_ns=max(stamps),sample_count=len(frames),
+            assistance_receipt=deepcopy(receipt),assistance_receipt_digest=_digest(receipt)))
+    scene['episode_scene']={key:deepcopy(scene[key]) for key in
+        ('episode_id','seed','machine_asset','environment_from_machine_root','environment_from_cup')}
+    scene['scene_digest']=_digest(scene)
+    _validate_scene(scene,allow_operator_assisted=True)
+    geometry=deepcopy(receipt['cup_geometry'])
+    source=dict(schema_version='physical_collection_source.v1',lane='physical-real',evidence_source='physical_rgbd',
+        adapter='operator_assisted_rgbd',observation_mode='operator_assisted_rgbd',run_id=run_id,sequence=0,
+        robot_id=physical_binding['robot_id'],camera_serials=deepcopy(physical_binding['camera_serials']),
+        calibration_profile=deepcopy(profile),initial_state=initial,scene=scene,
+        cup_geometry=geometry,cup_geometry_digest=_digest(geometry),grasp_command=deepcopy(receipt['grasp_command']))
+    binding=deepcopy(physical_binding)
+    binding.update(source_digest=_digest(source),operator_assistance_digest=_digest(receipt),
+        operator_assistance_request_id=receipt['request_id'],cup_geometry_digest=_digest(geometry))
+    validate_real_source(source,binding,environment='physical')
+    episode=deepcopy(scene['episode_scene'])
+    # Native episodes accept only their initial state pair. Assistance remains
+    # fully bound in source.json and hardware-binding.json, not duplicate metadata.
+    episode['metadata']=dict(initial_robot_state=deepcopy(initial['model']),initial_robot_state_digest=_digest(initial['model']))
+    return source,dict(episodes=[episode]),binding
+
+
+def convert_assisted(profile_path, receipt_path, output, run_id, physical_binding):
+    """Write the existing three-artifact planner input; verify, never copy, RGB-D."""
+    receipt=json.loads(Path(receipt_path).read_text())
+    profile=json.loads(Path(profile_path).read_text())
+    source,suite,binding=build_assisted_source(receipt,profile,run_id,physical_binding)
+    for frame in receipt['frames']:
+        path=Path(frame['path'])
+        if (not path.is_file() or path.is_symlink() or path.suffix!='.npz'
+                or hashlib.sha256(path.read_bytes()).hexdigest()!=frame['sha256']):
+            raise ValueError('assisted raw RGB-D evidence file/hash differs')
+    output=Path(output);output.mkdir(parents=True,exist_ok=False)
+    for name,value in (('source.json',source),('suite.json',suite),('hardware-binding.json',binding)):
+        (output/name).write_text(json.dumps(value,indent=2,allow_nan=False)+'\n')
     return source
 
 

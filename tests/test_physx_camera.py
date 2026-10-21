@@ -41,6 +41,7 @@ class PhysxCameraTest(unittest.TestCase):
         self.actor=dict(owner_available=True,owner_pid=1234,command_epoch=7,runtime_nonce='runtime-at-sample')
 
     def producer(self,**kwargs):
+        kwargs.setdefault('memory_recording', False)
         producer=CameraProducer(self.k,self.root/'spool',min_free_bytes=0,**kwargs)
         self.addCleanup(producer.close)
         return producer
@@ -186,6 +187,117 @@ class PhysxCameraTest(unittest.TestCase):
             except RuntimeError as error:errors.append(str(error))
         thread=threading.Thread(target=other_thread);thread.start();thread.join(1)
         self.assertEqual(len(errors),1)
+
+    def memory_lease(self, producer, token='a'*32,duration_ns=30_000_000_000):
+        now=time.time_ns()
+        lease=dict(run_id=token,start_wall_ns=now,admission_start_wall_ns=now,
+            deadline_wall_ns=now+duration_ns,execution_instance_id='execution-'+token,
+            execution_owner={key:self.actor[key] for key in ('owner_pid','command_epoch','runtime_nonce')})
+        for channel in producer.channels.values():channel.begin(lease)
+        return lease
+
+    def test_memory_delivery_is_exact_bounded_and_creates_no_frame_files(self):
+        producer=self.producer(memory_recording=True,recording_guard=lambda _:True)
+        self.collect(producer);self.wait(producer)
+        lease=self.memory_lease(producer)
+        self.collect(producer);self.wait(producer)
+        for name,channel in producer.channels.items():
+            self.assertEqual(channel.snapshot()['queued_frames'],1)
+            peek=channel.peek(lease['run_id'])
+            self.assertEqual(peek['metadata']['source_time_ns'],producer.frames[name].snapshot()['status']['source_time_ns'])
+            self.assertEqual(peek['rgb'],np.arange(36,dtype=np.uint8).tobytes())
+            self.assertEqual(peek['depth'],np.full((3,4),500,dtype='<u2').tobytes())
+            peek['metadata']['runtime_nonce']='consumer mutation'
+            frame=channel.pop(lease['run_id'])
+            self.assertEqual(frame['metadata']['runtime_nonce'],self.actor['runtime_nonce'])
+            self.assertEqual(channel.latest(lease['run_id']),frame['metadata'])
+            self.assertEqual(channel.snapshot()['queued_bytes'],0)
+            with self.assertRaisesRegex(ValueError,'already leased'):channel.begin(lease)
+            self.assertFalse(channel.end('b'*32))
+            self.assertEqual(channel.token(),lease['run_id'])
+        files=[path for path in self.root.rglob('*') if path.is_file()]
+        self.assertEqual(len([path for path in files if path.name=='recording-service.json']),3)
+        self.assertFalse([path for path in files if path.suffix in ('.png','.zip')])
+        for path in files:
+            if path.name=='recording-service.json':
+                self.assertEqual(json.loads(path.read_text())['transport'],'unix_rgbd')
+
+    def test_late_encoded_packet_and_revoked_owner_do_not_enter_next_memory_run(self):
+        live=[True]
+        producer=self.producer(memory_recording=True,recording_guard=lambda _:live[0])
+        lease=self.memory_lease(producer)
+        entered,release=threading.Event(),threading.Event();self.addCleanup(release.set)
+        publish=producer._publish
+        def delayed(packet):
+            entered.set();release.wait(3);return publish(packet)
+        producer._publish=delayed
+        self.collect(producer);self.assertTrue(entered.wait(1))
+        for channel in producer.channels.values():channel.end(lease['run_id'])
+        current=self.memory_lease(producer,'b'*32)
+        release.set();self.wait(producer)
+        for channel in producer.channels.values():self.assertIsNone(channel.peek(current['run_id']))
+        live[0]=False
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():self.assertIsNone(channel.peek(current['run_id']))
+        live[0]=True
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():
+            self.assertEqual(channel.pop(current['run_id'])['metadata']['frame_number'],2)
+
+    def test_memory_queue_overflow_fails_data_without_blocking_physics_and_new_lease_recovers(self):
+        producer=self.producer(memory_recording=True,recording_guard=lambda _:True)
+        lease=self.memory_lease(producer)
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():
+            channel.fail('injected camera recording memory queue overflow',sampled_token=lease['run_id'])
+        start=time.monotonic();self.collect(producer)
+        self.assertLess(time.monotonic()-start,.2)
+        self.wait(producer)
+        self.assertEqual(self.backend.sequence,0)
+        for channel in producer.channels.values():
+            with self.assertRaisesRegex(ValueError,'memory queue overflow'):channel.peek(lease['run_id'])
+            self.assertEqual(channel.snapshot()['queued_frames'],1)
+            channel.end(lease['run_id'])
+        current=self.memory_lease(producer,'b'*32)
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():
+            self.assertTrue(channel.pop(current['run_id'])['metadata']['data_valid'])
+            self.assertIsNone(channel.snapshot()['error'])
+
+    def test_memory_source_drop_is_immediately_visible_and_lease_renewal_keeps_admission(self):
+        producer=self.producer(memory_recording=True,recording_guard=lambda _:True)
+        lease=self.memory_lease(producer)
+        channel=producer.channels['base_0']
+        channel.renew(lease['run_id'],lease['deadline_wall_ns'],lease['deadline_wall_ns']+1_000_000_000)
+        self.assertEqual(channel.current_lease()['admission_start_wall_ns'],lease['admission_start_wall_ns'])
+        with self.assertRaisesRegex(ValueError,'ownership/window changed'):
+            channel.renew(lease['run_id'],lease['deadline_wall_ns'],lease['deadline_wall_ns']+2_000_000_000)
+        publish=producer._publish
+        def broken(packet):
+            producer._publish=publish
+            raise ValueError('memory encode fixture failed')
+        producer._publish=broken
+        self.collect(producer);self.wait(producer,'ValueError: memory encode fixture failed')
+        for channel in producer.channels.values():
+            with self.assertRaisesRegex(ValueError,'memory encode fixture failed'):channel.latest(lease['run_id'])
+        self.assertFalse(list(self.root.rglob('*.png'))+list(self.root.rglob('*.zip')))
+        self.assertEqual(len(list(self.root.rglob('recording-service.json'))),3)
+
+    def test_memory_byte_limit_and_lease_expiry_are_enforced(self):
+        producer=self.producer(memory_recording=True,recording_guard=lambda _:True,recording_budget_bytes=1)
+        lease=self.memory_lease(producer)
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():
+            self.assertEqual(channel.snapshot()['queued_bytes'],0)
+            with self.assertRaisesRegex(ValueError,'memory queue overflow'):channel.pop(lease['run_id'])
+            channel.end(lease['run_id'])
+        current=self.memory_lease(producer,'b'*32,duration_ns=100_000_000)
+        time.sleep(.12)
+        self.collect(producer);self.wait(producer)
+        for channel in producer.channels.values():
+            self.assertIsNone(channel.peek(current['run_id']))
+            with self.assertRaisesRegex(ValueError,'expired leases cannot resume'):
+                channel.renew(current['run_id'],current['deadline_wall_ns'],current['deadline_wall_ns']+1_000_000_000)
 
 
 if __name__=='__main__':unittest.main()

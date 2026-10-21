@@ -88,8 +88,10 @@ class RGBDTest(unittest.TestCase):
             frames.publish(status={'ready': True, 'recorded_frames': 7})
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)/'new'
+            service=SimpleNamespace(frames={'base_0':Frames()},start_servers=lambda _:dict(head=18499,left=18500,right=18501))
             with patch('sys.argv', ['real_rgbd', '--serial', '123', '--camera-name', 'head',
-                                    '--port', '18499', '--output', str(output)]), \
+                                    '--port', '18499', '--output', str(output),'--service-descriptor','unused.json']), \
+                    patch('robot_workbench.rgbd_service.CommonCameraService.connect',return_value=service), \
                     patch('rule_based_workbench.real_rgbd.capture', fake_capture):
                 main()
             final = json.loads((output/'status.json').read_text())

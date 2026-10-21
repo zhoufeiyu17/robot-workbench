@@ -1,5 +1,6 @@
 """Immutable robot-local calibration snapshots, independent of raw captures."""
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -10,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import threading
 
@@ -47,6 +49,28 @@ class CalibrationStore:
         self._check_root()
         self.root.mkdir(parents=True, exist_ok=True)
         self._check_root()
+        self._record_cache={};self._ids={};self._names=()
+        self._active_cache=None
+        self.generation=0
+
+    @staticmethod
+    def _stamp(path):
+        try:value=path.lstat()
+        except FileNotFoundError:return None
+        return (value.st_dev,value.st_ino,value.st_mode,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+
+    def _content_stamp(self,path):
+        if path.is_symlink():raise ValueError('calibration dependency must not be a symlink')
+        if not path.is_file():return self._stamp(path)
+        fd=os.open(path,os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as stream:return hashlib.sha256(stream.read()).digest()
+
+    def invalidate(self,*,catalog=True,active=True):
+        """Store writes invalidate immediately; every read still hashes actual file bytes."""
+        with _LOCK:
+            if catalog:self._record_cache.clear();self._ids={};self._names=()
+            if active:self._active_cache=None
+            self.generation+=1
 
     def _check_root(self):
         if any(path.is_symlink() for path in (self.root, *self.root.parents)):
@@ -69,44 +93,60 @@ class CalibrationStore:
             finally:
                 os.close(fd)
 
+    def _record(self,path):
+        if not re.fullmatch(r'v[0-9]{6,}\.json',path.name) or path.is_symlink():raise ValueError('invalid calibration version file')
+        try:
+            fd=os.open(path,os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd,'rb') as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):raise ValueError('regular calibration record required')
+                raw=stream.read()
+            # ARX filesystems can report identical nanosecond stats for rapid,
+            # same-size writes. Content hashes, never stat alone, fence this cache.
+            content_hash=hashlib.sha256(raw).digest();cached=self._record_cache.get(path.name)
+            if cached is not None and cached[0]==content_hash:return cached[1]
+            record=json.loads(raw);digest=record.pop('sha256')
+            if not isinstance(digest,str) or not hmac.compare_digest(digest,hashlib.sha256(_canonical(record)).hexdigest()):
+                raise ValueError('calibration hash mismatch')
+            if record['schema']!=_SCHEMA or record['robot_id']!=self.robot_id or record['version']!=path.stem:
+                raise ValueError('calibration identity mismatch')
+            _identifier(record['id'])
+            if record['kind'] not in _KINDS or not isinstance(record['payload'],dict):raise ValueError('invalid calibration payload or kind')
+            if record.get('environment') not in ('simulation','hardware') or self.environment is not None and record['environment']!=self.environment:
+                raise ValueError('calibration source does not match library')
+            record={**record,'sha256':digest,'path':str(path)}
+            self._record_cache[path.name]=(content_hash,record);self.generation+=1
+            return record
+        except (OSError,KeyError,TypeError,AttributeError,UnicodeError,ValueError) as exc:
+            self._record_cache.pop(path.name,None)
+            raise ValueError('invalid calibration record: '+path.name) from exc
+
     def _records(self):
-        records = []
-        ids = set()
+        records=[];ids={}
         for path in sorted(self.root.glob('v*.json')):
-            if not re.fullmatch(r'v[0-9]{6,}\.json', path.name) or path.is_symlink():
-                raise ValueError('invalid calibration version file')
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(fd, 'r', encoding='utf-8') as stream:
-                    record = json.load(stream)
-                digest = record.pop('sha256')
-                if not isinstance(digest,str) or not hmac.compare_digest(digest,hashlib.sha256(_canonical(record)).hexdigest()):
-                    raise ValueError('calibration hash mismatch')
-                if record['schema'] != _SCHEMA or record['robot_id'] != self.robot_id or record['version'] != path.stem:
-                    raise ValueError('calibration identity mismatch')
-                _identifier(record['id'])
-                if record['kind'] not in _KINDS or record['id'] in ids:
-                    raise ValueError('invalid or duplicate calibration identity')
-                if not isinstance(record['payload'],dict):
-                    raise ValueError('invalid calibration payload')
-                if record.get('environment') not in ('simulation','hardware') or self.environment is not None and record['environment']!=self.environment:
-                    raise ValueError('calibration source does not match library')
-                ids.add(record['id'])
-                records.append({**record, 'sha256':digest, 'path':str(path)})
-            except (OSError, KeyError, TypeError, AttributeError, UnicodeError, ValueError) as exc:
-                raise ValueError('invalid calibration record: '+path.name) from exc
+            record=self._record(path)
+            if record['id'] in ids:raise ValueError('invalid or duplicate calibration identity')
+            ids[record['id']]=path.name;records.append(record)
+        names=tuple(record['version']+'.json' for record in records)
+        if names!=self._names:self.generation+=1
+        self._names=names;self._ids=ids
+        self._record_cache={name:self._record_cache[name] for name in names}
         return sorted(records,key=lambda row:int(row['version'][1:]))
 
     def list(self):
         with self._locked():
-            return self._records()
+            return deepcopy(self._records())
 
     def get(self, id):
         _identifier(id)
         with self._locked():
-            for record in self._records():
-                if record['id'] == id:
-                    return record
+            names=tuple(path.name for path in sorted(self.root.glob('v*.json')))
+            if names!=self._names or id not in self._ids:self._records()
+            if id in self._ids:
+                record=self._record(self.root/self._ids[id])
+                if record['id']==id:return deepcopy(record)
+                # A legitimate external replacement may also change its ID.
+                for record in self._records():
+                    if record['id']==id:return deepcopy(record)
         raise ValueError('unknown calibration identifier')
 
     def split_legacy(self):
@@ -123,6 +163,7 @@ class CalibrationStore:
             for source,target in targets:
                 if not target.exists():os.link(source,target)  # Exclusive, atomic publication.
                 source.unlink()
+            self.invalidate()
 
     def register(self, kind, id, payload, source_batch, environment='simulation', dependency_id=None, validation=None):
         _identifier(id)
@@ -142,7 +183,7 @@ class CalibrationStore:
                 if record['id'] == id:
                     if record['kind'] != kind or record['environment']!=environment or record.get('dependency_id')!=dependency_id or _canonical(record['payload']) != _canonical(snapshot['payload']):
                         raise ValueError('calibration identifier conflicts with an existing snapshot')
-                    return record
+                    return deepcopy(record)
             number = max((int(row['version'][1:]) for row in records),default=0)+1
             version = f'v{number:06d}'
             record = dict(schema=_SCHEMA,robot_id=self.robot_id,id=id,kind=kind,version=version,
@@ -158,6 +199,7 @@ class CalibrationStore:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.link(temporary,target)  # Atomic publication; never replaces an existing version.
+                self.invalidate(catalog=True,active=False)
                 directory = os.open(self.root,os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
                     os.fsync(directory)
@@ -176,17 +218,31 @@ class CalibrationStore:
     # it. `active/` is that path: a self-contained directory holding exactly one group,
     # replaced atomically on install, never merged with the versions next to it.
 
-    def active(self):
+    def active(self,*,asset_geometry_id=None,asset_seal_sha256=None,robot_source=None):
         """The installed group for this library, or None when nothing is installed."""
+        qualification=(asset_geometry_id,asset_seal_sha256,robot_source)
         with self._locked():
             # Reading recovers a crash-orphaned install too: a consumer must never be
             # told "nothing is installed" because the previous install died mid-swap.
             self._heal_active()
+            if self._active_cache is not None:
+                paths,key,result=self._active_cache
+                if tuple(self._content_stamp(path) for path in paths)+(qualification,)==key:return deepcopy(result)
             manifest=self._read_active()
             if manifest is None:
                 return None
-            problems=self._active_problems(manifest)
-            return {**manifest,'path':str(self.root/_ACTIVE),'verified':not problems,'problems':problems}
+            paths=[self.root/_ACTIVE,self.root/_ACTIVE/'manifest.json',self.root/_ACTIVE/'head.json',self.root/_ACTIVE/'wrist.json']
+            for kind in ('head','wrist'):
+                version=str((manifest.get(kind) or {}).get('version') or '')
+                if re.fullmatch(r'v[0-9]{6,}',version):paths.append(self.root/(version+'.json'))
+            key=tuple(self._content_stamp(path) for path in paths)+(qualification,)
+            if key[1]!=self._active_manifest_hash:raise ValueError('installed manifest changed while reading')
+            problems=self._active_problems(manifest,asset_geometry_id=asset_geometry_id,
+                asset_seal_sha256=asset_seal_sha256,robot_source=robot_source)
+            if tuple(self._content_stamp(path) for path in paths)+(qualification,)!=key:raise ValueError('installed calibration changed while verifying')
+            result={**manifest,'path':str(self.root/_ACTIVE),'verified':not problems,'problems':problems}
+            self._active_cache=(paths,key,result);self.generation+=1
+            return deepcopy(result)
 
     def install(self,head,wrist,*,geometry_id,acceptance=None,notes=None,robot_source=None):
         """Make one head+wrist group the installed calibration, atomically.
@@ -262,6 +318,7 @@ class CalibrationStore:
                 if target.exists():
                     os.rename(target,superseded)
                 os.rename(temporary,target)
+                self.invalidate(catalog=False,active=True)
                 self._sync_directory(self.root)
             except BaseException:
                 shutil.rmtree(temporary,ignore_errors=True)
@@ -280,15 +337,16 @@ class CalibrationStore:
         if path.is_symlink() or manifest_path.is_symlink() or not manifest_path.is_file():
             return None
         try:
-            manifest=json.loads(manifest_path.read_text())
+            raw=manifest_path.read_bytes();manifest=json.loads(raw)
+            self._active_manifest_hash=hashlib.sha256(raw).digest()
         except (OSError,ValueError) as exc:
             raise ValueError('installed calibration manifest is unreadable') from exc
         if not isinstance(manifest,dict) or manifest.get('schema')!=_ACTIVE_SCHEMA:
             raise ValueError('installed calibration manifest has an unknown schema')
         return manifest
 
-    def _active_problems(self,manifest):
-        problems=[]
+    def _active_problems(self,manifest,*,asset_geometry_id=None,asset_seal_sha256=None,robot_source=None):
+        problems=[];records={}
         if self.environment is not None and manifest.get('environment')!=self.environment:
             problems.append('installed calibration belongs to another environment')
         if manifest.get('robot_id')!=self.robot_id:
@@ -304,6 +362,38 @@ class CalibrationStore:
                 problems.append(kind+' '+version+' is no longer in the library')
             elif installed.read_bytes()!=published.read_bytes():
                 problems.append(kind+' file differs from library '+version)
+            else:
+                try:record=self._record(published)
+                except ValueError:problems.append(kind+' published record is invalid');continue
+                if record['id']!=entry.get('id') or record['sha256']!=entry.get('sha256') or record['kind']!=kind:
+                    problems.append(kind+' installed identity differs from the validated published record')
+                records[kind]=record
+        if asset_geometry_id and not problems:
+            head,wrist=records['head'],records['wrist']
+            rows=[record['payload'].get('row',{}) for record in (head,wrist)]
+            contract=wrist['payload'].get('contract',{})
+            if (any(not isinstance(row,dict) for row in rows) or not isinstance(contract,dict)
+                    or not isinstance(rows[0].get('parameters'),dict)
+                    or not isinstance(contract.get('head_snapshot'),dict)):
+                return ['installed calibration asset/group identity is incomplete']
+            # The Workbench fingerprint also contains software/support policy. The
+            # immutable installed pair pins the asset separately, as A1-cal does.
+            identities=(rows[0].get('parameters',{}),rows[1],contract)
+            if (not asset_seal_sha256 or any(row.get('asset_geometry_id')!=asset_geometry_id
+                    or row.get('asset_seal_sha256')!=asset_seal_sha256 for row in identities)):
+                problems.append('installed calibration must match the current sealed native A1 geometry')
+            if (not manifest.get('geometry_id') or contract.get('geometry_id')!=manifest['geometry_id']
+                    or wrist.get('dependency_id')!=head['id']
+                    or manifest['wrist'].get('dependency_id')!=head['id']
+                    or contract.get('head_snapshot',{}).get('id')!=head['id']):
+                problems.append('installed calibration head/wrist group dependency mismatch')
+            if (robot_source not in ('physical','simulated')
+                    or manifest.get('robot_source')!=robot_source
+                    or manifest.get('simulation_only') is not (robot_source!='physical')
+                    or any(record.get('environment')!=manifest.get('environment') for record in (head,wrist))
+                    or any(row.get('robot_source')!=robot_source
+                        or row.get('simulation_only') is not (robot_source!='physical') for row in rows)):
+                problems.append('installed calibration source differs from this device environment')
         return problems
 
     def _heal_active(self):
@@ -314,6 +404,7 @@ class CalibrationStore:
         stale=sorted(self.root.glob(_ACTIVE_SUPERSEDED+'*'),key=lambda path:path.stat().st_mtime)
         if stale:
             os.rename(stale[-1],target)
+            self.invalidate(catalog=False,active=True)
             self._sync_directory(self.root)
 
     @staticmethod

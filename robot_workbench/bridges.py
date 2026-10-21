@@ -75,7 +75,11 @@ def start_control_gateway(device, token, *, port=0):
                 length=int(self.headers.get('Content-Length','0'))
                 limit=16*1024*1024 if self.path=='/operator' and business=='collection' else 4*1024*1024
                 if not 0<length<=limit:raise ValueError('small JSON body required')
-                body=json.loads(self.rfile.read(length))
+                raw=self.rfile.read(length)
+                if self.path=='/operator' and business=='collection':
+                    from .control_plan import preview_request
+                    body=preview_request(raw)
+                else:body=json.loads(raw)
                 if self.path=='/operator' and business=='collection':
                     if body.get('action')=='acquire':
                         if body!={'action':'acquire','confirmation':'ARMS_SUPPORTED_CONNECT'}:

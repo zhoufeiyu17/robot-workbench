@@ -6,11 +6,11 @@ step physics; preview frames stay in memory and recording uses bounded leases.
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
-from http.server import ThreadingHTTPServer
-import io
 import json
+import os
 from pathlib import Path
 import queue
+import secrets
 import threading
 import time
 
@@ -34,19 +34,30 @@ def camera_intrinsics(rig):
 
 
 class CameraProducer:
-    def __init__(self, intrinsics, root, *, queue_capacity=8, min_free_bytes=2*1024**3,recording_guard=None):
-        from real_rgbd import Frames, RawSpool
+    def __init__(self, intrinsics, root, *, queue_capacity=8, min_free_bytes=2*1024**3,recording_guard=None,
+                 memory_recording=True,recording_budget_bytes=1024**3):
+        from real_rgbd import RawSpool
         if set(intrinsics) != set(CAMERAS.values()) or type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError('three cameras and a positive bounded queue required')
         self.intrinsics = deepcopy(intrinsics)
         self.root = Path(root)
-        self.frames, self.spools, self.directories = {}, {}, {}
-        for name in CAMERAS.values():
+        self.frames, self.spools, self.directories, self.channels = {}, {}, {}, {}
+        self.recording_guard=recording_guard;self.channel_status={}
+        if type(memory_recording) is not bool or (memory_recording and not callable(recording_guard)):
+            raise ValueError('same-process recording requires a live Owner recording guard')
+        from robot_workbench.rgbd_service import CommonCameraService
+        self.service_owner=CommonCameraService.start(intrinsics,self.root,'fake',budget_bytes=recording_budget_bytes)
+        self.descriptor_path=self.root/'camera-service.json'
+        self.common=CommonCameraService.connect(self.descriptor_path)
+        self.publisher=self.common;self.publish_generation=0;self.ports=None
+        self.sampling_lock=threading.RLock();self.restart_lock=threading.Lock();self.paused=False
+        self.frames,self.directories=self.common.frames,self.common.directories
+        if memory_recording:self.channels=self.common.channels
+        for name in (() if memory_recording else CAMERAS.values()):
             path = self.root/name
-            path.mkdir(parents=True, exist_ok=False)
-            self.frames[name] = Frames()
+            # Read/legacy fixture compatibility only. Encoding still uses the
+            # same raw camera service; production recording uses its channels.
             self.spools[name] = RawSpool(path, min_free_bytes=min_free_bytes,lease_guard=recording_guard)
-            self.directories[name] = str(path)
         self.queue = queue.Queue(maxsize=queue_capacity)
         self.closed = threading.Event()
         self.thread_id = threading.get_ident()
@@ -60,30 +71,23 @@ class CameraProducer:
         self.last_step = None
         self.frame_sequence = 0
         self.clock_id = None
-        self.servers = []
         self.encoders = ThreadPoolExecutor(max_workers=3, thread_name_prefix='rgbd-camera')
         self.worker = threading.Thread(target=self._encode_loop, daemon=True, name='physx-rgbd-encoder')
         self.worker.start()
 
     def start_servers(self, ports=None):
-        from real_rgbd import make_handler
-        ports = ports or dict.fromkeys(CAMERAS, 0)
-        if set(ports) != set(CAMERAS):
-            raise ValueError('head/left/right loopback ports required')
-        result = {}
-        for role, name in CAMERAS.items():
-            server = ThreadingHTTPServer(('127.0.0.1', ports[role]), make_handler(self.frames[name]))
-            server.daemon_threads = True
-            threading.Thread(target=server.serve_forever, daemon=True, name='physx-camera-'+role).start()
-            self.servers.append(server)
-            result[role] = server.server_port
-        return result
+        self.ports=self.common.start_servers(ports)
+        return self.ports
 
     def collect(self, plant, backend, actor):
         """Call after this step's native render, never from an HTTP handler."""
         if threading.get_ident() != self.thread_id:
             raise RuntimeError('only the PhysX main thread may sample cameras')
-        if self.closed.is_set():
+        with self.sampling_lock:
+            return self._collect(plant,backend,actor)
+
+    def _collect(self,plant,backend,actor):
+        if self.closed.is_set() or self.paused:
             return False
         feedback = backend.read_calibration_state()
         step = feedback['physics_step']
@@ -100,6 +104,8 @@ class CameraProducer:
             raise RuntimeError('rendered camera and actual feedback do not describe the same completed plant step')
         packet = dict(feedback=deepcopy(feedback), actor=deepcopy(actor), wall_ns=sampled_wall_ns,
                       frame_sequence=self.frame_sequence,
+                      camera_service=self.publisher,publish_generation=self.publish_generation,
+                      recording_tokens={name: channel.cached_token for name, channel in self.channels.items()},
                       images={name: {key: values[key].copy() for key in ('rgb','depth')}
                               for name, values in images.items()})
         self.frame_sequence += 1
@@ -120,11 +126,19 @@ class CameraProducer:
                 **{key:packet['feedback'][key] for key in ('source_clock_id','source_time_ns','physics_step')},
                 last_publish=deepcopy(self.last_publish))
             self.drops.append(self.last_drop)
+        if self.common:self.common.fail_async(reason+' during recording lease',packet.get('recording_tokens',{}))
+        else:
+            for name, channel in self.channels.items():
+                channel.fail(reason+' during recording lease', sampled_token=packet.get('recording_tokens', {}).get(name))
 
     def _lease_drop_error(self, spool):
-        request = spool.root/'recording-request.json'
-        try:lease=json.loads(request.read_text())
-        except FileNotFoundError:return None
+        if hasattr(spool, 'current_lease'):
+            lease = spool.current_lease()
+            if lease is None:return None
+        else:
+            request = spool.root/'recording-request.json'
+            try:lease=json.loads(request.read_text())
+            except FileNotFoundError:return None
         if spool.lease_guard is not None and not spool.lease_guard(lease):return None
         start, end = lease.get('admission_start_wall_ns',lease.get('start_wall_ns')), lease.get('deadline_wall_ns')
         if type(start) is not int or type(end) is not int:return 'invalid recording lease'
@@ -145,7 +159,8 @@ class CameraProducer:
                 self._record_drop(packet, f'{type(error).__name__}: {error}')
                 with self.lock:self.error = f'{type(error).__name__}: {error}'
                 for frame in self.frames.values():
-                    frame.publish(status=dict(ready=False, data_valid=False, error=self.error))
+                    try:frame.publish(status=dict(ready=False, data_valid=False, error=self.error))
+                    except (OSError,ConnectionError,ValueError):pass
             finally:
                 elapsed=time.monotonic()-started
                 with self.lock:
@@ -158,6 +173,8 @@ class CameraProducer:
     def _publish(self, packet):
         # Each camera keeps its own ordered spool; three encoders share only the
         # immutable sampled packet. No GPU/physics work moves off the main thread.
+        if packet['publish_generation']!=self.publish_generation:
+            raise ValueError('camera packet belongs to a previous source service')
         futures = [self.encoders.submit(self._publish_camera, packet, role, name)
                    for role, name in CAMERAS.items()]
         wait(futures)
@@ -165,8 +182,8 @@ class CameraProducer:
 
     def _publish_camera(self, packet, role, name):
         import numpy as np
-        from PIL import Image
         from real_rgbd import pair_metadata
+        from .capture_diagnostics import unsupported
         started=time.monotonic()
         feedback, actor = packet['feedback'], packet['actor']
         source_fields = {key: feedback[key] for key in
@@ -178,11 +195,6 @@ class CameraProducer:
             raise ValueError('plant RGB-D shape/dtype differs from camera intrinsics')
         valid = np.isfinite(depth) & (depth > 0) & (depth <= 65.535)
         quantized = np.rint(np.where(valid,depth,0)/.001).astype(np.uint16)
-        png, zpng, jpeg = io.BytesIO(), io.BytesIO(), io.BytesIO()
-        Image.fromarray(rgb).save(png, format='PNG', compress_level=1)
-        Image.fromarray(quantized).save(zpng, format='PNG', compress_level=1)
-        Image.fromarray(rgb).save(jpeg, format='JPEG', quality=95, subsampling=0)
-        encoded=time.monotonic()
         number = packet['frame_sequence']
         ms = feedback['source_time_ns']/1e6
         status = pair_metadata(serial=k['serial'], camera_name=role, color_number=number,
@@ -190,6 +202,7 @@ class CameraProducer:
             depth_domain='simulation', host_receive_ns=packet['wall_ns'], depth_scale_m=.001,
             intrinsics=k, fps=30)
         status.update(**source_fields, host_receive_ns=packet['wall_ns'], timestamp_kind='simulation_step',
+            capture_instance_id=packet['camera_service'].descriptor['instance_id'],
             environment='fake', simulation_only=True, evidence_source='fake_device_rgbd',
             owner_available=actor.get('owner_available') is True, owner_pid=actor.get('owner_pid'),
             command_epoch=actor.get('command_epoch'), runtime_nonce=actor.get('runtime_nonce'),
@@ -199,7 +212,18 @@ class CameraProducer:
                 sample_wall_ns=feedback['sample_wall_ns'], environment='fake', simulation_only=True,
                 evidence_source=feedback['evidence_source'], owner_feedback_event=False),
             note='zero-distortion simulated raw pinhole; separate Owner history pairing is required',
-            data_valid=True, camera_sample_hz=30)
+            data_valid=True, camera_sample_hz=30,capture_diagnostics=unsupported())
+        token=packet['recording_tokens'].get(name)
+        if token:
+            lease=self.channels[name].current_lease()
+            if lease is None or not self.recording_guard(lease):token=None
+        response=packet['camera_service'].publish(name,status,rgb.tobytes(),quantized.astype('<u2',copy=False).tobytes(),
+            width=k['width'],height=k['height'],sampled_token=token)
+        if self.channels:
+            with self.lock:self.channel_status[name]=response['channel']
+            self.channels[name].cached_snapshot=response['channel']
+            return dict(encode_wall_s=0.,lease_check_wall_s=0.,spool_write_wall_s=0.,
+                total_wall_s=time.monotonic()-started,transport='unix_rgbd',recorded=response['recorded'])
         spool = self.spools[name]
         lease_started=time.monotonic()
         error = self._lease_drop_error(spool)
@@ -207,7 +231,8 @@ class CameraProducer:
         if error:status.update(data_valid=False, recording_error=error)
         with self.lock:status['dropped_preview_batches'] = self.dropped_batches
         try:
-            spool.write(status, png.getvalue(), zpng.getvalue())
+            encoded=self.frames[name].snapshot(formats=('color_png','depth_png'))
+            spool.write(status,encoded['color_png'],encoded['depth_png'])
         except Exception as exc:
             error = error or str(exc)
         error = error or status.get('recording_error')
@@ -215,9 +240,8 @@ class CameraProducer:
         if error:
             spool.error = error
             status.update(data_valid=False, recording_enabled=False, recording_error=error)
-        self.frames[name].publish(status=status, jpeg=jpeg.getvalue(),
-                                 color_png=png.getvalue(), depth_png=zpng.getvalue())
-        return dict(encode_wall_s=encoded-started,lease_check_wall_s=spool_started-lease_started,
+        self.frames[name].publish(status=status)
+        return dict(encode_wall_s=0.,lease_check_wall_s=spool_started-lease_started,
                     spool_write_wall_s=spool_finished-spool_started,total_wall_s=time.monotonic()-started)
 
     def snapshot(self):
@@ -226,15 +250,159 @@ class CameraProducer:
                         dropped_batches=self.dropped_batches, error=self.error,
                         queue_size=self.queue.qsize(), queue_capacity=self.queue.maxsize,worker_alive=self.worker.is_alive(),
                         last_drop=deepcopy(self.last_drop),last_publish=deepcopy(self.last_publish),
-                        maximum_queue_wait_s=self.maximum_queue_wait_s,maximum_publish_s=self.maximum_publish_s)
+                        maximum_queue_wait_s=self.maximum_queue_wait_s,maximum_publish_s=self.maximum_publish_s,
+                        recording_channels=deepcopy(self.channel_status))
+
+    def _fresh_frames(self,service,timeout_s):
+        deadline=time.monotonic()+timeout_s
+        while True:
+            try:
+                frames={camera:service.latest_rgbd(camera) for camera in self.frames}
+                if any(frame['metadata'].get('source_clock_id')!=self.clock_id for frame in frames.values()):
+                    raise ValueError('camera frames belong to another plant clock')
+                return frames
+            except ValueError as error:
+                if str(error)!='ValueError: camera has no raw RGB-D pair yet':raise
+            if threading.get_ident()==self.thread_id:
+                raise RuntimeError('camera startup must leave the PhysX main thread free to sample')
+            if time.monotonic()>=deadline:raise TimeoutError('camera service has no complete fresh RGB-D first-frame set')
+            time.sleep(.02)
+
+    def start(self,progress=lambda phase, fraction=None, detail=None:None,*,timeout_s=20.):
+        if (self.service_owner.process.poll() is not None or self.paused or
+                self.common.descriptor['instance_id']!=self.service_owner.descriptor['instance_id']):
+            return self.restart(progress,timeout_s=timeout_s)
+        progress('verifying_camera_frames')
+        cameras={}
+        for camera,frame in self._fresh_frames(self.common,timeout_s).items():
+            meta=frame['metadata']
+            cameras[camera]=dict(capture_instance_id=meta['capture_instance_id'],serial=meta['serial'],
+                frame_number=meta['frame_number'],pair_id=meta['pair_id'],host_receive_ns=meta['host_receive_ns'],
+                source_age_s=frame['source_age_s'],rgb_bytes=len(frame['rgb']),depth_bytes=len(frame['depth']),
+                clock={key:meta[key] for key in ('environment','clock_domain','source_clock_id')},healthy=True)
+        return dict(already_running=True,instance_id=self.common.descriptor['instance_id'],
+                    service_pid=self.service_owner.process.pid,cameras=cameras)
+
+    def stop(self,progress=lambda phase, fraction=None, detail=None:None,*,timeout_s=20.):
+        """Stop our CPU camera service under the caller's device maintenance gate.
+
+        Sampling stays paused after a close request, including an unknown exit.
+        The encoder, plant clock and control connection remain caller-owned.
+        """
+        if threading.get_ident()==self.thread_id:
+            raise RuntimeError('camera stop must leave the PhysX main thread free to sample')
+        if type(timeout_s) not in (int,float) or not 0<timeout_s<=120:
+            raise ValueError('camera stop requires a bounded positive drain timeout')
+        if not self.channels:raise ValueError('camera stop requires common memory recording channels')
+        if not self.restart_lock.acquire(blocking=False):raise ValueError('camera maintenance is already running')
+        was_paused=self.paused;close_requested=False
+        try:
+            if self.closed.is_set():raise ValueError('camera producer is closed')
+            if self.common.reconnect_state()['recording_leases']:
+                raise ValueError('cannot stop cameras while a recording lease remains')
+            progress('pausing_camera_samples')
+            with self.sampling_lock:self.paused=True
+            deadline=time.monotonic()+timeout_s
+            with self.queue.all_tasks_done:
+                while self.queue.unfinished_tasks:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('camera publishing did not become idle; old service retained')
+                    self.queue.all_tasks_done.wait(remaining)
+            owner=self.service_owner;already_stopped=owner.process.poll() is not None
+            if not already_stopped:
+                state=owner.snapshot()
+                if any(row['run_id'] for row in state['recording_channels'].values()):
+                    raise ValueError('cannot stop cameras while a recording lease remains')
+            if self.common.reconnect_state()['recording_leases']:
+                raise ValueError('cannot stop cameras while a recording lease remains')
+            progress('stopping_camera_service')
+            close_requested=True
+            if not already_stopped:owner.close()
+            if owner.process.poll() is None:
+                raise TimeoutError('camera service exit remains unknown; sampling stays paused')
+            return dict(stopped=True,exit_verified=True,already_stopped=already_stopped,
+                        instance_id=owner.descriptor['instance_id'],service_pid=owner.process.pid,
+                        source_clock_id=self.clock_id,preview_ports=self.ports,
+                        plant_preserved=True,control_reconnected=False)
+        except BaseException:
+            if not close_requested:
+                with self.sampling_lock:self.paused=was_paused
+            raise
+        finally:self.restart_lock.release()
+
+    def restart(self,progress=lambda phase, fraction=None, detail=None:None,*,timeout_s=20.):
+        """Replace only our CPU service; the caller holds the device maintenance gate.
+
+        Run on the maintenance worker: the existing main loop alone samples plant
+        frames after resume. Each queued packet retains its original service target.
+        """
+        from robot_workbench.rgbd_service import CommonCameraService
+        if threading.get_ident()==self.thread_id:
+            raise RuntimeError('camera restart must leave the PhysX main thread free to sample')
+        if not self.channels:raise ValueError('camera restart requires common memory recording channels')
+        if not self.restart_lock.acquire(blocking=False):raise ValueError('camera restart is already running')
+        replacement=None;old_stopped=False;was_paused=self.paused
+        try:
+            if self.closed.is_set():raise ValueError('camera producer is closed')
+            if self.common.reconnect_state()['recording_leases']:
+                raise ValueError('cannot restart cameras while a recording lease remains')
+            progress('pausing_camera_samples')
+            with self.sampling_lock:self.paused=True
+            deadline=time.monotonic()+timeout_s
+            with self.queue.all_tasks_done:
+                while self.queue.unfinished_tasks:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('camera publishing did not become idle; old service retained')
+                    self.queue.all_tasks_done.wait(remaining)
+            old=self.service_owner
+            if old.process.poll() is None:
+                state=old.snapshot()
+                if any(row['run_id'] for row in state['recording_channels'].values()):
+                    raise ValueError('cannot restart cameras while a recording lease remains')
+            if self.common.reconnect_state()['recording_leases']:
+                raise ValueError('cannot restart cameras while a recording lease remains')
+            if not self.clock_id:raise ValueError('camera source clock must be sampled before restart')
+            progress('starting_camera_service')
+            replacement=CommonCameraService.start(self.intrinsics,
+                self.root.parent/('camera-'+secrets.token_hex(6)),'fake',
+                budget_bytes=old.descriptor['budget_bytes'])
+            old.close();old_stopped=True;self.service_owner=replacement
+            if self.ports is not None:
+                if replacement.start_servers(self.ports)!=self.ports:
+                    raise ValueError('replacement camera preview ports changed')
+            staged=self.descriptor_path.with_name('.camera-service-'+secrets.token_hex(6)+'.json')
+            try:
+                with os.fdopen(os.open(staged,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+                    json.dump(replacement.descriptor,stream,allow_nan=False)
+                os.replace(staged,self.descriptor_path)
+            finally:staged.unlink(missing_ok=True)
+            progress('waiting_for_fresh_camera_frames')
+            with self.sampling_lock:
+                self.publisher=replacement;self.publish_generation+=1;self.paused=False
+            self._fresh_frames(replacement,timeout_s)
+            progress('rebinding_camera_clients')
+            deadline=time.monotonic()+timeout_s
+            while True:
+                try:receipt=self.common.reconnect();break
+                except ValueError as error:
+                    if str(error)!='camera operations are active; reconnect requires idle clients' or time.monotonic()>=deadline:
+                        raise
+                    time.sleep(.02)  # Only idle admission retries; no IPC mutation is replayed.
+            with self.sampling_lock:self.publisher=self.common
+            with self.lock:self.error=None;self.channel_status={}
+            return dict(receipt,source_clock_id=self.clock_id,preview_ports=self.ports,
+                        plant_preserved=True,control_reconnected=False)
+        except BaseException:
+            if not old_stopped:
+                if replacement is not None:replacement.close()
+                with self.sampling_lock:self.paused=was_paused
+            else:
+                with self.sampling_lock:self.paused=True
+            raise
+        finally:self.restart_lock.release()
 
     def close(self):
         self.closed.set()
         self.worker.join(timeout=5)
         self.encoders.shutdown(wait=False, cancel_futures=True)
-        for frame in self.frames.values():
-            with frame.condition:
-                frame.closed = True
-                frame.condition.notify_all()
-        for server in self.servers:
-            server.shutdown();server.server_close()
+        self.service_owner.close()

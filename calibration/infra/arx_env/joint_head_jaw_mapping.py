@@ -16,6 +16,7 @@ GAP_MM = {'left': (0., 23., 43., 63., 83.), 'right': (0., 22., 43., 63., 83.)}
 
 _LEGACY = (COMMAND, FEEDBACK, GAP_MM, {'version': 'legacy-pad-correction-2mm'})
 _ACTIVE = _LEGACY
+FEEDBACK_MAX_MM = 89.
 
 
 def configure_mapping(path):
@@ -53,9 +54,12 @@ def mapping_identity():
     return dict(_ACTIVE[3])
 
 
-def interpolate(value, xs, ys):
-    if type(value) not in (float, int) or not math.isfinite(value):
-        raise ValueError('finite jaw value required')
+def interpolate(value, xs, ys, *, field='jaw mapping input'):
+    name=type(value).__module__+'.'+type(value).__name__
+    if type(value) not in (float, int):
+        raise ValueError(f'{field}: unsupported type {name}; expected Python float/int')
+    if not math.isfinite(value):
+        raise ValueError(f'{field}: non-finite {name} value {value!r}')
     i = next((i for i in range(len(xs)-1) if value <= xs[i+1]), len(xs)-2)
     return ys[i] + (value-xs[i]) * (ys[i+1]-ys[i]) / (xs[i+1]-xs[i])
 
@@ -77,12 +81,12 @@ def feedback_gaps(raw):
 
 def command_gap_mm(side, sdk):
     commands, _, gaps, _ = _ACTIVE
-    return interpolate(sdk, commands[side], gaps[side])
+    return interpolate(sdk, commands[side], gaps[side],field=f'{side} jaw command SDK value')
 
 
 def feedback_sdk(side, gap_mm):
     _, feedback, gaps, _ = _ACTIVE
-    return interpolate(gap_mm, gaps[side], feedback[side])
+    return interpolate(gap_mm, gaps[side], feedback[side],field=f'{side} jaw feedback gap_mm')
 
 
 def command_gap_slope(side):
@@ -92,8 +96,8 @@ def command_gap_slope(side):
 
 def hold_command_sdk(side, gap_mm):
     """Accept measured endpoint error, without commanding beyond the calibrated range."""
-    if type(gap_mm) not in (float, int) or not math.isfinite(gap_mm) or not -2 <= gap_mm <= 85:
-        raise ValueError(f'{side} measured jaw gap {gap_mm} mm outside feedback tolerance -2–85 mm')
+    if type(gap_mm) not in (float, int) or not math.isfinite(gap_mm) or not -2 <= gap_mm <= FEEDBACK_MAX_MM:
+        raise ValueError(f'{side} measured jaw gap {gap_mm} mm outside feedback tolerance -2–{FEEDBACK_MAX_MM:g} mm')
     return command_sdk(side, min(83., max(0., gap_mm)))
 
 
@@ -102,6 +106,7 @@ def feedback_state(raw):
     sdk = [float(raw[6]), float(raw[13])]
     return dict(gap_mm=[interpolate(v, feedback[s], gaps[s]) for s,v in zip(('left','right'),sdk)], sdk=sdk,
                 measured_range_mm=[[gaps[s][1], gaps[s][-1]] for s in ('left','right')],
+                feedback_range_mm=[[-2.,FEEDBACK_MAX_MM],[-2.,FEEDBACK_MAX_MM]],
                 control_range_mm=[[0.,83.],[0.,83.]],zero_basis='user convention: SDK 0 = actual 0 mm',
                 within_measured_range=[feedback[s][1] <= v <= feedback[s][-1] for s,v in zip(('left','right'),sdk)],
                 mapping=identity['version'], mapping_identity=dict(identity))
@@ -111,6 +116,6 @@ def measured_jaw_gaps(value):
     """Measured metal gaps: retain endpoint error; never use for commands."""
     import numpy as np
     gaps = np.asarray(value, float)
-    if gaps.shape != (2,) or not np.isfinite(gaps).all() or np.any(gaps < -2) or np.any(gaps > 85):
-        raise ValueError('left/right measured metal gaps must be finite, -2..85 mm')
+    if gaps.shape != (2,) or not np.isfinite(gaps).all() or np.any(gaps < -2) or np.any(gaps > FEEDBACK_MAX_MM):
+        raise ValueError(f'left/right measured metal gaps must be finite, -2..{FEEDBACK_MAX_MM:g} mm')
     return gaps

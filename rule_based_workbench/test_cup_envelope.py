@@ -1,6 +1,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+from unittest.mock import patch
 from cup_envelope import transformed_spheres
 
 
@@ -9,6 +10,20 @@ def main():
         def transform_point(self,p):return (-p[1]+1.,p[0]+2.,p[2]+3.)
     proof=json.loads(Path(__file__).with_name('a1_cup_inset.json').read_text())
     identity=proof['cup_geometry_sha256']
+    from cup_contact import CupContact
+    contact=CupContact.__new__(CupContact)
+    with patch('cup_contact.cup_geometry_digest',return_value=identity),patch('cup_envelope.prepare',return_value=proof) as default:
+        contact._bind_inward_envelope(object())
+        default.assert_called_once()
+    selected=deepcopy(proof)
+    with patch('cup_contact.cup_geometry_digest',return_value=identity),patch('cup_envelope.prepare',side_effect=AssertionError('explicit proof fell back to default')):
+        contact._bind_inward_envelope(object(),selected)
+    selected['minimum_surface_inset_m']=0.
+    assert contact.inward_envelope['minimum_surface_inset_m']==.003
+    with patch('cup_contact.cup_geometry_digest',return_value='different'):
+        try:contact._bind_inward_envelope(object(),proof)
+        except ValueError:pass
+        else:raise AssertionError('different cup geometry accepted at binding')
     actual=transformed_spheres(proof,identity,Transform(),265)
     p=proof['first_band_spheres'][0]
     assert actual[0]==[-p[1]+1.,p[0]+2.,p[2]+3.,p[3]]

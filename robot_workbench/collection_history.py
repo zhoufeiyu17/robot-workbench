@@ -1,4 +1,4 @@
-"""Pinned, read-only completed fake recordings; never a Playground resume input."""
+"""Pinned read-only history; qualified fake imports and recording archives stay distinct."""
 from copy import deepcopy
 import hashlib
 import json
@@ -210,3 +210,160 @@ class CollectionHistoryGroup:
             path=history.media(result_id)
             if path is not None:return path
         return None
+
+    def quality_report(self,result_id):
+        for history in self.histories:
+            reader=getattr(history,'quality_report',None)
+            report=reader(result_id) if reader else None
+            if report is not None:return report
+        return None
+
+
+def inspect_recording(root, raw_directory, playback_directory, *, environment, robot_id):
+    """Offline, exact paths only. Incomplete recordings retain their original verdict."""
+    from real_recording import verify_raw
+    from real_contract import namespace
+    root=Path(root)
+    if not root.is_absolute() or root.resolve()!=root or root.is_symlink() or environment not in ('fake','physical'):
+        raise ValueError('explicit canonical recording run and environment required')
+    raw_manifest=_file(root,Path(raw_directory)/'manifest.json')
+    playback_manifest=_file(root,Path(playback_directory)/'manifest.json')
+    raw,source,_=verify_raw(raw_manifest.parent,environment=environment)
+    exported=json.loads(playback_manifest.read_bytes())
+    spec=namespace(environment)
+    if (exported.get('schema_version')!=spec['playback_schema'] or exported.get('mode')!=spec['mode']
+            or (exported.get('provenance') or {}).get('source')!=spec['evidence']
+            or environment=='fake' and (exported.get('environment')!='fake' or exported.get('simulation_only') is not True)
+            or environment=='physical' and (exported.get('environment','physical')!='physical' or exported.get('simulation_only') is True)
+            or source['robot_id']!=robot_id or raw.get('robot_id')!=robot_id
+            or exported.get('raw_manifest_sha256')!=_pin(raw_manifest)['sha256']
+            or exported.get('source_run_id')!=raw['source_run_id']
+            or exported.get('controller_outcome')!=raw.get('controller_outcome')):
+        raise ValueError('recording archive device, raw or playback identity differs')
+    if raw.get('recording_kind')!='streaming_policy' and any(exported.get(key)!=raw.get(key)
+            for key in ('plan_run_id','timeline_digest') if key in raw):
+        raise ValueError('recording archive playback belongs to another frozen execution')
+    files={str(path.relative_to(root)):_pin(path) for path in
+        (raw_manifest,_file(root,raw_manifest.parent/'source.json'),playback_manifest)}
+    videos=[]
+    for camera in CAMERAS:
+        name='source-'+camera+'.mp4'
+        path=_file(root,playback_manifest.parent/name);pin=_pin(path)
+        if pin!={key:exported.get('files',{}).get(name,{}).get(key) for key in pin}:
+            raise ValueError('recording archive video SHA or size differs')
+        relative=str(path.relative_to(root));files[relative]=pin
+        videos.append(dict(camera=camera,file=relative))
+    return dict(source_root=str(root),raw_directory=str(raw_manifest.parent.relative_to(root)),
+        playback_directory=str(playback_manifest.parent.relative_to(root)),
+        raw_manifest_sha256=_pin(raw_manifest)['sha256'],environment=environment,robot_id=robot_id,
+        source_run_id=raw['source_run_id'],controller_outcome=raw.get('controller_outcome'),
+        capture_status=raw['capture_status'],files=files,videos=videos)
+
+
+def register_recording(root, raw_directory, playback_directory, output, *, environment, robot_id):
+    """Create a new small catalog/report; never copy, move or rewrite source bytes."""
+    from .recording_quality import generate, REPORT
+    checked=inspect_recording(root,raw_directory,playback_directory,environment=environment,robot_id=robot_id)
+    output=Path(output)
+    if (not output.is_absolute() or output.resolve()!=output or output.exists()
+            or output.is_relative_to(Path(root))):
+        raise ValueError('recording archive requires a new independent output directory')
+    # generate performs the independent raw verification in this offline worker.
+    report=generate(Path(root)/checked['raw_directory'],output,environment=environment)
+    if report['raw_manifest_sha256']!=checked['raw_manifest_sha256']:
+        raise ValueError('recording changed during archive registration')
+    for relative,pin in checked['files'].items():
+        if _pin(_file(Path(root),relative))!=pin:
+            raise ValueError('recording archive input changed during registration')
+    relative='quality/'+checked['raw_manifest_sha256']+'/'+REPORT
+    value=dict(schema='recording_history.v1',**checked,quality_file=relative,
+        quality_pin=_pin(_file(output,relative)),readonly=True,
+        qualification='archived recording; does not promote raw, motion or task qualification')
+    with (output/'history.json').open('x') as stream:
+        json.dump(value,stream,ensure_ascii=False,allow_nan=False,indent=2)
+    return RecordingHistory(output,environment=environment,robot_id=robot_id)
+
+
+class RecordingHistory:
+    """A trusted deployment-selected catalog, including failed/incomplete recordings."""
+    def __init__(self,root,*,environment,robot_id):
+        from .recording_quality import _json,presentation,validate_report,SCHEMA as QUALITY_SCHEMA
+        self.root=Path(root).resolve();saved=_json(_file(self.root,'history.json'))
+        if (saved.get('schema')!='recording_history.v1' or saved.get('environment')!=environment
+                or saved.get('robot_id')!=robot_id or saved.get('readonly') is not True):
+            raise ValueError('recording history belongs to another device or environment')
+        source=Path(saved['source_root'])
+        if not source.is_absolute() or source.resolve()!=source or source.is_symlink():
+            raise ValueError('recording history requires its declared canonical run')
+        quality_error=None
+        try:
+            report_path=_file(self.root,saved['quality_file'])
+            if _pin(report_path)!=saved['quality_pin']:
+                raise ValueError('archived quality report changed')
+            report=_json(report_path)
+            if (report.get('schema')!=QUALITY_SCHEMA or report.get('raw_manifest_sha256')!=saved['raw_manifest_sha256']
+                    or report.get('environment')!=environment or report.get('robot_id')!=robot_id):
+                raise ValueError('archived quality belongs to a different recording')
+            validate_report(report,manifest_sha256=saved['raw_manifest_sha256'])
+        except (OSError,ValueError,TypeError,KeyError) as error:
+            report=None;quality_error=str(error)[:700]
+        changed=[]
+        video_names={row['file'] for row in saved['videos']}
+        for relative,pin in saved['files'].items():
+            if relative in video_names:continue
+            try:
+                if _pin(_file(source,relative))!=pin:changed.append(relative)
+            except (OSError,ValueError):changed.append(relative)
+        self.catalog=[];self.files={};self.source=source
+        self.quality_path=report_path if report is not None else None
+        self.quality_pin=saved['quality_pin']
+        for video in saved['videos']:
+            relative=video['file'];pin=saved['files'][relative];error=None
+            try:
+                if _pin(_file(source,relative))!=pin:raise ValueError('archived video SHA or size changed')
+            except (OSError,ValueError) as exc:error=str(exc)
+            identity='recording-history-'+hashlib.sha256((saved['raw_manifest_sha256']+'\0'+relative+'\0'+pin['sha256']).encode()).hexdigest()
+            view=presentation(report,video_ready=error is None,controller_outcome=saved['controller_outcome'])
+            if quality_error:view['quality_error']=quality_error
+            if changed:
+                view['dimensions']['data']=dict(status='requires_review',label='源证据已变化，需复核')
+                view['changed_evidence']=changed
+            if error:view['video_error']=error
+            if error is None:self.files[identity]=(relative,pin)
+            label='历史录制 · '+{'base_0':'头部','left_wrist_0':'左腕','right_wrist_0':'右腕'}[video['camera']]
+            self.catalog.append(dict(id=identity,run_id=saved['source_run_id'],kind='recording',label=label,
+                status='completed' if saved['capture_status']=='complete' and saved['controller_outcome']=='completed' else 'failed',
+                readonly=True,recording_quality=view,details=dict(robot_id=robot_id,environment=environment,
+                    raw_manifest_sha256=saved['raw_manifest_sha256'],qualification=saved['qualification'],
+                    original_controller_outcome=saved['controller_outcome'],original_capture_status=saved['capture_status']),
+                media=dict(id=identity,run_id=saved['source_run_id'],kind='replay',ready=error is None,
+                    role='source',camera=video['camera'],mime_type='video/mp4',label=label,
+                    url='/api/result-media?'+urlencode(dict(environment=environment,business='collection',result_id=identity)))))
+
+    def results(self):return deepcopy(self.catalog)
+
+    def quality_report(self,result_id):
+        from .recording_quality import _json
+        if self.quality_path is None or not any(row['id']==result_id for row in self.catalog):return None
+        if _pin(self.quality_path)!=self.quality_pin:raise ValueError('archived quality report changed')
+        report=_json(self.quality_path)
+        if _pin(self.quality_path)!=self.quality_pin:raise ValueError('archived quality report changed during read')
+        return dict(report=report,sidecar_sha256=self.quality_pin['sha256'])
+
+    def media(self,result_id):
+        if result_id not in self.files:return None
+        relative,pin=self.files[result_id];path=_file(self.source,relative)
+        if _pin(path)!=pin:raise ValueError('archived video SHA or size changed')
+        return path
+
+
+def load_history(root,*,environment,robot_id):
+    """Keep the original qualified-fake validator unchanged for its own schema."""
+    path=Path(root).resolve();saved=json.loads(_file(path,'history.json').read_bytes())
+    if saved.get('schema')=='recording_history.v1':
+        return RecordingHistory(path,environment=environment,robot_id=robot_id)
+    if environment!='fake':raise ValueError('qualified fake history cannot enter physical results')
+    history=CollectionHistory(path)
+    if any(row['details']['robot_id']!=robot_id for row in history.results()):
+        raise ValueError('retained history belongs to another virtual robot')
+    return history

@@ -1,0 +1,15 @@
+[Unit]
+Description=Robot Workbench internal LAN gateway
+After=network-online.target robot-workbench-dsw-tunnel.service
+Wants=robot-workbench-dsw-tunnel.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -B /home/wujie/services/robot-workbench/serve_lan_gateway.py --listen 10.17.0.27 --port 18866 --upstream-port 18867 --upstream-authority 127.0.0.1:43759
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

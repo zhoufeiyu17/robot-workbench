@@ -1,10 +1,13 @@
 """Native task wiring CPU fixtures. These never qualify PhysX/GPU task success."""
 from copy import deepcopy
+from collections import deque
 from dataclasses import asdict,dataclass
+import math
 from pathlib import Path
 import sys
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import Mock,patch
 import numpy as np
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -17,7 +20,7 @@ from control_motion import validate_control
 from execution_timeline import build
 from physical_motiongen import freeze_physical
 from robot_workbench.physx import PhysxBackend
-from robot_workbench.physx_task import CoffeeTaskMonitor,prepare_task
+from robot_workbench.physx_task import CoffeeTaskMonitor,prepare_task,return_sample_audit
 
 
 @dataclass(frozen=True)
@@ -32,17 +35,68 @@ class Acceptance:
     open_position_m:float=.041496
     open_tolerance_m:float=.001
     finger_force_max_n:float=100.
+    finger_force_min_n:float=.5
     residual_force_max_n:float=2.
     contact_speed_m_s:float=.08
     pregrasp_contact_speed_m_s:float=.16
     slip_m:float=.005
+    slip_rad:float=.1
+    tilt_rad:float=.08
+    surface_tolerance_m:float=.001
+    edge_margin_m:float=.002
+    support_force_min_n:float=.1
+    support_force_max_n:float=5.
+    stable_window_s:float=.1
+    release_window_s:float=.1
+    stable_speed_m_s:float=.01
+    stable_angular_speed_rad_s:float=.1
+    home_position_rad:float=.02
+    home_speed_rad_s:float=.03
+    hand_clearance_m:float=.01
+    cup_machine_contact_allowance_m:float=.003
     def finger_contact_speed_limit(self,grasp_confirmed):return self.contact_speed_m_s
+    def finger_contact_open_state_allowed(self,*,grasp_confirmed,landing,opened,opening,force):
+        return not grasp_confirmed or not opened or landing and (opened or opening) and force<=self.residual_force_max_n
     def digest(self):return _digest(asdict(self))
+
+
+@dataclass(frozen=True)
+class Band:
+    radius_start_m:float|None=None
 
 
 @dataclass(frozen=True)
 class Cup:
     candidate_grasp_band_m:tuple=(.04,.065)
+    bands:tuple=(Band(),)
+    bottom_radius_m:float=.03
+
+
+@dataclass(frozen=True)
+class Pose:
+    position:tuple=(0.,0.,0.)
+    orientation_wxyz:tuple=(1.,0.,0.,0.)
+    def rotate(self,p):
+        w,x,y,z=self.orientation_wxyz;vx,vy,vz=p
+        tx,ty,tz=2*(y*vz-z*vy),2*(z*vx-x*vz),2*(x*vy-y*vx)
+        return vx+w*tx+y*tz-z*ty,vy+w*ty+z*tx-x*tz,vz+w*tz+x*ty-y*tx
+    def transform_point(self,p):return tuple(a+b for a,b in zip(self.position,self.rotate(p)))
+    def inverse(self):
+        w,x,y,z=self.orientation_wxyz;r=Pose(orientation_wxyz=(w,-x,-y,-z))
+        return Pose(r.rotate(tuple(-v for v in self.position)),r.orientation_wxyz)
+    def compose(self,other):
+        w,x,y,z=self.orientation_wxyz;a,b,c,d=other.orientation_wxyz
+        return Pose(self.transform_point(other.position),(w*a-x*b-y*c-z*d,w*b+x*a+y*d-z*c,w*c-x*d+y*a+z*b,w*d+x*c-y*b+z*a))
+
+
+@dataclass(frozen=True)
+class Contact:
+    actors:tuple
+    shapes:tuple
+    position:tuple
+    normal:tuple=(0.,0.,1.)
+    impulse:tuple=(0.,0.,.2/240)
+    separation_m:float=0.
 
 
 @dataclass
@@ -51,6 +105,14 @@ class Sample:
     jaw_positions:tuple=(.041496,.041496)
     finger_cup_relative_speed_m_s:float=0.
     arm_positions:tuple=()
+    episode_id:str='cpu-episode'
+    world_from_cup:Pose=Pose()
+    world_from_tool:Pose=Pose()
+    cup_velocity:tuple=(0.,0.,0.)
+    cup_angular_velocity:tuple=(0.,0.,0.)
+    arm_velocities:tuple=(0.,)*12
+    jaw_velocities:tuple=(0.,0.)
+    hand_clearance_m:float=.2
 
 
 class Evaluator:
@@ -77,6 +139,18 @@ class Evaluator:
         return self.event
 
 
+class ReturnEvaluator(Evaluator):
+    def reset(self,sample):
+        super().reset(sample)
+        self.history.update(release_confirmed=False)
+        self.force_window=deque();self.force_window_duration=0.;self.grasp_transform=None
+        self.windows={};self.release_elapsed=0.
+    def _lowest_z(self,pose):return pose.position[2]
+    def _window(self,key,condition,dt,required):
+        self.windows[key]=self.windows.get(key,0.)+dt if condition else 0.
+        return self.windows[key]+1e-12>=required
+
+
 class Native:
     def __init__(self,backend):
         self.backend=backend
@@ -89,6 +163,7 @@ class Native:
             diagnostic_relax_guards=False,diagnostic_observe_only=False)
         self.env=NS(_sim_step_counter=60,physics_dt=1/240,
             scene={'robot':NS(joint_names=['q0'],data=NS(joint_pos=np.zeros((1,1))))})
+        self.instance=NS(environment_from_machine_root=Pose((.6235,-.0235,.78)))
         self.env._m2_runtime=self
         backend.plant.env=self.env
         self.latest_contacts=()
@@ -97,7 +172,17 @@ class Native:
         return Sample(step,arm_positions=tuple(self.backend.actual['left'][:6]+self.backend.actual['right'][:6])),NS()
 
 
-def fixture(*,prefix=False,preset=None,corrupt_preset=False):
+def compiled_views(plan,source,truth,timeline):
+    from robot_workbench.physx_task import prepare_isolated_task,PlantTargets
+    from robot_workbench.control_plan import _rows,Rows,Column
+    item=prepare_isolated_task(plan,source,truth,timeline)
+    fd,metadata=_rows(timeline['commands'],'a'*32);rows=Rows(fd,metadata,'a'*32)
+    view=dict(timeline,commands=rows,times=Column(rows,'times'),holding_ticks=Column(rows,'holding_ticks'),
+        unloading_ticks=Column(rows,'unloading_ticks'))
+    return item['prepared'],view,dict(source_timeline=view,timeline=view,targets=PlantTargets(rows,truth))
+
+
+def fixture(*,prefix=False,preset=None,corrupt_preset=False,compact=False):
     backend=PhysxBackend(LaggingPlant(),joint_offsets=[.04]*12,metal_gap_offset_mm=.008)
     source,model,binding=fake_inputs(source_clock_id=backend.source_clock_id,runtime_nonce='fixture-owner')
     start=model['ticks'][0]['target']
@@ -121,6 +206,8 @@ def fixture(*,prefix=False,preset=None,corrupt_preset=False):
     limits={side+'_arm_joints':[[-2,2]]*6 for side in ('left','right')}
     limits.update(left_gripper=[0,83],right_gripper=[0,83])
     timeline=build(plan,current_state=current,limits=limits) if prefix else build(plan)
+    compiled=None
+    if compact:prepared,timeline,compiled=compiled_views(plan,source,truth,timeline)
     backend.owner=NS(environment='fake',hardware=False,epoch=3,runtime_nonce='fixture-owner',
         execution_instance_id='a'*32,
         stop_requested=False,release_requested=False,
@@ -129,7 +216,7 @@ def fixture(*,prefix=False,preset=None,corrupt_preset=False):
     if preset is not None:native.physical_identity['cup_contact_preset']=deepcopy(preset)
     if corrupt_preset:native.physical_identity['cup_contact_preset']['stiffness_n_m']+=1.
     backend.plant.contact_status=dict(complete=True,absolute_physics_step=60)
-    monitor=CoffeeTaskMonitor(native,backend,prepared,timeline,command_epoch=3,runtime_nonce='fixture-owner')
+    monitor=CoffeeTaskMonitor(native,backend,prepared,timeline,command_epoch=3,runtime_nonce='fixture-owner',prepared_execution=compiled)
     return monitor
 
 
@@ -146,8 +233,73 @@ def apply(monitor,index,steps=1):
         monitor.observe_current()
 
 
+def return_fixture(*,compact=False):
+    from test_cup_return_replay import fixture as replay_inputs
+    from cup_return_replay import build_return_plan
+    original,parent,receipt,source,binding,_=replay_inputs()
+    backend=PhysxBackend(LaggingPlant(),joint_offsets=[.04]*12,metal_gap_offset_mm=.008)
+    source['clock']['source_clock_id']=backend.source_clock_id
+    source['initial_state']['clock']=deepcopy(source['clock'])
+    source['replay_context']['clock']=deepcopy(source['clock'])
+    for row in source['initial_state']['owner_samples']:row['source_clock_id']=backend.source_clock_id
+    receipt['physical_configuration_sha256']=source['replay_context']['physical_configuration_sha256']=_digest({'fixture':True})
+    plan=build_return_plan(parent,original,receipt,source)
+    truth=dict(source_clock_id=backend.source_clock_id,joint_offsets_rad=[.04]*12,metal_gap_offset_mm=.008)
+    prepared=prepare_task(plan,source,truth);timeline=build(plan)
+    compiled=None
+    if compact:prepared,timeline,compiled=compiled_views(plan,source,truth,timeline)
+    backend.owner=NS(environment='fake',hardware=False,epoch=3,runtime_nonce='fixture-owner',execution_instance_id='a'*32,
+        stop_requested=False,release_requested=False,runner=NS(runtime=timeline,frozen=NS(command_index=0,ticks=timeline['commands'])))
+    native=Native(backend)
+    native.evaluator=ReturnEvaluator(native.spec.acceptance,native.cup_profile,cup_root=native.root+'/Cup',
+        robot_root=native.root+'/Robot',table_shape='table',machine_profile_sha256='m'*64,
+        diagnostic_relax_guards=False,diagnostic_observe_only=False)
+    goal=plan['replay_derivation']['return_goal'];native.cup_pose=Pose(tuple(goal['position']))
+    native.failed_return_field=None
+    def read(step):
+        stage=(backend.applied_contexts['left'] or {}).get('stage','initial_hold')
+        held=stage in {'close_ramp','close_and_hold','lift','transport','lower','support_settle'}
+        gap=.038 if held else .041496
+        pose=native.cup_pose
+        sample=Sample(step,jaw_positions=(gap,gap),world_from_cup=pose,world_from_tool=Pose(),
+            arm_positions=tuple(backend.actual['left'][:6]+backend.actual['right'][:6]))
+        contacts=[Contact((native.root+'/Cup',native.root+'/Worktable'),('cup-bottom','table'),pose.position)]
+        if held:
+            for link in ('left_link7','left_link8'):
+                body=native.root+'/Robot/'+link
+                contacts.append(Contact((native.root+'/Cup',body),(native.root+'/Cup/Collisions/MiddleBody',body+'/RealFingerRubberPad'),
+                    (pose.position[0],pose.position[1],pose.position[2]+.05),normal=(1.,0.,0.),impulse=(1/240,0.,0.)))
+        if native.failed_return_field=='missing_support':contacts=[]
+        elif native.failed_return_field=='moving':sample.cup_velocity=(.02,0.,0.)
+        elif native.failed_return_field=='not_home':sample.arm_positions=(9.,)*12
+        elif native.failed_return_field=='not_clear':sample.hand_clearance_m=0.
+        elif native.failed_return_field=='no_grasp':contacts=contacts[:1]
+        native.latest_contacts=tuple(contacts)
+        return sample,NS(shapes=[],instance=NS(episode_id=sample.episode_id),observation_id=str(step),profile_sha256='m'*64)
+    native.read=read
+    return CoffeeTaskMonitor(native,backend,prepared,timeline,command_epoch=3,runtime_nonce='fixture-owner',prepared_execution=compiled)
+
+
 class TaskTest(unittest.TestCase):
     def setUp(self):Evaluator.events={};Evaluator.calls=[]
+
+    def test_compact_sealed_task_views_keep_current_success_and_latched_failures(self):
+        from robot_workbench.control_plan import Rows
+        from robot_workbench.physx_task import PlantTargets
+        legacy=fixture(prefix=True);m=fixture(prefix=True,compact=True)
+        self.assertIsInstance(m.timeline['commands'],Rows);self.assertIsInstance(m.targets,PlantTargets)
+        self.assertEqual(legacy.policy['configuration'],m.policy['configuration'])
+        self.assertEqual(list(legacy.targets),list(m.targets))
+        with patch('robot_workbench.physx_task.prepare_task_execution',side_effect=AssertionError('full task rescan')):
+            for i in range(len(m.targets)):apply(m,i)
+            Evaluator.events[m.native.env._sim_step_counter+1]='success';apply(m,len(m.targets)-1)
+            self.assertEqual(m.finish('completed',m.backend.read_calibration_state())['task_outcome'],'success')
+        Evaluator.events={61:'robot_forbidden_contact'};failed=fixture(compact=True);apply(failed,0)
+        self.assertEqual(failed.outcome,'failed');self.assertFalse(failed.backend.owner.stop_requested)
+        Evaluator.events={};returned=return_fixture(compact=True)
+        for i in range(len(returned.targets)):apply(returned,i,steps=8)
+        result=returned.finish('completed',returned.backend.read_calibration_state())
+        self.assertEqual(result['task_outcome'],'success',result['first_failure'])
 
     def test_actual_plant_preset_must_still_equal_frozen_plan(self):
         preset=dict(preset_id='soft',stiffness_n_m=329.24414834950727,damping_n_s_m=10.,diagnostic_claw_compression=True)
@@ -171,6 +323,8 @@ class TaskTest(unittest.TestCase):
 
     def test_actual_stage_prefix_fixed_truth_and_current_endpoint_success(self):
         m=fixture(prefix=True)
+        self.assertEqual(m.identity['actual_environment_from_machine_root'],
+            dict(position=[.6235,-.0235,.78],orientation_wxyz=[1.,0.,0.,0.]))
         self.assertEqual(m.runtime.evaluator.home_positions,tuple(m.targets[-1]['left'][:6]+m.targets[-1]['right'][:6]))
         # Non-8 spacing and a real initialization prefix cannot shift task intent.
         for i in range(len(m.targets)):apply(m,i,steps=3 if i%2 else 2)
@@ -199,6 +353,49 @@ class TaskTest(unittest.TestCase):
         result=m.finish('completed',m.backend.read_calibration_state())
         self.assertEqual(result['task_outcome'],'failed')
         self.assertEqual(result['first_failure']['reason'],'robot_forbidden_contact')
+
+    def test_execution_does_not_repeat_planning_collision_checks(self):
+        m=fixture()
+        m.native.zero_collision.check=Mock(side_effect=AssertionError('execution must not recheck geometry'))
+        Evaluator.events={62:'robot_forbidden_contact'}
+        apply(m,0);apply(m,1)
+        m.native.zero_collision.check.assert_not_called()
+        result=m.finish('completed',m.backend.read_calibration_state())
+        self.assertEqual(result['execution_geometry_collision_check'],
+                         dict(status='not_run',reason='planning_phase_only'))
+        self.assertEqual(result['last_observation']['folded_self_collision'],
+                         dict(status='not_run',reason='planning_phase_only'))
+        self.assertEqual(result['task_outcome'],'failed')
+        self.assertEqual(result['first_failure']['reason'],'robot_forbidden_contact')
+
+    def test_failed_task_records_new_endpoint_without_reclassifying_failure(self):
+        m=fixture();Evaluator.events={62:'robot_forbidden_contact'}
+        apply(m,0);apply(m,1)
+        first=deepcopy(m.first_failure)
+        original=m.native.read
+        def read(step):
+            sample,scene=original(step)
+            sample.world_from_cup=Pose((.43,.21,.78))
+            return sample,scene
+        m.native.read=read
+        for i in range(2,len(m.targets)):apply(m,i)
+        result=m.finish('completed',m.backend.read_calibration_state())
+        self.assertEqual(result['task_outcome'],'failed')
+        self.assertEqual(result['first_failure'],first)
+        self.assertEqual(len(Evaluator.calls),2)
+        endpoint=result['endpoint_observation']
+        self.assertEqual(endpoint['status'],'observed')
+        self.assertEqual(endpoint['sample']['world_from_cup']['position'],(.43,.21,.78))
+        self.assertGreater(endpoint['physics_step'],first['physics_step'])
+        self.assertNotEqual(endpoint['sample'],result['last_observation']['sample'])
+
+    def test_failed_task_does_not_label_stale_feedback_as_final_pose(self):
+        m=fixture();Evaluator.events={62:'robot_forbidden_contact'}
+        apply(m,0);apply(m,1);apply(m,2)
+        feedback=m.backend.read_calibration_state();feedback['physics_step']-=1
+        result=m.finish('completed',feedback)
+        self.assertEqual(result['task_outcome'],'failed')
+        self.assertEqual(result['endpoint_observation']['status'],'unavailable')
 
     def test_incomplete_contacts_missing_ticks_and_stale_identity_invalidate_only_task(self):
         for mutation in ('contacts','skip','epoch','instance','stage','target'):
@@ -233,6 +430,71 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(m.finish('completed',row)['task_outcome'],'unverifiable')
         m=fixture();m.native.physical_identity['changed']=True;apply(m,0)
         self.assertEqual(m.outcome,'unverifiable')
+
+    def test_return_uses_current_table_endpoint_without_coffee_outlet_policy(self):
+        m=return_fixture()
+        self.assertEqual(m.policy['configuration']['schema_version'],'owner_cup_return_policy.v1')
+        self.assertNotIn('placement_goal',m.policy['configuration'])
+        self.assertFalse(hasattr(m.runtime,'_motiongen_replay_policy'))
+        m.native.zero_collision.check=Mock(side_effect=AssertionError('return must not run geometry checks'))
+        for i in range(len(m.targets)):apply(m,i,steps=8)
+        self.assertEqual(m.outcome,'running',m.first_failure)
+        result=m.finish('completed',m.backend.read_calibration_state(),data_outcome='not_recorded')
+        self.assertEqual(result['task_kind'],'cup_return')
+        self.assertEqual(result['task_outcome'],'success',result['first_failure'])
+        self.assertEqual(result['execution_geometry_collision_check'],dict(status='not_run',reason='user_requested_reverse_replay'))
+        self.assertTrue(result['policy']['progress']['grasp_observed'])
+        self.assertTrue(result['policy']['progress']['release_confirmed'])
+        self.assertTrue(result['last_observation']['native_audit']['table_supported'])
+        self.assertEqual(result['policy']['progress']['return_goal']['goal_tolerance_m'],.01)
+        m.native.zero_collision.check.assert_not_called()
+        self.assertFalse(m.backend.owner.stop_requested)
+
+    def test_return_requires_current_support_release_pose_stability_and_home(self):
+        for failure in ('missing_support','moving','not_home','not_clear','no_grasp','wrong_xy','tilted'):
+            with self.subTest(failure=failure):
+                m=return_fixture()
+                if failure=='no_grasp':m.native.failed_return_field=failure
+                for i in range(len(m.targets)):apply(m,i,steps=8)
+                if failure=='wrong_xy':
+                    p=m.native.cup_pose.position;m.native.cup_pose=Pose((p[0]+.011,p[1],p[2]))
+                elif failure=='tilted':
+                    m.native.cup_pose=Pose(m.native.cup_pose.position,(math.cos(.05),math.sin(.05),0.,0.))
+                else:m.native.failed_return_field=failure
+                apply(m,len(m.targets)-1)
+                result=m.finish('completed',m.backend.read_calibration_state())
+                self.assertNotEqual(result['task_outcome'],'success')
+                self.assertFalse(result['task_qualified'])
+                self.assertFalse(m.backend.owner.stop_requested)
+
+    def test_return_old_success_cannot_mask_skipped_tick_or_stale_endpoint(self):
+        m=return_fixture();apply(m,0);apply(m,2)
+        self.assertEqual(m.outcome,'unverifiable')
+        m=return_fixture()
+        for i in range(len(m.targets)):apply(m,i,steps=8)
+        state=m.backend.read_calibration_state();state['physics_step']-=1
+        result=m.finish('completed',state)
+        self.assertEqual(result['task_outcome'],'unverifiable')
+
+
+class InferenceSupportTest(unittest.TestCase):
+    def test_only_current_tray_support_and_stability_count(self):
+        from robot_workbench.physx_task import tray_support_sample
+        options=dict(cup_root='/cup',scene=NS(world_from_support=Pose(),support_shape_path='/tray'),
+            cup_velocity=(0.,0.,0.),cup_angular_velocity=(0.,0.,0.),dt=1/240,source_time=40.,
+            source_clock_id='current',physics_step=9600,absolute_physics_step=9620,
+            surface_tolerance_m=.001,normal_tilt_rad=.08,minimum_force_n=.1,
+            stable_speed_m_s=.01,stable_angular_speed_rad_s=.1)
+        contact=NS(actors=('/cup','/machine'),shapes=('/cup-shape','/tray'),
+            normal=(0.,0.,1.),position=(.2,.3,0.),impulse=(0.,0.,.001))
+        result=tray_support_sample([contact],**options)
+        self.assertTrue(result['tray_supported']);self.assertTrue(result['stable'])
+        self.assertEqual(result['physics_step'],9600)
+        # No home, release, outlet alignment or earlier collision failure gate.
+        self.assertFalse(tray_support_sample([],**options)['tray_supported'])
+        self.assertFalse(tray_support_sample([contact],**dict(options,cup_velocity=(.011,0.,0.)))['stable'])
+        contact.normal=(1.,0.,0.)
+        self.assertFalse(tray_support_sample([contact],**options)['tray_supported'])
 
 
 if __name__=='__main__':unittest.main()

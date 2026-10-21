@@ -24,20 +24,21 @@ def private_spec_arguments(config):
         spec_sha256=spec['spec_sha256'],workbench_code=config['workbench_code'])
 
 
-def decode_private_spec(payload,expected_sha256):
+def decode_private_spec(payload,expected_sha256,*,kind='planner'):
     if hashlib.sha256(payload).hexdigest()!=expected_sha256:raise ValueError('planner private spec identity differs')
-    spec=json.loads(payload);validate_spec(spec,private=True)
+    spec=json.loads(payload);validate_spec(spec,private=True,kind=kind)
     return spec
 
 
-def load_private_spec(path,expected_sha256):
+def load_private_spec(path,expected_sha256,*,kind='planner'):
     import stat
     file=Path(path)
     if file.is_symlink() or not file.is_file() or file.stat().st_size>65536 or stat.S_IMODE(file.stat().st_mode)!=0o600:
         raise ValueError('planner spec must be a bounded private regular file')
     payload=file.read_bytes()
-    spec=decode_private_spec(payload,expected_sha256)
-    if file.resolve()!=Path(spec['allowed_output_root']+'/planner-spec.json').resolve():
+    spec=decode_private_spec(payload,expected_sha256,kind=kind)
+    expected=(spec['root']+'/private-spec.json' if kind=='scene' else spec['allowed_output_root']+'/planner-spec.json')
+    if file.resolve()!=Path(expected).resolve():
         raise ValueError('planner private spec is outside its owned output root')
     return spec
 
@@ -85,15 +86,18 @@ def startup_config(template,directory,*,shared_config=None):
         spec=None
     read_roots=(local_read_directories(base,contract['filesystem']['readonly_roots']) if local
                 else contract['filesystem']['readonly_roots'])
+    from launch_environment import persistent_service
+    persistent=persistent_service(contract['resources'])
     private=dict(root=root,socket=root+'/p',owner_token=uuid4().hex,session_id=session,
         identity=digest(json.dumps(pinned_files(contract),sort_keys=True).encode()),
         allowed_read_roots=[*read_roots,jobs],allowed_output_root=jobs,
         max_memory_mib=12288,min_free_memory_mib=16384,
-        max_lifetime_seconds=int(contract['resources'].get('service_lifetime_seconds',contract['resources']['max_wall_time_minutes']*60)))
+        max_lifetime_seconds=None if persistent else int(contract['resources'].get('service_lifetime_seconds',contract['resources']['max_wall_time_minutes']*60)))
+    if persistent:private['persistent_service']=True
     if local:
-        from local_execution import TARGET,validate
+        from local_execution import compute_resource,validate
         validate(base,contract)
-        private.update(frozen,compute_resource=TARGET)
+        private.update(frozen,compute_resource=compute_resource(base['execution']))
     if spec is None:
         payload=json.dumps(private,sort_keys=True,separators=(',',':')).encode()
         spec={k:v for k,v in private.items() if k!='owner_token'}
@@ -118,24 +122,37 @@ def startup_config(template,directory,*,shared_config=None):
     return config
 
 
-def validate_spec(spec,*,private=False):
+def validate_spec(spec,*,private=False,kind='planner'):
+    if kind not in ('planner','scene'):raise ValueError('unknown private worker kind')
     fields={'root','socket','session_id','identity','allowed_read_roots','allowed_output_root',
             'max_memory_mib','min_free_memory_mib','max_lifetime_seconds'}
     fields.add('owner_token' if private else 'spec_sha256')
+    if kind=='scene':fields.add('finger_envelope')
+    if isinstance(spec,dict) and 'persistent_service' in spec:
+        fields.add('persistent_service')
+        if spec['persistent_service'] is not True or spec.get('max_lifetime_seconds') is not None:
+            raise ValueError('persistent planner must explicitly freeze a null service lifetime')
     local_fields={'input_pins_sha256','runtime_paths','compute_resource'}
     if isinstance(spec,dict) and set(spec)&local_fields:
         fields|=local_fields
     if not isinstance(spec,dict) or set(spec)!=fields:raise ValueError('invalid planner service fields')
+    if kind=='scene':
+        pin=spec['finger_envelope']
+        if (not isinstance(pin,dict) or set(pin)!={'path','sha256'} or not isinstance(pin['path'],str)
+                or not PurePosixPath(pin['path']).is_absolute() or '..' in PurePosixPath(pin['path']).parts
+                or not isinstance(pin['sha256'],str) or not re.fullmatch('[0-9a-f]{64}',pin['sha256'])):
+            raise ValueError('scene requires one exact pinned finger envelope')
     if 'input_pins_sha256' in spec:
-        from local_execution import TARGET
-        if (spec['compute_resource']!=TARGET or not isinstance(spec['input_pins_sha256'],str)
+        from local_execution import TARGET,PHYSICAL_TARGET
+        if (spec['compute_resource'] not in (TARGET,PHYSICAL_TARGET) or not isinstance(spec['input_pins_sha256'],str)
                 or not re.fullmatch('[0-9a-f]{64}',spec['input_pins_sha256'])
                 or not isinstance(spec['runtime_paths'],dict) or set(spec['runtime_paths'])!=set(RUNTIME_KEYS)
                 or any(not isinstance(v,str) or not v.startswith('/') for v in spec['runtime_paths'].values())):
             raise ValueError('invalid frozen planner code/model inputs')
     root=PurePosixPath(spec['root'])
-    if (len(root.parts)!=3 or root.parts[1]!='tmp' or not root.name.startswith('rbw-planner-')
-            or len(root.name)<=len('rbw-planner-') or PurePosixPath(spec['socket']).parent!=root
+    prefix='rbw-'+kind+'-'
+    if (len(root.parts)!=3 or root.parts[1]!='tmp' or not root.name.startswith(prefix)
+            or len(root.name)<=len(prefix) or PurePosixPath(spec['socket']).parent!=root
             or len(spec['socket'].encode())>=104):raise ValueError('planner socket must be in an owned temporary root')
     if private and (not isinstance(spec['owner_token'],str) or len(spec['owner_token'])<16):raise ValueError('planner ownership nonce required')
     if not private and (not isinstance(spec['spec_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',spec['spec_sha256'])):
@@ -143,7 +160,7 @@ def validate_spec(spec,*,private=False):
     if not isinstance(spec['session_id'],str) or not spec['session_id']:
         raise ValueError('planner owner/session identity required')
     if not isinstance(spec['identity'],str) or not re.fullmatch('[0-9a-f]{64}',spec['identity']):raise ValueError('planner frozen identity required')
-    for key in ('max_memory_mib','min_free_memory_mib','max_lifetime_seconds'):
+    for key in ('max_memory_mib','min_free_memory_mib',*(() if spec.get('persistent_service') else ('max_lifetime_seconds',))):
         if type(spec[key]) is not int or spec[key]<=0:raise ValueError('positive bounded planner budgets required')
     if not isinstance(spec['allowed_read_roots'],list) or not spec['allowed_read_roots']:
         raise ValueError('planner read boundaries required')
@@ -160,7 +177,11 @@ def validate_config(config,contract):
     if spec!=contract.get('planner_service') or config.get('planning_backend')!='motiongen':
         raise ValueError('planner service must match a frozen MotionGen contract')
     fs=contract['filesystem']; resources=contract['resources']
-    owned_output=config['execution']['plant']['scope'] if config.get('execution') else '/mnt/data/feiyu.zhou/runs/robot_sim'
+    from launch_environment import persistent_service
+    if bool(spec.get('persistent_service'))!=persistent_service(resources):
+        raise ValueError('planner persistent lifetime differs from resource contract')
+    from local_execution import owner_scope
+    owned_output=owner_scope(config['execution']) if config.get('execution') else '/mnt/data/feiyu.zhou/runs/robot_sim'
     if (spec['root'] not in fs['writable_roots'] or spec['allowed_output_root'] not in fs['writable_roots']
             or not below(config['remote_run_root'],spec['allowed_output_root'])
             or not below(spec['allowed_output_root'],owned_output)):
@@ -173,7 +194,7 @@ def validate_config(config,contract):
         raise ValueError('planner must read current task outputs')
     if any(p!=spec['allowed_output_root'] and not any(below(p,r) for r in fs['readonly_roots']) for p in spec['allowed_read_roots']):
         raise ValueError('planner read root not authorized')
-    if config.get('execution'):
+    if config.get('execution') and not config.get('compute_transport'):
         reads=[path for path in spec['allowed_read_roots'] if path!=spec['allowed_output_root']]
         if local_read_directories(config,reads)!=reads:
             raise ValueError('local planner IPC read roots must be canonical existing directories')
@@ -182,6 +203,9 @@ def validate_config(config,contract):
             raise ValueError('local planner jobs must be a canonical directory; startup preflight creates it')
     pins=pinned_files(contract)
     if config.get('execution'):
+        from local_execution import compute_resource
+        if spec.get('compute_resource')!=compute_resource(config['execution']):
+            raise ValueError('planner compute resource differs from frozen execution')
         actual={k:v for group in pins for k,v in group.items()}
         frozen=dict(input_pins=contract.get('planner_inputs'),runtime_paths=spec.get('runtime_paths'))
         if (not isinstance(frozen['input_pins'],dict) or not frozen['input_pins']
@@ -247,9 +271,9 @@ class PlannerService:
     def __init__(self):
         self.process=None; self.log=None; self.state={'status':'stopped','model_initialized':False}
         self.lock=threading.Lock()
-        self.closed=False
+        self.closed=False;self.generation=0
 
-    def start(self,config_path,directory,*,resume=False):
+    def start(self,config_path,directory,*,resume=False,launch=None):
         from run_pipeline import load_config,python_command,transport,lane,pinned_files,GPU_CHECK
         from detector_service import SUPERVISOR
         config,contract,_=load_config(Path(config_path)); spec=config.get('planner_service')
@@ -280,41 +304,51 @@ class PlannerService:
         else:guard=python_command(GPU_CHECK,0)
         if config.get('execution'):
             from detector_service import LOCAL_SUPERVISOR
-            supervisor=python_command(LOCAL_SUPERVISOR,json.dumps(args),spec['max_lifetime_seconds'],'hold-stdin',wb)
-        else:supervisor=python_command(SUPERVISOR,json.dumps(args),spec['max_lifetime_seconds'],'hold-stdin')
+            supervisor=python_command(LOCAL_SUPERVISOR,json.dumps(args),'persistent' if spec.get('persistent_service') else spec['max_lifetime_seconds'],'hold-stdin',wb)
+        else:supervisor=python_command(SUPERVISOR,json.dumps(args),'persistent' if spec.get('persistent_service') else spec['max_lifetime_seconds'],'hold-stdin')
         command=guard+' 1>&2 && '+python_command(INSTALL_SPEC,json.dumps(pinned_files(contract)),private['spec_sha256'],'resume' if resume else 'new')+' && '+('exec ' if config.get('execution') else '')+supervisor
         Path(directory).mkdir(parents=True,exist_ok=True)
         self.log=(Path(directory)/'planner-service.log').open('a')
-        self.process=subprocess.Popen(transport(config,'dsw-scene',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
+        self.generation+=1;generation=self.generation
+        def create():
+            self.process=subprocess.Popen(transport(config,'dsw-scene',command),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,text=True,bufsize=1)
+            return self.process
+        try:process=launch(create) if launch is not None else create()
+        except BaseException:
+            self.log.close();self.log=None;raise
         self.process.stdin.write(payload.decode()+'\n');self.process.stdin.flush()
         self.config=config
         self.config_path,self.directory=Path(config_path),Path(directory)
         self.closed=False
         self.state={'status':'starting','model_initialized':False}
+        log=self.log
         def read_state():
             try:
-                for line in self.process.stdout:
-                    self.log.write(line);self.log.flush()
+                for line in process.stdout:
+                    log.write(line);log.flush()
                     value=json.loads(line)
                     if value.get('passed') is False:raise ValueError(value.get('error','planner startup failed'))
                     state=value.get('service')
                     if not isinstance(state,dict) or any(state.get(k)!=v for k,v in spec.items()) or 'owner_token' in state:
                         raise ValueError('planner startup state ownership differs')
-                    with self.lock:self.state=state
+                    with self.lock:
+                        if generation==self.generation and not self.closed:self.state=state
             except Exception as error:
-                with self.lock:self.state={'status':'failed','error':str(error),'model_initialized':False}
-                if self.process.stdin and not self.process.stdin.closed:self.process.stdin.close()
+                with self.lock:
+                    if generation==self.generation and not self.closed:self.state={'status':'failed','error':str(error),'model_initialized':False}
+                if process.stdin and not process.stdin.closed:process.stdin.close()
         self.thread=threading.Thread(target=read_state,daemon=True)
         self.thread.start()
 
     def status(self):
-        if self.closed:return {'status':'stopped','model_initialized':False}
+        if self.closed:return dict(self.state) if self.state.get('status')=='unknown' else {'status':'stopped','model_initialized':False}
         if self.process is not None and self.process.poll() is not None:
-            return {'status':'failed','error':'规划服务已退出，需重新准备环境','model_initialized':False}
+            name='场景服务' if getattr(self,'resource_kind','planner')=='scene' else '规划服务'
+            return {'status':'failed','error':name+'已退出，需重新准备环境','model_initialized':False}
         with self.lock:return dict(self.state)
 
     def close(self):
-        self.closed=True
+        self.closed=True;self.generation+=1
         if self.process is not None:
             if self.process.stdin and not self.process.stdin.closed:
                 try:self.process.stdin.close()
@@ -324,26 +358,56 @@ class PlannerService:
                 self.process.terminate()
                 try:self.process.wait(timeout=30 if getattr(self,'config',{}).get('execution') else 5)
                 except subprocess.TimeoutExpired:self.process.kill();self.process.wait(timeout=5)
-        if getattr(self,'thread',None) is not None:self.thread.join(timeout=5)
+        if getattr(self,'thread',None) is not None:
+            self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                self.state=dict(status='unknown',error='旧计算服务读取线程未退出；不启动新进程',model_initialized=False)
+                raise TimeoutError(self.state['error'])
         if self.log is not None:self.log.close()
         self.state={'status':'stopped','model_initialized':False}
 
-    def recover(self,*,progress=None,timeout=40):
-        """Cancel the owned GPU child, then restart only that planner scope."""
+    def probe(self):
+        from detector_service import probe_service
+        return probe_service(self.config,getattr(self,'resource_kind','planner'))
+
+    def recover(self,*,progress=None,timeout=40,restart=False,active=lambda:True,launch=None):
+        """Keep a healthy model; only a failed/stopped worker needs a new process."""
         import time
+        deadline=time.monotonic()+timeout
+        while True:
+            if not active():raise InterruptedError('计算服务恢复已撤销')
+            state=self.status()
+            if state['status']=='ready':
+                if not restart:return state
+                break
+            if state['status'] in ('failed','stopped'):break
+            if state['status']=='unknown':
+                if (not self.closed or getattr(self,'thread',None)is not None and self.thread.is_alive()
+                        or self.process is not None and self.process.poll()is None):
+                    raise RuntimeError(state.get('error') or '计算服务状态未知，保留原进程')
+                break
+            if time.monotonic()>=deadline:
+                raise TimeoutError('当前规划计算尚未结束；保留预热进程，稍后再复位')
+            if progress:progress('等待当前规划计算结束，保留已预热模型',next_label='恢复规划入口')
+            time.sleep(.05)
         config_path,directory=self.config_path,self.directory
         self.close()
+        if not active():raise InterruptedError('计算服务退役后操作已撤销，未启动新进程')
         self.process=None;self.log=None;self.thread=None
         from detector_service import wait_for_gpu_idle
         def waiting(remaining):
             if progress:progress('等待 GPU 释放（最多 30 秒）',next_label='恢复规划服务')
-        wait_for_gpu_idle('dsw-scene',progress=waiting,**({'config':self.config,'exclude':'planner'} if self.config.get('execution') else {}))
+        if not wait_for_gpu_idle('dsw-scene',cancel=lambda:not active(),progress=waiting,**({'config':self.config,'exclude':getattr(self,'resource_kind','planner')} if self.config.get('execution') else {})):
+            raise InterruptedError('GPU等待已撤销，未启动新进程')
+        if not active():raise InterruptedError('计算服务启动已撤销')
         if progress:progress('当前规划进程已退出，正在恢复规划服务',next_label='场景重建及规划')
-        self.start(config_path,directory,resume=True)
+        self.start(config_path,directory,resume=True,**({'launch':launch} if launch is not None else {}))
         deadline=time.monotonic()+timeout
         while time.monotonic()<deadline:
+            if not active():
+                self.close();raise InterruptedError('计算服务启动后操作已撤销；仅收尾本次启动')
             state=self.status()
-            if state['status']=='ready':return
+            if state['status']=='ready':return state
             if state['status']=='failed':raise RuntimeError(state.get('error','规划服务恢复失败'))
             time.sleep(.05)
         self.close()

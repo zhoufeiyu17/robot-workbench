@@ -97,7 +97,7 @@ class RecordingIOTest(unittest.TestCase):
                 if expected_error:
                     self.assertEqual(drained[:2],[4,4])
                     self.assertEqual(max_queue,16)
-                    self.assertEqual(h.session.error,'bounded recording queue overflow')
+                    self.assertTrue(h.session.error.startswith('bounded recording event queue overflow: '),h.session.error)
                     self.assertEqual(h.session.manifest['capture_status'],'incomplete')
                 else:
                     self.assertEqual(drained,[8]*7+[5])

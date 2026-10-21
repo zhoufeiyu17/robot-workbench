@@ -49,7 +49,7 @@ class PhysicalPreparationTest(unittest.TestCase):
             (capture/'profile.json').write_text(json.dumps(source['calibration_profile']))
             serials=dict(head='fixture-head',left='fixture-left',right='fixture-right')
             rows=[]
-            for n in range(6):
+            for n in range(9):
                 path=capture/f'{n}.npz'; path.write_bytes(f'fake-npz-{n}'.encode())
                 rows.append(dict(path=path.name,sha256=file_sha(path),source_stamp_ns=1+n*1_000_000_000,capture_sequence_id=n))
             manifest=dict(evidence_source='physical_rgbd',robot_id='fixture-only',camera_serials=serials,source_clock='host',frames=rows)

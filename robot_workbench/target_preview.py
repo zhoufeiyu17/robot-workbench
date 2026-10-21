@@ -92,6 +92,39 @@ def observed_mesh(client,inputs,candidate_id):
         display_only=True,measurement_qualified=False)
 
 
+def observed_mesh_group(client,inputs,candidate_id):
+    """Three independent observed frames, one explicitly related calibration pair."""
+    from io import BytesIO
+    from PIL import Image,ImageDraw
+    if not isinstance(inputs,dict) or set(inputs)!={'head','left','right'}:
+        raise ValueError('three camera input packets required')
+    if any(inputs[side][4].get('id')!=candidate_id or inputs[side][4].get('head_result_id')!=inputs['head'][4].get('id') for side in ('left','right')):
+        raise ValueError('both wrists must use the selected wrist candidate and its exact head dependency')
+    rendered=[];metadata=[]
+    for camera in ('head','left','right'):
+        raw,meta=observed_mesh(client,inputs[camera],inputs[camera][4]['id'])
+        with Image.open(BytesIO(raw)) as image:rendered.append(image.convert('RGB'))
+        metadata.append(dict(meta,camera=camera))
+    if len({meta['environment'] for meta in metadata})!=1 or len({meta['source_clock_id'] for meta in metadata})!=1:
+        raise ValueError('camera group belongs to different environments or source clocks')
+    # Each panel retains its own source stamp; this is not a synchronized capture.
+    now=time.time_ns();age=max((now-meta['source_wall_ns'])/1e9 for meta in metadata)
+    if not 0<=age<2:raise ValueError('three camera mesh source became stale')
+    width=max(image.width for image in rendered);height=max(image.height for image in rendered)
+    canvas=Image.new('RGB',(width*3,height+24),(24,28,34));draw=ImageDraw.Draw(canvas)
+    for i,(name,image) in enumerate(zip(('Head','Left wrist','Right wrist'),rendered)):
+        canvas.paste(image,(i*width,24));draw.text((i*width+8,5),name,fill='white')
+    output=BytesIO();canvas.save(output,format='JPEG',quality=90)
+    age=max((time.time_ns()-m['source_wall_ns'])/1e9 for m in metadata)
+    if not 0<=age<2:raise ValueError('three camera mesh source became stale during composition')
+    meta=dict(metadata[0],camera='all',candidate_id=candidate_id,source_wall_ns=min(m['source_wall_ns'] for m in metadata),
+              observed_age_s=age,source_age_s=age,render_ms=sum(m['render_ms'] for m in metadata),
+              frame_id=hashlib.sha256(''.join(m['frame_id'] for m in metadata).encode()).hexdigest(),
+              cameras=metadata,head_candidate_id=inputs['head'][4]['id'],wrist_candidate_id=candidate_id,
+              synchronized_capture=False)
+    return output.getvalue(),meta
+
+
 class TargetPreview:
     """Two bounded workers: three retained target slots and optional observed mesh.
 
@@ -172,12 +205,14 @@ class TargetPreview:
                 renderer_revision=None,requested_wall_ns=self.requested_wall_ns['target'],deadline=time.monotonic()+2.5))
         self.changed.set();return dict(queued=True,client_revision=revision,display_only=True,token=None)
 
-    def overview(self,yaw,pitch,zoom,pan_y=0.):
+    def overview(self,yaw,pitch,zoom,pan_y=0.,*,top_view=False):
+        if type(top_view)is not bool:raise ValueError('top view must be boolean')
         values=vector([yaw,pitch,zoom,pan_y],4,'overview')
         if not (-math.pi<=yaw<=math.pi and -.15<=pitch<=1.5 and .4<=zoom<=4 and abs(pan_y)<=2):raise ValueError('overview outside bounds')
         with self.lock:
             self._invalidate_locked('overview changed');self.active_view='overview'
             self.view=dict(zip(('yaw','pitch','zoom','pan_y'),values));self.revisions['view']+=1
+            if top_view:self.view['top_view']=True
             self.requested_wall_ns['view']=time.time_ns()
             self.frames.pop('overview',None);self.frames.pop('target',None)
             revision=self.revisions['view']
@@ -191,7 +226,7 @@ class TargetPreview:
         self.changed.set()
 
     def mesh(self,enabled,*,camera='head',candidate_id=None):
-        if type(enabled) is not bool or camera not in ('head','left','right'):raise ValueError('explicit mesh switch/camera required')
+        if type(enabled) is not bool or camera not in ('head','left','right','all'):raise ValueError('explicit mesh switch/camera required')
         if enabled and (self.mesh_inputs is None or not isinstance(candidate_id,str) or not candidate_id):
             raise ValueError('actual input reader and selected candidate required')
         with self.lock:
@@ -267,7 +302,7 @@ class TargetPreview:
                 if self.renderer_invalid:raise ValueError('renderer restarted; explicit rebind required')
                 # Candidate mesh uses stateless observed pixels only, not duplicate continuous overlays.
                 if remote.get('mesh_rendering_enabled') is not False:self.client.request('/overlay-rendering',{'enabled':False})
-                if sent['mode']!=mode:
+                if sent['mode']!=mode or remote.get('active_display_view',mode)!=mode:
                     self.client.request('/display-view',{'view':mode});sent['mode']=mode
                 if view is not None and sent['view']!=current['view']:
                     view_revision=max(remote.get('overview_revision',0)+1,(view_revision or 0)+1)
@@ -352,7 +387,8 @@ class TargetPreview:
                     inputs=self.mesh_inputs(selection['camera'],selection['candidate_id'])
                     with self.lock:valid=revision==self.revisions['mesh'] and self.mesh_selection['enabled']
                     if valid:
-                        raw,metadata=observed_mesh(self.client,inputs,selection['candidate_id'])
+                        raw,metadata=(observed_mesh_group(self.client,inputs,selection['candidate_id']) if selection['camera']=='all'
+                                      else observed_mesh(self.client,inputs,selection['candidate_id']))
                         with self.lock:
                             if revision==self.revisions['mesh'] and self.mesh_selection['enabled']:
                                 self.frames['mesh']=(raw,dict(metadata,renderer_instance_id=self.instance,revision=revision,camera=selection['camera']),time.monotonic());self.mesh_error=None

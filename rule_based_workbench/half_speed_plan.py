@@ -8,6 +8,7 @@ from frozen_executor import FrozenExecutor, validate_plan_evidence
 from integration import _digest
 from joint_space import contract
 from real_contract import validate_real_plan
+from gripper_distance_plan import COSINE_RELEASE_SCHEMAS
 
 
 WAIT_STAGES = frozenset({"preclose_settle", "close_and_hold", "lift_hold", "support_settle", "release_hold", "home_hold"})
@@ -23,6 +24,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
     def check(value):
         return FrozenExecutor(value, source, sink=lambda _:None, gate=lambda:False,
                               stop=lambda _:None,
+                              disabled_grippers=(source.get('initial_state') or {}).get('disabled_grippers',()),
                               source_validator=lambda p,s:validate_real_plan(p,s,binding,environment=environment))
     geometric = plan.get('simulation') == {'validated':False,'outcome':'not_run'}
     if geometric:
@@ -37,7 +39,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
     if 'execution_derivation' in plan:
         raise ValueError('derive only once from the original validated plan')
     if type(speed_scale) not in (int,float) or not math.isfinite(speed_scale) or not .1 <= speed_scale <= 1:
-        raise ValueError('speed scale must be finite and between 0.1 and 1.0')
+        raise ValueError('legacy vertex-preserving plans support only 10%–100%; replan with cuRobo MotionGen for 30%–170%')
     scale=Fraction(str(speed_scale))
     hz, nominal=plan['control']['physics_hz'],plan['control']['substeps']
     if type(hz) is not int or type(nominal) is not int or nominal <= 0 or hz != 30*nominal:
@@ -54,7 +56,7 @@ def resample_speed(plan, source, binding, speed_scale=.3, *, environment='physic
             or any(not math.isclose(t['time_s'],i*nominal/hz,abs_tol=1e-9,rel_tol=0) for i,t in enumerate(plan['ticks']))):
         raise ValueError('original native cadence and duration must be consistent')
     stages=deepcopy(plan.get('stages',[]))
-    wait_stages = WAIT_STAGES | ({'open'} if plan.get('gripper_release', {}).get('schema_version') == 'commanded_gap_release.v3' else set())
+    wait_stages = WAIT_STAGES | ({'open'} if plan.get('gripper_release', {}).get('schema_version') in COSINE_RELEASE_SCHEMAS else set())
     starts=[]
     for stage in stages:
         index=stage.get('start_tick')

@@ -37,6 +37,8 @@ class PreflightRaceTests(unittest.TestCase):
         a.geometry.with_gaps = lambda *args: a.geometry
         a.geometry.path_check = Mock(return_value={'ok': True})
         a.geometry.support_path_check = Mock(return_value={'ok': True})
+        a.manual_self_collision = SimpleNamespace(check_path=Mock(return_value={'ok': True}),
+                                                  description={'scope':'robot_self_spheres'})
         a.tokens = {}
         a.hardware_tokens = set()
         a.calibration_previews = {}
@@ -147,7 +149,7 @@ class PreflightRaceTests(unittest.TestCase):
             self.addCleanup(self.finish, state, mirror)
 
     def test_each_stop_route_bypasses_blocked_manual_preflight_and_revokes_late_token(self):
-        for blocked in ('path', 'support', 'gateway'):
+        for blocked in ('path', 'frozen', 'gateway'):
             for stop_path in ('/api/stop', '/api/control/stop', '/api/calibration-pipeline'):
                 with self.subTest(blocked=blocked, stop_path=stop_path):
                     a = self.app()
@@ -155,9 +157,13 @@ class PreflightRaceTests(unittest.TestCase):
                                'plans': [{'q_start': [0.] * 14, 'q_target': [0.] * 14}]}
                     entered, release, wait = self.block(preview if blocked == 'gateway' else {'ok': True})
                     if blocked == 'path':
-                        a.geometry.path_check = wait
-                    elif blocked == 'support':
-                        a.geometry.support_path_check = wait
+                        a.manual_self_collision.check_path = wait
+                    elif blocked == 'frozen':
+                        checked=[]
+                        def frozen_check(*args):
+                            checked.append(True)
+                            return wait() if len(checked)>1 else {'ok':True}
+                        a.manual_self_collision.check_path = frozen_check
                     else:
                         a._control_request.side_effect = lambda action, body=None: wait() if action.endswith('preview') else {'ok': True}
                     planning = self.start(lambda: a.action('/api/hardware-trajectory-preview',
@@ -184,7 +190,7 @@ class PreflightRaceTests(unittest.TestCase):
 
     def test_queue_check_leaves_state_and_mirror_live_and_stop_prevents_append(self):
         a = self.app()
-        entered, release, a.geometry.path_check = self.block({'ok': True})
+        entered, release, a.manual_self_collision.check_path = self.block({'ok': True})
         planning = self.start(lambda: a.action('/api/queue', {'q': [.1] * 12}))
         jobs = [planning]
         try:
@@ -202,7 +208,7 @@ class PreflightRaceTests(unittest.TestCase):
 
     def test_mode_aba_cannot_publish_inflight_hardware_review(self):
         a = self.app()
-        entered, release, a.geometry.support_path_check = self.block({'ok': True})
+        entered, release, a.manual_self_collision.check_path = self.block({'ok': True})
         planning = self.start(lambda: a.action('/api/control/home-preview', {}))
         switching = None
 
@@ -278,12 +284,14 @@ class PreflightRaceTests(unittest.TestCase):
         self.calibration_queue(a)
         a.geometry.path_check.side_effect = AssertionError('frozen seed was screened again')
         a.geometry.support_path_check.side_effect = AssertionError('frozen seed support was screened again')
+        a.manual_self_collision.check_path.side_effect = AssertionError('frozen seed coarse-screened again')
         result = a.action('/api/calibration-preview', {})
         self.assertEqual(result['token'], 'late-owner-token')
         self.assertFalse(result['collision_checked'])
         self.assertIn(result['token'], a.hardware_tokens)
         a.geometry.path_check.assert_not_called()
         a.geometry.support_path_check.assert_not_called()
+        a.manual_self_collision.check_path.assert_not_called()
 
     def calibration_queue(self, a, kind='head'):
         a.control_status['owner']['capabilities'] = ['calibration_capture_ack_v1']

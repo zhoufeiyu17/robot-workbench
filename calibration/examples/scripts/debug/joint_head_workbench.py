@@ -126,6 +126,10 @@ class Workbench:
         if environment=='fake' and config.get('resident_deadline_wall_ns') is not None:
             self.resident_capture_budget()
         self.geometry=Geometry(config); self.output=Path(output).resolve()
+        self.manual_self_collision=None
+        if config.get('model_family')=='ac_one':
+            from robot_workbench.manual_self_collision import ManualSelfCollision
+            self.manual_self_collision=ManualSelfCollision(self.geometry)
         self.output.mkdir(parents=True,exist_ok=True)
         from arx_env.joint_head_calibration_store import CalibrationStore
         self.calibration_root=Path(config.get('calibration_root',self.output/'calibrations')).absolute()
@@ -295,31 +299,40 @@ class Workbench:
             review=self.review_snapshot() if review is None else review
             self.require_review(review)
             body=json.loads(json.dumps(body,allow_nan=False))
-            geometry=self.geometry
+            checker=getattr(self,'manual_self_collision',None)
         preview_started=time.monotonic()
         self.check_owner_mapping()
         self.require_review(review)
+        owner_request_started=time.perf_counter()
         result=self._control_request(action,body)
+        owner_request_s=time.perf_counter()-owner_request_started
         if not calibration and getattr(self,'config',{}).get('model_family')=='ac_one':
+            if checker is None:raise ValueError('人工自碰撞检查器未就绪；请恢复工作台后重新生成执行预览')
             plans=result.get('plans')
-            if not isinstance(plans,list) or not plans:raise ValueError('A1 动作预览缺少冻结路径，无法检查支撑干涉')
-            checks=[]
+            if not isinstance(plans,list) or not plans:raise ValueError('A1 动作预览缺少冻结路径，无法检查自碰撞')
+            checks=[];frozen_check_started=time.perf_counter()
             for index,plan in enumerate(plans):
                 self.require_review(review)
-                endpoints=[]
+                endpoints=[];boundaries={}
                 for key in ('q_start','q_target'):
                     values=plan.get(key) if isinstance(plan,dict) else None
                     if (not isinstance(values,(list,tuple)) or len(values)!=14
                             or any(type(v) not in (int,float) or not np.isfinite(v) for v in values)):
                         raise ValueError('A1 动作预览包含无效冻结关节位置')
-                    endpoints.append(values[:6]+values[7:13])
-                check=geometry.support_path_check(*endpoints)
+                    bounded,boundary=self.bounded_joint_pose(values[:6]+values[7:13])
+                    endpoints.append(bounded);boundaries[key]=boundary
+                check=checker.check_path(*endpoints)
+                if any(row['corrections'] for row in boundaries.values()):
+                    check=dict(check,position_boundary=dict(environment=transport_environment(self.config),**boundaries))
                 if not check['ok']:
-                    raise ValueError(f'第 {index+1} 段动作超过支撑干涉上限或无法确认：'+json.dumps(check,ensure_ascii=False))
+                    raise ValueError(f'第 {index+1} 段执行路径未通过自碰撞粗检查：'+json.dumps(check,ensure_ascii=False))
                 checks.append(check)
-            result['support_checks']=checks
+            result['collision_checks']=checks
+            result['collision_check']=dict(checker.description)
+            result['control_phase_timings']=dict(owner_request_s=owner_request_s,
+                frozen_path_check_s=time.perf_counter()-frozen_check_started)
             result['expires_in_s']=max(0.,float(result.get('expires_in_s',30))-(time.monotonic()-preview_started))
-            if result['expires_in_s']<=0:raise ValueError('支撑路径检查已完成，但动作预览已过期；请重新预览以使用已缓存的检查结果')
+            if result['expires_in_s']<=0:raise ValueError('路径检查已完成，但动作预览已过期；请重新生成执行预览')
         with self.review_lock:
             self.require_review(review)
             if result.get('token'):self.hardware_tokens.add(result['token'])
@@ -794,19 +807,13 @@ class Workbench:
         return np.asarray(bounded),dict(requested_q=raw.tolist(),command_q=bounded,corrections=corrections)
 
     def require_checked_path(self,rows,start):
-        """Refuse motion whose swept path this workbench has not geometrically checked.
-
-        Uses the planner's own `path_check`: 0.04 rad steps, full-mesh convex hulls
-        with the jaws held open, chassis and support-plane screening. The operator's
-        clearance tick describes the physical scene; it cannot tell whether the model
-        says this trajectory runs the left arm through the right one. Until 2026-09-22
-        only the planner and the no-renderer manual queue ever checked, so a hand-made
-        target could self-collide and still be executed on hardware."""
-        geometry=self.geometry.with_gaps(83.,83.)
+        """A1 manual paths use the approved coarse robot-self model, not the task scene."""
+        checker=getattr(self,'manual_self_collision',None)
+        geometry=None if checker is not None else self.geometry.with_gaps(83.,83.)
         previous=np.asarray(start,float)
         for index,row in enumerate(rows):
             target=self.geometry._q(row['q'])
-            check=geometry.path_check(previous,target)
+            check=checker.check_path(previous,target) if checker is not None else geometry.path_check(previous,target)
             if not check['ok']:
                 pairs=check.get('collisions') or []
                 detail=('超出关节限位' if not pairs else '模型判定干涉/自碰撞：'+'；'.join(
@@ -838,6 +845,8 @@ class Workbench:
         trace=dict(schema='manual-motion-preview.v1',request_id=progress['request_id'],
                    started_at_s=progress['started_at_s'],environment=transport_environment(self.config),
                    start=start_boundary,waypoints=waypoints,path_check_skipped=checked,phase='path_check')
+        checker=getattr(self,'manual_self_collision',None)
+        if checker is not None and not checked:trace['collision_check']=checker.description
         progress['phase_timings']=trace['phase_timings']={}
         phase_started=time.monotonic()
         try:
@@ -848,8 +857,11 @@ class Workbench:
             self.preflight_progress(progress,'正在生成执行预览并核验冻结路径')
             trace['phase']='owner_preview';phase_started=time.monotonic()
             result=self.control_request('trajectory-preview',{'waypoints':waypoints},review=review)
+            if 'collision_check' in trace:result=dict(result,collision_check=trace['collision_check'])
+            if result.get('collision_checks'):trace['collision_checks']=result['collision_checks']
             trace['owner_preview_s']=time.monotonic()-phase_started
             progress['phase_timings']['owner_preview_s']=trace['owner_preview_s']
+            progress['phase_timings'].update(result.get('control_phase_timings',{}))
             if start_boundary['corrections'] or any(row['corrections'] for row in boundary_rows):
                 plans=result.get('plans') or []
                 if len(plans)!=len(boundary_rows) or any(not np.allclose(
@@ -1046,7 +1058,9 @@ class Workbench:
         seen=set();expected={w['sample_id']:w for w in pending['queue'] if w.get('capture') is not False}
         started=time.monotonic();started_wall_ns=time.time_ns()
         legacy_budget=float(preview['total_motion_duration_s'])+len(pending['queue'])*20+30
-        budget=None;deadline=started+legacy_budget
+        persistent=self.config.get('persistent_service') is True and environment=='fake'
+        # A persistent service has no shutdown clock; each capture still has a finite job budget.
+        budget=None;deadline=started+(7200. if persistent else legacy_budget)
         last_motion={}
         rejected_before_start=False
         def check_budget():
@@ -1055,7 +1069,7 @@ class Workbench:
         def timing():
             return dict(runtime_environment=environment,started_wall_ns=started_wall_ns,observed_wall_ns=time.time_ns(),
                 elapsed_wall_s=max(0.,time.monotonic()-started),deadline_monotonic_s=deadline,
-                budget_origin='fixed_resident_wall' if budget else 'independent_fake_finite_wall_fallback' if environment=='fake' else 'physical_legacy_wall',
+                budget_origin='fixed_resident_wall' if budget else 'persistent_fake_finite_batch' if persistent else 'independent_fake_finite_wall_fallback' if environment=='fake' else 'physical_legacy_wall',
                 resident_budget=budget,legacy_wall_budget_s=legacy_budget,
                 planned_motion_duration_s=float(preview['total_motion_duration_s']),clock=source_clock,
                 first_source_stamp=first_source_stamp,last_source_stamp=last_source_stamp,
@@ -1861,18 +1875,23 @@ class Workbench:
         if store is None or not hasattr(store,'active'):
             return None
         try:
-            manifest=store.active()
+            config=getattr(self,'config',{})
+            asset=config.get('asset_geometry_id')
+            manifest=store.active(**(dict(asset_geometry_id=asset,
+                asset_seal_sha256=config.get('asset_seal_sha256'),
+                robot_source='simulated' if environment=='simulation' or config.get('environment')=='fake' else 'physical')
+                if asset else {}))
         except (ValueError,OSError) as exc:
             return {'environment':environment,'error':str(exc),'verified':False,'problems':[str(exc)]}
         if not manifest:
             return None
-        if getattr(self,'config',{}).get('asset_geometry_id') and manifest.get('geometry_id')!=self.geometry_id:
-            manifest={**manifest,'verified':False,'problems':[*(manifest.get('problems') or []),'已安装标定属于其他几何资产；当前 A1 尚未安装匹配结果']}
         return {'environment':manifest.get('environment'),'head_id':(manifest.get('head') or {}).get('id'),
                 'wrist_id':(manifest.get('wrist') or {}).get('id'),
                 'head_version':(manifest.get('head') or {}).get('version'),
                 'wrist_version':(manifest.get('wrist') or {}).get('version'),
                 'installed_at':manifest.get('installed_at'),'geometry_id':manifest.get('geometry_id'),
+                'workbench_geometry_id':getattr(self,'geometry_id',None),
+                'workbench_fingerprint_matches':manifest.get('geometry_id')==getattr(self,'geometry_id',None),
                 'acceptance':manifest.get('acceptance') or {},'notes':manifest.get('notes'),
                 'path':manifest.get('path'),'verified':manifest.get('verified'),
                 'problems':manifest.get('problems') or []}
@@ -2796,6 +2815,8 @@ class Workbench:
 
     def wait_for_step(self, timeout, label, settle=('READY','STOPPED')):
         """Block until a sub-job the pipeline started has stopped running."""
+        if (label.endswith('采集') and getattr(self,'config',{}).get('persistent_service') is True
+                and transport_environment(self.config)=='fake'):timeout=7245.
         began=time.monotonic()
         budget=None;budget_loaded=False
         while True:
