@@ -1,0 +1,92 @@
+{
+  "schema": "workbench.source_delivery_acceptance.v1",
+  "date": "2026-10-31",
+  "source_commit": "11454b92b44d9056c3dbc06995647c97175ffafc",
+  "source_branch": "fix/shared-workspace-tools",
+  "source_scope": "Accumulated workbench source/tests through ARX13 lifecycle and original-collector handoff; isolated native SDK/model binaries and machine-private configuration remain external",
+  "validation": {
+    "at": "2026-10-31T10:54:00.938999+08:00",
+    "status": "PASS",
+    "method": "Standard scripts/check.sh, successful prefixes retained and resumed at failed groups after fixes; original failures preserved",
+    "unittest_executions": 1991,
+    "skipped": 44,
+    "node_suites": 7,
+    "standalone_cpu_checks": "passed, including owned process cleanup, reference/geometry and native interface fixtures",
+    "segments": [
+      {
+        "log": "full-check.log",
+        "sha256": "81bec4374ee2a19f4645379c44de12b5655c55fb0f628c95b5db04067e7e743a",
+        "successful_unittest_executions": 762,
+        "skipped": 18,
+        "failed_attempts": 1
+      },
+      {
+        "log": "resume-check.log",
+        "sha256": "10779c32e580306c89f8b2a70be8c80bfb4f3826c48ca6fa1ed1d460f55cf14d",
+        "successful_unittest_executions": 220,
+        "skipped": 1,
+        "failed_attempts": 1
+      },
+      {
+        "log": "resume-owner-check.log",
+        "sha256": "3b2385eecf8fb6ff61ff1ec4001b92fa72b5bf4d62d8633f5b0883cdaec31771",
+        "successful_unittest_executions": 385,
+        "skipped": 14,
+        "failed_attempts": 1
+      },
+      {
+        "log": "resume-collection-check.log",
+        "sha256": "025a55bbdbe1f2c85e3740bb7366b04a5852dde4645a5b672f2caad5a22dbab3",
+        "successful_unittest_executions": 321,
+        "skipped": 7,
+        "failed_attempts": 1
+      },
+      {
+        "log": "resume-physx-check.log",
+        "sha256": "0b5687a344f61f84cb31dfcaa44aeede1450daf862ed8e7fc749e0a00a156960",
+        "successful_unittest_executions": 303,
+        "skipped": 4,
+        "failed_attempts": 0
+      }
+    ],
+    "separate_asset_checks": "4/5 role setup skipped without sealed AC_ONE_ASSET_ROOT",
+    "scope": "macOS Python3.12.14 Node24.14.0; no GPU load, SDK acquisition or real robot commands",
+    "source_manifest": "source-manifest.json",
+    "check_script_sha256": "8644e996c4ab5f2bf48f65df6af76bfdabc4e83e3788a062dd2c5cee97761584",
+    "fixes": [
+      "outdated J5/J6 research cap expectation",
+      "independent Stop test now uses actual manager method binding",
+      "standalone boundary-test fixture import order",
+      "macOS vanished process-group EPERM handled only after actual absence check",
+      "fake inference default mapping field expected explicitly"
+    ],
+    "passed_executions": 1947
+  },
+  "historical_hardware": {
+    "environment_exit_job": "b9b2db8bc4704aa58c93bcd23c494ff0",
+    "deployment_sha256": "64cb428b021aadb854013c8c41917f612218b3d54d672051add03a2adea64ca5",
+    "completed": "2026-10-31T03:23:07+08:00",
+    "original_collection_ready": "2026-10-31T03:33:17+08:00",
+    "no_episode_recorded": true,
+    "qualification": "Historical published v9 real button/home/release/startup acceptance; not a new qualification of every file in this Git commit"
+  },
+  "later_incident": {
+    "at": "2026-10-31T09:32:06+08:00",
+    "error": "pedal process exited after USB disconnect/re-enumeration",
+    "last_read_only_observation": "2026-10-31T10:36:51+08:00",
+    "collection_state": "failed/stopped, claim active, no hardware manager or orphan",
+    "workbench_resources": "remain exited",
+    "automatic_restart": false
+  },
+  "excluded": [
+    ".evidence raw logs, screenshots, recordings and local receipts",
+    "private credentials and machine configuration",
+    "SDK binaries and model weights",
+    "pre-existing modified migration/validation-summary.json (historical migration record)"
+  ],
+  "limits": [
+    "No new robot action, SDK acquisition, GPU workload, remote deployment, or service operation during this Git delivery",
+    "Linux-only and sealed external-asset checks are skipped locally, not reported as passed",
+    "Model coordinate mapping, physical pedal3 Stop, and overall control precision/smoothness remain separately unqualified"
+  ]
+}
