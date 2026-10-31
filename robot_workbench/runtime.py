@@ -9,9 +9,11 @@ from copy import copy, deepcopy
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
-from .execution_settings import defaults as default_execution_settings, validate as validate_execution_settings
+from .execution_settings import (defaults as default_execution_settings, validate as validate_execution_settings,
+                                 measured_joint_speed, JointSpeedProtectionError,validate_study)
 import queue
 import secrets
 import stat
@@ -19,7 +21,7 @@ import threading
 import time
 
 
-BUSINESSES = {'calibration', 'collection', 'inference'}
+BUSINESSES = {'calibration', 'collection', 'inference', 'research'}
 CALIBRATION_PREVIEWS = {'preview', 'preview_home', 'preview_arm_home', 'preview_jaw_target',
                         'preview_both_home', 'preview_workbench'}
 COLLECTION_PREVIEWS = {'preview_frozen', 'preview_start_alignment'}
@@ -38,7 +40,7 @@ class _Backend:
     def __getattr__(self, name):
         value = getattr(self._backend, name)
         if name not in {'connect', 'close', 'begin', 'send', 'set_damping_hold',
-                         'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains', 'enable_collection_arm','queue_reference'}:
+                         'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains', 'enable_collection_arm','queue_reference','configure_motion_gains'}:
             return value
         def invoke(*args, **kwargs):
             return self._runtime._backend_call(name, value, *args, **kwargs)
@@ -71,6 +73,7 @@ class Runtime:
         self.release_receipt = None
         self.protected_retirement = None
         self.maintenance_active = False
+        self.settings_write_pending = False
         self.control_operation = None
         self._hold_verification = None
         self.initialization_error = None
@@ -89,9 +92,37 @@ class Runtime:
                 raise ValueError('device lock must be a regular file')
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             from real_control import classes
-            collection, _, _ = classes(ref, jaw_mapping_file=jaw_mapping_file)
+            collection, _, _ = classes(ref, jaw_mapping_file=jaw_mapping_file,device_id=device_id)
             runtime = self
             class ManagedOwner(collection):
+                def check_speed_protection(self, feedback):
+                    observation=measured_joint_speed(feedback,runtime._execution_policy(runtime.holder)['speed_protection'])
+                    self.speed_protection_observation=observation
+                    if (observation['enabled'] and observation['peak_rad_s']>observation['limit_rad_s']
+                            and self.control.state is not self.states.FAULT):
+                        error=JointSpeedProtectionError(observation)
+                        self.speed_protection_trip=dict(observation,business=runtime.holder,
+                            revision=runtime.execution_settings_revision,command_epoch=self.epoch,reason=str(error),
+                            trigger_qpos=feedback['qpos'][:],stop=dict(hold_return_confirmed=False,feedback_stationary_confirmed=False))
+                        raise error
+                    trip=getattr(self,'speed_protection_trip',None)
+                    if trip and self.control.state is self.states.FAULT and self.control.reason.startswith(trip['reason']):
+                        stop=trip['stop'];stop['current_feedback_peak_rad_s']=observation['peak_rad_s']
+                        stop['maximum_joint_displacement_rad']=max(stop.get('maximum_joint_displacement_rad',0.),
+                            max(abs(feedback['qpos'][i]-trip['trigger_qpos'][i])for i in(*range(6),*range(7,13))))
+                        stopped=bool(stop['hold_return_confirmed']and self.feedback_healthy and self.stationary
+                            and observation['peak_rad_s']<=observation['limit_rad_s'])
+                        stop['currently_stationary']=stopped
+                        if stopped and not stop['feedback_stationary_confirmed']:
+                            stop.update(feedback_stationary_confirmed=True,stationary_sample_time_s=feedback['sample_time_s'],
+                                elapsed_from_trigger_s=feedback['sample_time_s']-trip['sample_time_s'])
+                            self.event('speed_protection_stop_observed',trip=deepcopy(trip))
+
+                def recovery_ready(self):
+                    observation=getattr(self,'speed_protection_observation',None)
+                    below=observation is not None and (not observation['enabled'] or observation['peak_rad_s']<=observation['limit_rad_s'])
+                    return (super().recovery_ready() or runtime._software_stop_recovery_ready()) and below
+
                 def invalidate(self):
                     revoke=getattr(self.backend,'revoke_output',None)
                     if callable(revoke):revoke()
@@ -99,6 +130,7 @@ class Runtime:
                     if getattr(runner, 'is_inference', False):
                         runner.revoke('owner_invalidated')
                     getattr(self, 'inference_payloads', {}).clear()
+                    getattr(self, 'reference_payloads', {}).clear()
                     return super().invalidate()
 
                 def accept_review(self, plans):
@@ -113,7 +145,8 @@ class Runtime:
                                 or binding.get('inference_clock', self.feedback_clock) != self.feedback_clock
                                 or binding.get('controller_profile') != self.shared_target_profile
                                 or binding['command_epoch'] != self.epoch
-                                or runtime.maintenance_active or self.stop_requested or self.release_requested):
+                                or runtime.maintenance_active or runtime.settings_write_pending
+                                or self.stop_requested or self.release_requested):
                             return False
                         self.execution_instance_id = secrets.token_hex(16)
                         self.execution_error_settings = (None if binding['execution_settings']['legacy_passive_guards']
@@ -125,21 +158,88 @@ class Runtime:
 
                 def cached_snapshot_fields(self, result):
                     result = super().cached_snapshot_fields(result)
+                    if not result.get('recoverable_fault') and runtime._software_stop_recovery_ready(result.get('control_protection')):
+                        result['recoverable_fault']=self.control.reason
+                        result['recovery_scope']='confirmed_software_stop_without_sdk_reconnect'
+                    trip=getattr(self,'speed_protection_trip',None)
+                    observation=getattr(self,'speed_protection_observation',None)
+                    monitored=bool(result.get('connected') and result.get('feedback_healthy') and observation
+                        and 0<=self.control_time()-observation['sample_time_s']<=.1)
+                    result['speed_protection']=dict(runtime._execution_policy(runtime.holder)['speed_protection'],
+                        business=runtime.holder,monitored=monitored,
+                        observation=deepcopy(observation) if monitored else None,
+                        last_trip=deepcopy(trip),latched=bool(trip and self.control.state is self.states.FAULT
+                            and self.control.reason.startswith(trip['reason'])))
                     # Shared capabilities are invariant, including during the base cache refresh.
                     result['capabilities'] = ['collection_execution_v2',
-                        'workbench_trajectory_v1', 'calibration_capture_ack_v1',
-                        'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous', 'policy_inference_v1']
+                        'workbench_trajectory_v1', 'shared_manual_trajectory_v1', 'calibration_capture_ack_v1',
+                        'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous', 'policy_inference_v1','research_control_v1']
                     result['inference'] = (self.runner.snapshot() if getattr(self.runner, 'is_inference', False) else None)
                     result['inference_configured'] = runtime.inference_factory is not None
                     result['inference_configuration_revision'] = runtime.inference_revision
                     interpreter=getattr(self.runner,'target_interpreter',None)
                     result['target_interpreter']=dict(enabled=bool(self.shared_target_profile),
                         controller_profile=self.shared_target_profile,
+                        motion_gain_profile=getattr(self.backend,'motion_gain_profile',self.shared_target_profile),
+                        native_reference_api=getattr(self.backend,'native_reference_api',None),
                         reference=interpreter.snapshot()if interpreter is not None else None)
                     return result
 
                 def start_motion(self, plan, feedback, *, reviewed_deadline=None):
                     runtime.detached_hold = None
+                    settings=(runtime.execution_calibration or {}).get('study_settings')
+                    configure=getattr(self.backend,'configure_motion_gains',None)
+                    if settings is not None and not callable(configure):raise ValueError('SDK adapter does not support study gains')
+                    desired=None if settings is None else settings['gains']
+                    integral=None if settings is None else settings['integral_enabled']
+                    integral_gains=None if settings is None else settings.get('integral_gains')
+                    if (desired!=getattr(self,'active_study_gains',None)or integral!=getattr(self,'active_study_integral',None)
+                            or integral_gains!=getattr(self,'active_study_integral_gains',None)):
+                        previous=getattr(getattr(self,'runner',None),'target_interpreter',None)
+                        preserve=bool(desired is not None and getattr(self,'active_study_gains',None)is not None
+                            and integral==getattr(self,'active_study_integral',None)
+                            and integral_gains==getattr(self,'active_study_integral_gains',None)
+                            and previous is not None and not previous.cancelled and previous.feedforward is None
+                            and previous.epoch==self.epoch and previous.active_arm==plan.active_arm
+                            and previous.profile==self.shared_target_profile and self.runner.status=='READY'
+                            and self.control_time()>=previous.start_s+previous.reference.duration_s)
+                        if preserve:
+                            self.command_gate()
+                            result=configure(desired,preserve_hold=True)
+                            if result.get('preserved_hold')is not True:raise RuntimeError('gain change did not preserve hold')
+                            self.event('study_gains_changed_in_hold',gains=desired,parent_reference_id=previous.reference.metadata['reference_id'])
+                        else:
+                            if previous is not None:previous.revoke()
+                            if callable(configure):configure(desired)
+                        self.active_study_gains=deepcopy(desired);self.active_study_integral=integral
+                        self.active_study_integral_gains=deepcopy(integral_gains)
+                    payload=getattr(self,'reference_payloads',{}).pop(plan.sha256,None)
+                    if payload is not None:
+                        reference,feedforward=payload
+                        if (runtime.execution_calibration or {}).get('prepared_reference_id')!=reference.metadata['reference_id']:
+                            raise ValueError('prepared reference review identity changed')
+                        if (runtime.execution_calibration or {}).get('prepared_feedforward_sha256')!=(None if feedforward is None else feedforward['sha256']):
+                            raise ValueError('prepared feedforward review identity changed')
+                        ref.Owner.start_motion(self,plan,feedback,reviewed_deadline=reviewed_deadline)
+                        self.runner.prepared_reference=reference
+                        if feedforward is not None:
+                            factory=self.runner.interpreter_factory
+                            def with_feedforward(current,side,stamp):
+                                from .motion_reference import ReferenceFeedforward
+                                interpreter=factory(current,side,stamp)
+                                integral=interpreter.integrals.get('left')
+                                interpreter.feedforward=ReferenceFeedforward(feedforward,stamp,current.duration_s,stamp,
+                                    initial=None if integral is None else integral.bias.copy())
+                                # The frozen profile already includes the prior total bias.
+                                # Keep its inherited output only as the transition seed.
+                                if integral is not None:
+                                    integral.bias[:]=0.;integral.rate[:]=0.;integral.time=None
+                                return interpreter
+                            self.runner.interpreter_factory=with_feedforward
+                        self.runner.reference_event=lambda result:self.event('control_study_native_window',**result)
+                        self.runner.feedback_event=lambda now,state:self.event('control_study_feedback',source_time_s=now,raw=state,
+                            reference_id=reference.metadata['reference_id'],reference_started_s=self.runner.started)
+                        return
                     if plan.sha256 in self.inference_payloads:
                         payload = self.inference_payloads.pop(plan.sha256)
                         if runtime.inference_factory is None:
@@ -152,6 +252,13 @@ class Runtime:
                     if plan.sha256 in self.frozen_payloads or plan.sha256 in self.alignment_plans:
                         return super().start_motion(plan, feedback, reviewed_deadline=reviewed_deadline)
                     return ref.Owner.start_motion(self, plan, feedback, reviewed_deadline=reviewed_deadline)
+
+                def make_target_interpreter(self,reference,active_arm,start_s,**kwargs):
+                    settings=(runtime.execution_calibration or {}).get('study_settings')
+                    if settings is not None:
+                        kwargs['integral']=settings['integral_enabled']
+                        kwargs['integral_gains']=settings.get('integral_gains')
+                    return super().make_target_interpreter(reference,active_arm,start_s,**kwargs)
 
                 def reject_confirmation(self, plans, reason, *, review_deadline=None):
                     for plan in plans:
@@ -211,6 +318,7 @@ class Runtime:
                 joint_limits=deepcopy(owner.cache.get('joint_limits')),
                 disabled_grippers=list(getattr(owner.backend,'passive_jaws',())),
                 controller_profile=owner.shared_target_profile,
+                native_reference_api=getattr(owner.backend,'native_reference_api',None),
                 calibration_revision=self.calibration_revision,calibration_snapshot_id=self.calibration_snapshot_id,
                 hardware_binding=str(owner.hardware_binding)if getattr(owner,'hardware_binding',None)else None)
 
@@ -245,6 +353,8 @@ class Runtime:
             value.update(target_interpreter_profile=profile,target_execution='shared_reference_windows')
             if value.get('reference_feedforward')and profile!='normal_X5':
                 raise ValueError('frozen feedforward was qualified for normal_X5; requalify before another controller profile')
+            if value.get('reference_feedforward')and getattr(self.owner.backend,'native_reference_api','legacy_recompute')!='legacy_recompute':
+                raise ValueError('frozen inference feedforward requires native API requalification')
         if not callable(factory):
             raise ValueError('prepared inference runner factory required')
         with self._preview_boundary(), self.owner.lock:
@@ -274,7 +384,7 @@ class Runtime:
                     or type(value.get('revision')) is not int or value['revision'] < 0
                     or not isinstance(value.get('policies'), dict) or set(value['policies']) - BUSINESSES):
                 raise ValueError('execution settings identity or schema mismatch')
-            policies = {name: validate_execution_settings(policy, environment=self.environment)
+            policies = {name: validate_execution_settings(policy, environment=self.environment,allow_legacy=True)
                         for name, policy in value['policies'].items()}
             self._configure_fake_error(policies.get(self.holder, default_execution_settings(self.holder)))
             self.execution_settings_revision, self.execution_settings_policies = value['revision'], policies
@@ -315,12 +425,19 @@ class Runtime:
             value['revision'] += 1
             value['policies'][business] = settings
             temporary = self.execution_settings_path.with_suffix('.tmp')
-            try:
-                temporary.write_text(json.dumps(value, sort_keys=True, allow_nan=False)+'\n')
-                os.replace(temporary, self.execution_settings_path)
-            except BaseException:
+            self.settings_write_pending = True
+        # Reserve new motion, not the control locks: slow storage must never
+        # prevent feedback/heartbeat or Stop admission while the robot holds.
+        try:
+            temporary.write_text(json.dumps(value, sort_keys=True, allow_nan=False)+'\n')
+            os.replace(temporary, self.execution_settings_path)
+        except BaseException:
+            with self.lock, self.owner.lock:
+                self.settings_write_pending = False
                 self._configure_fake_error(old)
-                raise
+            raise
+        with self.lock, self.owner.lock:
+            self.settings_write_pending = False
             self.execution_settings_revision = value['revision']
             self.execution_settings_policies = value['policies']
             self.owner.execution_error_settings = deepcopy(settings)
@@ -350,18 +467,36 @@ class Runtime:
         return business
 
     def _backend_call(self, name, function, *args, **kwargs):
+        entered,entry_cpu=time.monotonic(),time.thread_time_ns()
         with self.lock:
-            if name in {'begin', 'send', 'begin_collection', 'enable_collection_arm','queue_reference'}:
+            acquired,acquired_cpu=time.monotonic(),time.thread_time_ns()
+            if name in {'begin', 'send', 'begin_collection', 'enable_collection_arm','queue_reference'} or name=='configure_motion_gains'and kwargs.get('preserve_hold'):
                 self.owner.command_gate()
             self.call_sequence += 1
             call = dict(id=self.call_sequence, operation=name, started_monotonic_s=time.monotonic(),
+                        entered_monotonic_s=entered,admission_lock_acquired_s=acquired,
+                        admission_lock_wait_s=acquired-entered,admission_lock_cpu_s=(acquired_cpu-entry_cpu)/1e9,
                         epoch=self.owner.epoch if self.owner else None)
+            call['command_gate_and_registration_s']=call['started_monotonic_s']-acquired
             if self._hold_verification is not None and name in ('begin','send'):
                 call.update(side=args[0],**{('feedback_argument' if name=='begin' else 'target'):list(args[1])})
+            if self._hold_verification is not None and name=='queue_reference':
+                from .sdk_process import ReferenceWindowRejected
+                packet=args[0];target=self.control_operation['fixed_target']
+                if (not packet['q_sdk14'] or any(list(row)!=target for row in packet['q_sdk14'])
+                        or any(value!=0 for field in ('dq_sdk14','torque_bias_sdk14') for row in packet[field] for value in row)):
+                    raise ReferenceWindowRejected('fixed hold requires unchanged q and zero dq/added torque')
+                call.update(target=list(target),reference_id=packet['reference_id'],
+                    node_count=len(packet['q_sdk14']),zero_velocity=True,zero_added_torque=True)
             self.calls[call['id']] = call
+        call_cpu=time.thread_time_ns();backend_started=time.monotonic();result=None;failure_timing=None
         try:
-            result = function(*args, **kwargs)
+            try:
+                result = function(*args, **kwargs)
+            finally:
+                backend_returned,backend_cpu=time.monotonic(),time.thread_time_ns()
         except BaseException as error:
+            if name=='queue_reference':failure_timing=getattr(error,'timing',None)
             with self.lock:
                 call['error'] = str(error)
                 if name == 'close':
@@ -394,6 +529,17 @@ class Runtime:
         finally:
             with self.lock:
                 call['returned_monotonic_s'] = time.monotonic()
+                call['cpu_s']=(time.thread_time_ns()-call_cpu)/1e9
+                call.update(backend_started_s=backend_started,backend_returned_s=backend_returned,
+                    backend_wall_s=backend_returned-backend_started,backend_cpu_s=(backend_cpu-call_cpu)/1e9,
+                    return_bookkeeping_s=call['returned_monotonic_s']-backend_returned,
+                    total_wall_s=call['returned_monotonic_s']-entered)
+                elapsed=call['total_wall_s']
+                if self.owner is not None and (elapsed>=.01 or failure_timing is not None)and name not in('connect','close'):
+                    details={k:result[k]for k in('feedback_read_timing','sdk_worker_read_timing','sdk_client_read_timing','sdk_reference_timing')if isinstance(result,dict)and k in result}
+                    if failure_timing is not None:details['sdk_reference_timing']=failure_timing
+                    self.owner.event('sdk_call_latency',call=deepcopy(call),timing=deepcopy(details),
+                        runtime_nonce=self.nonce,business=self.holder,threshold_s=.01)
                 if name=='close' and self.release_receipt is not None:
                     backend=getattr(function,'__self__',None)
                     self.release_receipt['release_diagnostics']=dict(schema='sdk_release_diagnostics.v1',
@@ -402,7 +548,7 @@ class Runtime:
                         can_evidence='unsupported' if self.environment=='fake' else 'independent_guard',
                         scope='Owner memory is available only if native close returned or raised; guard records survive protected termination')
                 self.last_return = call
-                if self._hold_verification is not None and name in ('begin','send','set_damping_hold'):
+                if self._hold_verification is not None and name in ('begin','send','queue_reference','set_damping_hold'):
                     self.control_operation['sdk_returns'].append(deepcopy(call))
                 self.calls.pop(call['id'])
                 self.tick_idle.notify_all()
@@ -410,13 +556,19 @@ class Runtime:
     @contextmanager
     def _preview_boundary(self):
         with self.lock:
+            started=time.monotonic();sequence=self.call_sequence;before=deepcopy(list(self.calls.values()))
             # Waiting releases the runtime lock: stop and the current SDK return stay independent.
             if not self.tick_idle.wait_for(lambda:not self.tick_lock.locked() and not self.calls, timeout=.1):
+                self.owner.event('preview_boundary_timeout',waited_s=time.monotonic()-started,
+                    call_sequence_before=sequence,call_sequence_after=self.call_sequence,
+                    in_flight_before=before,in_flight_after=deepcopy(list(self.calls.values())),
+                    tick_locked=self.tick_lock.locked(),last_sdk_return=deepcopy(self.last_return))
                 raise ValueError('control tick or SDK call is still in flight after 0.1s preview boundary wait')
             yield
 
     def _release_reason(self, *, include_in_flight=True):
         owner = self.owner
+        if self.settings_write_pending:return '执行配置正在保存；停止仍可独立使用'
         if include_in_flight and (self.tick_lock.locked() or self.calls):
             return '控制调用尚未结束，暂不能释放连接'
         if not owner.backend.is_connected:
@@ -462,6 +614,7 @@ class Runtime:
             return dict(result, release_receipt=deepcopy(self.release_receipt))
 
     def _idle_reason(self, *, include_in_flight=True, maintenance_actor=None):
+        if self.settings_write_pending:return '执行配置正在保存；停止仍可独立使用'
         if self.maintenance_active:
             if maintenance_actor is None:return '服务维护中，停止仍可独立使用'
             maintenance_actor.require(self)
@@ -498,15 +651,16 @@ class Runtime:
         with self._preview_boundary(), self.owner.lock:
             if self.maintenance_active:raise ValueError('已有服务维护窗口')
             reason=self._release_reason()
+            output_exited=False
             if reason and getattr(self.owner.backend,'terminal_failure',None):
                 evidence=self.owner.backend.protection_snapshot()
                 recording=self.owner.recording
                 if (evidence.get('worker_exit_confirmed') is True and not self.tick_lock.locked() and not self.calls
                         and (recording is None or recording.done.is_set()
                              and getattr(recording,'thread',None) is not None and not recording.thread.is_alive())):
-                    reason=None  # Maintenance may inspect/retire; never re-enable old SDK output.
+                    reason=None;output_exited=True  # Inspect/retire only; old SDK output cannot resume.
             if reason:raise ValueError(reason)
-            if self.owner.stop_requested or not self.owner.commands.empty():
+            if not output_exited and (self.owner.stop_requested or not self.owner.commands.empty()):
                 raise ValueError('控制命令仍在排队，等待收尾后再维护')
             self.maintenance_active=True
             self.preview_revision+=1
@@ -534,6 +688,52 @@ class Runtime:
             return dict(result,stop=deepcopy(self.stop_receipt))
 
     def control_release(self,actor):return self.request_release(None,actor=actor)
+
+    def _software_stop_recovery_ready(self, protection=None):
+        """Recognize only an evidenced Stop/reference race; never mutate on read."""
+        owner=self.owner;receipt=self.stop_receipt or {};diagnostic=owner.last_fault_diagnostic or {}
+        timing=diagnostic.get('target_translation_timing') or {};barrier=receipt.get('barrier_epoch')
+        if (getattr(owner,'native_faults',{}) or owner.control.state is not owner.states.FAULT or owner.control.reason not in
+                ('target reference epoch revoked','target reference revoked during native admission')
+                or diagnostic.get('error')!=owner.control.reason or type(barrier)is not int
+                or diagnostic.get('command_epoch')!=barrier or type(timing.get('epoch'))is not int
+                or not timing['epoch']<barrier<=owner.epoch
+                or timing.get('error_type')not in ('ValueError','ReferenceRevokedError')):return False
+        accepted=receipt.get('accepted_monotonic_s');returned=timing.get('returned_s')
+        if not all(type(x)in(int,float)and math.isfinite(x)for x in(accepted,returned))or not 0<=accepted<=returned:return False
+        prior=receipt.get('in_flight_calls')
+        if not isinstance(prior,list)or any(not isinstance(row,dict)or type(row.get('id'))is not int for row in prior):return False
+        calls=self.calls.copy()
+        if (self._release_reason(include_in_flight=False) is not None or owner.stop_requested
+                or owner.release_requested or not owner.commands.empty()
+                or any(row['id']in calls for row in prior)
+                or any(row['operation']not in {'read_calibration_state','get_bimanual_joint_position_limits','read_gains'}
+                       for row in calls.values())
+                or getattr(owner.backend,'terminal_failure',None)
+                or not owner.feedback_healthy or not owner.stationary or owner.pedal_snapshot()[1:]!=(False,True)):
+            return False
+        feedback=owner.cache.get('calibration_feedback')or{}
+        if not 0<=owner.control_time()-feedback.get('sample_time_s',-1)<=.1:return False
+        if self.environment=='physical':
+            guard=feedback.get('can_output_guard')or{};heartbeat=guard.get('heartbeat_monotonic_s')
+            if (guard.get('state')!='armed'or type(heartbeat)not in(int,float)
+                    or not 0<=owner.control_time()-heartbeat<=.1):return False
+        if set(self.hold_returns)!={'left','right'}or set(self.hold)!={'left','right'}:return False
+        if not all(self.hold[side]=='damping' and row and row.get('operation')=='set_damping_hold'
+                and 'error'not in row and row.get('epoch',-1)>=barrier
+                and row.get('started_monotonic_s',-1)>=accepted
+                and row.get('returned_monotonic_s',-1)>=row['started_monotonic_s']
+                for side,row in self.hold_returns.items()):return False
+        if self.environment=='physical' and feedback['sample_time_s']<max(
+                row['returned_monotonic_s'] for row in self.hold_returns.values()):return False
+        # The Owner tick rechecks its fresh armed Guard feedback above. Do not
+        # add a status-file read to this control-thread recovery gate.
+        if protection is None:return True
+        return bool(protection and protection.get('active_anomaly')is False
+            and protection.get('recovery_required')is False and protection.get('event')is None
+            and not protection.get('worker_exit_confirmed')and not protection.get('supervisor_exit_confirmed')
+            and (protection.get('heartbeat')or{}).get('status')=='healthy'
+            and (protection.get('heartbeat')or{}).get('monitored')is True)
 
     def control_recover(self,actor):
         actor.require(self)
@@ -566,6 +766,7 @@ class Runtime:
             self.owner.invalidate();self.owner.runner=None;self.preview_revision+=1
             self.control_operation=dict(schema='workbench.fixed_hold_verification.v1',operation_id=secrets.token_hex(16),
                 status='queued',verified=False,duration_s=5.,runtime_nonce=self.nonce,command_epoch=self.owner.epoch,
+                command_transport='native_window' if self.owner.shared_target_profile else 'point_send',
                 disabled_grippers=list(getattr(self.owner.backend,'passive_jaws',())),target_source='fresh_joint_feedback_and_bounded_calibrated_jaw_command',
                 joint_offsets_applied=False,requested_target=None,fixed_target=None,samples=[],sdk_returns=[],
                 stop_receipt=None,motion_kind='fixed_joint_pose_hold_not_home',firmware_ack='unsupported')
@@ -600,10 +801,11 @@ class Runtime:
                 # raw pose once so interpolation cannot move toward an older pose.
                 runner.plan=plan(actual)
                 runner.consumed.add(runner.plan.sha256)
-                from arx_env.joint_head_jaw_mapping import feedback_gaps,command_gap_mm
+                from arx_env.joint_head_jaw_mapping import feedback_gaps,command_gap_mm,command_max_mm
                 measured_gaps=feedback_gaps(actual)
                 command_gaps=[command_gap_mm(side,runner.plan.q_target[index]) for side,index in (('left',6),('right',13))]
                 self.control_operation.update(jaw_feedback_mm=measured_gaps,jaw_command_mm=command_gaps,
+                    jaw_command_max_mm=[command_max_mm(side)for side in ('left','right')],
                     jaw_command_clipped={side:abs(measured_gaps[i]-command_gaps[i])>1e-6 for i,side in enumerate(('left','right'))})
                 self.control_operation.update(status='holding',begin_feedback_qpos=list(actual),fixed_target=list(runner.plan.q_target),
                     started_wall_ns=time.time_ns(),started_monotonic_s=time.monotonic(),error_policy=deepcopy(runner.error_settings))
@@ -614,7 +816,9 @@ class Runtime:
                 owner.send('both',desired)
             runner=MotionRunner(plan(feedback['qpos']),begin=begin,send=send,stop=owner.motion_fault,consumed=owner.consumed,
                 arm_tolerance=owner.arm_tolerance,arm_tolerances=owner.arm_tolerances,environment=self.environment,
-                execution_settings=owner.motion_error_settings(),disabled_grippers=getattr(owner.backend,'passive_jaws',()))
+                execution_settings=owner.motion_error_settings(),disabled_grippers=getattr(owner.backend,'passive_jaws',()),
+                interpreter_factory=(lambda reference,side,stamp:owner.make_target_interpreter(reference,side,stamp,integral=False))
+                    if owner.shared_target_profile else None)
             owner.active_epoch=owner.epoch;owner.review_press=owner.pedal_snapshot()[0];owner.runner=runner
             verification['runner']=runner
             self.control_operation.update(status='verifying_feedback',initial_feedback=feedback)
@@ -640,28 +844,43 @@ class Runtime:
                     held_wall_s=time.monotonic()-receipt['started_monotonic_s'],target_error=deepcopy(runner.target_error))
                 verification['stop_sent']=True;self.request_stop()
         if verification['stop_sent'] and (self.stop_receipt or {}).get('stop_hold_return_confirmed') is True:
-            receipt.update(status='failed' if verification['error'] else 'completed',verified=verification['error'] is None,error=verification['error'],
-                stop_receipt=deepcopy(self.stop_receipt),finished_wall_ns=time.time_ns(),sample_count=len(receipt['samples']),
-                sdk_send_count=sum(row['operation']=='send' and 'error' not in row for row in receipt['sdk_returns']))
-            self._hold_verification=None;verification['done'].set()
+            self._finish_hold_verification(verification['error'])
+
+    def _finish_hold_verification(self,error):
+        verification=self._hold_verification;receipt=self.control_operation
+        receipt.update(status='failed' if error else 'completed',verified=error is None,error=error,
+            stop_receipt=deepcopy(self.stop_receipt),finished_wall_ns=time.time_ns(),sample_count=len(receipt['samples']),
+            sdk_send_count=sum(row['operation']=='send' and 'error' not in row for row in receipt['sdk_returns']),
+            sdk_window_count=sum(row['operation']=='queue_reference' and 'error' not in row for row in receipt['sdk_returns']))
+        self._hold_verification=None;verification['done'].set()
 
     def submit(self, credential, command):
         if not isinstance(command, dict):
             raise ValueError('command object required')
         action = command.get('action')
+        study=None
+        if 'study_settings'in command:
+            if action!='preview_workbench' or self.owner.shared_target_profile!='x5_control50_damping_v1':
+                raise ValueError('study settings require the declared V10 research route')
+            command=dict(command);study=validate_study(command.pop('study_settings'))
         if action == 'release':
             return self.request_release(credential, command)
         with self._preview_boundary() if action in CALIBRATION_PREVIEWS | COLLECTION_PREVIEWS | INFERENCE_PREVIEWS else self.lock:
             business = self._authenticate(credential)
+            if study is not None and business!='research':raise PermissionError('study settings require research control ownership')
             if action == 'stop':
                 if command!={'action':'stop'}:raise ValueError('explicit stop command required')
                 return self.request_stop()
+            if self.settings_write_pending:raise ValueError('执行配置正在保存；停止仍可独立使用')
             if self.maintenance_active:raise ValueError('服务维护中，停止仍可独立使用')
             if business != self.holder:
                 raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
             previews = {'calibration': CALIBRATION_PREVIEWS, 'collection': COLLECTION_PREVIEWS,
-                        'inference': INFERENCE_PREVIEWS}[business]
+                        'inference': INFERENCE_PREVIEWS,'research':set()}[business] | {'preview_workbench'}
             if action in previews:
+                if action=='preview_workbench' and business!='calibration' and isinstance(command.get('waypoints'),list) and any(
+                        isinstance(row,dict) and row.get('capture') for row in command.get('waypoints',[])):
+                    raise ValueError('capture acknowledgement belongs to calibration')
                 reason = self._idle_reason()
                 if reason:
                     raise ValueError(reason)
@@ -678,10 +897,17 @@ class Runtime:
                         and self.owner.epoch==epoch and not self.maintenance_active)
                     compiler.pending, compiler.frozen_payloads, compiler.alignment_plans = {}, {}, {}
                     compiler.inference_payloads = {}
+                    compiler.reference_payloads = {}
                     compiler.commands = queue.Queue(maxsize=16)
                     compiler.execution_error_settings = (None if business == 'calibration' and business not in self.execution_settings_policies
                                                          else self._execution_policy(business))
-                if business == 'inference':
+                if action=='preview_workbench' and 'reference_artifact' in command:
+                    from .control_reference import preview,start_allowance_matches
+                    from .target_interpreter import gains
+                    method=lambda current,requested:preview(self.ref,current,requested,
+                        allow_j3_integral_pause=bool(business=='research'and study and study['integral_enabled']),
+                        allow_start_allowance=bool(business=='research'and start_allowance_matches(current,study,command)))
+                elif action == 'preview_inference':
                     if self.inference_factory is None:
                         raise ValueError('prepare the inference model before review')
                     from .inference_owner import preview as inference_preview
@@ -690,7 +916,7 @@ class Runtime:
                                   calibration_revision=self.calibration_revision)
                     method = lambda current, requested: inference_preview(current, requested, config)
                 else:
-                    method = self.ref.Owner.submit if business == 'calibration' else self.collection.submit
+                    method = self.ref.Owner.submit if business == 'calibration' or action=='preview_workbench' else self.collection.submit
             else:
                 if action not in {'confirm', 'capture_ack', 'recover', 'release', 'simulate_pedal'}:
                     raise ValueError('action unavailable for this business')
@@ -705,6 +931,10 @@ class Runtime:
                 return result
         # No runtime/owner lock around full plan validation and hashing.
         result = method(compiler, command)
+        if study is not None and 'integral_gains'in study:
+            for reference,feedforward in compiler.reference_payloads.values():
+                if feedforward is not None and feedforward['provenance'].get('study_settings')!=study:
+                    raise ValueError('研究前馈的完整积分增益配置与本次审阅不一致')
         with self._preview_boundary(), self.owner.lock:
             if (self.holder != business or self.owner.epoch != epoch or self.preview_revision != revision
                     or self._idle_reason() or self.owner.cache.get('joint_limits') != compiler.cache.get('joint_limits')
@@ -714,11 +944,14 @@ class Runtime:
             self.owner.frozen_payloads = compiler.frozen_payloads
             self.owner.alignment_plans = compiler.alignment_plans
             self.owner.inference_payloads = compiler.inference_payloads
+            self.owner.reference_payloads = compiler.reference_payloads
             self.owner.review_wall_deadline = compiler.review_wall_deadline
             self.reviewed_plans = {
-                tuple(plan.sha256 for plan in review[0]): dict(calibration_revision=self.calibration_revision,
+                tuple(plan.sha256 for plan in review[0]): dict(prepared_reference_id=(compiler.reference_payloads[review[0][0].sha256][0].metadata['reference_id'] if review[0][0].sha256 in compiler.reference_payloads else None),
+                    prepared_feedforward_sha256=(compiler.reference_payloads[review[0][0].sha256][1]['sha256'] if review[0][0].sha256 in compiler.reference_payloads and compiler.reference_payloads[review[0][0].sha256][1] is not None else None),calibration_revision=self.calibration_revision,
                     inference_revision=self.inference_revision,
                     controller_profile=self.owner.shared_target_profile,
+                    study_settings=deepcopy(study),
                     inference_clock=deepcopy(self.owner.feedback_clock),
                     snapshot_id=self.calibration_snapshot_id, command_epoch=epoch, business=business,
                     execution_settings=dict(revision=self.execution_settings_revision, business=business,
@@ -822,15 +1055,18 @@ class Runtime:
                     self.hold=dict(left=None,right=None);self.hold_returns=dict(left=None,right=None)
                 self.owner.recording_call('finish','failed',str(protection_failure))
                 self.owner.event('control_protection_timing',reason=str(protection_failure),gc=timing_fault)
+                if self._hold_verification is not None:self._finish_hold_verification(str(protection_failure))
                 return False
             self._hold_before_tick()
             result = self.owner.tick()
             with self.lock:
                 if self.stop_receipt is not None:
                     receipt = self.stop_receipt
-                    stopped = self.owner.control.state in (self.owner.states.STOPPED, self.owner.states.MANUAL)
+                    receipt['prior_calls_complete']=all(row['id'] not in self.calls for row in receipt['in_flight_calls'])
+                    stopped = self.owner.control.state in (self.owner.states.STOPPED, self.owner.states.MANUAL, self.owner.states.FAULT)
                     if (stopped and not self.calls and all(row is not None
                             and row['operation'] == 'set_damping_hold' and 'error' not in row
+                            and row.get('epoch',-1)>=receipt['barrier_epoch']
                             and row.get('started_monotonic_s', -1) >= receipt['accepted_monotonic_s']
                             and 'returned_monotonic_s' in row for row in self.hold_returns.values())):
                         receipt.update(stop_hold_return_confirmed=True, sdk_hold_returns=deepcopy(self.hold_returns))

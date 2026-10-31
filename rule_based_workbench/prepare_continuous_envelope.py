@@ -62,9 +62,9 @@ def main(args):
         # Extra contained balls do not weaken coverage; keep the frozen capacity.
         while len(fitted)<264:fitted=np.vstack((fitted,fitted[0]))
     fitted[:,2]-=(bands[0]['z_min_m']+bands[0]['z_max_m'])/2
-    result={**parent,'cup_geometry_sha256':cup_geometry_digest(world),'source_bands':bands,
+    result={**parent,'cup_geometry_sha256':cup_geometry_digest(world),'cup_profile_sha256':data['cup']['profile_sha256'],'source_bands':bands,
             'first_band_spheres':fitted.tolist(),'source_polygon_sagitta_bound_m':sagitta}
-    result['proof']={**parent['proof'],'spheres_sha256':digest(result['first_band_spheres']),
+    result['proof']={'spheres_sha256':digest(result['first_band_spheres']),
                      'construction_grid_m':.0015,'construction_points':len(points)}
     proof=verify_offline(result)
     repairs=[]

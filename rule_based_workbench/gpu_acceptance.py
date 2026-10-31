@@ -399,8 +399,21 @@ def fixed_self_check(engine, planner, exported):
             keys=proof['relative_joints'];limits=proof['joint_domain']
             q=args.to_device([state[n] for n in keys]);lo=args.to_device([limits[n][0] for n in keys]);hi=args.to_device([limits[n][1] for n in keys])
             if bool(((q>=lo)&(q<=hi)).all()):clear[index]=True;certified.append(pair)
+    refined=[]
+    from gpu_mesh_clearance import mesh_pair_clearance
+    from integration import _digest
+    for index in (~clear).nonzero().reshape(-1).cpu().tolist():
+        pair=[names[pairs[index][0]],names[pairs[index][1]]];triangles=[]
+        for name in pair:
+            part=parts[name];frame=frames[part['link']]
+            triangles.append(np.asarray(part['vertices'])[part['faces']]@frame[:3,:3].T+frame[:3,3])
+        result=mesh_pair_clearance(*triangles,device=args.device)
+        refined.append(dict(parts=pair,part_sha256=[_digest(parts[name])for name in pair],
+            fixed_state_sha256=_digest(state),**result))
+        if result['passed']:clear[index]=True
     bad=(~clear).nonzero().reshape(-1).cpu().tolist()
     return dict(passed=not bad,pair_count=len(pairs),domain_certified_pairs=certified,unresolved_pairs=[[names[pairs[i][0]],names[pairs[i][1]]] for i in bad],
+        triangle_refined_pairs=refined,triangle_refinement_backend='gpu_original_triangle_sat_and_closed_component_containment',
         wall_seconds=time.perf_counter()-began,scope='native fixed self-pair list; local support pairs separately checked')
 
 

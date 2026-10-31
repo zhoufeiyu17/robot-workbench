@@ -512,7 +512,7 @@ class InferenceRunner:
             packet['torque_bias_sdk6']=self.reference_integral.packet(before,sample,
                 [a-b for a,b in zip(target[:6],feedback['qpos'][:6])],packet['host_times_s'])
             if self.reference_feedforward is not None:
-                packet['torque_bias_sdk6']=self.reference_feedforward.packet(packet['host_times_s'],packet['torque_bias_sdk6'])
+                packet['torque_bias_sdk6']=self.reference_feedforward.packet(packet['host_times_s'],packet['torque_bias_sdk6'],integrator=self.reference_integral)
         try:
             self.owner.command_gate()
             if not self.owner.shared_target_profile:receipt=self.owner.backend.queue_reference(packet)
@@ -545,7 +545,9 @@ class InferenceRunner:
 
     def _tick_native(self,now,feedback):
         self.loop.last_source_time=now
-        if self.owner.epoch!=self._epoch:raise ValueError('native reference epoch revoked')
+        if self.owner.epoch!=self._epoch:
+            from .target_interpreter import ReferenceRevokedError
+            raise ReferenceRevokedError('native reference epoch revoked')
         sample=feedback['sample_time_s']
         while self.native_pending and self.native_pending[0]<=sample:
             self.native_pending.pop(0);self.loop.completed+=1
@@ -634,6 +636,8 @@ class InferenceRunner:
                 self._submit(command, feedback)
             return self.status
         except Exception as exc:
+            if self.owner.cancel_requested_reference(exc):
+                self.revoke('operator stop/release');return self.status
             self.loop.stop(str(exc))
             self.status, self.reason = 'FAULT', str(exc)
             self._finish_data('failed', self.reason)

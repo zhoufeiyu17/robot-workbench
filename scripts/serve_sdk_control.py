@@ -31,14 +31,27 @@ def main():
     bind_child()
     connection=socket.socket(fileno=args.fd);os.set_inheritable(args.fd,False)
     from examples.scripts.debug import joint_head_real_owner as ref
+    from robot_workbench.sdk_quiesce import dm_joint_velocity_wire_scale,dm_torque_units,ec_torque_units,load_gripper_calibration
+    from robot_workbench.gravity_calibration import load_gravity_calibration
     from robot_workbench.sdk_process import serve_worker
+    if profile.get('native_gripper_calibration'):
+        from arx_env.joint_head_jaw_mapping import configure_mapping
+        configure_mapping(profile['jaw_mapping_file'])
     ref.legacy_modules(profile['legacy_source'])
     backend=ref.hardware_backend(disabled_grippers=profile.get('disabled_grippers',[]),
+        can_interfaces=profile['can_interfaces'],
         right_j4_diagnostic_kp=profile.get('right_j4_diagnostic_kp'),
         right_j4_diagnostic_kd=profile.get('right_j4_diagnostic_kd'),
         left_j6_diagnostic=profile.get('left_j6_diagnostic',False),
         prepared_reference_enabled=profile.get('prepared_reference_enabled',False),
-        target_interpreter_profile=profile.get('target_interpreter_profile'))
+        target_interpreter_profile=profile.get('target_interpreter_profile'),
+        motion_gain_profile=profile.get('motion_gain_profile'),
+        native_reference_api=profile.get('native_reference_api','legacy_recompute'),
+        dm_joint_velocity_wire_scale=dm_joint_velocity_wire_scale(profile.get('dm_joint_velocity_contract'),can_interfaces=profile['can_interfaces'],robot_id=profile['robot_id']),
+        dm_torque_unit_contract=dm_torque_units(profile.get('dm_torque_contract'),can_interfaces=profile['can_interfaces'],robot_id=profile['robot_id']),
+        gripper_calibration=load_gripper_calibration(profile.get('native_gripper_calibration'),robot_id=profile['robot_id']),
+        ec_torque_unit_contract=ec_torque_units(profile.get('ec_torque_contract')),
+        gravity_calibration=load_gravity_calibration(profile.get('sdk_gravity_calibration')))
     epoch=mmap.mmap(args.epoch_fd,32,access=mmap.ACCESS_READ)
     os.set_inheritable(args.epoch_fd,False)
     try:serve_worker(connection,backend,epoch)

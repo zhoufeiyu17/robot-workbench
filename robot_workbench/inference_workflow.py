@@ -16,6 +16,7 @@ from .inference_model import (CAMS, LegacyBaseAdapter, ContinuousBaseAdapter, le
                              model_family, model_spec, model_bundle_digest)
 from .inference_owner import device_limits, device_state, digest, make_inference_runner, check_gripper_policy, episode_duration, execution_steps
 from .inference_transport import MODEL_ID, RemoteBaseClient
+from .inference_history import InferenceHistory
 from .sample_clock import clock_spec, sample_stamp, POLICY_DURATION_TOLERANCE_S
 
 CAMERAS = {'head':'base_0', 'left':'left_wrist_0', 'right':'right_wrist_0'}
@@ -73,9 +74,11 @@ class InferenceWorkflow:
     def __init__(self, device, output, *, camera_service, model_endpoint, model_token_file,
                  profile_provider, support_provider=None, event=None, model_id=MODEL_ID, model_bundle=None,
                  model_catalog_provider=None, catalog_root=None, disabled_grippers=(), recording_enabled=True,
-                 model_prepare_operation=None, reference_trajectory=None,prepared_reference_execution=False,reference_integral_feedback=False):
+                 model_prepare_operation=None, reference_trajectory=None,prepared_reference_execution=False,reference_integral_feedback=False,
+                 control_mapping_pending=None):
         if type(recording_enabled) is not bool:raise ValueError('recording_enabled must be boolean')
         self.recording_enabled=recording_enabled
+        self.control_mapping_pending=control_mapping_pending
         from .inference_reference import load_reference
         self.reference_pin=deepcopy(reference_trajectory)
         self.reference=load_reference(reference_trajectory) if reference_trajectory is not None else None
@@ -95,8 +98,8 @@ class InferenceWorkflow:
         self.model_catalog_provider,self.catalog_root=model_catalog_provider,catalog_root
         self.models=[dict(id=model_id,label=self.selected_spec['label'],epoch=self.selected_spec['epoch'],
                          step=self.selected_spec['step'],selectable=True,status='configured',reason=None,
-                         bundle_digest=self.selected_bundle_digest)]
-        self.model_descriptors={model_id:deepcopy(model_bundle)}
+                         backend=self.selected_spec.get('backend','torch'),bundle_digest=self.selected_bundle_digest)]
+        self.model_descriptors={self.selected_bundle_digest:deepcopy(model_bundle)}
         self.catalog_error=None
         if tuple(disabled_grippers) not in ((),('right',)):raise ValueError('only right gripper may be disabled')
         self.disabled_grippers=tuple(disabled_grippers)
@@ -122,14 +125,13 @@ class InferenceWorkflow:
         self.cache_stop = threading.Event()
         self.cache_thread = None
         self.cache_paused = False
-        self.catalog, self.media_files = [], {}
         self.output.mkdir(parents=True, exist_ok=True)
         settings_path=self.output/'execution-settings.json'
         settings=json.loads(settings_path.read_text()) if settings_path.exists() else {}
         self.execute_steps=execution_steps(settings.get('execute_steps',30))
         self.execution_revision=settings.get('revision',0)
         if type(self.execution_revision) is not int or self.execution_revision<0:raise ValueError('invalid inference settings revision')
-        self._read_history()
+        self.history = InferenceHistory(self.output)
         self.model_probe_thread=threading.Thread(target=self._model_fact_loop,daemon=True,name='model-facts')
         self.model_probe_thread.start()
 
@@ -199,18 +201,6 @@ class InferenceWorkflow:
             self.invalidate()
             return self.execution_settings()
 
-    def _read_history(self):
-        path = self.output/'history.json'
-        if not path.exists():return
-        value = json.loads(path.read_text())
-        if value.get('schema') != 'inference_history.v1':raise ValueError('unknown inference history schema')
-        for entry in value['entries']:
-            relative = Path(entry['path']) if entry.get('path') else None
-            if relative is not None and (relative.is_absolute() or '..' in relative.parts):
-                raise ValueError('inference history path escapes output')
-            self.catalog.append(entry['result'])
-            if relative is not None:self.media_files[entry['result']['id']] = self.output/relative
-
     def _write_json(self, path, value):
         temporary = path.with_suffix(path.suffix+'.tmp')
         temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2)+'\n')
@@ -231,22 +221,29 @@ class InferenceWorkflow:
                 client=self._new_client();value=client.list_models()
             rows=value.get('models',[]) if isinstance(value,dict) else value
             if not isinstance(rows,list):raise ValueError('模型目录列表格式无效')
-            public=[];descriptors={}
+            public=[];descriptors={};seen=set()
             for index,row in enumerate(rows):
                 if not isinstance(row,dict):raise ValueError('模型目录条目格式无效')
                 identity=row.get('model_id',row.get('id'))
                 selectable=row.get('selectable') is True
-                if not isinstance(identity,str) or not identity or identity in descriptors:
+                descriptor=row.get('model_descriptor')
+                backend=(descriptor or {}).get('backend',row.get('backend','torch'))
+                if backend not in ('torch','triton') or row.get('backend',backend)!=backend:
+                    raise ValueError('模型目录模式与描述不一致')
+                if not isinstance(identity,str) or not identity:
                     if selectable:raise ValueError('可选模型目录身份缺失或重复')
                     identity='unavailable-'+digest(dict(index=index,label=row.get('label'),epoch=row.get('epoch'),step=row.get('step')))[:16]
-                descriptor=row.get('model_descriptor')
                 if selectable:
                     model_spec(identity,descriptor)
                     bundle_digest=model_bundle_digest(identity,descriptor)
                     if row.get('bundle_digest',bundle_digest)!=bundle_digest:raise ValueError('模型目录摘要与描述不一致')
                 else:bundle_digest=row.get('bundle_digest')
-                descriptors[identity]=deepcopy(descriptor)
-                public.append(dict(id=identity,selectable=selectable,bundle_digest=bundle_digest,
+                selection_key=(identity,backend,bundle_digest)
+                if selectable and selection_key in seen:raise ValueError('可选模型目录身份重复')
+                seen.add(selection_key)
+                if selectable:descriptors[bundle_digest]=deepcopy(descriptor)
+                public.append(dict(id=identity,backend=backend,selectable=selectable,bundle_digest=bundle_digest,
+                    runtime_schema=(descriptor or {}).get('schema'),
                     **{key:deepcopy(row.get(key)) for key in ('label','epoch','step','status','reason')}))
             with self.lock:
                 self.models,self.model_descriptors,self.catalog_error=public,descriptors,None
@@ -268,12 +265,17 @@ class InferenceWorkflow:
             if self.snapshot()['busy']:raise ValueError('推理或数据处理未结束，不能切换模型')
         self.refresh_models()
         with self.lock:
-            row=next((row for row in self.models if row['id']==model_id),None)
+            candidates=[row for row in self.models if row['id']==model_id
+                        and (expected_bundle_digest is None or row['bundle_digest']==expected_bundle_digest)]
+            if expected_bundle_digest is not None and not candidates and any(row['id']==model_id for row in self.models):
+                raise ValueError('模型目录身份已变化，请重新选择')
+            if len(candidates)>1:raise ValueError('同一checkpoint存在多个推理模式，请明确选择模式与目录摘要')
+            row=candidates[0]if candidates else None
             if row is None or row.get('selectable') is not True:
                 raise ValueError((row or {}).get('reason') or '模型尚不可选或已不在目录中')
             if expected_bundle_digest is not None and row.get('bundle_digest')!=expected_bundle_digest:
                 raise ValueError('模型目录身份已变化，请重新选择')
-            descriptor=deepcopy(self.model_descriptors[model_id])
+            descriptor=deepcopy(self.model_descriptors[row['bundle_digest']])
         return model_id,descriptor,row['bundle_digest']
 
     def _request_model_prepare(self, parameters):
@@ -304,6 +306,7 @@ class InferenceWorkflow:
             runner=(self.current or {}).get('runner')
             active=getattr(runner,'status',None) in ('ARMED','PREPARING','VERIFYING','RUNNING','SETTLING')
             return dict(selected_model_id=self.selected_model_id,bundle_digest=self.selected_bundle_digest,
+                backend=self.selected_spec.get('backend','torch'),
                 busy=bool(self.busy or active or getattr(runner,'recording_pending',False)),stage_id=self.stage,
                 loaded=ready,ready=ready,model_ready=ready,generation=self.generation,
                 workspace_bound=self.model_identity is not None,readiness=gate,
@@ -393,7 +396,8 @@ class InferenceWorkflow:
                     bound_worker_pid=self.model_service_fact.get('worker_pid'),
                     bound_model_instance=(self.model_service_fact.get('fact')or{}).get('instance_id'))
             return dict(message=self.message,model_ready=True,control_ready=False,
-                        model_id=self.selected_model_id,generation=generation,reused=reused)
+                        model_id=self.selected_model_id,bundle_digest=self.selected_bundle_digest,
+                        backend=self.selected_spec.get('backend','torch'),generation=generation,reused=reused)
         except Exception as error:
             if candidate is not None:candidate.close()
             with self.lock:
@@ -903,11 +907,7 @@ class InferenceWorkflow:
         if not rows:rows=[(dict(id=run['id'],kind='recording',label='推理结果 · 未生成视频',run_id=run['id'],status='invalid',details=dict(recording_error=error,receipt=str(run['directory']/'receipt.json'))),None)]
         with self.lock:
             run['receipt']=receipt;run['recording_error']=error
-            for row,path in rows:
-                self.catalog.append(row)
-                if path is not None:self.media_files[row['id']]=path
-            history=dict(schema='inference_history.v1',entries=[dict(result=row,path=str(self.media_files[row['id']].relative_to(self.output)) if row['id'] in self.media_files else None) for row in self.catalog])
-            self._write_json(self.output/'history.json',history)
+            self.history.append(rows)
 
     def allowed(self, action):
         current=self.snapshot()
@@ -988,10 +988,12 @@ class InferenceWorkflow:
                 outcomes=dict(motion='running' if active else 'completed' if value.get('runner_status')=='READY' else status if run else 'not_started',
                     data=data,simulation='not_applicable',task='passed' if outcome.get('success') is True else 'failed' if outcome.get('success') is False else 'unknown'),
                 inference=dict(models=deepcopy(self.models),selected_model_id=self.selected_model_id,catalog_root=self.catalog_root,
+                    backend=self.selected_spec.get('backend','torch'),
                     catalog_error=self.catalog_error,bundle_digest=self.selected_bundle_digest,generation=self.generation,
                     model_ready=model_ready,control_ready=control_ready,recording_enabled=self.recording_enabled,
                     execute_steps=run['config']['execute_steps'] if run and 'execute_steps' in run['config'] else self.execute_steps,
                     model=dict(id=self.selected_model_id,label=self.selected_spec['label'],loaded=model_ready,model_ready=model_ready,
+                    backend=self.selected_spec.get('backend','torch'),
                     bundle_digest=self.selected_bundle_digest,message=self.message,
                     status='loading' if self.status=='loading' else 'ready' if model_ready else 'error' if self.status=='failed' or self.model_identity else 'not_loaded',
                     readiness=model_gate,error=None if model_ready else model_gate['reason'] or self.model_error),
@@ -1001,11 +1003,13 @@ class InferenceWorkflow:
                     audit=deepcopy(run['audit']) if run else {},observation_error=self.cache_error,recording_error=recording_error))
 
     def results(self):
-        with self.lock:return deepcopy(self.catalog)
+        return self.results_page()['results']
+
+    def results_page(self, *, before=None, after=None):
+        return self.history.page(before=before, after=after)
 
     def media(self, identity):
-        with self.lock:path=self.media_files.get(identity)
-        return path if path and path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(self.output.resolve()) else None
+        return self.history.media(identity)
 
     def close(self):
         self.model_probe_stop.set();self.model_probe_thread.join(3)

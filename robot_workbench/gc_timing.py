@@ -41,6 +41,7 @@ def _record(phase, info):
         if start is not None:
             row=dict(generation=generation,started_monotonic_s=start,
                 returned_monotonic_s=now,duration_s=now-start,
+                thread_id=threading.get_native_id(),
                 collected=info.get('collected'),uncollectable=info.get('uncollectable'))
             _pauses.append(row)
             if row['duration_s']>=.005:_slow_pauses.append(row)
@@ -48,6 +49,12 @@ def _record(phase, info):
 
 def install():
     if _record not in gc.callbacks:gc.callbacks.append(_record)
+
+
+def recent():
+    """Small read-only process-local observation; never changes GC policy."""
+    return dict(automatic_enabled=gc.isenabled(),events=list(_pauses)[-4:],counts=list(gc.get_count()),
+                last_slow_event=_slow_pauses[-1]if _slow_pauses else None)
 
 
 def snapshot():

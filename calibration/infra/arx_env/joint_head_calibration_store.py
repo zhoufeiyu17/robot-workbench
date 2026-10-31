@@ -38,6 +38,28 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')
 
 
+def calibration_group_id(head_id, wrist_id):
+    return 'calibration:'+hashlib.sha256((_identifier(head_id)+'\0'+_identifier(wrist_id)).encode()).hexdigest()
+
+
+def bundle_records(head, wrist):
+    """One portable result; internal immutable solver records remain unchanged."""
+    records={kind:{key:deepcopy(value) for key,value in record.items() if key!='path'}
+             for kind,record in (('head',head),('wrist',wrist))}
+    for kind,record in records.items():
+        digest=record.get('sha256')
+        if (record.get('schema')!=_SCHEMA or record.get('kind')!=kind or not isinstance(digest,str)
+                or not hmac.compare_digest(digest,hashlib.sha256(_canonical({k:v for k,v in record.items() if k!='sha256'})).hexdigest())):
+            raise ValueError('invalid '+kind+' record in calibration bundle')
+    if (head['robot_id']!=wrist['robot_id'] or head['environment']!=wrist['environment']
+            or wrist.get('dependency_id')!=head['id']):
+        raise ValueError('calibration bundle requires one robot/environment and the exact head dependency')
+    result=dict(schema='robot_workbench.calibration_bundle.v1',robot_id=head['robot_id'],
+                environment=head['environment'],head_id=head['id'],wrist_id=wrist['id'],records=records)
+    result['sha256']=hashlib.sha256(_canonical(result)).hexdigest()
+    return result
+
+
 class CalibrationStore:
     def __init__(self, root, robot_id, environment=None):
         self.root = Path(root)

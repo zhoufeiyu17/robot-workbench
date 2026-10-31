@@ -201,7 +201,7 @@ class Playground:
 
     def progress(self, label, **fields):
         with self.lock:
-            for key in ('errors', 'recording', 'physical_outcome', 'task_outcome', 'native_task', 'simulation'):
+            for key in ('errors', 'recording', 'physical_outcome', 'task_outcome', 'native_task', 'simulation', 'dataset'):
                 if key in fields:
                     self.state[key] = deepcopy(fields.pop(key))
             if self.state.get('action') == 'execute' and 'errors' in self.state:
@@ -317,6 +317,7 @@ class Playground:
                                         'elapsed_s': 0, 'stage_elapsed_s': 0, 'stage_status': 'running',
                                         'estimate_s': estimate, 'estimate_source': '上次成功耗时' if previous_time and action != 'execute'
                                         else '粗估基线（非完成承诺）', 'stages': [], 'next_label': ''})
+            self.state.pop('dataset',None)
             if action == 'plan':
                 self.state.update(plan={'validated': False}, videos=[])
             elif action=='execute':

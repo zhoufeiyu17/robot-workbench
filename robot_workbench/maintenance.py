@@ -111,7 +111,7 @@ def operate(application,device,action,body):
     begin=action=='ops_maintenance_begin'
     fields={'environment','request_id','expected_target'}|({'purpose'} if begin else set() if action=='stop' else {'maintenance_token'})
     if action=='ops_prepare_model':fields|={'model_id','expected_bundle_digest','expected_model_id'}
-    if action=='ops_prepare_collection':fields|={'service_role','restart'}
+    if action=='ops_prepare_collection':fields|={'service_role','restart','asset_pair_id','expected_catalog_digest'}
     if action=='receipt':fields.add('lookup_request_id')
     if action in ('connect_control','release_control','recover_control','verify_hold'):fields.add('arms_supported')
     if not isinstance(body,dict) or set(body)-fields:raise ValueError('维护请求包含未知字段')
@@ -296,13 +296,20 @@ def operate(application,device,action,body):
                 result=callback(**{name:body[name] for name in ('model_id','expected_bundle_digest','expected_model_id') if name in body},still_current=actor.current)
             elif action=='ops_prepare_collection':
                 if device.runtime is None:raise ValueError('数采准备需要先在运维接入设备；不会自动连接')
+                asset_request={'asset_pair_id','expected_catalog_digest'}&set(body)
+                if asset_request and body.get('service_role') is not None:
+                    raise ValueError('单角色重启不能更换场景资产')
+                validate=getattr(device.collection_preparation,'validate_asset_request',None)
+                if body.get('service_role') is None and callable(validate):
+                    validate(body.get('asset_pair_id'),body.get('expected_catalog_digest'))
+                elif asset_request:raise ValueError('当前部署不支持资产选择')
                 device.runtime.admit_business('collection',active=actor.current,maintenance_actor=actor)
                 from .cup_return import clear
                 clear(device,maintenance_actor=actor)
                 callback=getattr(device.collection_preparation or device.workflows.get('collection'),'operations_prepare',None)
                 if not callable(callback):raise ValueError('当前环境未装配运维数采准备hook')
                 result=callback(still_current=actor.current,lifecycle_admission=actor.lifecycle_admission,
-                    **{name:body[name] for name in ('service_role','restart') if name in body})
+                    **{name:body[name] for name in ('service_role','restart','asset_pair_id','expected_catalog_digest') if name in body})
             actor.require(device.runtime)
         with application.lock:
             window.update(status='ready',phase='idle',active_action=None)

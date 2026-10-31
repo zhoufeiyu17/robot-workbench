@@ -10,9 +10,20 @@ const operationsModule='data:text/javascript;base64,'+Buffer.from(operationsSour
 const endpointSource=await readFile(new URL('../web/physical_endpoint.js',import.meta.url),'utf8');
 const endpointModule='data:text/javascript;base64,'+Buffer.from(endpointSource.replace("'./operations.js'",JSON.stringify(operationsModule))).toString('base64');
 const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
+assert(html.indexOf('data-tab="research"')<html.indexOf('data-tab="results"'),'control research precedes playback');
+assert.match(html,/<option value="research">控制研究<\/option>/,'research is a real handoff destination');
+assert.doesNotMatch(html,/id="preview-view"/,'one preview surface must not expose duplicate pose/view modes');
+assert.match(html,/<h3>目标姿态预览<\/h3>/);
+assert.match(html,/<h2 id="precision-study-title">控制精度研究<\/h2>/);
+assert.match(html,/<details id="precision-settings-details">/,'research settings are collapsed by default');
+assert.doesNotMatch(html,/precision-settings-v10/,'config versions must not have dedicated buttons');
+assert.match(html,/<select id="precision-config"/,'control configs share one selector');
+for(const id of ['observation-panel','manual-tools','media-preview','camera-grid'])
+  assert.equal([...html.matchAll(new RegExp('id="'+id+'"','g'))].length,1,'shared workspace component must not be duplicated: '+id);
 assert.match(html, /id="control-fault-recovery" href="#environment-recover"/);
 assert.match(html, /id="collection-speed" type="range" min="30" max="170"/);
-const {createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+const {createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+
 
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.attributes={};this.dataset={};this.events={};this.value='';this.checked=false;this.hidden=false;this.disabled=false;this.textContent='';this.className='';this.currentTime=0;this.duration=NaN;this.paused=true;this.playbackRate=1;this.open=false;this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on)names.add(name);else names.delete(name);this.className=[...names].join(' ');},contains:name=>this.className.split(' ').includes(name)};}
@@ -34,7 +45,7 @@ function documentStub(){
   const nodes=new Map([...html.matchAll(/id="([^"]+)"/g)].map(match=>[match[1],new Element()]));
   for(const id of ['return-offset-x','return-offset-y'])nodes.get(id).value='0';
   for(const id of ['head','left','right','preview','mesh']){const card=nodes.get('media-'+id),image=new Element('img'),empty=new Element('p'),meta=new Element('p');empty.className='empty';meta.className='media-meta';card.append(image,empty,meta);}
-  const tabs=['calibration','collection','inference','results','diagnostics'].map(tab=>{const button=new Element('button');button.dataset.tab=tab;return button;});
+  const tabs=['calibration','collection','inference','research','results','operations'].map(tab=>{const button=tab==='operations'?nodes.get('operations-link'):new Element('button');button.dataset.tab=tab;return button;});
   return {hidden:false,nodes,tabs,events:{},getElementById(id){assert(nodes.has(id),'Missing UI node '+id);return nodes.get(id);},createElement(tag){return new Element(tag);},createElementNS(namespace,tag){return new Element(tag);},querySelectorAll(selector){return selector==='[data-tab]'?tabs:[];},addEventListener(name,callback){this.events[name]=callback;}};
 }
 const response=(value,headers={})=>({ok:true,status:200,headers:{get:key=>headers[key]??null},json:async()=>value,blob:async()=>new Blob(['fixture'])});
@@ -48,9 +59,9 @@ function manualSnapshot(){
   value.manual={joint_names:Array.from({length:12},(_,i)=>'J'+i),positions:Array(12).fill(.1),limits:Array.from({length:12},()=>[-1,1]),jaw_gaps_mm:[80,80],default_joint_speed_rad_s:.2,default_jaw_speed_mm_s:10,queue:{available:true,revision:4,waypoints:[]}};
   return value;
 }
-function harness({audit=false,physical=false,business,storage,sessionMonitor,environmentAccess,crypto=webcrypto,create=createWorkbench}={}){
+function harness({audit=false,physical=false,business,view,storage,sessionMonitor,environmentAccess,crypto=webcrypto,create=createWorkbench}={}){
   const document=documentStub(),requests=[],intervals=[],revoked=[],blobs=[],timeouts=new Map(),rafs=new Map();let now=0,timerId=0,rafId=0;
-  const app=create({document,storage,sessionMonitor,environmentAccess,location:{href:'http://localhost:8110/?'+new URLSearchParams({...audit?{'preview-audit':'1'}:{},...physical?{environment:'physical'}:{},...business!==undefined?{business}:{}})},performance:{now:()=>now},crypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
+  const app=create({document,storage,sessionMonitor,environmentAccess,location:{href:'http://localhost:8110/?'+new URLSearchParams({...audit?{'preview-audit':'1'}:{},...physical?{environment:'physical'}:{},...business!==undefined?{business}:{},...view?{view}:{}})},performance:{now:()=>now},crypto,URL:{createObjectURL:blob=>{blobs.push(blob);return `blob:fixture-${requests.length}`;},revokeObjectURL:value=>revoked.push(value)},setInterval:fn=>{intervals.push(fn);return intervals.length;},clearInterval:()=>{},setTimeout:(fn,ms)=>{timeouts.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timeouts.delete(id),requestAnimationFrame:fn=>{rafs.set(++rafId,fn);return rafId;},cancelAnimationFrame:id=>rafs.delete(id),fetch:(url,options={})=>new Promise(resolve=>requests.push({url,options,resolve}))});
   const fireTimer=predicate=>{const timer=[...timeouts.entries()].find(([,t])=>predicate(t.ms));assert(timer,'matching timer scheduled');timeouts.delete(timer[0]);timer[1].fn();return timer[1].ms;};
   return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
@@ -81,13 +92,13 @@ for(const [business,expected]of [['inference','inference'],['collection','collec
   assert.deepEqual(h.app.context,{environment:'physical',business:expected});
   assert.equal(h.document.tabs.find(tab=>tab.dataset.tab===expected).attributes['aria-current'],'page');
   assert.equal(h.requests.length,1);assert.equal(h.requests[0].url,'/api/state?environment=physical&business='+expected);
-  const href='/operations?environment=physical&business='+expected;
+  const href='#operations-panel';
   assert.equal(h.get('operations-link').href,href);assert.equal(h.get('operations-link').dataset.business,expected);
   assert.equal(h.get('context-guidance-next').href,href);
   const value=snapshot();value.device.environment='physical';h.reply(0,value);await settle();
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'initial browse context never connects, hands off or executes');
   h.app.selectTab('collection');
-  assert.equal(h.get('operations-link').href,'/operations?environment=physical&business=collection');
+  assert.equal(h.get('operations-link').href,'#operations-panel');
   assert.equal(h.get('operations-link').dataset.business,'collection');
   h.app.selectTab('diagnostics');assert.equal(h.get('operations-link').dataset.business,'collection','auxiliary tabs retain the current business');
   h.app.destroy();
@@ -131,7 +142,7 @@ for(const connected of [false,true]){
   assert.equal(h.get('context-guidance-next').href,'#inference-run');followGuidance(h,'inference-run');
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);
   h.advance(3100);h.intervals[1]();assert.match(h.get('context-guidance-title').textContent,/待重新核验/);
-  assert.equal(h.get('context-guidance-next').href,'/operations?environment=fake&business=inference');h.app.destroy();
+  assert.equal(h.get('context-guidance-next').href,'#operations-panel');h.app.destroy();
 }
 {
   const {h}=await guidanceFixture('inference',value=>{
@@ -268,14 +279,14 @@ for(const [action,label] of [['manual_preview','单姿态'],['manual_queue_previ
     primary_action:{id:'generate_plan',label:'生成完整标定计划',allowed:false,reason:'当前请求仍在处理'},
     request:{action,status:'running',started_wall_ns:8e9},outcomes:{motion:'not_started',task:'not_started'}};
   h.reply(0,value);await settle();
-  assert.equal(h.get('stage-title').textContent,`正在检查${label}动作`);assert.equal(h.get('task-status').textContent,'执行前检查');
+  assert.equal(h.get('stage-title').textContent,'准备标定');assert.equal(h.get('manual-execution-status').textContent,'执行前检查');
   assert.match(h.get('manual-request-status').textContent,/已耗时 2.0 秒.*尚未执行.*弹出本次动作确认/);
   assert.equal(h.get('manual-execution-dialog').open,false);assert.equal(h.get('primary').disabled,true);
   value.revision++;value.server_wall_ns=11e9;h.app.poll();h.reply(1,value);await settle();
   assert.match(h.get('manual-request-status').textContent,/已耗时 3.0 秒/,'elapsed time uses each fresh server receipt');
   value.revision++;value.workflow.request={...value.workflow.request,status:'failed',finished_wall_ns:150e9,error:'真机：q_target[6] outside SDK limit'};
   h.app.poll();h.reply(2,value);await settle();
-  assert.equal(h.get('stage-title').textContent,`${label}执行前检查失败`);assert.equal(h.get('task-status').textContent,'检查失败');
+  assert.equal(h.get('stage-title').textContent,'准备标定');assert.equal(h.get('manual-execution-status').textContent,'检查失败');
   assert.match(h.get('manual-request-status').textContent,/已耗时 142.0 秒.*开发设备：q_target\[6\] outside SDK limit.*未下发本次运动/);
   assert.equal(h.get('manual-request-status').className,'tone-bad');assert.equal(h.get('outcome-task').textContent,'尚未开始','request failure does not rewrite business outcomes');
   value.revision++;value.workflow.stage_id='head.capture';value.workflow.status='running';
@@ -287,6 +298,47 @@ for(const [action,label] of [['manual_preview','单姿态'],['manual_queue_previ
   assert.equal(h.get('primary').disabled,false);assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'status rendering never confirms motion');
   h.get('manual-speed').value=.1;h.get('apply-manual-speed').events.click();
   assert.equal(h.get('manual-execution-dialog').open,false);h.app.destroy();
+}
+
+// Shared components stay in the same DOM across business tabs; browsing performs no actions.
+for(const business of ['calibration','collection','inference']){
+  const h=harness({business});h.app.start();const value=manualSnapshot();
+  value.workflow={...value.workflow,stage_id:'manual.execute',status:'executing',message:'人工执行中',
+    business_task:{stage_id:business+'.idle',status:'idle',title:'业务任务',message:'业务任务没有启动',primary_action:{id:'generate_plan',label:'生成业务计划',allowed:true}}};
+  value.manual.execution={status:'executing',stage_id:'manual.execute',message:'本次人工轨迹执行中'};
+  h.reply(0,value);await settle();
+  assert.equal(h.get('inference-execution-settings').hidden,business!=='inference');
+  assert.equal(h.get('task-message').textContent,'业务任务没有启动');
+  assert.equal(h.get('manual-execution-status').textContent,'执行中');
+  assert.equal(h.get('manual-execution-message').textContent,'本次人工轨迹执行中');
+  const count=h.requests.length;h.get('operations-link').events.click({preventDefault(){}});
+  assert.equal(h.get('operations-panel').hidden,false);assert.equal(h.get('work-pane').hidden,true);assert.equal(h.get('execution-settings-tools').hidden,true);assert.equal(h.get('inference-execution-settings').hidden,true);
+  assert.equal(h.get('request-status').hidden,true,'business request notices stay outside operations');
+  assert.equal(h.app.context.business,business);assert.equal(h.requests.length,count,'opening operations cannot connect, recover, hand off or execute');
+  h.app.poll();h.reply(count,value);await settle();assert.equal(h.get('request-status').hidden,true,'a business state refresh cannot leak its notice into operations');
+  h.app.selectTab(business);assert.equal(h.get('request-status').hidden,false,'business notices return with the business workspace');
+  h.app.destroy();
+}
+assert.equal([...html.matchAll(/id="manual-tools"/g)].length,1);
+assert.equal([...html.matchAll(/id="media-preview"/g)].length,1);
+assert(!html.includes('data-tab="site-cameras"'));assert(!html.includes('/web/site_cameras.js'));
+assert(!html.includes('data-tab="diagnostics"'));
+assert(html.indexOf('id="calibration-queue"')>html.indexOf('id="manual-execution-state"'));
+
+const operationsMarkup=html.slice(html.indexOf('id="operations-panel"'),html.indexOf('<footer>'));
+for(const id of ['manual-tools','task-panel','arrival-panel','image-recovery','raw-state'])assert(!operationsMarkup.includes('id="'+id+'"'),'operations must not contain business/view tools: '+id);
+assert.equal([...html.matchAll(/data-workbench-operations/g)].length,1);
+for(const camera of ['head','left','right','all']){
+  const h=harness({physical:true});h.app.start();const value=previewSnapshot();value.device.environment='physical';
+  const group={id:'calibration:one-group',kind:'calibration',label:'头部 v5 + 双腕 v6',components:{head:'head-component',wrist:'wrist-component'},mesh_selectable:true,details:{environment:'hardware',robot_source:'physical',simulation_only:false}};
+  value.preview.mesh_calibrations=[group];value.preview.mesh={requested:false,applied:false,camera:'head',candidate_id:'wrist-component'};
+  h.reply(0,value);await settle();assert.equal(h.get('mesh-candidate').value,group.id);
+  const option=h.get('mesh-candidate').children[1];assert.equal(h.get('mesh-candidate').children.length,2,'one calibration group plus placeholder');
+  h.get('mesh-camera').value=camera;h.get('mesh-camera').events.change();
+  assert.equal(h.get('mesh-candidate').value,group.id);assert.equal(h.get('mesh-candidate').children[1],option,'camera changes preserve the same option node and selection');
+  const sent=h.requests.find(row=>row.options.method==='POST'&&row.url.includes('preview_mesh'));
+  assert.equal(JSON.parse(sent.options.body).candidate_id,group.id);assert.equal(JSON.parse(sent.options.body).camera,camera);
+  h.app.destroy();
 }
 
 async function pendingManualExecution({queue=false,physical=false}={}){
@@ -566,6 +618,19 @@ function previewSnapshot(){
   value.results=[{id:'poor-head',kind:'head',label:'未通过头部',status:'quality_failed'},{id:'other-head',kind:'head',label:'另一个头部',status:'quality_failed'},{id:'poor-wrist',kind:'wrist',label:'未通过双腕',status:'quality_failed',details:{head_result_id:'poor-head'}}];
   return value;
 }
+for(const [business,disabledDraft]of [['calibration',''],['collection',89],['inference',null],['research',null]]){
+  const value=previewSnapshot();value.manual.disabled_grippers=['right'];value.manual.jaw_gaps_mm=[80,null];
+  const draft=JSON.stringify({jaw:[80,disabledDraft]});
+  const h=harness({business,storage:{getItem:()=>draft,setItem(){}}});h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('jaw-right').disabled,true);assert.equal(Number(h.get('jaw-right').value),83,'unknown disabled jaw gets a display target, never a claimed measurement');
+  const input=h.get('joint-inputs').querySelectorAll('input').find(input=>input.dataset.role==='position');
+  input.value=degrees(.2);input.events.input();h.fireTimer(ms=>ms===33);await settle();
+  const post=h.requests.find(row=>row.options.method==='POST');assert.equal(post.url,'/api/actions/preview_target');
+  const body=JSON.parse(post.options.body);assert.equal(body.business,business);assert.equal(body.q12[0],.2);assert.deepEqual(body.jaw_gap_mm,[80,83]);
+  h.get('jaw-left').value='90';h.get('show-target').events.click();
+  assert.match(h.get('request-status').textContent,/夹爪目标必须/,'invalid enabled targets are still rejected');
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url==='/api/actions/preview_target'),'editing and previewing cannot execute, recover or change ownership');h.app.destroy();
+}
 const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringify({environment:'fake',view,revision,view_revision:3,renderer_id:'renderer-one',frame_id:'frame-'+revision,source_wall_ns:10e9,...extra})});
 {
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;
@@ -579,8 +644,19 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
   assert.equal(image.hidden,true,'a frame must not survive a renderer identity change');assert(h.revoked.includes(previous));h.app.destroy();
 }
 {
+  const h=harness();h.app.start();const value=previewSnapshot();value.preview.frames.target.ready=true;
+  h.reply(0,value);await settle();h.reply(1,{},previewHeaders('target',7));await settle();
+  assert.equal(h.get('overview-controls').hidden,false,'camera controls are available without a separate view mode');
+  const image=h.get('media-preview').querySelector('img'),previous=image.src;
+  image.events.pointerdown({clientX:100,clientY:100,pointerId:1,preventDefault(){}});
+  image.events.pointermove({clientX:120,clientY:100});image.events.pointerup();
+  assert.equal(h.requests[2].url,'/api/actions/preview_overview','the default target preview can rotate directly');
+  assert.equal(image.hidden,false);assert.equal(image.src,previous,'camera updates keep the last target image visible');
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url==='/api/actions/preview_overview'));h.app.destroy();
+}
+{
   const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
-  h.get('preview-view').value='overview';h.get('preview-view').events.change();h.reply(1,{client_revision:4});await settle();
+  h.get('overview-reset').events.click();h.reply(1,{client_revision:4});await settle();
   value.revision++;value.preview.revisions.overview=4;value.preview.frames.overview={...value.preview.frames.overview,ready:true,revision:4,view_revision:4};
   h.reply(2,value);await settle();h.reply(3,{},previewHeaders('overview',4,{view_revision:4}));await settle();
   const image=h.get('media-preview').querySelector('img'),previous=image.src;
@@ -597,7 +673,7 @@ const previewHeaders=(view,revision,extra={})=>({'X-Frame-Metadata':JSON.stringi
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
-  h.get('preview-view').value='overview';h.get('preview-view').events.change();h.reply(1,{client_revision:4});await settle();
+  h.get('overview-reset').events.click();h.reply(1,{client_revision:4});await settle();
   h.reply(3,{},previewHeaders('overview',4,{view_revision:4}));await settle();
   value.revision++;h.reply(2,value);await settle();h.nextFrame();
   h.reply(4,{},previewHeaders('overview',4,{view_revision:4}));await settle();
@@ -810,7 +886,7 @@ for(const changed of ['server','route','calibration','environment']){
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
-  h.get('preview-view').value='overview';h.get('preview-view').events.change();assert.equal(h.requests[1].url,'/api/actions/preview_overview');
+  h.get('overview-reset').events.click();assert.equal(h.requests[1].url,'/api/actions/preview_overview');
   h.get('overview-zoom').value=1.5;h.get('overview-zoom').events.input();h.get('overview-zoom').value=2;h.get('overview-zoom').events.input();assert.equal(h.requests.length,2,'overview requests are serialized and coalesced');
   h.reply(1,{client_revision:4});await settle();assert.match(h.requests[3].url,/preview-media/);
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'the next view waits for a rendered frame, not just its HTTP ACK');
@@ -819,12 +895,12 @@ for(const changed of ['server','route','calibration','environment']){
 }
 {
   const h=harness();h.app.start();const value=previewSnapshot();value.preview.connected=false;value.preview.error='renderer process unavailable';value.preview.recovery={allowed:false,reason:'后端未允许',message:'检查本会话渲染日志',commands:['review renderer.log']};
-  h.reply(0,value);await settle();h.app.selectTab('diagnostics');assert.equal(h.get('image-recovery').hidden,false);assert.equal(h.get('preview-recover').href,'/operations?environment=fake&business=calibration');
-  assert.equal(h.get('preview-recover').events.click,undefined,'service recovery is navigation, not a business action');
+  h.reply(0,value);await settle();h.app.selectTab('diagnostics');assert.equal(h.get('image-recovery').hidden,false);assert.equal(h.get('preview-recover').href,'#operations-panel');
+  h.get('preview-recover').events.click({preventDefault(){}});assert.equal(h.get('operations-panel').hidden,false,'service recovery opens the unique operations workspace without a business action');
   const reconnect=h.get('reconnect-images').events.click();assert.match(h.requests[1].url,/\/api\/state/);h.reply(1,{...value,revision:2});await reconnect;
   assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0,'browser recovery only rereads state and frames');
   assert.equal(h.get('image-recovery-commands').textContent,'review renderer.log');
-  value.preview.recovery.allowed=true;value.revision=3;h.app.poll();h.reply(2,value);await settle();assert.equal(h.get('preview-recover').events.click,undefined);
+  value.preview.recovery.allowed=true;value.revision=3;h.app.poll();h.reply(2,value);await settle();assert.equal(typeof h.get('preview-recover').events.click,'function');
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
 }
 {
@@ -994,6 +1070,16 @@ function deletionSnapshot(){
   globalThis.innerWidth=730;h.advance(34);h.fireTimer(ms=>Math.abs(ms-1000/30)<.01);
   assert.match(h.get('audit-status').textContent,/测量视口已改变/);assert.equal(h.requests[1].options.signal.aborted,true);h.app.destroy();
   if(originalWidth===undefined)delete globalThis.innerWidth;else globalThis.innerWidth=originalWidth;
+}
+{
+  const h=harness({audit:true});h.app.start();const value=previewSnapshot();
+  value.manual.jaw_command_ranges_mm=[[0,80],[0,89]];value.manual.jaw_feedback_ranges_mm=[[-3,83],[-3,92]];
+  value.manual.jaw_gaps_mm=[80,89];h.reply(0,value);await settle();
+  assert.equal(Number(h.get('jaw-left').value),80);assert.equal(Number(h.get('jaw-right').value),89);
+  assert.equal(Number(h.get('jaw-left').max),80);assert.equal(Number(h.get('jaw-right').max),89);
+  h.get('zero-preview').events.click();assert.equal(Number(h.get('jaw-right').value),89);
+  h.get('jaw-left').value=81;h.get('show-target').events.click();assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);
+  h.get('use-feedback').events.click();assert.equal(Number(h.get('jaw-right').value),89,'readback must not close an ARX13 jaw to the old 83mm limit');h.app.destroy();
 }
 {
   const h=harness({audit:true});h.app.start();const value=previewSnapshot();value.manual.jaw_gaps_mm=[83.00000236797332,-.000002];h.reply(0,value);await settle();
@@ -1225,6 +1311,35 @@ for(const invalidate of ['offset','stale','dismiss','tab','instance']){
   position.value=10;position.events.input();h.app.selectTab('results');h.fireTimer(ms=>ms===33);
   assert.equal(h.requests.length,1,'leaving the work pane cancels pending automatic display');h.app.destroy();
 }
+for(const business of ['calibration','collection','inference','research']){
+  const h=harness({business,physical:true});h.app.start();const value=previewSnapshot();
+  value.device.environment='physical';
+  Object.assign(value.runtime,{connected:false,feedback_healthy:false,holder:null,state:'DISCONNECTED'});
+  Object.assign(value.runtime.allowed_operations,{manual_preview:{allowed:false,reason:'请先连接设备'},manual_execute:{allowed:false},manual_queue:{allowed:false}});
+  Object.assign(value.manual,{positions:null,jaw_gaps_mm:[null,null]});h.reply(0,value);await settle();
+  const inputs=role=>h.get('joint-inputs').querySelectorAll('input').filter(node=>node.dataset.role===role);
+  assert.equal(inputs('slider').length,12);assert(inputs('slider').every(input=>!input.disabled),'offline model sliders remain editable');
+  assert.equal(Number(inputs('position')[0].value),0);assert.equal(Number(h.get('jaw-left').value),83);
+  assert.equal(h.get('use-feedback').disabled,true);assert.equal(h.get('manual-preview').disabled,true);assert.equal(h.get('show-target').disabled,false);
+  assert.match(h.get('manual-feedback').textContent,/控制未接入.*模型预览.*实测未知/);
+  assert.equal(value.manual.positions,null,'neutral model pose is only a target draft');
+  inputs('slider')[0].value=15;inputs('slider')[0].events.input();h.fireTimer(ms=>ms===33);
+  const body=JSON.parse(h.requests[1].options.body);assert.equal(body.business,business);assert.equal(h.requests[1].url,'/api/actions/preview_target');
+  assert(Math.abs(body.q12[0]-Math.PI/12)<1e-14);assert.deepEqual(body.jaw_gap_mm,[83,83]);
+  assert(h.requests.filter(row=>row.options.method==='POST').every(row=>row.url==='/api/actions/preview_target'),'offline editing never connects, transfers ownership or moves the robot');h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=previewSnapshot();h.reply(0,value);await settle();
+  const inputs=role=>h.get('joint-inputs').querySelectorAll('input').filter(node=>node.dataset.role===role);
+  inputs('position')[0].value=12;inputs('position')[0].events.input();
+  const offline={...value,revision:2,manual:{...value.manual,positions:null,jaw_gaps_mm:[null,null]},runtime:{...value.runtime,connected:false,feedback_healthy:false,holder:null}};
+  h.app.poll();h.reply(1,offline);await settle();
+  assert.equal(inputs('position').length,12);assert.equal(Number(inputs('position')[0].value),12,'disconnect preserves the draft and model controls');
+  assert.equal(h.get('use-feedback').disabled,true);assert.match(h.get('joint-inputs').querySelectorAll('small').find(node=>node.dataset.role==='actual').textContent,/实测未知/);
+  value.revision=3;value.manual.positions[0]=.2;h.app.poll();h.reply(2,value);await settle();
+  assert.equal(Number(inputs('position')[0].value),12,'reconnecting does not replace the offline target with measured feedback');
+  assert.equal(h.get('use-feedback').disabled,false);h.app.destroy();
+}
 {
   const h=harness();h.app.start();const value=manualSnapshot();h.reply(0,value);await settle();
   const inputs=role=>h.get('joint-inputs').querySelectorAll('input').filter(node=>node.dataset.role===role);
@@ -1414,7 +1529,142 @@ function executionSettingsSnapshot(business='calibration'){
   value.runtime.execution_settings={revision:2,business,settings:{arrival_enabled:business==='calibration',
     arrival_tolerances_rad:Array.from({length:12},(_,i)=>.01+i*.001),arrival_jaw_mm:2,
     tracking_enabled:business==='calibration',tracking_joint_rad:.08,tracking_jaw_mm:4,tracking_duration_s:.2,
-    fake_error:{enabled:false,joint_bias_max_rad:0,seed:0}}};return value;
+    fake_error:{enabled:false,joint_bias_max_rad:0,seed:0},speed_protection:{enabled:true,limit_rad_s:.8}}};return value;
+}
+function researchSettings(){return {gains:{left:{kp:[240,210,210,90,90,60],kd:[5,5,5,3,3,2.1]},right:{kp:[80,70,70,80,30,20],kd:[2,2,2,1.6,1,.7]}},
+  integral_enabled:true,alignment_speed_rad_s:.1,home_speed_rad_s:.1,jaw_speed_mm_s:10,tcp_tolerance_mm:1};}
+assert(html.indexOf('id="speed-protection-tools"')<html.indexOf('id="execution-settings-tools"'));
+for(const business of ['calibration','collection','inference']){
+  const h=harness({business});h.app.start();const value=executionSettingsSnapshot(business);value.runtime.holder=business;
+  h.reply(0,value);await settle();
+  assert.equal(h.get('speed-protection-tools').hidden,false);assert.equal(h.get('speed-protection-enabled').checked,true);
+  assert.equal(Number(h.get('speed-protection-limit').value),.8);assert.match(h.get('speed-protection-effective').textContent,/当前生效.*版本 2.*开启.*0.8 rad\/s/);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  for(const limit of ['',0,-.1,'NaN','Infinity']){
+    h.get('speed-protection-limit').value=limit;h.get('speed-protection-limit').events.input();
+    assert.equal(h.get('speed-protection-apply').disabled,true);assert.match(h.get('speed-protection-draft').textContent,/有限正数/);
+  }
+  h.get('speed-protection-limit').value='.9';h.get('speed-protection-limit').events.input();
+  h.get('speed-protection-enabled').checked=false;h.get('speed-protection-enabled').events.input();
+  h.get('speed-protection-apply').events.click();
+  const body=JSON.parse(h.requests[1].options.body);assert.equal(body.expected_revision,2);
+  assert.equal(body.business,business);assert.deepEqual(body.settings.speed_protection,{enabled:false,limit_rad_s:.9});
+  assert.equal(h.requests[1].url,'/api/actions/execution_settings');
+  assert.equal(h.get('manual-execution-dialog').open,false,'saving a limit never starts a motion');
+  h.reply(1,{message:'saved'});await settle();value.revision++;value.runtime.execution_settings.revision++;value.runtime.execution_settings.settings=body.settings;
+  h.reply(2,value);await settle();assert.match(h.get('speed-protection-effective').textContent,/关闭.*0.9 rad\/s/);
+  h.app.selectTab('results');assert.equal(h.get('speed-protection-tools').hidden,true);
+  h.app.selectTab('operations');assert.equal(h.get('speed-protection-tools').hidden,true);h.app.destroy();
+}
+{
+  const h=harness();h.app.start();const value=executionSettingsSnapshot();h.reply(0,value);await settle();
+  h.get('tracking-joint-tolerance').value='.12';h.get('tracking-joint-tolerance').events.input();
+  h.get('speed-protection-limit').value='.9';h.get('speed-protection-limit').events.input();h.get('speed-protection-apply').events.click();
+  const speedBody=JSON.parse(h.requests[1].options.body);
+  assert.equal(speedBody.settings.tracking_joint_rad,.08,'speed save preserves effective errors, not their draft');
+  h.reply(1,{message:'saved'});await settle();value.revision++;value.runtime.execution_settings.revision++;value.runtime.execution_settings.settings=speedBody.settings;
+  h.reply(2,value);await settle();
+  assert.equal(h.get('tracking-joint-tolerance').value,'.12');assert.equal(h.get('execution-settings-apply').disabled,true);
+  assert.match(h.get('execution-settings-draft').textContent,/版本已变化/);
+  h.get('speed-protection-limit').value='.7';h.get('speed-protection-limit').events.input();
+  h.get('execution-settings-reset').events.click();assert.equal(h.get('speed-protection-limit').value,'.7','error reset preserves speed draft');
+  h.get('tracking-joint-tolerance').value='.11';h.get('tracking-joint-tolerance').events.input();h.get('execution-settings-apply').events.click();
+  const errorBody=JSON.parse(h.requests[3].options.body);assert.equal(errorBody.settings.speed_protection.limit_rad_s,.9,'error save preserves effective speed, not its draft');
+  h.reply(3,{message:'saved'});await settle();value.revision++;value.runtime.execution_settings.revision++;value.runtime.execution_settings.settings=errorBody.settings;
+  h.reply(4,value);await settle();assert.equal(h.get('speed-protection-limit').value,'.7');assert.equal(h.get('speed-protection-apply').disabled,true);
+  assert.match(h.get('speed-protection-draft').textContent,/版本已变化/);
+  h.get('speed-protection-reset').events.click();assert.equal(Number(h.get('speed-protection-limit').value),.9);h.app.destroy();
+}
+for(const unavailable of ['disconnected','old-backend','not-holder']){
+  const h=harness();h.app.start();const value=executionSettingsSnapshot();
+  if(unavailable==='disconnected')value.runtime.connected=false;
+  if(unavailable==='old-backend')delete value.runtime.execution_settings.settings.speed_protection;
+  if(unavailable==='not-holder')value.runtime.allowed_operations.execution_settings={allowed:false,reason:'请先交接控制权限'};
+  h.reply(0,value);await settle();assert.equal(h.get('speed-protection-enabled').disabled,true);assert.equal(h.get('speed-protection-apply').disabled,true);
+  if(unavailable!=='not-holder')assert.match(h.get('speed-protection-effective').textContent,/实际设置未核验/);
+  else assert.match(h.get('speed-protection-reason').textContent,/交接/);
+  h.app.destroy();
+}
+{
+  const h=harness({business:'research'});h.app.start();const value=executionSettingsSnapshot('research');value.runtime.holder='collection';
+  Object.assign(value.runtime.allowed_operations,{precision_preview:{allowed:false,reason:'请先交接控制权限'},precision_execute:{allowed:false},precision_analyze:{allowed:false}});
+  const settings=researchSettings();
+  value.precision_study={configured:true,reason:'请先交接控制权限',latest:null,review:null,settings,settings_caps:settings,settings_revision:0};h.reply(0,value);await settle();
+  assert.equal(h.app.context.business,'research');assert.equal(h.get('work-pane').hidden,false);
+  assert.equal(h.get('precision-study-tools').hidden,false);assert.equal(h.get('task-panel').hidden,true);
+  assert.equal(h.get('business-outcomes').hidden,true);assert.equal(h.get('precision-execute').disabled,true);
+  assert.equal(h.get('manual-tools').hidden,false);assert.equal(h.get('observation-panel').hidden,false);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'opening research never transfers control');
+  value.revision++;value.runtime.holder='research';value.runtime.allowed_operations.precision_preview={allowed:true};h.app.poll();h.reply(1,value);await settle();
+  h.get('precision-20').events.click();const body=JSON.parse(h.requests[2].options.body);
+  assert.equal(h.requests[2].url,'/api/actions/precision_preview');assert.equal(body.business,'research');
+  assert.equal(body.kind,'trajectory');assert.equal(body.speed,2);
+  h.reply(2,{message:'prepared'});await settle();value.revision++;value.precision_study.review={id:'one-study-review',summary:'固定片段 2×',duration_s:25.5};
+  value.runtime.allowed_operations.precision_execute={allowed:true};h.reply(3,value);await settle();
+  assert.match(h.get('precision-review').textContent,/2×.*25.50/);h.get('precision-execute').events.click();
+  assert.equal(h.requests[4].url,'/api/actions/precision_execute');assert.equal(JSON.parse(h.requests[4].options.body).review_id,'one-study-review');
+  h.app.selectTab('results');assert.equal(h.get('precision-study-tools').hidden,true);h.app.destroy();
+}
+
+{
+  const h=harness({business:'research'});h.app.start();const value=executionSettingsSnapshot('research');
+  value.runtime.holder='research';Object.assign(value.runtime.allowed_operations,{precision_preview:{allowed:true},precision_execute:{allowed:false},precision_analyze:{allowed:false}});
+  const settings=researchSettings(),caps=researchSettings();for(const side of ['left','right'])settings.gains[side].kd=[0,0,0,0,0,0];
+  value.precision_study={configured:true,settings,settings_caps:caps,settings_revision:0,runtime_facts:{trajectory_speed_choices:[1.5]}};
+  h.reply(0,value);await settle();
+  for(const id of ['precision-05','precision-10','precision-20']){assert.equal(h.get(id).hidden,true);assert.equal(h.get(id).disabled,true);}
+  assert.equal(h.get('precision-15').hidden,false);assert.equal(h.get('precision-start').disabled,false,'zero KD remains valid, matching the server');h.get('precision-start').events.click();
+  assert.equal(JSON.parse(h.requests[1].options.body).speed,1.5,'alignment uses an available reference even when 0.5x is absent');h.app.destroy();
+}
+
+{
+  const h=harness({business:'collection',view:'control-research'});h.app.start();
+  assert.equal(h.document.tabs.find(t=>t.dataset.tab==='research').attributes['aria-current'],'page');
+  const value=executionSettingsSnapshot('research');value.runtime.connected=false;
+  const config=researchSettings();
+  const v8=JSON.parse(JSON.stringify(config));v8.gains.left.kd=[2,2,2,1,1,.7].map(v=>1.5*Math.sqrt(2)*v);
+  value.precision_study={configured:true,settings:config,settings_caps:config,settings_revision:0,history:[],review:null,latest:null,
+    settings_presets:[{id:'v8',label:'V8',settings:v8},{id:'v10',label:'V10',settings:config}]};
+  value.runtime.allowed_operations.precision_settings={allowed:true};h.reply(0,value);await settle();
+  const gains=()=>h.get('precision-gain-inputs').querySelectorAll('input');assert.equal(gains().length,24);
+  gains()[6].value='70';gains()[6].events.input();h.get('precision-integral').checked=false;h.get('precision-integral').events.input();
+  h.app.poll();h.reply(1,value);await settle();assert.equal(gains()[6].value,'70','poll must preserve the gain draft');
+  h.get('precision-settings-save').events.click();const body=JSON.parse(h.requests[2].options.body);
+  assert.equal(h.requests[2].url,'/api/actions/precision_settings');assert.equal(body.settings.gains.left.kp[3],70);assert.equal(body.settings.integral_enabled,false);
+  assert.equal(body.expected_revision,0);assert.equal(h.requests.filter(x=>/connect|precision_execute/.test(x.url)).length,0,'saving gains must not connect or move');
+  h.reply(2,{message:'saved'});await settle();value.revision++;value.precision_study={...value.precision_study,settings:body.settings,settings_revision:1};
+  Object.assign(value.runtime,{connected:true,holder:'research'});
+  Object.assign(value.runtime.allowed_operations,{precision_preview:{allowed:true},precision_execute:{allowed:true}});
+  value.precision_study.review={id:'saved-config-review',summary:'已保存配置的审阅',duration_s:1};
+  h.reply(3,value);await settle();assert.match(h.get('precision-settings-status').textContent,/版本 1/);
+  assert.equal(h.get('precision-start').disabled,false);assert.equal(h.get('precision-execute').disabled,false);
+  assert.equal(h.get('precision-settings-details').open,false);
+  const count=h.requests.length,stored=JSON.stringify(value.precision_study.settings);
+  const selector=h.get('precision-config');assert.deepEqual(selector.children.map(option=>option.value),['','v8','v10']);
+  selector.value='v8';selector.events.change();assert.equal(selector.value,'v8');
+  assert.equal(Number(gains()[1].value),v8.gains.left.kd[0]);assert.equal(h.get('precision-settings-details').open,false);
+  assert.match(h.get('precision-settings-status').textContent,/实际准备使用 自定义.*草稿未保存/);
+  assert.equal(h.get('precision-start').disabled,true);assert.equal(h.get('precision-execute').disabled,true);
+  h.get('precision-start').events.click();h.get('precision-execute').events.click();assert.equal(h.requests.length,count,'unsaved config cannot silently use old saved gains');
+  selector.value='v10';selector.events.change();assert.equal(selector.value,'v10');
+  assert.equal(Number(gains()[1].value),5);
+  assert.equal(h.requests.length,count,'filling a preset neither saves nor applies gains');
+  assert.equal(JSON.stringify(value.precision_study.settings),stored,'preset editing cannot rewrite saved settings');
+  assert.match(h.get('precision-settings-status').textContent,/草稿未保存/);
+  gains()[6].value='91';gains()[6].events.input();assert.equal(h.get('precision-settings-save').disabled,true);
+  h.app.selectTab('calibration');assert.equal(h.get('precision-study-tools').hidden,true);h.app.destroy();
+}
+{
+  const h=harness({business:'research'});h.app.start();const value=executionSettingsSnapshot('research'),settings=researchSettings();
+  const trip={joint:'left_J5',command_epoch:15,sample_wall_ns:100,peak_rad_s:1.28};
+  const latest={id:'fixture-record',summary:'2x',status:'fault',reason:'reference rejected',started_wall_ns:200,binding:{command_epoch:17},feedback_peak_rad_s:.626,speed_protection:{last_trip:trip}};
+  value.precision_study={configured:true,settings,settings_caps:settings,settings_revision:0,latest,review:null};h.reply(0,value);await settle();
+  let report=JSON.parse(h.get('precision-report').textContent);
+  assert.equal(report.speed_protection.current_execution_trip,null);assert.deepEqual(report.speed_protection.historical_last_trip,trip);
+  assert.match(h.get('precision-status').textContent,/已观测峰值 0.626/);
+  latest.binding.command_epoch=15;latest.started_wall_ns=0;value.revision++;h.app.poll();h.reply(1,value);await settle();
+  report=JSON.parse(h.get('precision-report').textContent);assert.deepEqual(report.speed_protection.current_execution_trip,trip);
+  assert.equal(report.speed_protection.historical_last_trip,null);assert.match(h.get('precision-status').textContent,/已观测峰值 1.28/);h.app.destroy();
 }
 {
   const h=harness();h.app.start();assert.equal(h.get('execution-settings-apply').disabled,true);
@@ -1466,7 +1716,7 @@ function executionSettingsSnapshot(business='calibration'){
   assert.equal(h.get('fake-error-settings').hidden,true);h.app.destroy();
 }
 {
-  const h=harness(),value=snapshot();
+  const h=harness({business:'inference'}),value=snapshot();
   value.inference_execution={execute_steps:30,revision:0,allowed:true,action_horizon:60,control_hz:30};
   value.runtime.allowed_operations.inference_execution_settings={allowed:true};
   h.app.start();h.reply(0,value);await settle();
@@ -1479,7 +1729,7 @@ function executionSettingsSnapshot(business='calibration'){
   h.get('inference-steps-apply').events.click();
   const sent=h.requests.find(row=>row.options.method==='POST');
   assert.equal(sent.url,'/api/actions/inference_execution_settings');
-  const body=JSON.parse(sent.options.body);assert.equal(body.business,'calibration');assert.equal(body.execute_steps,45);assert.equal(body.expected_revision,0);
+  const body=JSON.parse(sent.options.body);assert.equal(body.business,'inference');assert.equal(body.execute_steps,45);assert.equal(body.expected_revision,0);
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'saving does not run or connect');
   h.app.destroy();
 }
@@ -1621,6 +1871,32 @@ function oneRunSnapshot(){
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,3);h.app.destroy();
 }
 {
+  const h=harness({business:'inference'});h.app.start();
+  const value=snapshot({workflow:{id:'current-run',status:'completed',busy:false,outcomes:{},primary_action:null},
+    results_page:{schema:'inference_results_page.v1',run_ids:['current-run','older-a'],total_runs:30,total_results:90,page_run_limit:12,older_cursor:19,newer_cursor:null},
+    results:[{id:'current-video',run_id:'current-run',kind:'recording',media:{id:'current-video',kind:'replay',ready:true,mime_type:'video/mp4',url:'/api/result-media?result_id=current-video'}}]});
+  h.reply(0,value);await settle();h.app.selectTab('results');
+  assert.equal(h.get('inference-history-pages').hidden,false);assert.match(h.get('inference-history-page-info').textContent,/共 30 个任务／90 项结果/);
+  assert.equal(h.get('inference-history-newer').disabled,true);
+  h.get('inference-history-older').events.click();assert.match(h.requests[1].url,/results_before=19/);
+  const older={...value,revision:2,results_page:{...value.results_page,run_ids:['older-b'],older_cursor:7,newer_cursor:18},
+    results:[{id:'old-video',run_id:'older-b',kind:'recording',media:{id:'old-video',kind:'replay',ready:true,mime_type:'video/mp4',url:'/api/result-media?result_id=old-video'}}]};
+  h.reply(1,older);await settle();
+  assert.equal(h.get('collection-history-run').value,'older-b','paging selects a task on that page, not the current run outside it');
+  assert.equal(h.get('results-list').querySelectorAll('article').length,1);
+  h.app.poll();assert.match(h.requests[2].url,/results_before=19/,'ordinary polling retains the stable page cursor');
+  h.get('inference-history-newer').events.click();assert(h.requests[2].options.signal.aborted);
+  assert.match(h.requests[3].url,/results_after=18/);
+  h.reply(2,{...older,revision:999});h.reply(3,{...value,revision:3});await settle();
+  assert.equal(h.app.state.revision,3,'aborted old page cannot replace the newer response');
+  h.get('inference-history-latest').events.click();assert(!h.requests[4].url.includes('results_'));
+  h.reply(4,{...value,revision:4});await settle();
+  assert.equal(h.get('collection-history-run').value,'current-run');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'paging never transfers control or starts tasks');
+  h.app.switchContext({environment:'fake',business:'calibration'});assert(!h.requests[5].url.includes('results_'));
+  h.app.destroy();
+}
+{
   const route={route_id:'a'.repeat(32),prefix:'/device-physical/'+'a'.repeat(32),device_id:'physical-cpu'};
   const value=snapshot({device:{id:'physical-cpu',environment:'physical'},gateway_route:route});
   assert.equal(routePhysicalRequest('/api/actions/stop',{body:JSON.stringify({environment:'physical'})},value,'http://localhost:8110/'),route.prefix+'/api/actions/stop');
@@ -1678,3 +1954,24 @@ function oneRunSnapshot(){
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
 }
 console.log('PASS unified web: inference workspace/reviews/metrics/media, execution error settings/drafts/gates, per-run history pairing, server-owned outcomes, workspace drafts, degree sliders, readonly auto-preview, calibration comparison, explicit collection stages and failure guidance, HTTP request IDs, reviewed speed, replay, release, per-environment server identities and bound physical endpoint routing.');
+
+// The catalog contains trusted IDs, while selection alone remains read-only.
+{
+  const calls=[],access={permission:()=>({allowed:true}),subscribe(){},setEnvironment(){},destroy(){},
+    prepare:(action,parameters)=>{calls.push({action,parameters});return Promise.resolve();}};
+  const h=harness({business:'collection',environmentAccess:access});h.app.start();
+  const value=snapshot();value.scene_assets={catalog_digest:'a'.repeat(64),can_retry:true,busy:false,status:'ready',
+    assets:[{id:'machine',kind:'machine',label:'咖啡机',asset_id:'coffee',revision:'v1',dimensions_m:[.23,.43,.345],preview_url:'/api/scene-assets/preview?environment=fake&asset_id=machine&catalog_digest='+ 'a'.repeat(64)},
+      {id:'open',kind:'cup',label:'无盖杯',asset_id:'cup-open',revision:'v1',dimensions_m:[.079,.079,.1105],preview_url:'/api/scene-assets/preview?environment=fake&asset_id=open&catalog_digest='+ 'a'.repeat(64)},
+      {id:'lid',kind:'cup',label:'带盖杯',asset_id:'cup-lid',revision:'v1',dimensions_m:[.082,.082,.124],preview_url:'/api/scene-assets/preview?environment=fake&asset_id=lid&catalog_digest='+ 'a'.repeat(64)}],
+    pairs:[{id:'machine-open',machine:'machine',cup:'open',can_prepare:true},{id:'machine-lid',machine:'machine',cup:'lid',can_prepare:true}]};
+  h.reply(0,value);await settle();const requests=h.requests.length;
+  h.get('scene-asset-cup').value='lid';h.get('scene-asset-cup').events.change();
+  assert.equal(h.requests.length,requests);assert.deepEqual(calls,[],'draft selection cannot prepare GPU services');
+  assert.match(h.get('scene-asset-cup-preview').src,/asset_id=lid/);
+  assert.match(h.get('scene-asset-cup-details').textContent,/124\.0/);
+  assert.equal(h.get('scene-asset-apply').disabled,false);
+  h.get('scene-asset-apply').events.click();await settle();
+  assert.deepEqual(calls,[{action:'prepare_collection',parameters:{asset_pair_id:'machine-lid',expected_catalog_digest:'a'.repeat(64)}}]);
+  assert.equal(h.requests.length,requests);h.app.destroy();
+}

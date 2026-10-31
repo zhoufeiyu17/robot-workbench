@@ -138,8 +138,10 @@ def validate_profile(profile: Any) -> dict[str, Any]:
             raise ValueError(f"divergence_thresholds.{key} must be nonnegative")
     support = profile.get("scene_support")
     if support is not None:
-        if not isinstance(support, dict) or support.get("machine_asset") != "objects/owner_coffee_machine_00003/v1":
-            raise ValueError("scene_support requires the supported canonical machine asset")
+        if not isinstance(support, dict):
+            raise ValueError("scene_support requires a canonical machine asset")
+        from scene_assets import asset_reference
+        asset_reference(support.get('machine_asset'))
         if not isinstance(support.get("source"), str) or not support["source"].strip():
             raise ValueError("scene_support requires installation geometry provenance")
         for key in ("machine_root_z_m", "cup_root_z_m"):
@@ -157,8 +159,12 @@ class ObservationWindow:
     cup_position_jitter_m: float | None = None
     cup_motion_threshold_source: str = "unresolved"
     reobserve_events: list[dict[str, Any]] = field(default_factory=list)
+    asset_set: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.asset_set is not None:
+            from scene_assets import validate
+            self.asset_set = deepcopy(validate(self.asset_set))
         if self.mode not in {"live", "offline_replay"} or self.coordinates not in {"camera", "world"}:
             raise ValueError("unsupported observation mode or coordinate space")
         if self.cup_motion_threshold_m is not None:
@@ -302,6 +308,10 @@ class ObservationWindow:
         unconstrained = {"machine_position": list(machine_position), "machine_orientation_wxyz": list(machine_orientation),
                          "cup_position": list(cup_position)}
         support = self.profile.get("scene_support")
+        from scene_assets import LEGACY_MACHINE
+        machine_asset = self.asset_set['machine']['native_asset'] if self.asset_set is not None else LEGACY_MACHINE
+        if support is not None and support['machine_asset'] != machine_asset:
+            raise ValueError('installation support belongs to another machine asset; prepare the selected geometry first')
         if support is not None:
             # These canonical mesh roots are upright on a known installation plane.
             # Detection contributes XY/yaw; its roll/pitch must not tilt the tray.
@@ -317,7 +327,7 @@ class ObservationWindow:
             "schema_version": SCENE_SCHEMA,
             "episode_id": "arx-coffee-observation",
             "seed": 0,
-            "machine_asset": "objects/owner_coffee_machine_00003/v1",
+            "machine_asset": machine_asset,
             "environment_from_machine_root": {"position": list(machine_position), "orientation_wxyz": list(machine_orientation)},
             "environment_from_cup": {"position": list(cup_position), "orientation_wxyz": [1.0, 0.0, 0.0, 0.0]},
             "source": {"frame_id": frame["frame_id"], "observation_mode": self.mode,
@@ -336,6 +346,8 @@ class ObservationWindow:
                                    machine_orientation="detected yaw; upright and Z from installation geometry")
         scene["episode_scene"] = {key: scene[key] for key in (
             "episode_id", "seed", "machine_asset", "environment_from_machine_root", "environment_from_cup")}
+        if self.asset_set is not None:
+            scene['asset_set'] = deepcopy(self.asset_set)
         scene["scene_digest"] = _digest(scene)
         return scene
 
@@ -462,7 +474,13 @@ def _validate_scene(scene: Any, *, allow_operator_assisted=False) -> None:
     if scene.get("scene_digest") != _digest({k: v for k, v in scene.items() if k != "scene_digest"}):
         raise ValueError("source scene digest does not match content")
     keys = ("episode_id", "seed", "machine_asset", "environment_from_machine_root", "environment_from_cup")
-    if any(key not in scene for key in keys) or scene.get("episode_scene") != {key: scene[key] for key in keys}:
+    expected = {key: scene[key] for key in keys if key in scene}
+    if scene.get('asset_set') is not None:
+        from scene_assets import validate
+        validate(scene['asset_set'])
+        if scene['machine_asset'] != scene['asset_set']['machine']['native_asset']:
+            raise ValueError('observed scene machine differs from selected asset set')
+    if any(key not in scene for key in keys) or scene.get("episode_scene") != expected:
         raise ValueError("episode_scene must match the observed scene")
     for key in keys[-2:]:
         pose = scene[key]

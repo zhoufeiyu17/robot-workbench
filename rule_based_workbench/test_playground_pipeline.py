@@ -368,6 +368,30 @@ def main():
         physical_limits['resources'].pop('max_replay_time_seconds')
         physical_contract.write_text(json.dumps(physical_limits))
 
+        # The modern physical entry must reach the shared native dataset exporter.
+        bridge.config.update(dataset_format='lerobot-v2.1',render_replay=False)
+        processes_before,uploads_before=popen.call_count,upload.call_count
+        legacy_exports_before=exporter.call_count
+        def finalize_dataset(config,recording):
+            assert config['dataset_format']=='lerobot-v2.1' and config['render_replay'] is False
+            assert recording['done'] and recording['directory']==str(raw)
+            destination=Path(config['artifact_dir'])/'playback';destination.mkdir()
+            for camera in ('base_0','left_wrist_0','right_wrist_0'):
+                (destination/f'source-{camera}.mp4').write_bytes(b'checked-source-video')
+            return dict(status='ready',dataset_ready=True,dataset_format='v2.1',
+                dataset_root=str(Path(config['artifact_dir'])/'lerobot'),replay_ready=True)
+        with patch('real_workflow.finalize_collection',side_effect=finalize_dataset)as finalizer:
+            result=pipeline.execute(configured,root/'physical-native-dataset',bridge,prepared)
+            assert result['status']=='completed'and result['dataset']['dataset_ready']
+            assert result['simulation']['status']=='not_requested'and len(result['videos'])==3
+            assert finalizer.call_count==1
+        with patch('real_workflow.finalize_collection',return_value=dict(status='failed',dataset_ready=False,error='native readback rejected')):
+            result=pipeline.execute(configured,root/'physical-native-dataset-rejected',bridge,prepared)
+            assert result['status']=='failed'and result['errors']['dataset']=='native readback rejected'
+        assert popen.call_count==processes_before and upload.call_count==uploads_before
+        assert exporter.call_count==legacy_exports_before,'dataset finalizer already exports source videos'
+        bridge.config.pop('dataset_format');bridge.config.pop('render_replay')
+
         # Successful speed changes rebuild/audit the cached route with CPU geometry only;
         # the only Kit invocation is the separately requested action replay.
         actions.clear()

@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -24,6 +25,61 @@ class SettingsTest(unittest.TestCase):
     advance = fixture.UnifiedRuntimeTest.advance
     preview = fixture.UnifiedRuntimeTest.preview
     confirm = fixture.UnifiedRuntimeTest.confirm
+
+    def test_stalled_settings_storage_does_not_block_tick_or_stop_or_admit_motion(self):
+        for phase in ('write', 'replace'):
+            with self.subTest(phase=phase):
+                runtime, creds = self.create(device='disk-'+phase)
+                review = self.preview(runtime, creds['calibration'])
+                settings = runtime.execution_settings_snapshot('calibration')['settings']
+                settings['arrival_jaw_mm'] = 7.
+                entered, release = threading.Event(), threading.Event()
+                results, errors = [], []
+                def stalled(*args, **kwargs):
+                    entered.set()
+                    if not release.wait(3):raise TimeoutError('test storage gate')
+                    return original(*args, **kwargs)
+                def update():
+                    try:results.append(runtime.update_execution_settings(creds['calibration'],settings))
+                    except BaseException as error:errors.append(error)
+                from robot_workbench import runtime as module
+                original = Path.write_text if phase=='write' else module.os.replace
+                target, name = (Path, 'write_text') if phase=='write' else (module.os, 'replace')
+                with patch.object(target,name,stalled):
+                    worker=threading.Thread(target=update);worker.start()
+                    try:
+                        self.assertTrue(entered.wait(1))
+                        self.assertTrue(runtime.settings_write_pending)
+                        self.advance(runtime)
+                        self.assertTrue(runtime.owner.feedback_healthy)
+                        with self.assertRaisesRegex(ValueError,'配置正在保存'):
+                            self.confirm(runtime,creds['calibration'],review)
+                        with self.assertRaisesRegex(ValueError,'配置正在保存'):
+                            runtime.update_execution_settings(creds['calibration'],settings)
+                        with self.assertRaisesRegex(ValueError,'配置正在保存'):
+                            runtime.begin_maintenance()
+                        runtime.request_stop();self.advance(runtime)
+                        self.assertEqual(runtime.owner.control.state,runtime.owner.states.STOPPED)
+                        self.assertFalse(release.is_set(),'control must complete while storage is still blocked')
+                    finally:release.set();worker.join(3)
+                self.assertFalse(worker.is_alive());self.assertFalse(errors,errors)
+                self.assertEqual(len(results),1);self.assertFalse(runtime.settings_write_pending)
+                self.assertEqual(runtime.owner.control.state,runtime.owner.states.STOPPED)
+                self.assertEqual(json.loads(runtime.execution_settings_path.read_text()),runtime.export_execution_settings())
+                with self.assertRaisesRegex(ValueError,'unknown or consumed'):
+                    self.confirm(runtime,creds['calibration'],review)
+
+    def test_failed_settings_write_keeps_previous_policy_and_releases_reservation(self):
+        runtime,creds=self.create()
+        previous=runtime.export_execution_settings()
+        settings=runtime.execution_settings_snapshot('calibration')['settings']
+        settings['arrival_jaw_mm']=7.
+        with patch.object(Path,'write_text',side_effect=OSError('injected full disk')):
+            with self.assertRaisesRegex(OSError,'full disk'):
+                runtime.update_execution_settings(creds['calibration'],settings)
+        self.assertEqual(runtime.export_execution_settings(),previous)
+        self.assertFalse(runtime.settings_write_pending)
+        self.preview(runtime,creds['calibration'])
 
     def test_update_preserves_defaults_revokes_reviews_and_persists_without_motion(self):
         runtime, creds = self.create()

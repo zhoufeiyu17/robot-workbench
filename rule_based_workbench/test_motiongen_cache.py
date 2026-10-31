@@ -104,6 +104,19 @@ class CacheTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'cup proof mismatch'):self.prepare()
         self.assertEqual(len(self.engines),count)
 
+    def test_selected_asset_has_no_old_cup_fallback(self):
+        self.planner.scene_asset_set={'cup':{}}
+        with self.assertRaisesRegex(ValueError,'legacy fallback is forbidden'):self.prepare()
+        self.assertFalse(self.engines)
+        path=self.urdf.parent/'selected-cup.json';path.write_text('{}')
+        self.planner.scene_asset_set['cup']['inward_envelope']=dict(path=str(path),
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        self.prepare()
+        self.assertEqual(self.envelope_paths[-1],str(path))
+        path.write_text('{"changed":true}')
+        with self.assertRaisesRegex(ValueError,'envelope file changed'):self.prepare()
+        self.assertEqual(len(self.engines),1)
+
     def test_scene_start_and_locked_pose_reuse_refreshes_all_bindings(self):
         cold=self.prepare();engine=cold['engine']
         self.assertEqual(cold['model_build_seconds'],7.)

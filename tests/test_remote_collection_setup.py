@@ -25,6 +25,47 @@ from local_execution import TARGET,PHYSICAL_TARGET
 
 
 class RemoteCollectionSetupTests(unittest.TestCase):
+    def test_standalone_owner_raw_root_is_shared_by_recorder_and_strict_finalizer(self):
+        from robot_workbench.collection_setup import trusted_recording_location
+        from robot_workbench.control_owner import collection_recording_root
+        from real_workflow import resolve_raw_source
+        from real_contract import namespace
+        owner=self.h.root/'independent-owner';owner.mkdir();root=collection_recording_root(owner)
+        (self.h.root/'business-run').mkdir()
+        reference=dict(descriptor=str(owner/'control-owner.json'),runtime_nonce='current-owner')
+        with self.assertRaises(ValueError):trusted_recording_location(root,self.h.root/'business-run')
+        with patch('robot_workbench.control_owner.ControlChannel')as channel:
+            peer=channel.return_value;peer.descriptor=dict(environment='physical',socket_path=str(owner/'control.sock'),
+                identity={'script':'/published/scripts/serve_control_owner.py'})
+            peer.call.return_value=dict(recording_configured=True)
+            self.assertEqual(trusted_recording_location(root,self.h.root/'business-run',reference),root)
+            peer.call.assert_called_once_with('inspect',expected_nonce='current-owner')
+            with self.assertRaises(ValueError):trusted_recording_location(owner/'different',self.h.root,reference)
+            peer.call.return_value=dict(recording_configured=False)
+            with self.assertRaises(ValueError):trusted_recording_location(root,self.h.root,reference)
+            peer.call.side_effect=ValueError('Owner nonce changed')
+            with self.assertRaisesRegex(ValueError,'nonce changed'):trusted_recording_location(root,self.h.root,reference)
+        episode=root/'cpu-only-episode';episode.mkdir()
+        write(episode/'manifest.json',dict(schema_version=namespace('physical')['raw_schema'],sealed_wall_ns=1,capture_status='complete'))
+        report=dict(directory=str(episode),done=True)
+        self.assertEqual(resolve_raw_source(dict(environment='physical',local_recording_root=str(root)),report),episode)
+        with self.assertRaises(ValueError):resolve_raw_source(dict(environment='physical',local_recording_root=str(self.h.root/'business-run')),report)
+
+    def test_independent_owner_binding_is_exact_and_nonce_fenced_without_broadening_root(self):
+        from robot_workbench.collection_setup import trusted_binding_location
+        other=self.remote/'owner-binding.json';reference=dict(descriptor='/private/owner.json',runtime_nonce='current-owner')
+        with self.assertRaises(ValueError):trusted_binding_location(other,self.h.root/'business-run')
+        with patch('robot_workbench.control_owner.ControlChannel')as channel:
+            channel.return_value.descriptor={'environment':'physical'}
+            channel.return_value.call.return_value={'hardware_binding':str(other)}
+            self.assertEqual(trusted_binding_location(other,self.h.root/'business-run',reference),other)
+            channel.return_value.call.assert_called_once_with('inputs',expected_nonce='current-owner')
+            with self.assertRaisesRegex(ValueError,'current independent Owner location'):
+                trusted_binding_location(other.with_name('different.json'),self.h.root/'business-run',reference)
+            channel.return_value.call.side_effect=ValueError('Owner nonce changed')
+            with self.assertRaisesRegex(ValueError,'nonce changed'):
+                trusted_binding_location(other,self.h.root/'business-run',reference)
+
     def test_remote_failure_exposes_cause_without_ssh_or_encoded_request(self):
         from robot_workbench.collection_setup import remote_compute_call,_process_failure_reason
         def failed(command,**kwargs):

@@ -95,6 +95,21 @@ def summary(config, owner):
             pass
     complete = len(lanes) == (1 if config.get('render_replay', True) is False else 2) and all(recording.get(side, {}).get('capture_status') == 'complete'
                  and recording.get(side, {}).get('validation') == 'passed' for side in lanes)
+    dataset=None
+    if config.get('dataset_format'):
+        dataset=dict(status='waiting',format=config['dataset_format'])
+        try:
+            path=Path(config['artifact_dir'])/'collection-finalization.json'
+            if path.is_symlink() or path.stat().st_size>64*1024:raise ValueError('bounded dataset finalization receipt required')
+            report=read_object(path)
+            if (not source or not plan or report.get('source_run_id')!=source['run_id']
+                    or report.get('plan_run_id')!=plan['run_id'] or report.get('timeline_digest')!=plan['timeline_digest']):
+                raise ValueError('dataset finalization belongs to another observation/plan')
+            dataset.update(status='ready' if report.get('status')=='ready' and report.get('dataset_ready') is True else 'failed',
+                root=report.get('dataset_root'),receipt=report.get('dataset_receipt'),error=report.get('error'))
+        except FileNotFoundError:pass
+        except (OSError,ValueError,KeyError,TypeError) as error:dataset.update(status='failed',error=str(error))
+        complete=complete and dataset['status']=='ready'
     stages = [dict(id=name,label=label,status='ready' if ready else 'blocked') for name,label,ready in (
         ('calibration','真机标定验收',data['binding'] is not None), ('observe','真实 RGB-D 观测与检测',source is not None),
         ('plan','仿真规划与验证',plan is not None))]
@@ -126,7 +141,7 @@ def summary(config, owner):
             source_run_id=source['run_id'] if source else None,run_id=plan['run_id'] if plan else None,
             plan_run_id=plan['run_id'] if plan else None,timeline_digest=plan['timeline_digest'] if plan else None,
             tick_count=len(plan['ticks']) if plan else 0,stages=plan.get('stages',[]) if plan else [],
-            recording=recording,execution_lanes=lanes,collection_complete=complete,
+            recording=recording,dataset=dataset,execution_lanes=lanes,collection_complete=complete,
             timing=dict(status='independent-rendering'),scene_comparison=dict(status='unverified'),measured_scene_comparison=dict(status='unverified')),
         job=None,telemetry={'status':('running' if execution in ('running','awaiting_final_feedback') else 'complete') if rows else 'unavailable',
                            'source':dict(rows=rows,row_count=len(rows),latest=rows[-1] if rows else None,failure=rows[-1] if rows and rows[-1]['event'] else None,physical_feedback=actual,sample_age_s=owner.get('sample_age_s'),
@@ -354,6 +369,19 @@ def finalize_collection(config, owner_recording, *, runner=None):
                     raise ValueError('已有回放与本轮 raw/target manifest 不一致')
             else:
                 manifest=export_playback(raw_root,target,output,runner=runner or subprocess.run,environment=environment)
+            if config.get('dataset_format'):
+                if environment!='physical' or config['dataset_format']!='lerobot-v2.1':
+                    raise ValueError('当前保存链仅支持 physical 的 lerobot-v2.1')
+                receipt['dataset_ready']=False
+                if raw_complete:
+                    from robot_workbench.recording_process import export_lerobot_process
+                    dataset=export_lerobot_process(raw_root,root/'lerobot',
+                        task=config.get('task_description') or '将杯子从桌面放到咖啡机托盘')
+                    if (dataset.get('status')!='NATIVE_READBACK_PASS' or len(dataset.get('episodes',[]))!=1
+                            or dataset['episodes'][0].get('raw_manifest_sha256')!=raw_hash):
+                        raise ValueError('LeRobot 保存验收与本轮原始记录不一致')
+                    receipt.update(dataset_ready=True,dataset_format=dataset['format_version'],
+                        dataset_root=dataset['root'],dataset_receipt=str(Path(dataset['root'])/'audit/export-receipt.json'))
             receipt.update(status='ready' if raw_complete else 'failed',replay_ready=True,raw_complete=raw_complete,
                            playback_manifest=str(output/'manifest.json'),target_manifest_sha256=target_hash)
             if not raw_complete:

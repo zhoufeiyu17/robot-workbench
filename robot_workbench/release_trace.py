@@ -1,8 +1,10 @@
 """One page of inherited, non-actuating release diagnostics. No hot-path IO."""
 import mmap
+import fcntl
 import os
 import stat
 import struct
+import sys
 import tempfile
 
 PAGE=4096
@@ -18,6 +20,56 @@ STEPS=('guard_releasing','set_to_damping','pop_left','destroy_left','retire_left
 STATUSES=('started','returned','failed')
 STEP_IDS={name:i+1 for i,name in enumerate(STEPS)}
 STATUS_IDS={name:i+1 for i,name in enumerate(STATUSES)}
+LINUX=sys.platform=='linux'
+# Linux UAPI values; some Conda builds omit these Python symbols.
+F_ADD_SEALS=getattr(fcntl,'F_ADD_SEALS',1033)
+F_GET_SEALS=getattr(fcntl,'F_GET_SEALS',1034)
+
+
+def create_memfd(name):
+    """Use the same kernel RAM fd even when Python was built with old headers."""
+    if not LINUX:raise OSError('memfd requires Linux')
+    if not isinstance(name,str) or not name or '\0' in name:raise ValueError('memory fd name required')
+    flags=0x0001|0x0002  # MFD_CLOEXEC | MFD_ALLOW_SEALING
+    native=getattr(os,'memfd_create',None)
+    if native is not None:return native(name,flags)
+    import ctypes
+    import errno
+    libc=ctypes.CDLL(None,use_errno=True)
+    try:create=libc.memfd_create
+    except AttributeError:raise OSError(errno.ENOSYS,'libc memfd_create unavailable; no disk fallback')from None
+    create.argtypes=(ctypes.c_char_p,ctypes.c_uint);create.restype=ctypes.c_int
+    fd=create(os.fsencode(name),flags)
+    if fd<0:
+        error=ctypes.get_errno();raise OSError(error,os.strerror(error))
+    return fd
+
+
+def memory_file(name, size):
+    """Prefaulted, fixed-size Linux RAM fd; disk fallback is for non-Linux CPU tests only."""
+    if type(size)is not int or not 0<size<=4*1024**2:raise ValueError('bounded memory size required')
+    if LINUX:
+        fd=create_memfd(name)
+        file=os.fdopen(fd,'r+b',buffering=0)
+    else:file=tempfile.TemporaryFile()
+    try:
+        os.fchmod(file.fileno(),0o600);file.truncate(size)
+        with mmap.mmap(file.fileno(),size)as memory:memory[:]=bytes(size)
+        if LINUX:
+            fcntl.fcntl(file.fileno(),F_ADD_SEALS,4|2|1)  # GROW | SHRINK | SEAL
+        return file
+    except BaseException:
+        file.close();raise
+
+
+def archive_memory_file(file, path):
+    """Call only after the writing child has exited; never from a control loop."""
+    limit=os.fstat(file.fileno()).st_size
+    count=min(os.lseek(file.fileno(),0,os.SEEK_CUR),limit)
+    raw=os.pread(file.fileno(),count,0)
+    with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb')as output:
+        output.write(raw)
+    return dict(bytes=len(raw),limit_bytes=limit,truncated=count>=limit,storage='bounded_memory_then_post_exit_archive')
 
 
 class ReleaseTrace:
@@ -27,9 +79,8 @@ class ReleaseTrace:
 
     @classmethod
     def create(cls):
-        file=tempfile.TemporaryFile();buffer=None
+        file=memory_file('workbench-release-trace',PAGE);buffer=None
         try:
-            file.truncate(PAGE)
             buffer=mmap.mmap(file.fileno(),PAGE)
             buffer[:]=bytes(PAGE)  # Allocate/touch the page before spawning the SDK process.
             HEADER.pack_into(buffer,0,MAGIC,1,0,0,0,0,0)

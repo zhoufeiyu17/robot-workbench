@@ -40,10 +40,11 @@ class CaptureDiagnosticsTest(unittest.TestCase):
                     number[0]+=1
                     if number[0]>20:clock[0]+=1.1 if prolonged else .04
                     return pair(number[0],number[0]==21 or prolonged and number[0]>20)
-                pipeline=SimpleNamespace(wait_for_frames=wait,stop=Mock(),start=lambda _:SimpleNamespace(
+                pipeline=SimpleNamespace(wait_for_frames=wait,stop=Mock(),start=lambda _,queue=None:SimpleNamespace(
                     get_device=lambda:SimpleNamespace(first_depth_sensor=lambda:SimpleNamespace(get_depth_scale=lambda:.001))))
                 rs=SimpleNamespace(pipeline=lambda:pipeline,config=lambda:SimpleNamespace(enable_device=lambda _:None,enable_stream=lambda *a:None),
-                    stream=SimpleNamespace(color=1,depth=2),format=SimpleNamespace(yuyv=1,z16=2),align=lambda _:SimpleNamespace(process=lambda p:p))
+                    stream=SimpleNamespace(color=1,depth=2),format=SimpleNamespace(yuyv=1,z16=2),align=lambda _:SimpleNamespace(process=lambda p:p),
+                    frame_queue=lambda *_:SimpleNamespace(wait_for_frame=lambda timeout:SimpleNamespace(as_frameset=lambda:wait(timeout))))
                 channel=SimpleNamespace(token=lambda:'current-recording',fail=Mock())
                 def publish(*args,**kwargs):
                     published.append(args)
@@ -177,11 +178,12 @@ class CaptureDiagnosticsTest(unittest.TestCase):
                 calls[0]+=1
                 return raw[max(0,calls[0]-21)]
             pipeline=SimpleNamespace(wait_for_frames=wait,stop=lambda:None,
-                start=lambda _:SimpleNamespace(get_device=lambda:SimpleNamespace(first_depth_sensor=lambda:SimpleNamespace(get_depth_scale=lambda:.001))))
+                start=lambda _,queue=None:SimpleNamespace(get_device=lambda:SimpleNamespace(first_depth_sensor=lambda:SimpleNamespace(get_depth_scale=lambda:.001))))
             config=SimpleNamespace(enable_device=lambda _:None,enable_stream=lambda *a:None)
             sdk=SimpleNamespace(pipeline=lambda:pipeline,config=lambda:config,
                 stream=SimpleNamespace(color='color',depth='depth'),format=SimpleNamespace(yuyv='yuyv',z16='z16'),
-                align=lambda _:SimpleNamespace(process=lambda _:aligned.pop(0)))
+                align=lambda _:SimpleNamespace(process=lambda _:aligned.pop(0)),
+                frame_queue=lambda *_:SimpleNamespace(wait_for_frame=lambda timeout:SimpleNamespace(as_frameset=lambda:wait(timeout))))
             def publish(camera,metadata,*a,**kw):
                 published.append(metadata)
                 if len(published)==2:stopped.set()

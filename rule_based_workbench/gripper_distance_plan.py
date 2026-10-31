@@ -28,11 +28,22 @@ def release_targets(closed, opening):
 
 
 def requested_metal_gap_mm(source):
-    """Only an explicitly bound physical assistance receipt may change 65 mm."""
+    """Keep legacy commands; new assets require their own bounded geometry seed."""
     if isinstance(source,dict) and source.get('schema_version')=='physical_cup_maintenance_source.v1':
         from physical_cup_maintenance import validate_source
         validate_source(source)
         return float(source['grasp_command']['metal_gap_mm'])
+    selection=(source.get('scene') or {}).get('asset_set') if isinstance(source,dict) else None
+    if selection is not None:
+        from scene_assets import validate
+        validate(selection)
+        expected=selection['cup'].get('grasp_command')
+        if expected is None or source.get('grasp_command')!=expected:
+            raise ValueError('selected cup has no matching geometry-bound grasp command; legacy 65mm fallback is forbidden')
+        gap=float(expected['metal_gap_mm'])
+        if not 0<gap<=source['calibration_profile']['gripper']['max_opening_mm']:
+            raise ValueError('selected grasp seed exceeds the current calibrated command range')
+        return gap
     if not isinstance(source,dict) or source.get('adapter')!='operator_assisted_rgbd':
         return 65.
     command=source.get('grasp_command')
@@ -145,7 +156,8 @@ def validate_distance_control(plan, source):
     policy = plan.get('gripper_distance_control', {})
     requested=requested_metal_gap_mm(source)
     assisted=(source.get('adapter')=='operator_assisted_rgbd'
-              or source.get('schema_version')=='physical_cup_maintenance_source.v1')
+              or source.get('schema_version')=='physical_cup_maintenance_source.v1'
+              or (source.get('scene') or {}).get('asset_set') is not None)
     if policy.get('schema_version') != 'gripper_distance_control.v2':
         if assisted or plan.get('native_action_encoding') == NATIVE_DISTANCE_ENCODING:
             raise ValueError('native distance encoding requires the v2 distance policy')
@@ -214,7 +226,8 @@ def read_trace(episode, plan):
 
 def distance_plan(plan, source, trace=None, *, close_metal_gap_mm=None):
     requested=requested_metal_gap_mm(source)
-    assisted=source.get('adapter')=='operator_assisted_rgbd'
+    assisted=(source.get('adapter')=='operator_assisted_rgbd'
+              or (source.get('scene') or {}).get('asset_set') is not None)
     if assisted and close_metal_gap_mm is None:
         raise ValueError('assisted grip requires an explicit fixed metal-gap target')
     if 'execution_derivation' in plan or 'gripper_distance_control' in plan:

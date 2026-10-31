@@ -72,7 +72,9 @@ class OwnerTest(unittest.TestCase):
         value=self.owner.snapshot();raw=value['calibration_feedback']
         self.assertTrue(value['feedback_healthy']);self.assertEqual(raw['qpos'][0],-3.17)
         self.assertFalse(raw['position_boundary']['command_projection_allowed'])
-        with self.assertRaises(ValueError):feedback_to_command(raw['qpos'],value['joint_limits'],environment='physical')
+        held=feedback_to_command(raw['qpos'],value['joint_limits'],environment='physical')
+        self.assertEqual(held[0],value['joint_limits'][0][0])
+        self.assertEqual(raw['qpos'][0],-3.17,'feedback stays raw; only the hold command is projected into limits')
         self.owner.backend.q[0]=-3.18;self.advance(.01);epoch=self.owner.epoch
         faults=sum(a==('fault',)for a,k in self.events)
         for _ in range(10):self.advance(.01)
@@ -675,7 +677,7 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(b._controllers['left'].calls[-2][1].pos()[0],3.)
         self.assertEqual(b.last_begin_position_boundary['corrections'][0]['original_rad'],3.009)
         with self.assertRaisesRegex(ValueError,'invalid single-arm target'):b.send('left',noisy)
-        noisy[0]=3.0101;b._controllers['left'].state.p[0]=3.0101
+        noisy[0]=3.04;b._controllers['left'].state.p[0]=3.04
         with self.assertRaisesRegex(ValueError,'position-boundary'):b.begin('left',noisy)
         b.set_damping_hold(manual=True)
         for controller in b._controllers.values():

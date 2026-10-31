@@ -21,6 +21,120 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_disconnected_manual_definition_comes_from_model_for_all_businesses(self):
+        limits=[[-1.,1.]]*12
+        self.device.workflows['calibration']=SimpleNamespace(
+            app=SimpleNamespace(geometry=SimpleNamespace(limits=limits)),
+            snapshot=lambda:dict(busy=False,status='idle',primary_action=None),
+            results=lambda:[],mesh=lambda:dict(requested=False,applied=False))
+        self.device.factory=Mock(side_effect=AssertionError('model preview must not connect SDK'))
+        for business in ('calibration','collection','inference','research'):
+            with self.subTest(business=business):
+                view=self.state(business)
+                self.assertEqual(view['manual']['limits'],limits)
+                self.assertEqual(len(view['manual']['joint_names']),12)
+                self.assertIsNone(view['manual']['positions'],'model defaults must never appear as measured feedback')
+                self.assertEqual(view['manual']['jaw_gaps_mm'],[None,None])
+                self.assertFalse(view['runtime']['allowed_operations']['manual_preview']['allowed'])
+                self.assertFalse(view['runtime']['allowed_operations']['manual_execute']['allowed'])
+                self.assertFalse(view['runtime']['connected'])
+        sdk_limits=[[-.05,3.5]]*12
+        self.device.workflows['calibration'].app.manual_joint_limits=lambda:sdk_limits
+        self.assertEqual(self.state('research')['manual']['limits'],sdk_limits)
+        self.device.factory.assert_not_called()
+        self.assertIsNone(self.device.runtime)
+
+    def test_precision_buttons_route_once_without_replacing_business_or_connecting(self):
+        study=SimpleNamespace(snapshot=lambda runtime,business:dict(configured=True,reason=None,
+            execute_allowed=True,latest={'status':'completed'}),
+            prepare=Mock(return_value={'message':'prepared only'}),execute=Mock(return_value={'message':'submitted'}),
+            analyze=Mock(return_value={'message':'analyzed'}))
+        self.device.precision_study=study
+        # Numeric analysis is useful while disconnected; it must never acquire a device.
+        self.action('precision_analyze',business='research')
+        self.wait_precision_request()
+        study.analyze.assert_called_once();self.assertIsNone(self.device.runtime)
+        self.connect();self.action('handoff',target_business='research')
+        before=self.state('research')['workflow']['stage_id']
+        result=self.action('precision_preview',business='research',kind='trajectory',speed=.5)
+        self.wait_precision_request()
+        self.assertEqual(self.state('research')['workflow']['stage_id'],before)
+        study.prepare.assert_called_once_with('research','trajectory',.5,None)
+        study.prepare.reset_mock()
+        pin=dict(path='/owned/ff.json',sha256='a'*64,size_bytes=123)
+        self.action('precision_preview',business='research',kind='trajectory',speed=.5,feedforward_artifact=pin)
+        self.wait_precision_request()
+        study.prepare.assert_called_once_with('research','trajectory',.5,pin)
+        with self.assertRaises(HTTPError):self.action('precision_preview',business='research',kind='trajectory',speed=.5,path='/arbitrary')
+        self.assertFalse(self.device.snapshot('research').get('automatic_enabled'))
+
+    def wait_precision_request(self):
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            value=self.state('research')
+            if(value['precision_study'].get('request')or{}).get('status')=='completed':return value
+            time.sleep(.01)
+        self.fail('research request did not complete')
+
+    def test_shared_manual_tool_uses_current_business_and_preserves_business_task(self):
+        self.connect();self.calibration_adapter()
+        q=[0.01]+[0.0]*11
+        for business in ('collection','inference','research'):
+            with self.subTest(business=business):
+                holder=self.device.runtime.holder
+                deadline=time.monotonic()+3
+                while not self.state(holder)['runtime']['allowed_operations']['handoff']['allowed'] and time.monotonic()<deadline:
+                    time.sleep(.01)
+                self.action('handoff',business=holder,target_business=business)
+                self.wait(lambda value:value['runtime']['holder']==business)
+                self.assertTrue(self.state(business)['runtime']['allowed_operations']['manual_preview']['allowed'])
+                self.assertFalse(self.state(business)['runtime']['allowed_operations']['manual_queue']['allowed'])
+                self.action('manual_preview',business=business,q12=q,speeds12=[.1]*12,jaw_gap_mm=[80,80],jaw_speed_mm_s=10)
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    view=self.state(business)
+                    if (view['workflow'].get('request') or {}).get('status')!='running':break
+                    time.sleep(.01)
+                self.assertEqual(self.app.jobs[('fake',business)]['status'],'completed',self.app.jobs[('fake',business)])
+                self.assertEqual(view['manual']['execution']['stage_id'],'manual.review')
+                self.assertFalse(view['workflow']['business_task']['stage_id'].startswith('manual.'))
+                self.assertEqual(self.device.runtime.holder,business)
+                self.action('manual_execute',business=business,review_id=view['workflow']['review']['id'],physical_clearance=True)
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    done=self.state(business)
+                    if done['manual'].get('execution',{}).get('status')=='completed':break
+                    time.sleep(.01)
+                self.assertEqual(done['manual']['execution']['status'],'completed',done['workflow'])
+                self.assertFalse(done['workflow']['business_task']['stage_id'].startswith('manual.'))
+
+    def test_inference_history_pages_and_old_media_are_readonly_without_device_or_model(self):
+        from robot_workbench.inference_history import InferenceHistory, PAGE_RUNS
+        root=Path(self.temp.name)/'infer-history';history=InferenceHistory(root)
+        flow,calls,_,_=self.infer_run_fixture()
+        flow.results=Mock(side_effect=AssertionError('never enumerate the full history'))
+        flow.results_page=history.page;flow.media=history.media
+        history.append((dict(id=f'video-{i}',run_id=f'run-{i}',kind='recording'),root/f'{i}.mp4') for i in range(40))
+        video=root/'0.mp4';video.write_bytes(b'old playback bytes')
+        before=history.path.read_bytes()
+        latest=self.state('inference')
+        self.assertEqual(latest['results_page']['total_results'],40)
+        self.assertEqual(len(latest['results']),PAGE_RUNS)
+        base=self.url+'/api/state?environment=fake&business=inference'
+        with self.http.open(base+'&results_before='+str(latest['results_page']['older_cursor'])) as response:
+            older=json.load(response)
+        self.assertTrue(set(row['id'] for row in latest['results']).isdisjoint(row['id'] for row in older['results']))
+        with self.http.open(base+'&results_after='+str(older['results_page']['newer_cursor'])) as response:
+            self.assertEqual(json.load(response)['results'],latest['results'])
+        with self.http.open(self.url+'/api/result-media?environment=fake&business=inference&result_id=video-0') as response:
+            self.assertEqual(response.read(),b'old playback bytes')
+        for suffix in ('results_before=0','results_before=-1','results_before=x','results_after=9223372036854775808',
+                       'results_before=2&results_after=1','results_before=1&results_before=2'):
+            with self.subTest(suffix=suffix),self.assertRaises(HTTPError):self.http.open(base+'&'+suffix)
+        with self.assertRaises(HTTPError):self.http.open(base.replace('inference','calibration')+'&results_before=1')
+        self.assertEqual(history.path.read_bytes(),before)
+        self.assertIsNone(self.device.runtime);self.assertEqual(calls,[])
+
     def test_quality_download_is_readonly_and_bound_to_the_selected_recording(self):
         report=dict(schema='recording_quality.v1',raw_manifest_sha256='a'*64,cameras={},raw_modified=False)
         self.device.collection_history=SimpleNamespace(quality_report=lambda identity:dict(report=report,sidecar_sha256='b'*64) if identity=='known' else None)
@@ -294,6 +408,10 @@ class HTTPTest(unittest.TestCase):
         with self.assertRaises(HTTPError):self.action('execution_settings',settings={},expected_revision=0)
         self.connect()
         before=self.state()['runtime']['execution_settings'];settings=deepcopy(before['settings'])
+        self.assertEqual(settings['speed_protection'],dict(enabled=True,limit_rad_s=.8))
+        legacy=deepcopy(settings);legacy.pop('speed_protection')
+        with self.assertRaises(HTTPError):self.action('execution_settings',settings=legacy,expected_revision=before['revision'])
+        settings['speed_protection']['limit_rad_s']=.9
         settings.update(arrival_enabled=False,tracking_enabled=False)
         settings['arrival_tolerances_rad']=[.01+i*.001 for i in range(12)]
         self.app.reviews[('fake','calibration')]={'id':'obsolete-review'}
@@ -334,7 +452,8 @@ class HTTPTest(unittest.TestCase):
             results=lambda:[],allowed=lambda action:dict(allowed=True,reason=None))
         def prepare(device,offset_xy_mm=None):
             device.cup_return_task=dict(directory='return-job',timeline_digest='return-timeline',duration_s=37.57,
-                parent_plan_id='parent-plan',parent_speed_scale=.97,submitted=False)
+                parent_plan_id='parent-plan',parent_speed_scale=.97,submitted=False,
+                runtime_nonce=owner['runtime_nonce'],command_epoch=owner['command_epoch'])
             return dict(preview=dict(token='one-reviewed-return',owner_pid=owner['pid'],command_epoch=owner['command_epoch'],
                 runtime_nonce=owner['runtime_nonce'],purpose='cup_return',speed_scale=.97),summary='取回杯子；无新碰撞检查')
         with patch('robot_workbench.cup_return.prepare',side_effect=prepare), \

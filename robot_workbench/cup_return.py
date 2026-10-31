@@ -273,13 +273,16 @@ def activate_prepared(device,directory,metadata,current,state):
     task={k:metadata[k] for k in ('timeline_digest','duration_s','parent_plan_id','parent_speed_scale','source_digest',
         'offset_xy_mm','origin_position_m','goal_position_m')}
     task.update(directory=str(directory),submitted=False,environment=device.environment,media_id=directory.name,
+        return_policy=metadata.get('return_policy'),
         binding_path=str(binding_path),plan_sha256=[p['sha256'] for p in preview.get('plans',[])],
         runtime_nonce=preview['runtime_nonce'],command_epoch=preview['command_epoch'])
     device.cup_return_task=task
     preview.update(purpose='cup_return',speed_scale=speed,offset_xy_mm=offset,
         origin_position_m=metadata['origin_position_m'],goal_position_m=metadata['goal_position_m'])
     physical=device.environment=='physical';unit='秒' if physical else '个仿真秒'
-    gap=metadata['metal_gap_mm'];collision='当前场景路径检查已通过。' if physical else '未重新检查碰撞。'
+    gap=metadata['metal_gap_mm']
+    collision=('直接复用本轮已完成轨迹，未重新检测、IK或碰撞检查。' if task['return_policy']=='completed-parent-reverse-no-replanning-v1'
+        else '当前场景路径检查已通过。') if physical else '未重新检查碰撞。'
     return dict(preview=preview,summary=f"恢复场景：从咖啡机取杯，放到固定原起点前后 {offset[0]:+g} mm、左右 {offset[1]:+g} mm；{metadata['duration_s']:.2f} {unit}。"
         f'抓杯金属间距{gap:g} mm；{collision}保留位置与动态限值。只执行维护动作，不录制训练数据。')
 
@@ -294,9 +297,7 @@ def clear(device,*,maintenance_actor=None):
         runtime=device.runtime
         if runtime is None or maintenance_actor.action!='ops_prepare_collection':
             raise ValueError('清理恢复绑定需要当前数采准备维护身份')
-        maintenance_actor.require(runtime)
-        reason=runtime._idle_reason(maintenance_actor=maintenance_actor)
-        if reason:raise ValueError(reason)
+        runtime.admit_business('collection',maintenance_actor=maintenance_actor)
     elif not state['allowed_operations']['preview']['allowed']:raise ValueError('请先等待取回动作结束')
     path=Path(task['binding_path'])
     current=json.loads(path.read_text())
@@ -312,7 +313,10 @@ def view(device,runtime,value):
     if not task:return value
     physical=task.get('environment')=='physical'
     result=deepcopy(value);frozen=runtime.get('frozen') or {}
-    submitted=task['submitted'];matching=frozen.get('timeline_digest')==task['timeline_digest']
+    submitted=task['submitted']
+    context_changed=(runtime.get('runtime_nonce') is not None and type(runtime.get('command_epoch')) is int
+        and (runtime['runtime_nonce'],runtime['command_epoch'])!=(task['runtime_nonce'],task['command_epoch']))
+    matching=not context_changed and frozen.get('timeline_digest')==task['timeline_digest']
     if submitted:
         accepted=runtime.get('execution_calibration') or {}
         matching=matching and accepted.get('accepted_monotonic_s',0)>=task.get('submitted_monotonic_s',float('inf'))
@@ -340,7 +344,10 @@ def view(device,runtime,value):
                     if isinstance(speed,(int,float)) and isinstance(limit,(int,float)) and speed>limit:
                         message+=f' 指爪与杯子相对速度 {speed*1000:.2f} mm/s，当前门槛 {limit*1000:.2f} mm/s。'
         rejection=runtime.get('last_confirm_rejection') or {}
-        if (task.get('plan_sha256') and rejection.get('plan_sha256')==task['plan_sha256']
+        if context_changed:
+            status='superseded';motion='context_superseded'
+            message='控制上下文已变化，本取回任务不再执行；原任务结果以执行记录为准。'
+        elif (task.get('plan_sha256') and rejection.get('plan_sha256')==task['plan_sha256']
                 and rejection.get('command_epoch')==task['command_epoch'] and rejection.get('motion_started') is False
                 and rejection.get('monotonic_s',0)>=task.get('submitted_monotonic_s',float('inf'))):
             status='failed';motion='未执行';message='执行确认已过期或撤销，动作未启动；请重新生成取回计划。'
@@ -351,7 +358,8 @@ def view(device,runtime,value):
         title='取回杯子',message=message,failure=None,request=None,progress=None,speed_scale=task['parent_speed_scale'],
         primary_action=dict(id='execute',label='审阅后执行取回',allowed=not submitted),
         outcomes=dict(motion=motion,data='维护动作，过程录像独立保存' if physical else '未请求录制',
-            simulation='当前路径检查通过' if physical else '未重新碰撞检查',task=native.get('task_outcome','待核验')))
+            simulation=('复用本轮已完成轨迹；未重新检测或碰撞检查' if task.get('return_policy')=='completed-parent-reverse-no-replanning-v1'
+                else '当前路径检查通过') if physical else '未重新碰撞检查',task=native.get('task_outcome','待核验')))
     if status=='failed':
         result['failure']=dict(message=message,recovery='先核对当前杯位与首次失败阶段；过程失败不代表动作未执行，不要直接重复取杯。')
     collection=result.setdefault('collection',{})

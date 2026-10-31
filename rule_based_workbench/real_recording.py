@@ -517,9 +517,10 @@ class RealRecorder:
 def validate_policy_source(source,binding,environment):
     from integration import validate_profile
     from robot_workbench.sample_clock import POLICY_DURATION_TOLERANCE_S
+    study=source.get('execution_kind')=='control_reference_study' and source.get('training_observation') is False
     if (source.get('schema_version')!='policy_execution_source.v1' or source.get('environment')!=environment
             or not isinstance(source.get('execution_instance_id'),str) or not source['execution_instance_id']
-            or type(source.get('duration_s')) not in (int,float) or not 0<source['duration_s']<=40
+            or type(source.get('duration_s')) not in (int,float) or not 0<source['duration_s']<=(180 if study else 40)
             or source.get('duration_tolerance_s',POLICY_DURATION_TOLERANCE_S)!=POLICY_DURATION_TOLERANCE_S
             or binding.get('calibration_accepted') is not True or binding.get('robot_id')!=source.get('robot_id')
             or binding.get('camera_serials')!=source.get('camera_serials')

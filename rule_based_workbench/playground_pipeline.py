@@ -878,7 +878,8 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
     previous_runtime=(before.get('execution_timeline') or {}).get('path')
     runtime_enabled='compiled_tick_count_before_initialization' in preview
     log=(output/'simulation.log').open('wb')
-    process=None; simulation=None; videos=[]; recording=None; manifest=None; errors={}; owner={};controller_outcome=None
+    process=None; simulation=None; videos=[]; recording=None; manifest=None; errors={}; owner={};controller_outcome=None;dataset=None
+    replay_requested=environment!='physical' or bridge.config.get('render_replay',True)
     execution_started=None;execution_budget=None;execution_deadline=None;simulation_started=None
     task_outcome='unverified';native_task_evidence=None;execution_identity=None;confirmation_requested=False
     def start_simulation(execution_timeline_path=None):
@@ -903,7 +904,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
             execution_budget=resident_wait_budget(cfg,contract)
             execution_started=time.monotonic();execution_deadline=execution_started+execution_budget
         # Both lanes start from one click; there is deliberately no per-tick barrier.
-        if not runtime_enabled:
+        if not runtime_enabled and replay_requested:
             process,simulation,simulation_started=start_simulation()
         if cancel is not None and cancel():raise InterruptedError('执行确认前已中断')
         def mark_confirmation():
@@ -921,8 +922,9 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         if runtime_enabled:
             try:
                 runtime=execution_runtime(lane,plan_value,output,previous_runtime,cancel=cancel)
-                remote_runtime=prepare_remote_runtime(cfg,remote_plan,runtime,cancel=cancel)
-                process,simulation,simulation_started=start_simulation(remote_runtime)
+                if replay_requested:
+                    remote_runtime=prepare_remote_runtime(cfg,remote_plan,runtime,cancel=cancel)
+                    process,simulation,simulation_started=start_simulation(remote_runtime)
             except InterruptedError:raise
             except Exception as error:errors['simulation_runtime']=str(error)
         if progress:
@@ -980,12 +982,21 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
         controller_reason=controller_failure(owner,manifest)
         if controller_reason:errors['controller']=controller_reason
         else:errors.pop('controller',None)
+        dataset_lane=environment=='physical' and bool(local_config.get('dataset_format'))
+        if dataset_lane:
+            from real_workflow import finalize_collection
+            if progress:progress('保存 LeRobot 并执行原生读回',recording=recording,physical_outcome=controller_outcome)
+            dataset=finalize_collection(local_config,recording)
+            if dataset.get('status')!='ready' or dataset.get('dataset_ready') is not True:
+                errors['dataset']=dataset.get('error') or 'LeRobot 原生读回未通过'
+            if progress:progress('LeRobot 保存已完成' if not errors.get('dataset') else 'LeRobot 保存未通过',dataset=dataset)
+        video_directory=output/('playback' if dataset_lane else 'physical-video')
         frame_counts=manifest.get('camera_frames',{})
         if all(type(frame_counts.get(camera)) is int and frame_counts[camera]>0
                for camera in ('base_0','left_wrist_0','right_wrist_0')):
             try:
                 from cancellable_process import run
-                export_playback(raw,None,output/'physical-video',runner=lambda argv,**kw:run(argv,cancel=cancel,**kw),
+                if not dataset_lane:export_playback(raw,None,video_directory,runner=lambda argv,**kw:run(argv,cancel=cancel,**kw),
                                 **({'environment':environment} if environment=='fake' else {}),
                                 **({'scratch_root':scratch_root} if scratch_root is not None else {}))
             except InterruptedError:
@@ -993,7 +1004,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
             except Exception as error:
                 errors['physical_export']=str(error)
             for camera in ('base_0','left_wrist_0','right_wrist_0'):
-                path=output/'physical-video'/f'source-{camera}.mp4'
+                path=video_directory/f'source-{camera}.mp4'
                 if not path.is_file():continue
                 if 'physical_export' in errors:
                     # A failed batch export may already contain playable streams.
@@ -1011,13 +1022,19 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
                 execution_identity=execution_identity,cancel=cancel,progress=progress)
             task_outcome=task['task_outcome'];native_task_evidence=task['native_task']
             save(output/'native-task-verification.json',task)
-        if progress: progress('同 plant 视频已核验，等待 L3 辅助回放封存' if resident else '核验真机视频后等待独立仿真视频封存',next_label='独立回放本轮可用视频',
+        if progress: progress('真实采集数据收尾' if not replay_requested else
+                              '同 plant 视频已核验，等待 L3 辅助回放封存' if resident else '核验真机视频后等待独立仿真视频封存',
+                              next_label=None if not replay_requested else '独立回放本轮可用视频',
                               errors=errors,recording=recording,physical_outcome=controller_outcome,task_outcome=task_outcome,
                               **resident_evidence())
         if process is None:
-            return dict(status='failed',physical_outcome=controller_outcome,task_outcome=task_outcome,
+            complete=(not replay_requested and controller_outcome=='completed'
+                and manifest.get('validation',{}).get('status')=='passed' and not errors)
+            return dict(status='completed' if complete else 'failed',physical_outcome=controller_outcome,task_outcome=task_outcome,
                 capture_outcome=manifest.get('validation',{}).get('status'),videos=videos,errors=errors,
-                error='; '.join(f'{k}: {v}' for k,v in errors.items()),recording=recording,**resident_evidence())
+                error='; '.join(f'{k}: {v}' for k,v in errors.items()),recording=recording,dataset=dataset,
+                simulation=dict(status='not_requested' if not replay_requested else 'failed',
+                    scope='physical_source_recording_only',task_success_evidence=False),**resident_evidence())
         deadline=(min(simulation_started+simulation['timeout_s'],execution_deadline)+40
                   if resident else time.monotonic()+simulation['timeout_s']+40)
         while process.poll() is None:
@@ -1063,7 +1080,7 @@ def execute(config,output,bridge,prepared,progress=None,cancel=None):
                     videos=videos,message=('同 plant 采集与 L3 辅助回放已保存；任务结果仅由同 plant 证据验收' if resident else '两侧视频已保存；任务抓放结果需验收') if complete else '执行未完整结束；已保留本轮可用视频',task_outcome=task_outcome,
                     physical_outcome=controller_outcome,capture_outcome=manifest.get('validation',{}).get('status'),simulation=sim,
                     errors=errors,error='; '.join(f'{key}: {value}' for key,value in errors.items()) if errors else None,
-                    recording=recording,**resident_evidence())
+                    recording=recording,dataset=dataset,**resident_evidence())
     except InterruptedError:
         if confirmation_requested:stop_physical_execution(lane,output)
         raise

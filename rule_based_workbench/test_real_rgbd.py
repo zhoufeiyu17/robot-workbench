@@ -18,6 +18,68 @@ from rule_based_workbench.real_rgbd import RawSpool, FrameProgress, Frames, main
 
 
 class RGBDTest(unittest.TestCase):
+    def test_native_fifo_preserves_device_frames_during_slow_publish(self):
+        """Exercise capture with a 30Hz SDK producer and an 80ms publisher."""
+        from collections import deque
+        import numpy as np
+        from rule_based_workbench.real_rgbd import capture
+        class Queue:
+            def __init__(self,capacity=1,keep_frames=False):
+                self.rows=deque(maxlen=capacity);self.condition=threading.Condition()
+            def put(self,frame):
+                with self.condition:self.rows.append(frame);self.condition.notify()
+            def wait_for_frame(self,timeout):
+                with self.condition:
+                    if not self.rows:self.condition.wait(timeout/1000)
+                    if not self.rows:raise TimeoutError('synthetic SDK stopped')
+                    return self.rows.popleft()
+        intrinsic=SimpleNamespace(width=4,height=3,fx=4.,fy=4.,ppx=2.,ppy=1.5,model='none',coeffs=[0.]*5)
+        class Frame:
+            profile=SimpleNamespace(as_video_stream_profile=lambda:SimpleNamespace(get_intrinsics=lambda:intrinsic))
+            def __init__(self,n,depth=False):self.n,self.depth=n,depth
+            def get_frame_number(self):return self.n
+            def get_timestamp(self):return self.n*1000/30
+            def get_frame_timestamp_domain(self):return 'timestamp_domain.hardware_clock'
+            def get_data(self):return np.ones((3,4),dtype=np.uint16)if self.depth else np.zeros((3,4,2),dtype=np.uint8)
+        class Pair:
+            def __init__(self,n):self.n=n
+            def as_frameset(self):return self
+            def get_color_frame(self):return Frame(self.n)
+            def get_depth_frame(self):return Frame(self.n,True)
+        class Pipeline:
+            def start(self,config,queue=None):
+                self.queue=queue or Queue();self.closed=threading.Event()
+                def produce():
+                    n=0
+                    while not self.closed.wait(1/30):n+=1;self.queue.put(Pair(n))
+                self.thread=threading.Thread(target=produce);self.thread.start()
+                return SimpleNamespace(get_device=lambda:SimpleNamespace(first_depth_sensor=lambda:SimpleNamespace(get_depth_scale=lambda:.001)))
+            def wait_for_frames(self,timeout):
+                frame=self.queue.wait_for_frame(timeout)
+                with self.queue.condition:
+                    while self.queue.rows:frame=self.queue.rows.pop()
+                return frame
+            def stop(self):self.closed.set();self.thread.join(2)
+        frames=SimpleNamespace(stop_requested=threading.Event(),publish=lambda **kw:None);published=[]
+        with tempfile.TemporaryDirectory()as temporary:
+            service=SimpleNamespace(descriptor={'environment':'physical','intrinsics':{'base_0':{'serial':'123'}}},
+                directories={'base_0':temporary},channels={'base_0':SimpleNamespace(token=lambda:None)})
+            def publish(camera,status,*args,**kwargs):
+                time.sleep(.08);published.append(status)
+                if len(published)==5:frames.stop_requested.set()
+            service.publish=publish
+            sdk=SimpleNamespace(pipeline=Pipeline,config=lambda:SimpleNamespace(enable_device=lambda *a:None,enable_stream=lambda *a:None),
+                stream=SimpleNamespace(color=1,depth=2),format=SimpleNamespace(yuyv=1,z16=2),frame_queue=Queue,
+                align=lambda _:SimpleNamespace(process=lambda value:value))
+            cv=SimpleNamespace(COLOR_YUV2RGB_YUY2=1,cvtColor=lambda image,mode:np.zeros((3,4,3),dtype=np.uint8))
+            args=SimpleNamespace(service_descriptor='synthetic',serial='123',camera_name='head',output=Path(temporary),duration_s=0)
+            with patch.dict('sys.modules',{'pyrealsense2':sdk,'cv2':cv}),patch(
+                    'robot_workbench.rgbd_service.CommonCameraService.connect',return_value=service):capture(args,frames)
+        self.assertEqual(len(published),5)
+        self.assertEqual([r['frame_number']for r in published],list(range(21,26)))
+        self.assertEqual(published[-1]['color_missing_frames'],0)
+        self.assertEqual(published[-1]['depth_missing_frames'],0)
+
     def test_first_invalid_spooled_frame_preserves_producer_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);now=1_000_000_000

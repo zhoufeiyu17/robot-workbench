@@ -39,10 +39,23 @@ def hold_verified(control):
     if not isinstance(control,dict):return False
     held=control.get('held_source_s');target=control.get('fixed_target')
     samples=control.get('samples');returns=control.get('sdk_returns');stop=control.get('stop_receipt')
+    if not isinstance(returns,list) or not all(isinstance(row,dict) for row in returns):return False
+    transport=control.get('command_transport','point_send')
+    if transport not in ('point_send','native_window'):return False
+    operation,count=('queue_reference','sdk_window_count') if transport=='native_window' else ('send','sdk_send_count')
+    outputs=[row for row in returns if row.get('operation')==operation and 'error'not in row]
+    if transport=='native_window' and (control.get('sdk_send_count')!=0 or any(
+            row.get('target')!=target or row.get('zero_velocity')is not True or row.get('zero_added_torque')is not True
+            or type(row.get('node_count'))is not int or row['node_count']<2
+            or not isinstance(row.get('reference_id'),str) or not re.fullmatch('[0-9a-f]{64}',row['reference_id'])
+            for row in outputs)):
+        return False
     feedback=control.get('jaw_feedback_mm');command=control.get('jaw_command_mm');clipped=control.get('jaw_command_clipped')
     finite=lambda value:type(value) in (int,float) and math.isfinite(value)
+    maxima=control.get('jaw_command_max_mm',[83.,83.])
+    if not isinstance(maxima,list) or len(maxima)!=2 or not all(finite(v) and 0<v<=100 for v in maxima):return False
     if (not isinstance(feedback,list) or len(feedback)!=2 or not all(map(finite,feedback))
-            or not isinstance(command,list) or len(command)!=2 or not all(finite(value) and 0<=value<=83. for value in command)
+            or not isinstance(command,list) or len(command)!=2 or not all(finite(value) and 0<=value<=maxima[i] for i,value in enumerate(command))
             or not isinstance(clipped,dict) or set(clipped)!={'left','right'}
             or any(type(clipped[side]) is not bool or clipped[side]!=(abs(feedback[i]-command[i])>1e-6)
                 for i,side in enumerate(('left','right')))):
@@ -55,9 +68,7 @@ def hold_verified(control):
         and isinstance(target,list) and len(target)==14 and all(map(finite,target))
         and isinstance(samples,list) and len(samples)>0 and type(control.get('sample_count')) is int
         and control['sample_count']==len(samples)
-        and isinstance(returns,list) and all(isinstance(row,dict) for row in returns)
-        and type(control.get('sdk_send_count')) is int and control['sdk_send_count']>0
-        and control['sdk_send_count']==sum(row.get('operation')=='send' and 'error' not in row for row in returns)
+        and type(control.get(count)) is int and control[count]>0 and control[count]==len(outputs)
         and isinstance(stop,dict) and stop.get('stop_hold_return_confirmed') is True)
 
 
@@ -132,6 +143,10 @@ class WorkbenchManager:
                 or '..' in Path(config['state_root']).parts):
             raise ValueError('explicit trusted manager configuration required')
         self.config=deepcopy(config);self.environment=config['environment'];self.port=config['backend_port']
+        self.triton_preview=None
+        if config.get('triton_preview'):
+            from .triton_preview import TritonPreviewClient
+            self.triton_preview=TritonPreviewClient(config['triton_preview'])
         descriptor=config.get('control_owner_descriptor')
         if descriptor is not None and (self.environment!='physical'or not isinstance(descriptor,str)
                 or not Path(descriptor).is_absolute()or '..'in Path(descriptor).parts):
@@ -164,7 +179,12 @@ class WorkbenchManager:
         if services is None and (not isinstance(config.get('services'),dict) or 'workbench' not in config['services']):
             raise ValueError('trusted services registry with workbench required')
         self.instance=secrets.token_hex(16);self.csrf=secrets.token_urlsafe(32)
-        self.services=services if services is not None else {name:ManagedService(ServiceSpec(name=name,**value)) for name,value in config['services'].items()}
+        def managed(name,value):
+            if value.get('kind')=='docker_model':
+                from .docker_model_service import DockerModelService,DockerModelSpec
+                return DockerModelService(DockerModelSpec(name=name,**value))
+            return ManagedService(ServiceSpec(name=name,**value))
+        self.services=services if services is not None else {name:managed(name,value) for name,value in config['services'].items()}
         if 'workbench' not in self.services:raise ValueError('workbench service required')
         if descriptor and 'control_owner'not in self.services:raise ValueError('independent Owner must be a registered managed service')
         reset=config.get('camera_reset')
@@ -172,6 +192,17 @@ class WorkbenchManager:
                 or any(not isinstance(p,str) or not Path(p).is_absolute() or '..' in Path(p).parts for p in reset.values())
                 or not re.fullmatch(r'python(?:\d+(?:\.\d+)*)?',Path(reset['python']).name)):
             raise ValueError('trusted camera_reset requires absolute Python, profile and owner root')
+        handoff=config.get('collection_handoff')
+        if handoff is not None:
+            from urllib.parse import urlsplit
+            url=urlsplit(handoff.get('status_url','')) if isinstance(handoff,dict) else None
+            if (not isinstance(handoff,dict) or set(handoff)!={'unit','files','status_url'}
+                    or not re.fullmatch(r'prometheus-arx[0-9]+-web\.service',str(handoff.get('unit')))
+                    or not isinstance(handoff['files'],dict) or not handoff['files']
+                    or any(not Path(p).is_absolute()or not re.fullmatch('[a-f0-9]{64}',str(h))for p,h in handoff['files'].items())
+                    or url.scheme!='http' or url.hostname!='127.0.0.1' or not url.port or url.path!='/api/status'
+                    or url.query or url.fragment or url.username):
+                raise ValueError('pinned collection user unit and loopback status API required')
         self.machine_profile=MachineProfile(config);self.deployment=Deployment(ROOT,self.services)
         self.deployment.bind_configuration(config)
         self.root=Path(config['state_root']);self.root.mkdir(parents=True,exist_ok=True)
@@ -198,8 +229,10 @@ class WorkbenchManager:
             ('stop_workbench','停止工作台后端','确认控制已释放后停止业务后端；独立相机、模型和管理服务保留，不自动启动。',self.environment=='physical'),
             ('recover_maintenance','核验并结束遗留维护','重核服务身份与业务空闲后结束遗留维护；不重试旧动作、不恢复运动。',False),
             ('connect_control','接入设备控制','检查基础环境并接入本设备；物理设备需现场支撑。不会执行旧任务。',self.environment=='physical'),
+            ('reclaim_control','清理现有控制并接入','正常停止当前工作台任务和已登记的数采，再接入工作台。数采停机可能回零；健康连接停止旧动作后复用，必要时释放重接会撤掉保持。保留数据；退出不明时停止，不强杀、不续跑旧动作。',self.recovery_requires_support),
+            ('exit_environment','一键退出工作台环境','停止当前任务，经正常规划以0.1rad/s平滑回零、保留夹爪开度，然后释放SDK保持，停止工作台模型、相机、业务和控制进程，恢复原数采网页。回零会移动双臂；失败不继续释放，不强杀、不自动开始采集。管理页保留。',False),
             ('release_control','释放设备控制','撤掉SDK保持并核验连接收尾；已有数据保留。',self.environment=='physical'),
-            ('recover_control','中断恢复','核验后恢复控制；必要时释放并重新接入SDK，不续跑旧动作。物理设备须确认双臂可靠支撑。',self.environment=='physical'),
+            ('recover_control','中断恢复','可确认的运动/软件故障原地恢复，不重接、不续跑旧动作；需要释放重接时才要求可靠支撑。',self.recovery_requires_support),
             ('verify_hold','5秒原地保持验证','按当前实测关节姿态保持5秒；夹爪沿既有0–83mm命令限幅，反馈超出时可能略收拢。不回零、不抓取，结束后停止并留证。',self.environment=='physical'),
             ('prepare_collection','准备数采计算环境','核验当前资产并按需准备已声明的常驻服务；需要已接入的健康静止反馈。不采新观测、不构建任务场景、不做业务预热。',False),
         ]
@@ -220,7 +253,7 @@ class WorkbenchManager:
             check=lambda request,n=name:self.check(n,request),
             run=lambda request,progress,cancel,n=name:self.run(n,request,progress),
             verify=lambda request,result:self.verify(result),requires_support=support,timeout_s=self.timeouts['operation'],
-            parameter_keys=('model_id','expected_bundle_digest') if name=='prepare_model' else ('capabilities',) if name=='prepare_environment' else ())
+            parameter_keys=('model_id','expected_bundle_digest') if name=='prepare_model' else ('capabilities',) if name=='prepare_environment' else ('asset_pair_id','expected_catalog_digest') if name=='prepare_collection' else ())
             for name,label,impact,support in definitions],target=self.target,receipt_dir=self.root/'operations')
         self.refresh()
         self.thread=None
@@ -329,6 +362,7 @@ class WorkbenchManager:
     def service_dependencies(self,action,health,parameters=None):
         """Finite operation scopes, not a second readiness authority."""
         required={'workbench'};parameters=parameters or {}
+        if action=='exit_environment':return set(self.services)
         wanted=set(parameters.get('capabilities',['observe'])) if action=='prepare_environment' else set()
         if action in ('prepare_model','restart_model','stop_model') or 'inference' in wanted:required.add('model')
         if self.environment=='physical' and (action in ('start_cameras','restart_cameras','stop_cameras','rebind_cameras',
@@ -391,10 +425,14 @@ class WorkbenchManager:
     def check(self,action,request=None):
         with self.health_lock:h=deepcopy(self.health_cache)
         parameters=(request or {}).get('parameters') or {}
-        allowed={'model_id','expected_bundle_digest'} if action=='prepare_model' else {'capabilities'} if action=='prepare_environment' else set()
+        allowed={'model_id','expected_bundle_digest'} if action=='prepare_model' else {'capabilities'} if action=='prepare_environment' else {'asset_pair_id','expected_catalog_digest'} if action=='prepare_collection' else set()
         if not isinstance(parameters,dict) or set(parameters)-allowed:return '此操作不接受这些参数'
         if 'model_id' in parameters and (not isinstance(parameters['model_id'],str) or not parameters['model_id'] or len(parameters['model_id'])>256):return '模型ID无效'
         if 'expected_bundle_digest' in parameters and (not isinstance(parameters['expected_bundle_digest'],str) or not re.fullmatch('[a-f0-9]{64}',parameters['expected_bundle_digest'])):return '模型bundle身份无效'
+        if {'asset_pair_id','expected_catalog_digest'}&set(parameters):
+            if (not re.fullmatch('[A-Za-z0-9_.-]{1,128}',str(parameters.get('asset_pair_id','')))
+                    or not re.fullmatch('[a-f0-9]{64}',str(parameters.get('expected_catalog_digest','')))):
+                return '场景资产组合和目录版本无效'
         if 'capabilities' in parameters and (not isinstance(parameters['capabilities'],list) or not parameters['capabilities']
                 or any(name not in ('observe','inference','collection') for name in parameters['capabilities']) or len(set(parameters['capabilities']))!=len(parameters['capabilities'])):return '准备能力只能选择观测、推理或数采'
         if action=='status_check':return None
@@ -405,6 +443,26 @@ class WorkbenchManager:
         if h.get('deployment',{}).get('files_unchanged') is not True:return '部署源文件已变化，请重新启动管理器并刷新页面；诊断仍可查看'
         if time.time_ns()-h.get('checked_wall_ns',0)>10_000_000_000:return '环境状态已过期，请先检查状态'
         if h.get('services',{}).get('workbench',{}).get('state')=='unknown':return '工作台进程身份未知，请先检查诊断；不会自动停止未知控制进程'
+        if action=='reclaim_control':
+            if self.environment!='physical' or not self.config.get('control_owner_descriptor'):
+                return '一键接入需要已登记的物理设备与独立控制Owner'
+            if not self.config.get('collection_handoff'):return '本机尚未登记数采交接接口'
+            if h.get('services',{}).get('control_owner',{}).get('state')not in ('running','stopped'):
+                return '控制Owner进程身份未知，未清理或接入'
+            if (h.get('maintenance')or{}).get('active_action'):return '旧维护动作仍未返回，先核验原回执'
+            return None
+        if action=='exit_environment':
+            if self.environment!='physical' or not self.config.get('control_owner_descriptor')or not self.config.get('collection_handoff'):
+                return '退出交接需要已登记的真机Owner与原数采入口'
+            if self.window is not None or h.get('maintenance')or self.unresolved():return '存在未核验的维护，请先核验并结束遗留维护'
+            if any(v.get('state')not in ('running','stopped')for v in h.get('services',{}).values()):return '服务身份未知，不能确认退出范围'
+            runtime=h.get('runtime')or{}
+            if runtime.get('connected'):
+                if not h.get('backend_reachable')or runtime.get('feedback_healthy')is not True or 'FAULT'in str(runtime.get('state')):
+                    return '当前控制或反馈异常，无法走正常回零释放；先按中断恢复流程核验'
+            elif h.get('services',{}).get('control_owner',{}).get('state')=='running'and not h.get('control_owner_reachable'):
+                return '控制Owner状态未知，未确认SDK已退出'
+            return None
         pending=self.window is not None or bool(h.get('maintenance')) or bool(
             self.unresolved() if action in ('recover_maintenance','recover_control') else self.blocking_history(action,h,parameters))
         cold_backend=(h.get('services',{}).get('workbench',{}).get('state')=='stopped'
@@ -493,6 +551,11 @@ class WorkbenchManager:
         self.validate_control_receipt(action,result,expected)
         if tracked:self.save_window(dict(self.window,pending_call=None))
         return result
+
+    def recovery_requires_support(self, request=None):
+        runtime=self.health_cache.get('runtime') or {}
+        return self.environment=='physical' and not (self.control_healthy(runtime)
+            or runtime.get('connected')is True and bool(runtime.get('recoverable_fault')))
 
     def read_pending_call(self):
         """Query the original command result; never resend a timed-out command."""
@@ -726,7 +789,7 @@ class WorkbenchManager:
         except (OSError,ValueError,TypeError):pass
         return None
 
-    def camera_action(self,action,token,progress):
+    def camera_action(self,action,token,progress,*,bind=True):
         progress('camera_service')
         if self.environment=='fake':
             return self.post('ops_start_cameras' if action=='start' else 'ops_restart_cameras',token=token,timeout=self.timeouts['camera'])
@@ -749,6 +812,7 @@ class WorkbenchManager:
                 raise OperationError('camera_start_failed',detail+'；请检查对应相机与USB链路，再显式启动相机服务')
             time.sleep(.05)
         else:raise TimeoutError('相机未恢复真实帧：'+str(error))
+        if not bind:return dict(service=result,binding=dict(status='deferred_until_business_start'))
         progress('rebinding_camera_clients')
         return dict(service=result,binding=self.post('ops_rebind_cameras',token=token,timeout=15))
 
@@ -860,15 +924,17 @@ class WorkbenchManager:
             if remaining>0:time.sleep(min(.05,remaining))
         raise TimeoutError('三路相机HTTP图像未在等待时限内就绪：'+str(error)) from None
 
-    def model_evidence(self,selected):
+    def model_evidence(self,selected,bundle_digest=None):
         service=self.services['model'].snapshot()
         if service.get('state')!='running' or service.get('owned') is not True:raise ValueError('模型服务进程身份未核验')
         value=json_request(self.config['model_port'],'/status',timeout=self.timeouts['state'])
         if (value.get('service_pid')!=(service.get('identity') or {}).get('pid') or value.get('model_id')!=selected
                 or value.get('loaded') is not True or value.get('status')!='ready' or (value.get('warmup') or {}).get('completed') is not True):
             raise ValueError('模型服务身份、选择或暖机结果未核验')
+        if value.get('backend') is not None and (bundle_digest is None or value.get('bundle_digest')!=bundle_digest):
+            raise ValueError('模型模式或实现摘要与所选运行时不一致')
         return dict(service_identity=stable_identity(service['identity']),worker_pid=value.get('worker_pid'),
-            model_id=selected,warmup=deepcopy(value['warmup']),loaded=True)
+            model_id=selected,backend=value.get('backend'),bundle_digest=value.get('bundle_digest'),warmup=deepcopy(value['warmup']),loaded=True)
 
     def warm_model_binding(self,state=None):
         if 'model' not in self.services or 'model_port' not in self.config:return None
@@ -877,7 +943,7 @@ class WorkbenchManager:
                 or (observed.get('warmup') or {}).get('completed') is not True):return None
         info=(state or {}).get('model') or {}
         selected=info.get('selected_model_id') or info.get('id') or observed.get('model_id')
-        evidence=self.model_evidence(selected)
+        evidence=self.model_evidence(selected,info.get('bundle_digest'))
         if type(evidence['worker_pid']) is not int or evidence['worker_pid']<=0:
             raise OperationError('model_identity_unknown','暖模型worker身份未核验，请先检查模型服务')
         return dict(model_id=selected,bundle_digest=info.get('bundle_digest'),evidence=evidence)
@@ -897,14 +963,14 @@ class WorkbenchManager:
             digest=info.get('bundle_digest')
             if (selected!=binding['model_id'] or binding['bundle_digest'] is not None and digest!=binding['bundle_digest']):
                 raise OperationError('model_rebind_required','后端已重载，但模型选择或bundle身份已变化；请核验并显式选择原模型，未自动切换或加载')
-            current=self.model_evidence(selected)
+            current=self.model_evidence(selected,binding['bundle_digest'])
             if any(current[key]!=binding['evidence'][key] for key in ('service_identity','worker_pid')):
                 raise OperationError('model_rebind_required','后端已重载，但原暖模型进程身份已变化；请核验模型服务后显式准备')
             progress('restoring_warm_model_binding')
             prepared=self.post('ops_prepare_model',token=token,expected_model_id=selected,timeout=30)
             if prepared.get('model_ready') is not True or prepared.get('control_ready') is not False:
                 raise OperationError('model_rebind_required','暖模型工作区绑定未确认；请核验模型，不会连接或恢复机器人动作')
-            evidence=self.model_evidence(selected)
+            evidence=self.model_evidence(selected,binding['bundle_digest'])
             if any(evidence[key]!=binding['evidence'][key] for key in ('service_identity','worker_pid')):
                 raise OperationError('model_rebind_required','恢复绑定期间暖模型进程发生变化，请重新核验')
             return dict(status='restored',prepared=prepared,evidence=evidence)
@@ -954,7 +1020,7 @@ class WorkbenchManager:
             raise OperationError('model_prepare_failed',message) from None
         if prepared.get('model_ready') is not True or prepared.get('control_ready') is not False:
             raise OperationError('model_not_prepared','模型准备未确认或意外绑定了设备控制')
-        return dict(service=service,prepared=prepared,evidence=self.model_evidence(prepared.get('model_id')))
+        return dict(service=service,prepared=prepared,evidence=self.model_evidence(prepared.get('model_id'),prepared.get('bundle_digest')))
 
     def stop_model(self,token,progress,*,backend_absent=False):
         prior=self.services['model'].snapshot()
@@ -974,9 +1040,13 @@ class WorkbenchManager:
 
     def run(self,action,request,progress):
         generation=self.stop_generation
+        last_report=None
         def report(*args,**kwargs):
+            nonlocal last_report
             if generation!=self.stop_generation:
                 raise OperationError('operator_stop','停止已撤销后续准备或接入步骤；已开始的服务状态需读回')
+            if last_report==(args,kwargs):return  # Polling the same phase must not fsync an identical job at control rate.
+            last_report=deepcopy((args,kwargs))
             return progress(*args,**kwargs)
         try:
             result=self._run(action,request,report)
@@ -993,6 +1063,10 @@ class WorkbenchManager:
         if self.target()!=request['expected_target']:raise OperationError('target_changed','执行前目标身份已变化，请重新审阅')
         reason=self.check(action,request)
         if reason:raise ValueError(reason)
+        if action=='reclaim_control':return self.reclaim_control(request,progress)
+        if action=='exit_environment':return self.exit_environment(request,progress)
+        if action=='recover_control' and self.recovery_requires_support(request) and request.get('arms_supported')is not True:
+            raise OperationError('support_required','当前需要释放重接；未确认支撑，不执行恢复。')
         before=self.target();parameters=request.get('parameters') or {}
         before['dependencies']=self.dependency_evidence(action,self.health_cache,parameters)
         if action!='status_check':progress('checking_service_dependencies',detail=dict(dependencies=before['dependencies']))
@@ -1048,7 +1122,7 @@ class WorkbenchManager:
                 raise ValueError('恢复接入需要已登记相机服务与可信descriptor；未启动后端或SDK')
             binding=self.warm_model_binding() if action=='restart_workbench' else None
             # Physical bootstrap requires the independent source descriptor; Fake owns its source inside the backend.
-            if self.environment=='physical' and 'cameras' in self.services:self.service_action('cameras','start',progress)
+            if self.environment=='physical' and 'cameras' in self.services:self.camera_action('start',None,progress,bind=False)
             started_service=self.service_action('workbench','start',progress)
             started=self.wait_backend(progress,started_service=started_service)
             if started['runtime']['connected'] or started['runtime'].get('automatic_enabled'):
@@ -1077,13 +1151,16 @@ class WorkbenchManager:
             if action=='stop_model':result['stopped_model']=self.stop_model(token,progress)
             if action=='prepare_collection' or action in COMPUTE_RESTARTS or 'collection' in wanted:
                 progress('preparing_collection')
-                options=dict(service_role=COMPUTE_RESTARTS[action],restart=True) if action in COMPUTE_RESTARTS else {}
+                options=(dict(service_role=COMPUTE_RESTARTS[action],restart=True) if action in COMPUTE_RESTARTS
+                    else parameters if action=='prepare_collection' else {})
                 result['collection']=self.post('prepare_collection',token=token,timeout=self.timeouts['operation'],**options)
             if action in ('connect_control','recover_control'):
                 runtime=self.state()['runtime']
                 retire=(action=='recover_control' and runtime.get('connected') is True
                     and not runtime.get('recoverable_fault') and not self.control_healthy(runtime))
                 if action=='connect_control' or runtime.get('connected') is False or retire:
+                    if self.environment=='physical' and request.get('arms_supported')is not True:
+                        raise OperationError('support_required','恢复条件已变化，需要释放重接；未确认支撑，不执行后续接入。')
                     result['cameras']=self.camera_action('start',token,progress)
                     progress('verifying_observation_before_control')
                     try:result['observation_before_control']=self.camera_evidence()
@@ -1132,6 +1209,16 @@ class WorkbenchManager:
 
     def verify(self,result):
         action=result['action'];evidence={}
+        if action=='exit_environment':
+            from scripts.workbench_deploy import verify_unit,http_json
+            health=self.refresh();states=health.get('services',{})
+            stopped=all(row.get('state')=='stopped'and row.get('running')is False for row in states.values())
+            pin=self.config['collection_handoff'];unit=verify_unit({k:pin[k]for k in ('unit','files')});web=http_json(pin['status_url'])
+            released=result.get('sdk_was_disconnected')is True or self.release_verified(result.get('release_receipt')or{})
+            return dict(ok=stopped and released and unit['ActiveState']=='active'and int(unit['MainPID'])>0
+                and web.get('robot_vin')==self.config['device_id']and web.get('orphan_alive')is False,
+                resources=states,sdk_release_verified=released,collection_web=dict(ready=True,manager_alive=web.get('manager_alive'),collect_status=web.get('collect_status')),
+                collection_started_by_operation=False,motion_resumed=False)
         try:
             if action in ('start_cameras','restart_cameras','rebind_cameras',*CAMERA_RESETS) or 'cameras' in result:
                 evidence['cameras']=self.camera_evidence()
@@ -1181,10 +1268,10 @@ class WorkbenchManager:
                 or stable_identity(backend.get('identity'))!=result['before'].get('services',{}).get('workbench')):ok=False
         try:
             if 'model' in result:
-                selected=result['model']['prepared'].get('model_id');evidence['model']=self.model_evidence(selected)
+                selected=result['model']['prepared'].get('model_id');evidence['model']=self.model_evidence(selected,result['model']['prepared'].get('bundle_digest'))
                 ok=ok and (health.get('model') or {}).get('loaded') is True and health['model'].get('id')==selected
             if action=='restart_workbench' and (result.get('model_binding') or {}).get('status')=='restored':
-                restored=result['model_binding'];selected=restored['prepared']['model_id'];evidence['model']=self.model_evidence(selected)
+                restored=result['model_binding'];selected=restored['prepared']['model_id'];evidence['model']=self.model_evidence(selected,restored['prepared'].get('bundle_digest'))
                 ok=ok and (health.get('model') or {}).get('loaded') is True and health['model'].get('id')==selected
                 ok=ok and all(evidence['model'][key]==restored['evidence'][key] for key in ('service_identity','worker_pid'))
         except (OSError,HTTPException,ValueError,KeyError) as error:return dict(ok=False,reason=str(error),health=health,evidence=evidence,motion_started=False)
@@ -1195,6 +1282,12 @@ class WorkbenchManager:
             if action=='connect_control':ok=ok and control.get('connected') is True
             else:ok=ok and control.get('motion_resumed') is False and (control.get('recovered') is True or control.get('already_operable') is True or control.get('reconnected') is True)
             evidence['control']=control
+            if result.get('requested_action')=='reclaim_control':
+                handoff=(result.get('reclaim')or{}).get('collection')or{}
+                from scripts.workbench_deploy import unit_state
+                released=unit_state(handoff['unit']) if handoff.get('unit') else {}
+                ok=ok and handoff.get('exit_verified')is True and released.get('ActiveState')=='inactive' and released.get('MainPID')=='0'
+                evidence['collection_handoff']=handoff
         elif action=='release_control':
             receipt=runtime.get('release_receipt') or (result.get('control') or {}).get('release_receipt') or {}
             ok=ok and runtime.get('connected') is False and self.release_verified(receipt)
@@ -1233,16 +1326,192 @@ class WorkbenchManager:
         return dict(ok=bool(ok),unknown=health.get('backend_reachable') is not True,health=health,
                     evidence=evidence,motion_started=action=='verify_hold')
 
+    def stop_current_control(self,request,progress):
+        """Shared stop barrier for reclaim and exit; no release or new motion."""
+        runtime=self.health_cache.get('runtime')or{}
+        stopped=None
+        if runtime.get('connected')is True:
+            progress('stopping_current_control')
+            stopped=self._request_control_stop(request['request_id']+'-stop')
+            if stopped.get('status')!='accepted':raise OperationError('stop_unconfirmed','独立Owner未确认接收停止请求',unknown=True)
+            barrier=((stopped.get('receipt')or{}).get('stop')or{}).get('barrier_epoch')
+            if type(barrier)is not int:raise OperationError('stop_unconfirmed','停止代次未核验，未继续接入',unknown=True)
+            state=self.state()
+            json_request(self.port,'/api/maintenance/stop',dict(environment=self.environment,
+                request_id=secrets.token_hex(16),expected_target=self.backend_target(state)),timeout=self.timeouts['state'],
+                headers={'Origin':'http://127.0.0.1:'+str(self.port),'X-CSRF-Token':state['csrf']})
+            deadline=time.monotonic()+self.timeouts['release']
+            while time.monotonic()<deadline:
+                progress('waiting_control_stop');health=self.refresh();current=health.get('runtime')or{}
+                if (current.get('runtime_nonce')!=runtime.get('runtime_nonce')
+                        or current.get('connected')is not True):
+                    raise OperationError('control_changed','停止期间控制实例或连接变化，未继续接入',unknown=True)
+                stop_receipt=current.get('stop_receipt')or{}
+                if (stop_receipt.get('stop_hold_return_confirmed')is True
+                        and type(stop_receipt.get('barrier_epoch'))is int and stop_receipt['barrier_epoch']>=barrier
+                        and current.get('feedback_healthy')is True and current.get('stationary')is True
+                        and not health.get('busy') and not current.get('automatic_enabled')):break
+                time.sleep(.05)
+            else:raise OperationError('stop_unconfirmed','停止、静止反馈或任务收尾未确认，未释放或重新接入',unknown=True)
+        return stopped
+
+    def home_for_exit(self,request,progress):
+        """Use the existing reviewed manual path, native motion gains and protection."""
+        expected=self.target();nonce=(self.health_cache.get('runtime')or{})['runtime_nonce'];submitted=False
+        def view():
+            value=json_request(self.port,'/api/state?environment=physical&business=research',timeout=self.timeouts['state'])
+            r=value['runtime']
+            if value.get('server_instance_id')!=expected['backend_instance']or r.get('runtime_nonce')!=nonce:
+                raise OperationError('home_identity_changed','回零期间设备/业务身份变化，未释放')
+            if not r.get('connected')or not r.get('feedback_healthy')or'FAULT'in str(r.get('state')):
+                raise OperationError('home_feedback_failed','回零反馈异常，未释放')
+            return value
+        def action(name,body):
+            s=view();return json_request(self.port,'/api/actions/'+name,dict(environment=self.environment,business='research',
+                request_id='exit-home-'+secrets.token_hex(12),**body),timeout=max(10,self.timeouts['state']),
+                headers={'Origin':'http://127.0.0.1:'+str(self.port),'X-CSRF-Token':s['csrf']})
+        try:
+            progress('preparing_exit_home');s=view()
+            if s['runtime']['holder']!='research':action('handoff',dict(target_business='research'))
+            s=view();manual=s['manual'];gaps=[min(hi,max(lo,value))for value,(lo,hi)in zip(manual['jaw_gaps_mm'],manual['jaw_command_ranges_mm'])]
+            job=action('manual_preview',dict(q12=[0.]*12,speeds12=[.1]*12,jaw_gap_mm=gaps,jaw_speed_mm_s=5.))
+            deadline=time.monotonic()+self.timeouts['operation'];review=None
+            while time.monotonic()<deadline:
+                progress('preparing_exit_home');s=view();candidate=s.get('workflow',{}).get('review');preparation=s.get('workflow',{}).get('request')or{}
+                if candidate and candidate.get('request_job_id')==job['job_id']:review=candidate;break
+                if preparation.get('id')==job['job_id']and preparation.get('status')=='failed':raise OperationError('home_plan_failed',preparation.get('error')or'回零规划失败')
+                time.sleep(.1)
+            if review is None:raise OperationError('home_plan_unconfirmed','回零审阅未确认，未执行或释放')
+            progress('returning_home');submitted=True
+            action('manual_execute',dict(review_id=review['id'],physical_clearance=True))
+            deadline=time.monotonic()+self.timeouts['operation']
+            while time.monotonic()<deadline:
+                progress('waiting_exit_home');s=view();r=s['runtime'];execution=s.get('manual',{}).get('execution')or{}
+                if execution.get('id')==review['id']:
+                    if execution.get('status')in ('failed','rejected','expired'):raise OperationError('home_failed',execution.get('message')or'回零未完成')
+                    if execution.get('status')=='completed'and r.get('stationary')and not r.get('automatic_enabled'):
+                        return dict(completed=True,review_id=review['id'],runtime_nonce=nonce,command_epoch=r['command_epoch'],
+                            speed_rad_s=.1,jaw_gap_mm=gaps,final_joint_positions=s['manual']['positions'],static_precision_qualified=False)
+                time.sleep(.1)
+            raise OperationError('home_unconfirmed','回零结束或静止反馈未确认，未释放')
+        except BaseException as error:
+            if submitted and not(isinstance(error,OperationError)and error.code=='operator_stop'):
+                self._request_control_stop(request['request_id']+'-home-failed-stop',expected_nonce=nonce)
+            raise
+
+    def exit_environment(self,request,progress):
+        """Normal home/release, verified resource exit, then restore the collector Web."""
+        from scripts.workbench_deploy import verify_unit,http_json,restore_collection_web
+        from .control_owner import ControlChannel
+        pin=self.config['collection_handoff'];before=self.target();unit=verify_unit({k:pin[k]for k in ('unit','files')})
+        runtime=self.health_cache.get('runtime')or{}
+        if unit['ActiveState']=='active':
+            collection=http_json(pin['status_url'])
+            if collection.get('robot_vin')!=self.config['device_id']or(runtime.get('connected')and collection.get('manager_alive')is not False):
+                raise OperationError('control_owner_conflict','数采控制归属冲突或未知，未回零或释放')
+        result=dict(action='exit_environment',before=before,sdk_was_disconnected=runtime.get('connected')is False,steps=[],collection_started=False)
+        report=progress
+        def progress(phase,fraction=None,detail=None):
+            report(phase,fraction=fraction,detail=dict(exit=deepcopy(result),current=detail))
+        if runtime.get('connected'):
+            result['stop']=self.stop_current_control(request,progress)
+            result['home']=self.home_for_exit(request,progress)
+            self.refresh();progress('releasing_control')
+            # The reviewed normal-home route authorizes withdrawing hold. This is
+            # the legacy release acknowledgement, not a new claim of human support.
+            release=self._run('release_control',dict(request,expected_target=self.target(),arms_supported=True),progress)
+            proof=self.verify(release)
+            if proof.get('ok')is not True:raise OperationError('release_unconfirmed','SDK释放未确认，后续服务保持不动',unknown=True)
+            result.update(release_receipt=(proof.get('evidence')or{}).get('release'),release_basis='reviewed_normal_home_completed')
+        owner=self.services['control_owner'].snapshot()
+        if owner['state']=='running':
+            inspected=ControlChannel(self.config['control_owner_descriptor'],timeout=2).call('inspect')
+            if inspected.get('connected')is not False or inspected.get('runtime_nonce')is not None:
+                raise OperationError('control_not_retired','SDK或Runtime仍存活，未停止Owner或恢复数采',unknown=True)
+            result['sdk_was_disconnected']=True if 'release_receipt'not in result else result['sdk_was_disconnected']
+        elif owner['state']=='stopped'and owner.get('running')is False:
+            result['sdk_was_disconnected']=True
+        else:raise OperationError('control_exit_unknown','控制Owner退出状态未知，未继续交接',unknown=True)
+        for action,role in (('stop_model','model'),('stop_cameras','cameras')):
+            if role not in self.services:continue
+            self.refresh();progress('stopping_environment',detail=dict(service=role))
+            step=self._run(action,dict(request,expected_target=self.target()),progress);proof=self.verify(step)
+            if proof.get('ok')is not True:raise OperationError('resource_exit_unconfirmed',role+'退出未确认，未继续交接',unknown=True)
+            result['steps'].append(dict(service=role,verification=proof))
+        if 'triton_control'in self.services:
+            if self.services['triton_control'].snapshot()['state']=='running'and self.triton_preview.catalog().get('busy')is not False:
+                raise OperationError('triton_busy','转换工具仍有任务，未停止或恢复数采网页')
+            progress('stopping_environment',detail=dict(service='triton_control'))
+            result['steps'].append(dict(service='triton_control',result=self.service_action('triton_control','stop',progress)))
+        for role in ('workbench','control_owner'):
+            progress('stopping_environment',detail=dict(service=role))
+            result['steps'].append(dict(service=role,result=self.service_action(role,'stop',progress)))
+        states={name:service.snapshot()for name,service in self.services.items()}
+        if any(x.get('state')!='stopped'or x.get('running')is not False for x in states.values()):
+            raise OperationError('environment_exit_unconfirmed','工作台仍有未确认退出的进程，未恢复数采',unknown=True)
+        result['collection_web']=restore_collection_web(pin,self.config['device_id'],progress=progress,timeout=self.timeouts['backend'])
+        result['resources']=states;result['environment_exited']=True
+        return result
+
+    def reclaim_control(self,request,progress):
+        """Compose the existing stop, collection shutdown and recovery paths."""
+        from scripts.workbench_deploy import handoff_collection,http_json,verify_unit
+        pin=self.config['collection_handoff'];initial=self.target()
+        runtime=self.health_cache.get('runtime')or{}
+        unit=verify_unit({k:pin[k]for k in ('unit','files')})
+        if unit['ActiveState']=='active' and runtime.get('connected')is True:
+            collection=http_json(pin['status_url'])
+            if collection.get('robot_vin')!=self.config['device_id'] or collection.get('manager_alive')is not False:
+                raise OperationError('control_owner_conflict','数采和工作台控制归属冲突或未知，未接入第二个SDK')
+        stopped=self.stop_current_control(request,progress)
+        progress('checking_collection_handoff')
+        handed=handoff_collection(pin,self.config['device_id'],stop_active=True,progress=progress,
+                                 timeout=min(240.,self.timeouts['operation']))
+        self.refresh()
+        if self.target()['manager_instance']!=initial['manager_instance'] or self.target()['deployment_sha256']!=initial['deployment_sha256']:
+            raise OperationError('target_changed','部署身份在交接期间变化，未接入SDK')
+        if any(self.target().get('services',{}).get(name)!=initial.get('services',{}).get(name)
+                for name in ('control_owner','workbench')):
+            raise OperationError('target_changed','控制或业务服务在交接期间被其他实例替换，未接入SDK')
+        if self.window is not None or self.unresolved():
+            progress('verifying_old_maintenance')
+            self._run('recover_maintenance',dict(request,expected_target=self.target()),progress)
+            self.refresh()
+        owner=self.services['control_owner'].snapshot()
+        if owner.get('state')=='stopped':
+            self.service_action('control_owner','start',progress)
+            from .control_owner import ControlChannel
+            deadline=time.monotonic()+self.timeouts['state']*5
+            while time.monotonic()<deadline:
+                progress('waiting_control_owner')
+                try:
+                    inspected=ControlChannel(self.config['control_owner_descriptor'],timeout=1.).call('inspect')
+                    if inspected.get('connected')is False:break
+                except (OSError,ValueError,ConnectionError):pass
+                time.sleep(.1)
+            else:raise OperationError('owner_start_unconfirmed','控制Owner启动未核验，未接入SDK',unknown=True)
+            self.refresh()
+        current=self.health_cache.get('runtime')or{}
+        action='connect_control' if current.get('state')=='DISCONNECTED' else 'recover_control'
+        progress('recovering_workbench_control')
+        result=self._run(action,dict(request,expected_target=self.target()),progress)
+        result['requested_action']='reclaim_control'
+        result['reclaim']=dict(before=initial,stop=stopped,collection=handed,old_motion_resumed=False)
+        return result
+
     def stop(self,body):
         if (not isinstance(body,dict) or set(body)!={'expected_device_id','request_id'}
                 or body['expected_device_id']!=self.config['device_id'] or not isinstance(body['request_id'],str)
                 or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',body['request_id'])):
             raise ValueError('停止请求需要当前设备身份和请求编号')
         self.stop_generation+=1
+        return self._request_control_stop(body['request_id'])
+
+    def _request_control_stop(self,request_id,*,expected_nonce=None):
         if self.config.get('control_owner_descriptor'):
             try:
                 from .control_owner import ControlChannel
-                result=ControlChannel(self.config['control_owner_descriptor'],timeout=2.).call('stop')
+                result=ControlChannel(self.config['control_owner_descriptor'],timeout=2.).call('stop',**({}if expected_nonce is None else dict(expected_nonce=expected_nonce)))
                 return dict(status='accepted',receipt=result,message='停止已直达独立Owner；实际停止与保持以设备回执为准')
             except (OSError,ValueError,ConnectionError,RuntimeError)as error:
                 return dict(status='unknown',stopped=False,message='独立Owner停止结果尚未核验：'+str(error))
@@ -1253,7 +1522,7 @@ class WorkbenchManager:
         if auth is None:return dict(status='unknown',stopped=False,message='设备状态未知，无法确认软件停止；请使用现场停止入口')
         try:
             result=json_request(self.port,'/api/maintenance/stop',dict(environment=self.environment,
-                request_id=body['request_id'],expected_target={key:auth[key] for key in ('server_instance_id','device_id')}),
+                request_id=request_id,expected_target={key:auth[key] for key in ('server_instance_id','device_id')}),
                 timeout=2,headers={'Origin':'http://127.0.0.1:'+str(self.port),'X-CSRF-Token':auth['csrf']})
             return dict(status='accepted',receipt=result,message='停止请求已提交，实际停止与保持以设备回执为准')
         except (OSError,HTTPException,ValueError) as error:
@@ -1393,6 +1662,27 @@ def serve(manager,*,host,port,allowed_hosts=()):
             elif self.headers.get_all('Content-Length',[]) not in ([],['0']):
                 return self.send(400,{'error':'GET/HEAD body is not supported'})
             try:
+                if path.startswith('/api/triton/'):
+                    query=parse_qs(parsed.query,keep_blank_values=True)
+                    if self.command in ('GET','HEAD'):
+                        if query!={'environment':[manager.environment]}:raise ValueError('明确的当前设备环境必需')
+                        if manager.triton_preview is None:
+                            return self.send(200,dict(configured=False,available=False,sources=[],models=[],reason='当前设备未配置Triton服务'))
+                        if path=='/api/triton/catalog':return self.send(200,manager.triton_preview.catalog())
+                        if path.startswith('/api/triton/jobs/'):return self.send(200,manager.triton_preview.job(path.rsplit('/',1)[-1]))
+                        return self.send(404,{'error':'unknown Triton endpoint'})
+                    if self.command!='POST' or query:return self.send(404,{'error':'unknown Triton endpoint'})
+                    if self.headers.get_all('X-CSRF-Token',[])!=[manager.csrf]:return self.send(403,{'error':'invalid Triton authorization'})
+                    manager.require_deployment(self.headers)
+                    if manager.triton_preview is None:raise ValueError('当前设备未配置Triton输出预览')
+                    value=json.loads(body)
+                    if not isinstance(value,dict) or value.get('environment')!=manager.environment or value.get('business')!='inference':raise ValueError('Triton操作仅允许当前设备的推理输出预览')
+                    health=manager.refresh()
+                    if (manager.operations.active is not None or not health.get('backend_reachable') or health.get('busy') or health.get('maintenance')
+                            or (health.get('runtime') or {}).get('automatic_enabled')):
+                        raise ValueError('设备忙或状态未核验，暂不启动Triton任务')
+                    result=manager.triton_preview.start(path.removeprefix('/api/triton/'),{k:v for k,v in value.items()if k not in('environment','business')})
+                    return self.send(202,result)
                 if path=='/api/deployment' and self.command in ('GET','HEAD'):
                     return self.send(200,manager.deployment.snapshot(check_files=True))
                 if path=='/api/environment' and self.command in ('GET','HEAD'):

@@ -42,7 +42,7 @@ def validate_physical_binding(binding, profile, summary, observations, *, enviro
         raise ValueError("detection differs from trusted physical acquisition receipt")
 
 
-def build_source(summary, observations, profile, run_id, physical_binding=None, *, environment='physical'):
+def build_source(summary, observations, profile, run_id, physical_binding=None, *, environment='physical', asset_set=None):
     validate_profile(profile)
     nonempty(run_id, "run_id")
     if physical_binding is not None:
@@ -71,6 +71,10 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
     session, frame_id = None, None
     providers = []
     valid_stamps = []
+    if asset_set is not None:
+        from scene_assets import check_detection
+        check_detection(asset_set, summary)
+        window.asset_set = deepcopy(asset_set)
     for capture, observation in zip(inputs, observations):
         if not isinstance(capture, dict) or not isinstance(observation, dict):
             raise ValueError("capture and observation must be objects")
@@ -104,6 +108,10 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
                        for t in tracks)):
             raise ValueError("valid pair requires two current tracks and unambiguous coffee-machine orientation")
         valid_stamps.append(stamp)
+        if asset_set is not None:
+            check_detection(asset_set, summary, tracks)
+            from cup_pose_refinement import validate_observation
+            validate_observation(observation,asset_set['cup'],input_sha256=capture['sha256'])
         provenance = {}
         for track in observation["tracks"]:
             if track.get("object_type") not in {"coffee_machine", "cup"}:
@@ -147,6 +155,8 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
     source = {"schema_version": PIPELINE_SCHEMA, **PIPELINE_LANES["simulated-real"],
               "lane": "simulated-real", "adapter": "foundationpose", "observation_mode": "offline_replay",
               "run_id": run_id, "sequence": 0, "scene": scene, "calibration_profile": deepcopy(profile)}
+    if asset_set is not None and asset_set['cup'].get('grasp_command') is not None:
+        source['grasp_command']=deepcopy(asset_set['cup']['grasp_command'])
     if physical_binding is not None:
         source = {k: v for k, v in source.items() if k not in PIPELINE_LANES["simulated-real"]}
         spec = namespace(environment)
@@ -165,7 +175,7 @@ def build_source(summary, observations, profile, run_id, physical_binding=None, 
     return source
 
 
-def convert(profile_path, detection_dir, output, run_id, physical_binding=None, simulation_initial_suite=None, *, environment='physical'):
+def convert(profile_path, detection_dir, output, run_id, physical_binding=None, simulation_initial_suite=None, *, environment='physical', assets=None, asset_set_digest=None):
     summary_bytes = (detection_dir / "summary.json").read_bytes()
     observation_bytes = (detection_dir / "observations.jsonl").read_bytes()
     summary = json.loads(summary_bytes)
@@ -178,9 +188,17 @@ def convert(profile_path, detection_dir, output, run_id, physical_binding=None, 
             raise ValueError("detection files differ from trusted physical acquisition receipt")
         physical_binding.update(detection_summary_digest=_digest(summary),
                                 observations_digest=_digest(observations))
-    source = build_source(summary, observations, json.loads(profile_path.read_text()), run_id, physical_binding, environment=environment)
+    from scene_assets import load
+    selection = load(assets, expected_digest=asset_set_digest) if assets is not None else None
+    if asset_set_digest is not None and assets is None:
+        raise ValueError('selected asset set requires its prepared native assets root')
+    source = build_source(summary, observations, json.loads(profile_path.read_text()), run_id, physical_binding,
+                          environment=environment, asset_set=selection)
     source["detection_files"] = detection_files
     episode = deepcopy(source['scene']['episode_scene'])
+    if selection is not None:
+        from scene_assets import episode_metadata
+        episode['metadata'] = episode_metadata(selection)
     if simulation_initial_suite is not None:
         if physical_binding is not None:
             raise ValueError('simulation initial suite cannot bind a physical source')
@@ -192,10 +210,10 @@ def convert(profile_path, detection_dir, output, run_id, physical_binding=None, 
         validate_physical14(model,gripper_max_mm=source['calibration_profile']['gripper']['max_opening_mm'])
         if metadata.get('initial_robot_state_digest')!=_digest(model) or metadata.get('gripper_mode')!='distance':
             raise ValueError('sealed distance-mode simulation initial state required')
-        episode['metadata'] = {key:deepcopy(metadata[key]) for key in ('initial_robot_state','initial_robot_state_digest','gripper_mode')}
+        episode.setdefault('metadata', {}).update({key:deepcopy(metadata[key]) for key in ('initial_robot_state','initial_robot_state_digest','gripper_mode')})
     if 'initial_state' in source:
         model = source['initial_state']['model']
-        episode['metadata'] = dict(initial_robot_state=deepcopy(model), initial_robot_state_digest=_digest(model))
+        episode.setdefault('metadata', {}).update(initial_robot_state=deepcopy(model), initial_robot_state_digest=_digest(model))
     outputs = [("source.json", source), ("suite.json", {"episodes": [episode]})]
     if physical_binding is not None:
         physical_binding["source_digest"] = _digest(source)
@@ -268,6 +286,8 @@ def main():
     for flag in ("profile", "detection-dir", "output"):
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument('--simulation-initial-suite',type=Path)
+    parser.add_argument('--assets', type=Path)
+    parser.add_argument('--asset-set-digest')
     parser.add_argument('--environment', choices=('physical','fake'), default='physical')
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--physical-binding", type=Path, help="Trusted accepted physical acquisition/calibration receipt")
@@ -278,8 +298,11 @@ def main():
         parser.error("physical-binding must be an absolute path")
     if args.simulation_initial_suite is not None and not args.simulation_initial_suite.is_absolute():
         parser.error('simulation-initial-suite must be an absolute path')
+    if args.assets is not None and not args.assets.is_absolute():
+        parser.error('assets must be an absolute path')
     binding = json.loads(args.physical_binding.read_text()) if args.physical_binding else None
-    source = convert(args.profile, args.detection_dir, args.output, args.run_id, binding,args.simulation_initial_suite,environment=args.environment)
+    source = convert(args.profile, args.detection_dir, args.output, args.run_id, binding,args.simulation_initial_suite,
+                     environment=args.environment,assets=args.assets,asset_set_digest=args.asset_set_digest)
     print(json.dumps({"source": str(args.output / "source.json"), "scene_digest": source["scene"]["scene_digest"],
                       "observation_mode": source["observation_mode"]}))
 

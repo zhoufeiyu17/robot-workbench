@@ -72,6 +72,8 @@ def wait_owned(child, timeout, grace=30, *, failure_result=None):
             os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if group_alive(child.pid):raise
         else:
             deadline = time.monotonic() + grace
             while time.monotonic() < deadline:
@@ -84,6 +86,8 @@ def wait_owned(child, timeout, grace=30, *, failure_result=None):
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError:
+                    if group_alive(child.pid):raise
         child.wait(timeout=5)
     return 124 if timed_out else return_code
 

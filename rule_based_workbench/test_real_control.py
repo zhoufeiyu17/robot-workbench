@@ -189,7 +189,7 @@ def main(root, jaw_mapping_file=None):
                 owner.hardware=True; owner.hardware_binding=binding_path
                 try:
                     try:owner.submit(dict(action='preview_frozen',plan=plan,source=real))
-                    except ValueError as error:assert 'Playground' in str(error),error
+                    except ValueError as error:assert '证据未通过' in str(error),error
                     else:raise AssertionError('old rollout-only plan accepted by hardware preview')
                     geometric=deepcopy(plan)
                     geometric['planning_validation']=dict(schema_version='geometric_path_validation.v1',passed=True,
@@ -249,7 +249,12 @@ def main(root, jaw_mapping_file=None):
             if owner.runner.status=='READY':break
         assert owner.runner.status == 'READY', owner.snapshot()
         assert host_pause and owner.runner.frozen.schedule_slips and owner.runner.maximum_control_gap_s>=.15
+        submitted_before_seal=sum(kind=='command'for kind,row in sessions[0].events)
+        for _ in range(10):
+            if sessions[0].terminal is not None:break
+            owner.tick();clock[0]+=.01
         assert sessions[0].terminal == ('completed',None)
+        assert sum(kind=='command'for kind,row in sessions[0].events)==submitted_before_seal
         commands=[row for kind,row in sessions[0].events if kind=='command']
         runtime=sessions[0].timeline
         assert runtime['initialization_duration_s']>0

@@ -67,13 +67,16 @@ def source_fingerprint(geometry):
 
 class ManualSelfCollision:
     def __init__(self, geometry, *, prebuilt=None):
+        from arx_env.joint_head_jaw_mapping import command_max_mm
         began = time.perf_counter()
         if geometry.config.get('model_family') != 'ac_one': raise ValueError('nominal A1 geometry required')
-        data = json.loads(DEFAULT_PROXY.read_text()) if prebuilt is None else prebuilt
-        if (data.get('proxy_id') != proxy_digest(data) or data.get('schema') != 'manual_inscribed_spheres.v1' or data.get('policy') != POLICY
+        policy = dict(POLICY, jaws_mm=[command_max_mm(side) for side in ('left', 'right')])
+        path = Path(geometry.config.get('manual_self_collision_proxy', DEFAULT_PROXY))
+        data = json.loads(path.read_text()) if prebuilt is None else prebuilt
+        if (data.get('proxy_id') != proxy_digest(data) or data.get('schema') != 'manual_inscribed_spheres.v1' or data.get('policy') != policy
                 or data.get('source_fingerprint') != source_fingerprint(geometry)):
             raise ValueError('manual sphere asset/model/policy differs; explicitly rebuild and qualify the offline proxy')
-        self.geometry = geometry.with_gaps(83., 83.); self.parts = data['parts']
+        self.geometry = geometry.with_gaps(*policy['jaws_mm']); self.parts = data['parts']
         self.centers = np.asarray(data['centers'], dtype=float)
         self.radii = np.asarray(data['radii'], dtype=float)
         self.original_radii = np.asarray(data['original_radii'], dtype=float)
@@ -118,7 +121,7 @@ class ManualSelfCollision:
                 if static['side'] is None and (moving['name'], static['name']) in geometry.static_adjacent: continue
                 self.enabled[i, j] = self.enabled[j, i] = True
         self.part_sides = np.asarray([p['side'] or '' for p in self.parts]); self.front_roi = POLICY['front_support_x_min_m']
-        self.description = dict(backend='collection_inscribed_spheres_cpu', scope=POLICY['scope'], jaws_mm=POLICY['jaws_mm'],
+        self.description = dict(backend='collection_inscribed_spheres_cpu', scope=policy['scope'], jaws_mm=policy['jaws_mm'],
             environment_checked=False, exact_support_depth_checked=False, support_policy='coarse_local_inscribed_proxy',
             support_pair_exemptions=False, sphere_count=count, part_count=len(self.parts),
             support_local_sphere_count=int(self.support_local.sum()), proxy_id=data['proxy_id'],
@@ -159,13 +162,16 @@ class ManualSelfCollision:
             part = self.parts[index]; return (part['side'] or 'robot')+'/'+part['name']
         return [list(pair) for pair in dict.fromkeys((name(i), name(j)) for i, j in part_pairs)]
 
-    def check_path(self, start, target):
+    def check_path(self, start, target, *, limits=None):
         began = time.perf_counter(); start, target = self.geometry._q(start), self.geometry._q(target)
+        limits=np.asarray(self.geometry.limits if limits is None else limits,dtype=float)
+        if limits.shape!=(12,2) or not np.isfinite(limits).all() or np.any(limits[:,0]>limits[:,1]):
+            raise ValueError('twelve finite ordered command limits required')
         count = max(2, int(np.ceil(np.max(abs(target-start))/POLICY['maximum_joint_step_rad']))+1)
         result = dict(self.description, ok=True, samples=count, certified_continuous_collision=False)
         for index, fraction in enumerate(np.linspace(0., 1., count)):
             q = np.clip(start+fraction*(target-start), np.minimum(start, target), np.maximum(start, target))
-            if np.any(q < self.geometry.limits[:, 0]) or np.any(q > self.geometry.limits[:, 1]):
+            if np.any(q < limits[:, 0]) or np.any(q > limits[:, 1]):
                 result.update(ok=False, fraction=float(fraction), reason='joint limits', collisions=[]); break
             pairs = self.collisions(q)
             if pairs:

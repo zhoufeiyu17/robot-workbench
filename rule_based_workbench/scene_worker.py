@@ -61,6 +61,7 @@ class Worker:
             if hashlib.sha256(self.options.finger_envelope.read_bytes()).hexdigest()!=self.options.finger_envelope_sha256:
                 raise ValueError('pinned native finger envelope changed')
             key=_digest(dict(calibration=source['calibration_profile'],machine_asset=suite['episodes'][0]['machine_asset'],
+                scene_asset_set=(source.get('scene') or {}).get('asset_set'),
                 finger_envelope_sha256=self.options.finger_envelope_sha256,assets=str(self.options.assets),
                 cup_contact_preset=self.options.cup_contact_preset,environment=self.options.environment))
             if self.model_key is not None and self.model_key!=key:

@@ -251,6 +251,21 @@ def main(native_code):
     else:
         raise AssertionError('wrong asset identity accepted')
     selection_patch.stop()
+    from scene_assets import digest as asset_digest
+    from test_scene_assets import selection
+    from motiongen_targets import checked_reference
+    changed=deepcopy(planner);changed.cup.profile_sha256='f'*64
+    selected=selection(Path('/cpu-fixture-publication.json'))
+    selected['cup']['interaction_profile_sha256']='f'*64
+    selected['asset_set_digest']=asset_digest({k:v for k,v in selected.items()if k!='asset_set_digest'})
+    changed.scene_asset_set=selected
+    ref,expected=checked_reference(changed,data)
+    assert ref['cup_profile_sha256']=='f'*64
+    assert ref['asset_derivation']['contact_and_path_acceptance_reused']is False
+    changed.identity['native_geometry_sha256']='0'*64
+    try:checked_reference(changed,data)
+    except ValueError:pass
+    else:raise AssertionError('new cup reused a seed for different robot geometry')
     assert 'torch' not in sys.modules
     print('MotionGen task-space targets: relative-depth, fixed pitch/yaw, support, 17mm lane and identity checks passed')
 

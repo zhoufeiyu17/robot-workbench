@@ -15,6 +15,21 @@ from robot_workbench.workflows import CalibrationWorkflow,CollectionWorkflow,cal
 
 
 class WorkflowAdapterTest(unittest.TestCase):
+    def test_research_manual_preview_reuses_calibration_geometry_and_research_credential(self):
+        flow=CalibrationWorkflow.__new__(CalibrationWorkflow)
+        capture={}
+        def geometry_preview(body,*,submit_preview,start_q):
+            capture.update(body=body,start_q=start_q);return submit_preview(body['waypoints'])
+        flow.app=SimpleNamespace(hardware_trajectory_preview=geometry_preview)
+        flow.device=SimpleNamespace(snapshot=lambda business:dict(calibration_feedback=dict(qpos=[0.]*14)),
+            submit=Mock(return_value={'purpose':'research-manual'}))
+        body=dict(q12=[.01]*12,speeds12=[.1]*12,jaw_gap_mm=[80,80],jaw_speed_mm_s=10)
+        result=flow.manual_preview(body,business='research')
+        self.assertEqual(result['purpose'],'research-manual');self.assertEqual(capture['start_q'],[0.]*12)
+        self.assertEqual(flow.device.submit.call_args.args[0],'research')
+        self.assertEqual(flow.device.submit.call_args.args[1]['action'],'preview_workbench')
+        with self.assertRaisesRegex(ValueError,'single-arm'):flow.manual_preview(dict(body,active_arm='left'),business='research')
+
     def test_finished_calibration_does_not_keep_environment_busy_via_old_active_flag(self):
         flow=CalibrationWorkflow.__new__(CalibrationWorkflow);flow.lock=threading.Lock();flow.active=True;flow.generation=3
         for status in ('failed','stopped','completed'):
@@ -578,12 +593,31 @@ class WorkflowAdapterTest(unittest.TestCase):
         legacy.app.arrival_state=Mock(return_value={'error':'CPU fixture has no arrival feed'})
         workflow.refresh()
         catalog={row['id']:row for row in workflow.results()}
-        self.assertIn('metrics_rectified_px',catalog[head['id']]['details'])
-        self.assertEqual(catalog[wrist['id']]['details']['head_result_id'],head['id'])
+        bundle=next(row for row in catalog.values() if row['kind']=='calibration')
+        self.assertNotIn(head['id'],catalog);self.assertNotIn(wrist['id'],catalog)
+        self.assertIn('metrics_rectified_px',bundle['details'])
+        self.assertEqual(bundle['components'],dict(head=head['id'],wrist=wrist['id']))
+        self.assertEqual(workflow.mesh_calibrations()[0]['id'],bundle['id'])
+        self.assertEqual(workflow.mesh_calibrations()[0]['components'],bundle['components'])
+        exported=workflow.download(bundle['id'])
+        self.assertEqual(exported['schema'],'robot_workbench.calibration_bundle.v1')
+        self.assertEqual(exported['records']['head']['id'],head['id'])
+        self.assertEqual(exported['records']['wrist']['dependency_id'],head['id'])
+        self.assertNotIn('path',exported['records']['head'])
+        self.assertEqual(set(exported['records']),{'head','wrist'})
+        saved_head=legacy.app.calibration_store_record(head['id'])
+        saved_wrist=legacy.app.calibration_store_record(wrist['id'])
+        from arx_env.joint_head_calibration_store import bundle_records
+        for broken in (dict(saved_wrist,dependency_id='another-head'),dict(saved_wrist,robot_id='another-robot')):
+            with self.assertRaises(ValueError):bundle_records(saved_head,broken)
+        self.assertEqual(exported,workflow.download(bundle['id']))
+        with patch.object(legacy.app,'action',side_effect=AssertionError('bundle replay must not change live selection')):
+            selected=workflow.select_result({'result_id':bundle['id']})
+        self.assertEqual(selected['replay_context']['result_id'],bundle['id'])
         self.assertEqual(workflow.snapshot()['calibration_tools']['installed']['head_id'],head['id'])
         self.assertTrue(workflow.snapshot()['calibration_tools']['installed']['verified'])
         self.assertEqual(workflow.download(head['id']),legacy.app.calibration_store_record(head['id']))
-        self.assertIn('/api/calibration-file?',catalog[head['id']]['download_url'])
+        self.assertIn('/api/calibration-file?',bundle['download_url'])
         with self.assertRaises(ValueError):workflow.download('../head.json')
 
     def test_original_C_workflow_fit_source_and_wrist_only_pipeline_entry(self):
@@ -756,6 +790,26 @@ class WorkflowAdapterTest(unittest.TestCase):
                 self.assertIsNone(value['failed_stage']);self.assertNotIn('上一轮',value['message'])
                 self.assertEqual(value['overall_progress']['current'],0)
                 self.assertTrue(value['progress']['indeterminate'])
+
+    def test_independent_plan_keeps_prior_failure_out_of_current_pipeline(self):
+        flow=self.calibration();flow.app.pipeline_run_id=None
+        prior=dict(run_id='old-run',aborted='FileNotFoundError: old seed',failed_phase='腕半场：规划',
+                   installed=dict(verified=True),steps=[])
+        flow.app.runtime_state.return_value=dict(status='READY',workflow=dict(kind='wrist'),pipeline=prior)
+        flow.operation=dict(id='new-plan',action='plan',kind='wrist',message='planning')
+        flow.refresh();value=flow.snapshot()
+        self.assertEqual(value['id'],'new-plan');self.assertEqual(value['status'],'completed')
+        self.assertEqual(value['pipeline'],{});self.assertEqual(value['previous_pipeline']['aborted'],prior['aborted'])
+        self.assertNotIn('installed',value['quality']);self.assertEqual(value['quality']['results'],[])
+        self.assertEqual(flow.app.runtime_state.return_value['pipeline'],prior,'historical receipts remain intact')
+        flow.operation=None;flow.app.restored_pipeline_report_id='old-run';flow.refresh();restored=flow.snapshot()
+        self.assertEqual(restored['status'],'idle');self.assertEqual(restored['pipeline'],{})
+        self.assertEqual(restored['previous_pipeline']['aborted'],prior['aborted'])
+        self.assertNotIn('FileNotFoundError',restored['message'])
+        flow.app.runtime_state.return_value['status']='REJECTED';flow.refresh()
+        self.assertEqual(flow.snapshot()['status'],'failed','a fresh live rejection must remain visible')
+        flow.app.runtime_state.return_value['status']='READY';flow.app.restored_pipeline_report_id=None;flow.refresh()
+        self.assertEqual(flow.snapshot()['status'],'failed','a live quality failure must not be mistaken for a restored failure')
 
     def test_capture_retry_starts_at_zero_and_ignores_prior_batch_completion(self):
         flow,state=self.capture_progress_fixture()

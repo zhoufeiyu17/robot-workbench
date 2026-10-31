@@ -287,6 +287,19 @@ def main():
         assert finalize_collection(physical_only,reported,runner=runner)['status']=='ready'
         assert len(calls)==count_after_physical
         assert playback(dict(physical_only,render_replay=True))[0]['status']=='unavailable'
+        # Raw/video completion cannot advertise successful collection when the required dataset fails.
+        dataset_config=dict(physical_only,dataset_format='lerobot-v2.1')
+        with patch('robot_workbench.recording_process.export_lerobot_process',side_effect=ValueError('dataset disk failure')):
+            result=finalize_collection(dataset_config,reported,runner=runner)
+        assert result['status']=='failed' and result['dataset_ready'] is False,result
+        assert not summary(dataset_config,actual_owner)['pipeline']['collection_complete']
+        saved=dict(status='NATIVE_READBACK_PASS',format_version='v2.1',root=str(root/'physical-only/lerobot'),
+            episodes=[dict(raw_manifest_sha256=sha256(root/'raw/manifest.json'))])
+        with patch('robot_workbench.recording_process.export_lerobot_process',return_value=saved) as exporter:
+            result=finalize_collection(dataset_config,reported,runner=runner)
+        assert result['status']=='ready' and result['dataset_ready'],result
+        assert summary(dataset_config,actual_owner)['pipeline']['collection_complete']
+        assert exporter.call_count==1 and len(calls)==count_after_physical
         def rejected_directory(directory):
             result=finalize_collection(local_config,dict(local_reported,directory=directory),runner=runner)
             assert result['status']=='failed',result

@@ -145,6 +145,8 @@ def cpu_fixture(kind,port,environment,model_port):
                 value['stop_requested']=False
                 result=dict(token=value['maintenance']['token'],status='ready')
                 value['begin_cache'][body['request_id']]=result
+                if value.get('recovery_changes_after_begin'):
+                    value['recoverable_fault']=None;value['nonrecoverable_fault']='FAULT_STOP_UNCONFIRMED'
                 if value['lose_begin']:value['lose_begin']=False;self.connection.close();self.close_connection=True;return
                 return self.send(200,result)
             window=value['maintenance']
@@ -163,7 +165,8 @@ def cpu_fixture(kind,port,environment,model_port):
                 window['target']=dict(server_instance_id=instance,device_id='cpu-device',runtime_nonce=None)
                 return self.send(200,{'connected':False,'release_receipt':value['release_receipt'],'target':window['target']})
             if action in ('connect_control','recover_control'):
-                if environment=='physical' and body.get('arms_supported') is not True:return self.send(409,{'error':'support required'})
+                if action=='connect_control' and environment=='physical' and body.get('arms_supported') is not True:return self.send(409,{'error':'support required'})
+                if action=='recover_control' and not(value['connected']and value['recoverable_fault']):return self.send(409,{'error':'in-place recovery unavailable'})
                 value['connected']=True;window['target']=target();window['active_action']=action
                 time.sleep(value['connect_delay']);window['active_action']=None
                 if value['connect_partial'] or value['stop_requested']:
@@ -292,6 +295,19 @@ class ManagementTests(unittest.TestCase):
                     self.assertFalse(manager.verify(missing)['ok'])
                     legacy=dict(result,collection={'ready':True})
                     self.assertFalse(manager.verify(legacy)['ok'])
+
+    def test_triton_proxy_is_model_only_and_requires_manager_identity(self):
+        m=self.h['manager'];m.triton_preview=Mock()
+        m.triton_preview.catalog.return_value=dict(configured=True,available=True,sources=[],models=[])
+        m.triton_preview.start.return_value=dict(job_id='cpu-job',status='QUEUED')
+        code,body,_=self.request('/api/triton/catalog?environment=fake');self.assertEqual(code,200);self.assertEqual(body['models'],[])
+        body=dict(environment='fake',business='inference',model_id='cpu-model',request_id='cpu-request')
+        self.assertEqual(self.request('/api/triton/infer',body)[0],403)
+        headers={'Content-Type':'application/json','X-CSRF-Token':m.csrf,'X-Workbench-Deployment':m.deployment.sha256}
+        code,reply,_=self.request('/api/triton/infer',body,headers=headers)
+        self.assertEqual(code,202,reply);m.triton_preview.start.assert_called_once_with('infer',dict(model_id='cpu-model',request_id='cpu-request'))
+        self.assertFalse(m.state()['runtime']['connected'])
+        self.assertEqual(self.request('/api/triton/catalog?environment=physical')[0],409)
 
     def setUp(self):
         self.directory=TemporaryDirectory();self.addCleanup(self.directory.cleanup)
@@ -1110,6 +1126,29 @@ class ManagementTests(unittest.TestCase):
         _,job,_=self.start('recover_control',h=unknown);result=self.wait_job(job,unknown)
         self.assertEqual(result['status'],'unknown',result)
         self.assertEqual(unknown['services']['workbench'].starts,1);self.assertEqual(unknown['services']['workbench'].stops,0)
+
+    def test_physical_in_place_recovery_needs_no_support_but_never_reconnects_without_it(self):
+        h=self.harness('physical');self.configure(h=h,connected=True,recoverable_fault='confirmed software cancellation')
+        manager=h['manager'];manager.refresh()
+        self.assertFalse(manager.snapshot()['operations']['recover_control']['requires_support'])
+        status,job,_=self.start('recover_control',h=h,support=False);self.assertEqual(status,200,job)
+        result=self.wait_job(job,h);self.assertEqual(result['status'],'succeeded',result)
+        self.assertTrue(result['result']['control']['recovered'])
+        events=json_request(h['services']['workbench'].port,'/fixture')['events']
+        self.assertIn('recover_control',events);self.assertNotIn('release',events);self.assertNotIn('connect_control',events)
+        self.configure(h=h,connected=False);manager.refresh()
+        self.assertTrue(manager.snapshot()['operations']['recover_control']['requires_support'])
+        status,result,_=self.start('recover_control',h=h,support=False);self.assertNotEqual(status,200)
+        self.assertEqual(result.get('code'),'support_required',result)
+
+    def test_in_place_recovery_does_not_fall_back_to_release_after_conditions_change(self):
+        h=self.harness('physical')
+        self.configure(h=h,connected=True,recoverable_fault='confirmed software cancellation',recovery_changes_after_begin=True)
+        status,job,_=self.start('recover_control',h=h,support=False);self.assertEqual(status,200,job)
+        result=self.wait_job(job,h);self.assertEqual(result['status'],'failed',result)
+        self.assertEqual(result['error']['code'],'support_required')
+        events=json_request(h['services']['workbench'].port,'/fixture')['events']
+        for name in ('release','connect_control','recover_control','ops_start_cameras'):self.assertNotIn(name,events)
 
     def test_legacy_session_routes_cannot_reach_a_second_lifecycle_writer(self):
         state=self.h['manager'].snapshot();before=json_request(self.h['services']['workbench'].port,'/fixture')['events']

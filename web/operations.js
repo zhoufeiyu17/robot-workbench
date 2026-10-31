@@ -59,7 +59,7 @@ const canonical=value=>JSON.stringify(value,(_key,item)=>item&&typeof item==='ob
 const same=(a,b)=>canonical(a)===canonical(b);
 const describeTarget=target=>target?`${target.environment==='physical'?'Physical · 物理设备':'Fake · 开发设备'} / ${target.id||target.device_id||target.robot_id||'未命名设备'} / ${target.manager_instance||target.manager_instance_id||target.deployment_id||'未提供管理器版本'}`:'尚未核验目标';
 const readable=value=>typeof value==='string'?value:JSON.stringify(value,null,2);
-export const phaseText=value=>({queued:'已排队',preflight:'核验当前条件',run:'执行已确认操作',verify:'核验实际结果',complete:'完成',recovery:'等待核验并结束遗留维护',start_workbench:'启动工作台后端',stop_workbench:'等待旧后端退出',start_model:'启动模型服务',restart_model:'重启模型服务',waiting_model_endpoint:'等待模型接口就绪',warming_model:'加载并预热模型',camera_service:'准备相机服务',start_cameras:'启动相机服务',restart_cameras:'重启相机服务',stop_cameras:'等待相机服务退出',waiting_camera_source:'等待相机真实帧',rebinding_camera_clients:'重新绑定相机消费者',resetting_camera_usb:'复位指定USB相机',restoring_warm_model_binding:'恢复原暖模型绑定',releasing_control:'释放设备控制',verifying_old_maintenance:'核验遗留维护'})[value]||value||'未知';
+export const phaseText=value=>({preparing_exit_home:'准备退出前回零审阅',returning_home:'执行平滑低速回零',waiting_exit_home:'等待回零完成与静止',stopping_environment:'退出工作台资源',restoring_collection_web:'恢复原数采网页',waiting_collection_web:'核验原数采入口',stopping_current_control:'停止旧控制任务',waiting_control_stop:'等待停止与静止反馈',checking_collection_handoff:'核验数采交接',stopping_collection:'正常结束数采',waiting_collection_exit:'等待数采保存与退出',stopping_collection_web:'暂停数采网页',waiting_collection_web_exit:'核验数采进程退出',waiting_control_owner:'等待控制服务就绪',recovering_workbench_control:'接入并核验工作台控制',queued:'已排队',preflight:'核验当前条件',run:'执行已确认操作',verify:'核验实际结果',complete:'完成',recovery:'等待核验并结束遗留维护',start_workbench:'启动工作台后端',stop_workbench:'等待旧后端退出',start_model:'启动模型服务',restart_model:'重启模型服务',waiting_model_endpoint:'等待模型接口就绪',warming_model:'加载并预热模型',camera_service:'准备相机服务',start_cameras:'启动相机服务',restart_cameras:'重启相机服务',stop_cameras:'等待相机服务退出',waiting_camera_source:'等待相机真实帧',rebinding_camera_clients:'重新绑定相机消费者',resetting_camera_usb:'复位指定USB相机',restoring_warm_model_binding:'恢复原暖模型绑定',releasing_control:'释放设备控制',verifying_old_maintenance:'核验遗留维护'})[value]||value||'未知';
 export const jobText=job=>{
   if(!job)return '尚无操作记录';
   if(job.status==='succeeded')return job.verification?.ok===true?'已完成 · 后置核验通过':'返回成功状态，但后置核验尚未通过';
@@ -71,7 +71,13 @@ export function operationsGuidance(state,stale=false){
   const missing=(state?.dependencies||[]).find(row=>row.category==='onsite'&&['blocked','failed','waiting_onsite'].includes(row.status));
   if(stale||!state)return {title:'当前状态尚未核验',message:'等待管理服务返回新状态；历史结果不能代表服务现在仍然可用。'};
   if(state.active_job)return {title:(state.active_job.label||'维护操作')+' · '+jobText(state.active_job),message:phaseText(state.active_job.phase)+'。当前操作完成并通过核验后，再继续下一步。',current:true};
+  const exited=(state.recent_jobs||[]).some(job=>job?.request?.action==='exit_environment'&&job.status==='succeeded'&&job.verification?.ok===true);
+  const resources=state.services||health.services||{};
+  if(exited&&['workbench','control_owner','cameras','model'].every(name=>resources[name]?.state==='stopped'&&resources[name]?.running===false))
+    return {title:'工作台环境已退出',message:'工作台控制、相机和模型已核验释放，原数采网页已恢复。请在数采端继续操作；此管理页保留回执，不会自动接回设备。'};
   if(missing)return {title:'等待现场处理 · '+missing.label,message:missing.reason||missing.actual||'请按依赖要求处理现场条件，再重新检查。',action:missing.recommended_action||'status_check'};
+  if(state.operations?.reclaim_control?.allowed===true&&(!runtime.connected||state.recovery?.required||['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(runtime.state)))
+    return {title:'清理旧控制并接入工作台',message:state.operations.reclaim_control.impact,action:'reclaim_control'};
   if(state.recovery?.required)return {title:'先处理未完成的维护',message:'上次操作的结果尚未核验。先结束遗留维护，再开始新的操作；不会恢复旧动作。',action:'recover_maintenance'};
   if(runtime.release_receipt?.status==='unconfirmed')return {title:'设备释放结果未知',message:runtime.release_receipt.message||'SDK 关闭尚未确认；请先核对恢复计划和现场条件。',action:'recover_control'};
   if(['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(runtime.state))return {title:'控制故障仍锁定',message:runtime.reason||'反馈恢复不代表控制恢复；请核对中断恢复的范围与现场条件。',action:'recover_control'};
@@ -147,7 +153,7 @@ export function createOperations({document:doc,fetch:request,container,location=
   const health=make('div',undefined,'ops-health'),cards=make('div',undefined,'ops-groups');container.append(health);
   const current=make('section');current.id=prefix+'-current';current.setAttribute('aria-label','当前管理操作');container.append(current,cards);
   const groups=[
-    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['connect_control','release_control','recover_control','verify_hold']},
+    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['reclaim_control','exit_environment','connect_control','release_control','recover_control','verify_hold']},
     {title:'依赖与能力',description:'预置、可准备、现场条件分别核验；各业务依赖独立判断。',actions:['prepare_environment','prepare_collection','prepare_model']},
     {title:'服务与资源',description:'按实际影响管理已登记服务；计算角色可单独重启，其他健康服务保留。',actions:['start_cameras','stop_cameras','restart_cameras','rebind_cameras','restart_model','stop_model','restart_detector','restart_planner','restart_scene','restart_workbench','stop_workbench','reset_camera_head','reset_camera_left','reset_camera_right'],collapsed:true},
     {title:'诊断与回执',description:'当前事实与历史操作分开；进程退出、SDK 释放与物理保持分别核验。',actions:['status_check','recover_maintenance']}
@@ -167,8 +173,8 @@ export function createOperations({document:doc,fetch:request,container,location=
   const environmentSelect=doc.getElementById('environment');
   const query=new URLSearchParams(location?.search||'');
   const queryEnvironment=query.get('environment')==='fake'?'fake':'physical';
-  const validBusiness=value=>['calibration','collection','inference'].includes(value)?value:'calibration';
-  if(container.dataset.operationsStandalone==='true'&&environmentSelect)environmentSelect.value=queryEnvironment;
+  const validBusiness=value=>['calibration','collection','inference','research'].includes(value)?value:'calibration';
+  if(environmentSelect&&(container.dataset.operationsStandalone==='true'||['fake','physical'].includes(query.get('environment'))))environmentSelect.value=queryEnvironment;
   let environment=environmentSelect?.value==='fake'?'fake':environmentSelect?.value==='physical'?'physical':queryEnvironment;
   let state=null,stale=true,posting=false,stopping=false,stopNotice='',review=null,lastJob=null,uncertain=null,destroyed=false,timer=null,generation=0,reading=null,sequence=0;
   const buttons=new Map(),reasons=new Map();
@@ -228,7 +234,7 @@ export function createOperations({document:doc,fetch:request,container,location=
     const link=doc.getElementById('operations-link');
     const business=validBusiness(link?.dataset.business||query.get('business'));
     const contextQuery='environment='+environment+'&business='+business;
-    if(link)link.href='/operations?'+contextQuery;
+    if(link)link.href=container.dataset.operationsStandalone==='true'?'/operations?'+contextQuery:'#operations-panel';
     const returnLink=doc.getElementById('operations-return');if(returnLink)returnLink.href='/?'+contextQuery;
     badge.textContent=environment==='physical'?'Physical · 物理设备':'Fake · 开发设备';identity.textContent=describeTarget(state?.target);
     versionWarning.hidden=!state||compatible();versionWarning.textContent=versionWarning.hidden?'':versionReason();reloadButton.hidden=versionWarning.hidden;
@@ -391,7 +397,7 @@ export function createOperations({document:doc,fetch:request,container,location=
   }
   const onEnvironment=()=>{
     const access=doc.workbenchEnvironmentAccess,next=environmentSelect.value;
-    if(access?.navigateEnvironment){environmentSelect.value=environment;void access.navigateEnvironment(next,{page:'/operations'});}
+    if(access?.navigateEnvironment){environmentSelect.value=environment;void access.navigateEnvironment(next,{page:container.dataset.operationsStandalone==='true'?'/operations':'/'});}
     else setEnvironment(next);
   };
   environmentSelect?.addEventListener('change',onEnvironment);

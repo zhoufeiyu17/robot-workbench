@@ -45,6 +45,17 @@ def checked_reference(planner,data,*,reference=None,urdf_path=None):
         from a1_asset_derivation import derive_cup_reference
         ref=derive_cup_reference(ref,urdf_path)
     assisted=getattr(planner,'operator_assisted_cup_geometry',None)
+    selection=getattr(planner,'scene_asset_set',None)
+    if reference is None and selection is not None:
+        from scene_assets import validate
+        validate(selection)
+        if (selection['cup']['interaction_profile_sha256']!=expected['cup_profile_sha256']
+                or any(ref.get(key)!=expected[key] for key in expected if key!='cup_profile_sha256')):
+            raise ValueError('selected cup seed requires the same checked A1 mechanical geometry')
+        ref=dict(ref,cup_profile_sha256=expected['cup_profile_sha256'],
+            asset_derivation=dict(scope='unverified_task_pose_seed',asset_set_digest=selection['asset_set_digest'],
+                parent_cup_profile_sha256=ref['cup_profile_sha256'],current_cup_profile_sha256=expected['cup_profile_sha256'],
+                contact_and_path_acceptance_reused=False))
     if reference is None and assisted is not None:
         # This retains a numerical search seed, never the previous cup's grasp proof.
         if (assisted.get('profile_sha256')!=expected['cup_profile_sha256']

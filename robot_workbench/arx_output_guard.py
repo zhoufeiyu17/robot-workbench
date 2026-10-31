@@ -9,8 +9,10 @@ from collections import deque
 from copy import deepcopy
 import faulthandler
 import json
+import mmap
 import os
 from pathlib import Path
+import resource
 import select
 import secrets
 import signal
@@ -22,7 +24,7 @@ import sys
 import threading
 import time
 
-from .release_trace import ReleaseTrace
+from .release_trace import ReleaseTrace, memory_file, archive_memory_file
 
 TIMEOUT = .1  # Existing feedback-loss budget, now measured from actual CAN RX.
 STARTUP_TIMEOUT = 10.
@@ -59,6 +61,9 @@ class FeedbackLatch:
         self.release_events=deque(maxlen=16);self.release_events_truncated=0
         self.sdk_contract=sdk_contract
         self.sdk_instances={};self.quiesce_reports={};self.generation=None
+        self.rx_evidence={bus:dict(frames=0,valid_feedback_frames=0,stale_frames=0,future_frames=0,
+            socket_drops=0,last_rx_age_s=None,maximum_rx_age_s=0.,last_kernel_rx_ns=None,last_read_monotonic_s=None)
+            for bus in self.buses}
 
     def begin(self):
         if self.phase != 'idle' or self.reason:
@@ -122,6 +127,12 @@ class FeedbackLatch:
                 if received_at>self.clock():return
                 self.output_started.setdefault(key,received_at)
             return
+        update = self.validated_feedback(bus, can_id, data, received_at, flags)
+        if update is not None:self.apply_feedback(*update)
+
+    def validated_feedback(self, bus, can_id, data, received_at, flags=0):
+        """Validate at reception time, before optional normal-state coalescing."""
+        if bus in self.retired:return None
         decoded = feedback_motor(can_id, data, flags)
         if self.phase == 'idle' or self.reason or decoded is None or bus not in self.buses:
             return
@@ -134,6 +145,11 @@ class FeedbackLatch:
         # waits 100 ms before enabling it. That clear reply is not evidence that
         # an output stream has started. Once enabled, the 100 ms latch applies.
         if self.phase=='starting' and key not in self.output_started:return
+        self.rx_evidence[bus]['valid_feedback_frames']+=1
+        return bus,motor,status,received_at
+
+    def apply_feedback(self, bus, motor, status, received_at):
+        key=(bus,motor)
         if status is not None:
             self.statuses[key]=status
             if status not in (0,1):self.trip(f'{bus} motor {motor} fault status {status}')
@@ -178,6 +194,7 @@ class FeedbackLatch:
         # Called for persistence only after termination or while outputs are idle.
         now = self.trip_time if self.trip_time is not None else self.clock()
         return dict(sample_monotonic_s=now,phase=self.phase,phase_before_latch=self.trip_phase,
+            receive_evidence=deepcopy(self.rx_evidence),
             last_heartbeat_monotonic_s=self.heartbeat,last_heartbeat_age_s=max(0.,now-self.heartbeat),
             motor_rx_age_s={f'{bus}:{motor}':None if (bus,motor) not in self.seen else max(0.,now-self.seen[bus,motor])
                             for bus,motor in sorted(self.expected)},retired_buses=sorted(self.retired),
@@ -223,29 +240,172 @@ def parent_death(parent_pid):
     if os.getppid() != parent_pid:os._exit(125)
 
 
+class CANBatchTiming:
+    """Wall spans for all batches; CPU detail at pending IPC; no hot-path IO."""
+    def __init__(self,detailed=True):
+        self.stages={}
+        self.detailed=detailed
+        self.usage=self.read_usage()if detailed else None
+        self.started=self.last=time.monotonic_ns()
+        self.cpu=self.last_cpu=time.thread_time_ns()if detailed else None
+
+    @staticmethod
+    def read_usage():
+        kind=getattr(resource,'RUSAGE_THREAD',None)
+        if kind is None:return None
+        try:return resource.getrusage(kind)
+        except (OSError,ValueError):return None
+
+    def mark(self,phase):
+        now=time.monotonic_ns();cpu=time.thread_time_ns()if self.detailed else None
+        row=self.stages.setdefault(phase,[0,0,0])
+        row[0]+=now-self.last
+        if cpu is not None:row[1]+=cpu-self.last_cpu
+        row[2]+=1
+        self.last,self.last_cpu=now,cpu
+
+    def finish(self):
+        usage=self.read_usage()if self.detailed else None
+        fields=('ru_utime','ru_stime','ru_nvcsw','ru_nivcsw','ru_minflt','ru_majflt')
+        return dict(schema='guard_can_batch_timing.v1',wall_s=(self.last-self.started)/1e9,
+            cpu_s=(self.last_cpu-self.cpu)/1e9 if self.detailed else None,
+            stages={k:dict(wall_s=v[0]/1e9,cpu_s=v[1]/1e9 if self.detailed else None,segments=v[2])for k,v in self.stages.items()},
+            thread_usage_delta=None if usage is None or self.usage is None else
+                {k:getattr(usage,k)-getattr(self.usage,k)for k in fields},
+            scope='Instrumented batch includes probe overhead; thread usage separates user/kernel CPU, switches and page faults')
+
+
+def receive_ready_can(ready,readers,latch,timing=None):
+    """Bound connected CAN work before servicing IPC; retain queued RX stamps."""
+    frames=0;pending={}
+    coalesce=latch.phase in ('active','releasing')
+    def flush():
+        for update in pending.values():latch.apply_feedback(*update)
+        pending.clear()
+        if timing is not None:timing.mark('apply_coalesced')
+    for sock in ready:
+        if sock not in readers:continue
+        started=time.monotonic()
+        for index in range(128):
+            # Probe/activation keep their original acquisition ordering. Once
+            # connected, neither busy bus may monopolize a heartbeat roundtrip.
+            if index and latch.phase in ('active','releasing')and time.monotonic()-started>=.0005:break
+            if timing is not None:timing.mark('loop')
+            try:raw,ancillary,flags,_addr=sock.recvmsg(16,128)
+            except BlockingIOError:
+                if timing is not None:timing.mark('recvmsg')
+                break
+            if timing is not None:timing.mark('recvmsg')
+            frames+=1
+            if len(raw)!=16 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):continue
+            ident,size,data=struct.unpack('=IB3x8s',raw)
+            if size!=8:continue
+            stamp=next((v for level,kind,v in ancillary if level==socket.SOL_SOCKET and kind==35),None)
+            if stamp is None or len(stamp)<struct.calcsize('@ll'):continue
+            seconds,nanos=struct.unpack('@ll',stamp[:struct.calcsize('@ll')])
+            if timing is not None:timing.mark('header_timestamp')
+            kernel_ns=seconds*1_000_000_000+nanos
+            age=(time.time_ns()-kernel_ns)/1e9
+            read_at=time.monotonic();received=read_at-age
+            row=latch.rx_evidence[readers[sock]];row['frames']+=1
+            row['last_rx_age_s']=age;row['maximum_rx_age_s']=max(row['maximum_rx_age_s'],age)
+            row['last_kernel_rx_ns']=kernel_ns;row['last_read_monotonic_s']=read_at
+            if age>TIMEOUT:row['stale_frames']+=1
+            elif age<0:row['future_frames']+=1
+            for level,kind,value in ancillary:
+                if level==socket.SOL_SOCKET and kind==40 and len(value)>=4:
+                    row['socket_drops']=struct.unpack('=I',value[:4])[0]  # Linux SO_RXQ_OVFL.
+            if timing is not None:timing.mark('clock_mapping')
+            if received>=latch.started:
+                if not coalesce:latch.receive(readers[sock],ident,data[:size],received,flags)
+                else:
+                    update=latch.validated_feedback(readers[sock],ident,data[:size],received,flags)
+                    if timing is not None:timing.mark('validate_feedback')
+                    if update is not None:
+                        bus,motor,status,stamp=update
+                        if status not in (None,1):
+                            # Preserve the complete normal prefix before an
+                            # abnormal/disabled transition; never merge it away.
+                            flush();latch.apply_feedback(*update)
+                        elif (bus,motor)not in pending or stamp>pending[bus,motor][3]:
+                            pending[bus,motor]=update
+            if timing is not None:timing.mark('merge_or_transition')
+            if latch.reason:return frames
+    flush()
+    return frames
+
+
 class GuardClient:
-    def __init__(self, connection):
+    def __init__(self, connection, failure_trace=None):
         self.connection = connection;self.lock = threading.Lock();self.pending = b''
-        self.release_trace=None
+        self.release_trace=None;self.failure_trace=failure_trace
 
     def call(self, action, **payload):
+        requested=time.monotonic_ns();requested_cpu=time.thread_time_ns()
         with self.lock:
+            started=time.monotonic_ns();stage='timeout_setup'
+            budget=.5 if action in ('hello','begin') else TIMEOUT if action=='heartbeat' else .05
             try:
-                self.connection.settimeout(.5 if action in ('hello','begin') else .05)
+                self.connection.settimeout(budget);stage='send'
                 self.connection.sendall(json.dumps({'action': action,**payload}).encode()+b'\n')
+                sent=time.monotonic_ns();stage='receive'
                 while b'\n' not in self.pending:
                     part = self.connection.recv(4096)
                     if not part:raise ConnectionError('CAN output supervisor disconnected')
                     self.pending += part
                     if len(self.pending) > 8192:raise ValueError('oversized guard response')
-                line,self.pending = self.pending.split(b'\n',1);reply = json.loads(line)
-            except (OSError, ValueError):
+                line,self.pending = self.pending.split(b'\n',1);stage='decode';reply = json.loads(line)
+            except (OSError, ValueError) as error:
+                if self.failure_trace is not None:
+                    try:self.failure_trace.write(dict(schema='guard_ipc_failure.v1',source_pid=os.getpid(),source_tid=threading.get_native_id(),
+                        action=action,stage=stage,started_monotonic_ns=started,sent_monotonic_ns=locals().get('sent'),
+                        failed_monotonic_ns=time.monotonic_ns(),budget_s=budget,exception=type(error).__name__,errno=getattr(error,'errno',None),
+                        message=str(error)[:160],pending_bytes=len(self.pending),self_sigkill_requested=True))
+                    except Exception:pass  # Diagnostic failure never delays the existing fail-stop.
                 # The supervisor also owns and terminates us on IPC failure. Do
                 # not call SDK close(), whose destructor can resume sending.
                 os.kill(os.getpid(), signal.SIGKILL)
                 raise
             if reply.get('error'):raise ValueError(reply['error'])
+            returned=time.monotonic_ns()
+            self.last_call_timing=dict(action=action,lock_wait_s=(started-requested)/1e9,
+                encode_send_s=(sent-started)/1e9,response_wait_decode_s=(returned-sent)/1e9,
+                total_s=(returned-requested)/1e9,sent_monotonic_ns=sent,returned_monotonic_ns=returned,
+                cpu_s=(time.thread_time_ns()-requested_cpu)/1e9,
+                server=reply.get('server_timing'))
             return reply
+
+
+class IPCFailureTrace:
+    """One bounded failure-only shared-memory slot, prefaulted before SDK startup."""
+    SIZE=4096
+    def __init__(self,fd,file=None):
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode)or info.st_uid!=os.getuid()or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size!=self.SIZE:
+            raise ValueError('owned private IPC failure memory required')
+        self.fd,self.file=fd,file;self.memory=mmap.mmap(fd,self.SIZE)
+    @classmethod
+    def create(cls):
+        file=memory_file('workbench-ipc-failure',cls.SIZE);result=cls(file.fileno(),file)
+        result.memory[:]=b'\0'*cls.SIZE
+        return result
+    def write(self,value):
+        raw=json.dumps(value,separators=(',',':'),allow_nan=False).encode()
+        if len(raw)>self.SIZE-8:raise ValueError('bounded failure receipt required')
+        self.memory[:8]=struct.pack('=II',1,len(raw));self.memory[8:8+len(raw)]=raw
+        self.memory[:8]=struct.pack('=II',2,len(raw))
+    def snapshot(self):
+        header=self.memory[:8];sequence,size=struct.unpack('=II',header)
+        if sequence==0:return None
+        if sequence!=2 or not 0<size<=self.SIZE-8:return dict(status='partial')
+        raw=self.memory[8:8+size]
+        if self.memory[:8]!=header:return dict(status='partial')
+        try:return json.loads(raw)
+        except (ValueError,UnicodeDecodeError):return dict(status='partial')
+    def close(self):
+        self.memory.close()
+        if self.file is not None:self.file.close()
+        else:os.close(self.fd)
 
 
 def bind_child():
@@ -263,7 +423,10 @@ def bind_child():
     os.set_inheritable(trace_fd,False)
     faulthandler.enable(file=trace_fd,all_threads=True)
     faulthandler.register(signal.SIGUSR1,file=trace_fd,all_threads=True,chain=False)
-    _client = GuardClient(connection)
+    failure_fd=os.environ.pop('ROBOT_WORKBENCH_GUARD_FAILURE_FD',None)
+    failure_trace=IPCFailureTrace(int(failure_fd)) if failure_fd is not None else None
+    if failure_fd is not None:os.set_inheritable(int(failure_fd),False)
+    _client = GuardClient(connection,failure_trace)
     _client.trace_fd = trace_fd  # Keep open for the entire owned SDK process.
     diagnostic_fd=os.environ.pop('ROBOT_WORKBENCH_GUARD_RELEASE_FD',None)
     if diagnostic_fd is not None:
@@ -296,6 +459,7 @@ def open_can(bus):
     sock=socket.socket(socket.PF_CAN,socket.SOCK_RAW,socket.CAN_RAW)
     try:
         sock.setsockopt(socket.SOL_SOCKET,35,1)  # Linux SO_TIMESTAMPNS.
+        sock.setsockopt(socket.SOL_SOCKET,40,1)  # Linux SO_RXQ_OVFL; diagnostic only.
         sock.bind((bus,));sock.setblocking(False)
         return sock
     except BaseException:
@@ -304,6 +468,8 @@ def open_can(bus):
 
 def supervise(profile, command, *, record_path=None, inherited_fds=()):
     if sys.platform != 'linux':raise RuntimeError('physical SDK protection requires Linux')
+    from .gc_timing import install,recent
+    install()
     buses = tuple(profile['can_interfaces'][side] for side in ('left','right'))
     disabled=profile.get('disabled_grippers',[])
     if disabled not in ([],['left'],['right'],['left','right']):
@@ -313,7 +479,8 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         from .sdk_quiesce import validate_contract
         validate_contract(sdk_contract)
     latch = FeedbackLatch(buses,disabled_grippers=disabled,sdk_contract=sdk_contract);readers = {};parent = peer = child = None
-    trace_fd = trace_path = release_trace = None
+    trace_fd = trace_path = trace_memory = release_trace = failure_trace = None
+    stack_capture=dict(storage='bounded_memory',limit_bytes=4*1024**2,archived=False)
     path = Path(record_path or Path(profile['storage_root'])/'can-output-guard.json')
     path.parent.mkdir(parents=True,exist_ok=True)
     previous = json.loads(path.read_text()) if path.exists() else {}
@@ -331,7 +498,9 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
             child_pid=child.pid if child else None,wall_ns=time.time_ns(),timeout_s=TIMEOUT,
             last_latch=previous.get('last_latch'),diagnostics=latch.diagnostic_snapshot(),
             stack_log=str(trace_path) if trace_path is not None else None,stack_requests=list(latch.stack_requests),**extra)
+        value['stack_capture']=dict(stack_capture)
         value['process_evidence']=deepcopy(process_evidence)
+        value['guard_client_failure']=failure_trace.snapshot() if failure_trace is not None else None
         value['sdk_quiesce_reports']=dict(latch.quiesce_reports)
         if latch.reason:value['last_latch']={'reason':latch.reason,'wall_ns':time.time_ns(),**value['diagnostics']}
         if include_release_trace:
@@ -352,7 +521,10 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                 observed['missing_guard_receipts']=missing
             if latch.reason:value['last_latch']['release_trace']=deepcopy(value['release_trace'])
         temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n');temporary.replace(path)
-    def reply(value):parent.sendall(json.dumps(value).encode()+b'\n')
+    def reply(value):
+        process_evidence['last_reply']=dict(action=(process_evidence.get('last_ipc')or{}).get('action'),started_monotonic_ns=time.monotonic_ns())
+        parent.sendall(json.dumps(value).encode()+b'\n')
+        process_evidence['last_reply']['returned_monotonic_ns']=time.monotonic_ns()
     pending = b'';probe_request = False;next_probe = 0.;stop_signal = None
     def stop(signum, _):
         nonlocal stop_signal
@@ -363,18 +535,25 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
             readers[open_can(bus)]=bus
         parent,peer=socket.socketpair();parent.settimeout(.005)
         trace_path=path.parent/f'can-output-guard-stack-{os.getpid()}-{time.time_ns()}.log'
-        trace_fd=os.open(trace_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        trace_memory=memory_file('workbench-sdk-stack',stack_capture['limit_bytes'])
+        trace_fd=trace_memory.fileno()
         env=dict(os.environ,ROBOT_WORKBENCH_GUARD_FD=str(peer.fileno()),ROBOT_WORKBENCH_GUARD_PARENT=str(os.getpid()),
                  ROBOT_WORKBENCH_GUARD_TRACE_FD=str(trace_fd))
         env.pop('ROBOT_WORKBENCH_GUARD_RELEASE_FD',None)
+        env.pop('ROBOT_WORKBENCH_GUARD_FAILURE_FD',None)
+        try:failure_trace=IPCFailureTrace.create()
+        except (OSError,ValueError,BufferError,MemoryError):pass
         try:release_trace=ReleaseTrace.create()
         except (OSError,ValueError,BufferError,MemoryError):pass
         descriptors=(peer.fileno(),trace_fd,*inherited_fds)
+        if failure_trace is not None:
+            descriptors+=(failure_trace.fd,);env['ROBOT_WORKBENCH_GUARD_FAILURE_FD']=str(failure_trace.fd)
         if release_trace is not None:
             descriptors+=(release_trace.fd,);env['ROBOT_WORKBENCH_GUARD_RELEASE_FD']=str(release_trace.fd)
         parent_pid=os.getpid()
         child=subprocess.Popen(command,env=env,pass_fds=descriptors,preexec_fn=lambda:parent_death(parent_pid))
         peer.close();peer=None;persist('disconnected')
+        cycle_done_ns=time.monotonic_ns();previous_batch=None;reported_slow_ns=None
         while child.poll() is None:
             if stop_signal:
                 # Preserve existing supported-release semantics: ordinary service
@@ -398,23 +577,24 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                         if (bus,motor) not in latch.expected:continue
                         sock.send(struct.pack('=IB3x8s',0x7ff,4,bytes([motor,0,0xcc,0,0,0,0,0])))
                 next_probe=now+.025
+            select_started_ns=time.monotonic_ns();select_cpu=time.thread_time_ns()
             ready,_,_=select.select([parent,*readers],[],[],.005)
+            selected_ns=time.monotonic_ns();selected_cpu=time.thread_time_ns()
+            loop_timing=dict(select_started_monotonic_ns=select_started_ns,
+                before_select_s=(select_started_ns-cycle_done_ns)/1e9,
+                select_wall_s=(selected_ns-select_started_ns)/1e9,
+                select_cpu_s=(selected_cpu-select_cpu)/1e9,previous_batch=previous_batch)
             # Always process CAN before activate/heartbeat, preserving acquisition
             # order and refusing queued pre-arm packets by their kernel RX stamp.
-            for sock in ready:
-                if sock is parent:continue
-                for _ in range(128):
-                    try:raw,ancillary,flags,_addr=sock.recvmsg(16,128)
-                    except BlockingIOError:break
-                    if len(raw)!=16 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):continue
-                    ident,size,data=struct.unpack('=IB3x8s',raw)
-                    if size!=8:continue
-                    stamp=next((v for level,kind,v in ancillary if level==socket.SOL_SOCKET and kind==35),None)
-                    if stamp is None or len(stamp)<struct.calcsize('@ll'):continue
-                    seconds,nanos=struct.unpack('@ll',stamp[:struct.calcsize('@ll')])
-                    age=(time.time_ns()-(seconds*1_000_000_000+nanos))/1e9
-                    received=time.monotonic()-age
-                    if received>=latch.started:latch.receive(readers[sock],ident,data[:size],received,flags)
+            can_probe=CANBatchTiming(detailed=parent in ready)
+            can_frames=receive_ready_can(ready,readers,latch,can_probe)
+            can_done_ns=time.monotonic_ns()
+            can_cpu_ns=time.thread_time_ns()-selected_cpu
+            can_detail=can_probe.finish()if parent in ready or can_done_ns-selected_ns>=5_000_000 else None
+            if can_done_ns-selected_ns>=5_000_000:
+                process_evidence['last_slow_can_batch']=dict(selected_monotonic_ns=selected_ns,
+                    can_batch_s=(can_done_ns-selected_ns)/1e9,can_batch_cpu_s=can_cpu_ns/1e9,
+                    can_frames=can_frames,detail=can_detail,loop=loop_timing,gc=recent())
             if latch.reason:continue
             if parent in ready:
                 data=parent.recv(4096)
@@ -436,15 +616,27 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                     if set(request)!=fields:raise ValueError('invalid guard request')
                     if action=='hello':reply({'ready':True,'disabled_grippers':disabled,'sdk_contract':sdk_contract})
                     elif action=='begin':
+                        from .can_feedback_filter import install
+                        for sock in readers:install(sock,active=False)
                         latch.begin();probe_request=True;next_probe=0.
                     elif action=='activate':
                         if sdk_contract and set(latch.sdk_instances)!={'left','right'}:
                             raise ValueError('SDK instances not registered')
                         try:latch.activate()
                         except ValueError:continue
+                        from .can_feedback_filter import install
+                        for sock,bus in readers.items():
+                            install(sock,active=True,include_gripper=(bus,8)in latch.expected)
                         reply({'armed':True,'heartbeat_monotonic_s':latch.heartbeat})  # No filesystem IO while outputs are armed.
                     elif action=='heartbeat' and latch.phase in ('starting','active','releasing'):
-                        latch.heartbeat=time.monotonic();reply({'healthy':True,'heartbeat_monotonic_s':latch.heartbeat})
+                        slow=process_evidence.get('last_slow_can_batch')
+                        new_slow=slow if slow and slow['selected_monotonic_ns']!=reported_slow_ns else None
+                        latch.heartbeat=time.monotonic();reply({'healthy':True,'heartbeat_monotonic_s':latch.heartbeat,
+                            'server_timing':dict(selected_monotonic_ns=selected_ns,can_batch_s=(can_done_ns-selected_ns)/1e9,
+                                can_batch_cpu_s=can_cpu_ns/1e9,can_frames=can_frames,can_detail=can_detail,
+                                loop=loop_timing,new_slow_can_batch=new_slow,gc=recent(),
+                                request_decoded_monotonic_ns=process_evidence['last_ipc']['received_monotonic_ns'])})
+                        if new_slow:reported_slow_ns=new_slow['selected_monotonic_ns']
                     elif action=='releasing' and latch.phase in ('starting','active'):
                         latch.phase='releasing';latch.started=time.monotonic();latch.note_release('releasing_received');reply({'protected':True})
                     elif action=='register_sdk':
@@ -473,6 +665,10 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                     missing=latch.missing(DM);latch.phase='idle';probe_request=False
                     reply({'error':'电机只读反馈预检失败，未启动 SDK：'+', '.join(missing)})
                     persist('connection_rejected',missing=missing)
+            cycle_done_ns=time.monotonic_ns()
+            previous_batch=dict(selected_monotonic_ns=selected_ns,can_frames=can_frames,
+                can_batch_s=(can_done_ns-selected_ns)/1e9,can_batch_cpu_s=can_cpu_ns/1e9,
+                after_can_s=(cycle_done_ns-can_done_ns)/1e9)
         process_evidence['wait']=dict(status='started',started_monotonic_ns=time.monotonic_ns())
         try:result=child.wait(timeout=3)
         except subprocess.TimeoutExpired:
@@ -481,6 +677,8 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         process_evidence['wait'].update(status='returned',returned_monotonic_ns=time.monotonic_ns())
         process_evidence['returncode']=result
         process_evidence['reaped_monotonic_ns']=time.monotonic_ns()
+        try:stack_capture.update(archive_memory_file(trace_memory,trace_path),archived=True)
+        except OSError as error:stack_capture['archive_error']=str(error)
         if latch.phase!='idle' and not latch.reason:
             observe_failure('SDK process exited before protected release completed')
             latch.trip('SDK process exited before protected release completed')
@@ -500,6 +698,7 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         if child is not None and child.poll() is None:terminate()
         for sock in [*readers,parent,peer]:
             if sock is not None:sock.close()
-        if trace_fd is not None:os.close(trace_fd)
+        if trace_memory is not None:trace_memory.close()
         if release_trace is not None:release_trace.close()
+        if failure_trace is not None:failure_trace.close()
         for sig,handler in old_signals.items():signal.signal(sig,handler)

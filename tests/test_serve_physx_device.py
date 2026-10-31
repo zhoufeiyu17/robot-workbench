@@ -48,9 +48,10 @@ class RetainedInferenceTest(unittest.TestCase):
             flow=InferenceWorkflow(SimpleNamespace(id='fake-old',environment='fake'),output,camera_service=None,
                 model_endpoint='http://127.0.0.1:1',model_token_file=self.root/'unused',profile_provider=lambda:None)
         self.assertEqual(flow.execute_steps,45);self.assertEqual(flow.execution_revision,7)
-        self.assertEqual([row['id'] for row in flow.catalog],['old-video','old-failure'])
-        self.assertEqual(flow.catalog[1]['details']['receipt'],self.history['entries'][1]['result']['details']['receipt'])
-        self.assertEqual(json.loads(Path(flow.catalog[1]['details']['receipt']).read_text())['status'],'original failure')
+        self.addCleanup(flow.close)
+        self.assertEqual([row['id'] for row in flow.results()],['old-video','old-failure'])
+        self.assertEqual(flow.results()[1]['details']['receipt'],self.history['entries'][1]['result']['details']['receipt'])
+        self.assertEqual(json.loads(Path(flow.results()[1]['details']['receipt']).read_text())['status'],'original failure')
         restored=flow.media('old-video');self.assertEqual(restored.read_bytes(),self.video.read_bytes())
         self.assertEqual(restored.stat().st_ino,self.video.stat().st_ino)
         self.assertTrue(receipt['original_receipt_paths_preserved']);self.assertIn('no new execution',receipt['scope'])
@@ -65,6 +66,22 @@ class RetainedInferenceTest(unittest.TestCase):
             receipt=serve_physx_device.restore_inference(source,output)
         self.assertEqual((output/'previous-run/videos/source-base_0.mp4').read_bytes(),self.video.read_bytes())
         self.assertEqual(receipt['files']['previous-run/videos/source-base_0.mp4'],'copy')
+
+    def test_sqlite_restore_preserves_all_pages_and_copies_an_independent_writable_index(self):
+        from robot_workbench.inference_history import InferenceHistory, DATABASE
+        history=InferenceHistory(self.source)
+        history.append((dict(id=f'new-{i}',run_id=f'new-run-{i}'),None) for i in range(50))
+        source=serve_physx_device.inference_source(self.source)
+        self.assertIn(DATABASE,source['files']);self.assertIn('previous-run/videos/source-base_0.mp4',source['files'])
+        output=self.root/'sqlite-restored';serve_physx_device.restore_inference(source,output)
+        restored=InferenceHistory(output)
+        self.assertEqual(restored.page()['total_results'],52)
+        self.assertEqual(restored.media('old-video').read_bytes(),self.video.read_bytes())
+        self.assertNotEqual((output/DATABASE).stat().st_ino,(self.source/DATABASE).stat().st_ino)
+        restored.append([(dict(id='only-in-new-service'),None)])
+        self.assertEqual(InferenceHistory(self.source).page()['total_results'],52)
+        self.assertEqual(restored.page()['total_results'],53)
+        self.assertEqual((output/'history.json').read_bytes(),(self.source/'history.json').read_bytes())
 
     def test_tampered_metadata_media_missing_files_and_duplicate_ids_fail_before_copy(self):
         source=serve_physx_device.inference_source(self.source)
@@ -129,7 +146,7 @@ class ResidentConfigurationTest(unittest.TestCase):
         setup=dict(model_id=BASE566_ID,model_bundle=bundle,catalog_root='/approved/catalog',recording_enabled=False)
         with patch('subprocess.Popen',side_effect=AssertionError('CPU configuration must not start models')):
             options=serve_physx_device.inference_options(setup)
-        self.assertEqual(options,dict(setup,disabled_grippers=[]))
+        self.assertEqual(options,dict(setup,disabled_grippers=[],control_mapping_pending=None))
         self.assertEqual(serve_physx_device.inference_options({})['model_id'],BASE379_ID)
         self.assertIsNot(options['model_bundle'],bundle)
         for change in ({'recording_enabled':'false'},{'catalog_root':'relative'},

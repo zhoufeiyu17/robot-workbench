@@ -16,12 +16,12 @@ from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from robot_workbench.sdk_process import SDKProcess,SDKCommandRevoked,send,receive
+from robot_workbench.sdk_process import SDKProcess,SDKCommandRevoked,SDKCommandRejected,send,receive
 from robot_workbench.control_alerts import ControlAlerts
 
 WORKER='''import os,socket,sys,time,threading,signal
 sys.path.insert(0,sys.argv[1])
-from robot_workbench.sdk_process import serve_worker
+from robot_workbench.sdk_process import serve_worker,ReferenceWindowRejected
 class Backend:
  is_connected=False
  def connect(self):self.is_connected=True
@@ -30,8 +30,15 @@ class Backend:
   return dict(qpos=[0.]*14,future_queued=getattr(self,'future',False),can_output_guard=dict(heartbeat_monotonic_s=time.monotonic()))
  def close(self):self.is_connected=False
  def read_gains(self):return dict(future_queued=getattr(self,'future',False))
+ def get_bimanual_joint_position_limits(self):return [[-3.,3.]]*14
+ def configure_motion_gains(self,value,**kw):
+  if kw.get('preserve_hold'):self.queue_reference(value);return dict(preserved_hold=True)
+  return dict(configured=value is not None,hardware_write=False)
  def send(self,*args):self.command_guard();return None
+ def set_damping_hold(self,**kwargs):self.future=False;return dict(stopped=True)
  def queue_reference(self,value):
+  if value.get('reject'):raise ReferenceWindowRejected('bounded, ordered future reference window required')
+  if value.get('native_failure'):raise ValueError('unclassified native failure')
   self.future=True;time.sleep(.03)
   try:self.command_guard()
   except BaseException:
@@ -68,6 +75,76 @@ serve_worker(socket.socket(fileno=int(sys.argv[2])),Backend(),mmap.mmap(int(sys.
 
 
 class SDKProcessTests(unittest.TestCase):
+    def test_disabled_point_send_is_rejected_before_ipc_without_tripping_sdk(self):
+        from robot_workbench.sdk_process import ReferenceWindowRejected
+        backend=object.__new__(SDKProcess);backend.target_interpreter_profile='x5_control50_damping_v1'
+        with patch.object(backend,'call')as call:
+            with self.assertRaisesRegex(ReferenceWindowRejected,'point-send is disabled'):backend.send('left',[0.]*14)
+            call.assert_not_called()
+            backend.target_interpreter_profile=None;backend.send('left',[0.]*14)
+            call.assert_called_once_with('send','left',[0.]*14)
+
+    def test_static_limits_are_connection_scoped_and_never_hide_worker_loss(self):
+        backend=self.fixture();backend.connect();before=backend.sequence
+        limits=backend.get_bimanual_joint_position_limits();self.assertEqual(backend.sequence,before+1)
+        limits[0][0]=-999.
+        for _ in range(20):self.assertEqual(backend.get_bimanual_joint_position_limits(),[[-3.,3.]]*14)
+        self.assertEqual(backend.sequence,before+1,'steady ticks must not send another static RPC')
+        backend.connect();before=backend.sequence;backend.get_bimanual_joint_position_limits()
+        self.assertEqual(backend.sequence,before+1,'an explicit connect must invalidate prior limits')
+        backend.read_calibration_state();backend.process.wait(timeout=3)
+        with self.assertRaisesRegex(RuntimeError,'not connected'):backend.get_bimanual_joint_position_limits()
+        fresh=self.fixture();fresh.connect();before=fresh.sequence;fresh.get_bimanual_joint_position_limits()
+        self.assertEqual(fresh.sequence,before+1);fresh.close()
+        self.assertIsNone(fresh._joint_limits)
+        with self.assertRaises(RuntimeError):fresh.get_bimanual_joint_position_limits()
+
+    def test_feedback_rpc_reports_worker_and_client_timing_without_extra_calls(self):
+        backend=self.fixture();backend.connect();before=backend.sequence
+        result=backend.read_calibration_state()
+        self.assertEqual(backend.sequence,before+1)
+        worker=result['sdk_worker_read_timing'];client=result['sdk_client_read_timing']
+        self.assertEqual(backend.worker_pid,worker['pid'])
+        self.assertGreaterEqual(worker['execute_s'],0.)
+        self.assertGreaterEqual(client['total_s'],worker['execute_s'])
+        self.assertAlmostEqual(client['lock_wait_s']+client['request_encode_send_s']+client['response_wait_decode_s'],client['total_s'])
+        backend.process.wait(timeout=3)  # This existing fixture intentionally SIGKILLs itself after a read.
+    def test_application_window_rejection_keeps_channel_available_for_stop(self):
+        backend=self.fixture();backend.connect();pid=backend.process.pid
+        backend.queue_reference({})
+        timing=backend.last_reference_timing
+        self.assertGreaterEqual(timing['worker']['wall_s'],.03)
+        client=timing['client']
+        self.assertAlmostEqual(client['total_s'],client['lock_wait_s']+client['request_encode_send_s']+client['response_wait_decode_s'])
+        with self.assertRaisesRegex(SDKCommandRejected,'bounded, ordered future reference window')as caught:
+            backend.queue_reference({'reject':True})
+        self.assertIs(caught.exception.timing,backend.last_reference_timing)
+        self.assertIsNot(caught.exception.timing,timing,'failed call must carry its own timing')
+        self.assertGreaterEqual(caught.exception.timing['worker']['cpu_s'],0.)
+        self.assertIsNone(backend.failure);self.assertTrue(backend.is_connected)
+        self.assertEqual(backend.process.pid,pid);self.assertIsNone(backend.process.poll())
+        self.assertEqual(backend.set_damping_hold(manual=False),dict(stopped=True))
+        self.assertFalse(backend.read_gains()['future_queued'])
+        backend.close()
+
+    def test_unclassified_native_error_is_not_misreported_as_application_rejection(self):
+        backend=self.fixture();backend.connect()
+        with self.assertRaisesRegex(RuntimeError,'unclassified native failure'):
+            backend.queue_reference({'native_failure':True})
+        self.assertIsNotNone(backend.failure);self.assertFalse(backend.is_connected)
+
+    def test_gain_configuration_is_an_explicit_ram_only_worker_call(self):
+        backend=self.fixture();backend.connect()
+        self.assertEqual(backend.configure_motion_gains({'cpu':'fixture'}),dict(configured=True,hardware_write=False))
+        backend.close()
+
+    def test_hold_gain_rpc_revocation_preserves_connection_only_after_cancel(self):
+        backend=self.fixture();backend.connect()
+        timer=threading.Timer(.01,backend.revoke_output);timer.start()
+        with self.assertRaises(SDKCommandRevoked):backend.configure_motion_gains({},preserve_hold=True)
+        timer.join();self.assertIsNone(backend.failure);self.assertTrue(backend.is_connected)
+        self.assertFalse(backend.read_gains()['future_queued']);backend.close()
+
     def test_revoked_reference_with_confirmed_cancel_keeps_sdk_connected(self):
         backend=self.fixture();backend.connect()
         timer=threading.Timer(.01,backend.revoke_output);timer.start()
@@ -160,6 +237,17 @@ class SDKProcessTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):backend.connect()
         self.assertEqual(backend.process.pid,pid)
 
+    def test_live_protection_snapshot_never_reads_disk(self):
+        from types import SimpleNamespace
+        backend=SDKProcess({})
+        backend.process=SimpleNamespace(pid=123,poll=lambda:None,returncode=None)
+        backend.connected=True;backend.heartbeat=time.monotonic()
+        backend.guard_record=Path('/not-read/guard.json')
+        with patch('robot_workbench.sdk_process.os.open',side_effect=AssertionError('disk in live health read')):
+            self.assertEqual(backend.protection_snapshot()['heartbeat']['status'],'healthy')
+            backend.heartbeat=time.monotonic()-.101
+            self.assertTrue(backend.protection_snapshot()['active_anomaly'])
+
     def test_live_heartbeat_timeout_is_still_an_active_anomaly(self):
         from types import SimpleNamespace
         backend=SDKProcess({})
@@ -168,6 +256,23 @@ class SDKProcessTests(unittest.TestCase):
         value=backend.protection_snapshot()
         self.assertEqual(value['heartbeat']['status'],'lost')
         self.assertTrue(value['heartbeat']['monitored']);self.assertTrue(value['active_anomaly'])
+
+    def test_recorded_guard_ipc_failure_is_distinct_from_a_current_heartbeat_fault(self):
+        from types import SimpleNamespace
+        with TemporaryDirectory()as temporary:
+            backend=SDKProcess({});backend.connected=True
+            backend.process=SimpleNamespace(pid=123,poll=lambda:1,returncode=1)
+            backend.guard_record=Path(temporary)/'guard.json'
+            receipt=dict(state='latched',supervisor_pid=123,child_pid=124,reason='SDK process exited before protected release completed',
+                process_evidence=dict(wait=dict(status='returned'),returncode=-9,reaped_monotonic_ns=1,terminations=[]),
+                guard_client_failure=dict(schema='guard_ipc_failure.v1',source_pid=124,self_sigkill_requested=True,
+                    started_monotonic_ns=1,failed_monotonic_ns=100_000_001,action='heartbeat',stage='receive',exception='TimeoutError'))
+            backend.guard_record.write_text(json.dumps(receipt));value=backend.protection_snapshot()
+            self.assertIn('Guard IPC heartbeat receive',value['reason']);self.assertIn('100.0ms',value['reason'])
+            self.assertFalse(value['active_anomaly']);self.assertTrue(value['recovery_required'])
+            self.assertEqual(value['heartbeat']['status'],'not_monitored');self.assertFalse(value['event']['sdk_close_confirmed'])
+            receipt['guard_client_failure'].pop('started_monotonic_ns');backend.guard_record.write_text(json.dumps(receipt))
+            self.assertTrue(backend.protection_snapshot()['recovery_required'])
 
     def test_explicit_normal_close_is_not_a_heartbeat_fault(self):
         backend=self.fixture();backend.connect();backend.close()

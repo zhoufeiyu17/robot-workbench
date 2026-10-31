@@ -38,6 +38,8 @@ class TargetDisplayGateway:
             sources=dict(mesh=actual),mesh=actual.get('mesh',{}))
         display['frames']['mesh']=actual.get('frames',{}).get('mesh',{})
         display['revisions']['mesh']=actual.get('revisions',{}).get('mesh',0)
+        for name in ('mesh_candidates','mesh_calibrations','mesh_catalog_error'):
+            if name in actual:display[name]=deepcopy(actual[name])
         state['preview']=display
         for name in('target','overview'):
             state['runtime']['allowed_operations']['preview_'+name]=dict(allowed=bool(display['connected']),
@@ -102,6 +104,7 @@ def route(manager,handler,parsed,body):
         if display is not None:value=display.augment(value)
         if assets is not None:
             value['preview']['webgl_model']=assets.public
+            value['preview'].setdefault('capabilities',{}).update(target=True,overview=True,top_view=True)
             for name in('preview_target','preview_overview'):value['runtime']['allowed_operations'][name]=dict(allowed=True,reason=None)
         elif model_manifest:value['preview']['webgl_error']=getattr(manager,'target_model_error','display model unavailable')
         handler.send(200,value);return True

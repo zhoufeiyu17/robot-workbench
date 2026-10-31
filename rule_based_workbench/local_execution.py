@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 TARGET=dict(transport='local',instance_id='dsw-3lduujsvlem1a91wdl',gpu_index=1,
             gpu_uuid='GPU-ffc2b1a7-9e85-ec83-d289-f7d1b45ccd64',vulkan_gpu=1)
 PHYSICAL_TARGET=dict(transport='local',instance_id='dsw-nygxkzfd5znx4if0t2',gpu_index=0,
-            gpu_uuid='GPU-195270a3-30b8-39b1-1ac4-4c9e1aebf228',vulkan_gpu=0)
+            gpu_uuid='GPU-c91a5773-d19a-7a27-267c-907fc9ffc663',vulkan_gpu=0)
 
 
 def compute_resource(execution):return {key:execution.get(key) for key in TARGET}

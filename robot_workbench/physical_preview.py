@@ -54,14 +54,21 @@ class PhysicalPreview:
                 and row.get('simulation_only') is False)
 
     def _candidates(self,camera,identity):
+        from arx_env.joint_head_calibration_store import calibration_group_id
         app=self.workbench
         heads={r['id']:r for r in app.calibration_results() if self._physical(r) and app.calibration_asset_matches(r)}
-        wrists={r['id']:r for r in app.wrist_results() if self._physical(r) and app.calibration_asset_matches(r)}
+        reader=getattr(app,'wrist_display_results',app.wrist_results)
+        wrists={r['id']:r for r in reader() if self._physical(r) and app.calibration_asset_matches(r)}
         installed=app.installed_pair() or {}
         if identity is None:
             identity=installed.get('head_id' if camera=='head' else 'wrist_id')
-        wrist=None
-        if identity in wrists:
+        group=(next((r for r in wrists.values() if calibration_group_id(
+            app.wrist_contract(r)['head_snapshot']['id'],r['id'])==identity),None)
+            if isinstance(identity,str) and identity.startswith('calibration:') else None)
+        wrist=group
+        if group is not None:
+            head_id=app.wrist_contract(group)['head_snapshot']['id']
+        elif identity in wrists:
             wrist=wrists[identity];head_id=app.wrist_contract(wrist)['head_snapshot']['id']
         elif identity in heads:
             head_id=identity
@@ -75,7 +82,7 @@ class PhysicalPreview:
         parameters=app.calibration_snapshot(head['parameters'])
         if parameters.get('id')!=head_id or not parameters.get('snapshot_complete'):
             raise ValueError('头部标定快照不完整或身份不一致')
-        if camera!='head':
+        if camera!='head' or group is not None:
             if wrist is None:raise ValueError('所选头部标定没有关联的双腕结果')
             error=app.wrist_overlay_error(wrist)
             if error:raise ValueError(error)
@@ -83,9 +90,9 @@ class PhysicalPreview:
             snapshot=app.calibration_snapshot(contract['head_snapshot'])
             if snapshot['id']!=head_id or snapshot['snapshot_sha256']!=parameters['snapshot_sha256']:
                 raise ValueError('双腕依赖快照与所选头部标定不一致')
-        return deepcopy(dict(head=parameters,wrist=wrist if camera!='head' else None,
-            wrist_cameras=contract['cameras'] if camera!='head' else None,
-            candidate_id=head_id if camera=='head' else wrist['id']))
+        return deepcopy(dict(head=parameters,wrist=wrist if camera!='head' or group is not None else None,
+            wrist_cameras=contract['cameras'] if camera!='head' or group is not None else None,
+            candidate_id=identity if group is not None else head_id if camera=='head' else wrist['id']))
 
     def mesh(self,enabled,*,camera='head',candidate_id=None):
         if type(enabled) is not bool or camera not in ('head','left','right','all'):

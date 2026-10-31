@@ -137,6 +137,7 @@ def extract(batch, camera_position, camera_q, canonical_from_mesh):
             continue
         tracks.append(dict(track_id=item.track_id, object_type=item.object_type,
                            xyz_m=list(position), pose_current=True, provenance=provenance,
+                           **({'image_bbox':asdict(item.bbox)} if getattr(item,'bbox',None) is not None else {}),
                            **({'quaternion_xyzw': list(orientation)} if orientation is not None else {}),
                            canonical_world=world_pose(position, camera_position, camera_q, orientation),
                            world=world_pose(camera_from_mesh[:3, 3], camera_position, camera_q, mesh_orientation)))
@@ -403,11 +404,15 @@ def self_test():
                  asset_match=NS(identity_valid=True))
     cup = NS(track_id=2, lifecycle=NS(value='ACTIVE'), object_type='cup', pose=pose,
              asset_match=NS(identity_valid=True), center_3d=pose)
+    cup.bbox=make_dataclass('Box',[('valid',bool),('freshness',str),('xyxy',tuple),
+        ('source_stamp_ns',int),('frame_id',str)])(True,'CURRENT',(1.,2.,3.,4.),1,'camera')
     batch.instances = [machine, cup]
     transforms = {asset: np.array([[0, -1, 0, 0], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]).ravel()}
     result = extract(batch, [0, 0, 0], [1, 0, 0, 0], transforms)
     assert np.allclose(result['tracks'][0]['world']['quaternion_xyzw'], [0, 0, 2**-.5, 2**-.5])
     assert result['pair_valid'] and 'quaternion_xyzw' not in result['tracks'][1]
+    assert result['tracks'][1]['image_bbox']['xyxy']==(1.,2.,3.,4.)
+    assert result['tracks'][1]['image_bbox']['source_stamp_ns']==result['source_stamp_ns']
     cup.asset_match.identity_valid = False
     assert not extract(batch, [0, 0, 0], [1, 0, 0, 0], transforms)['pair_valid']
     cup.asset_match.identity_valid = True

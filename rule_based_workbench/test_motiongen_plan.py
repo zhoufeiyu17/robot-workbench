@@ -193,6 +193,19 @@ def main(native_code, urdf):
                 native_identity=dict(control=dict(physics_hz=240, substeps=8, max_target_velocity_rad_s=2., max_target_acceleration_rad_s2=5.)))
     planner.identity=data['planner_identity']
     grip = gripper_geometry(planner, urdf)
+    from test_scene_assets import selection,seal
+    from scene_assets import derive_grasp_command
+    selected=selection(Path('/cpu-fixture-publication.json'))
+    selected['cup']['grasp_command']=derive_grasp_command(NS(candidate_grasp_band_m=(.035,.1),
+        profile_sha256=selected['cup']['interaction_profile_sha256'],required_opening_m=lambda low,high:.070))
+    seal(selected)
+    planner.requested_metal_gap_mm=71.
+    try:gripper_geometry(planner,urdf)
+    except ValueError:pass
+    else:raise AssertionError('71mm seed accepted without a selected-asset binding')
+    planner.scene_asset_set=selected
+    assert gripper_geometry(planner,urdf)['closed_metal_gap_mm']==71.
+    del planner.scene_asset_set;del planner.requested_metal_gap_mm
     spec = ac_one_dual_arm_zero_home_action_spec()
     reset_action = spec.encode(DualArmCommand(ArmCommand(tuple(state[n] for n in LEFT), True),
                                              ArmCommand(tuple(state[n] for n in RIGHT), True)))

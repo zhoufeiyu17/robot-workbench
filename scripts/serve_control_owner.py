@@ -13,7 +13,7 @@ def main():
     args=parser.parse_args()
     from robot_workbench.device_bootstrap import read_profile,physical_runtime_factory
     from robot_workbench.service import Device
-    from robot_workbench.control_owner import ControlOwnerService
+    from robot_workbench.control_owner import ControlOwnerService,collection_recording_root
     profile=read_profile(args.profile)
     device=Device(profile['robot_id'],'physical',None,label=profile.get('label'))
     service=ControlOwnerService(device,args.root,profile_sha256=hashlib.sha256(args.profile.read_bytes()).hexdigest())
@@ -22,9 +22,9 @@ def main():
         from robot_workbench.rgbd_service import CommonCameraService
         from robot_workbench.recording_process import ProcessRecordingSession
         import secrets
-        cameras=CommonCameraService.connect(profile['camera_service_descriptor'])
         def recording(payload,on_fault):
-            return ProcessRecordingSession(args.root/'collection-raw'/secrets.token_hex(16),plan_ref=payload['plan_ref'],
+            cameras=CommonCameraService.connect(profile['camera_service_descriptor'])
+            return ProcessRecordingSession(collection_recording_root(args.root)/secrets.token_hex(16),plan_ref=payload['plan_ref'],
                 camera_channels=cameras.channels,storage_format='segments',execution_timeline=payload.get('execution_timeline'),
                 environment='physical',execution_owner=payload.get('execution_owner'),on_fault=on_fault,
                 persistent_service=True,max_wall_time_seconds=7200,**payload.get('recording_preparation',{}))

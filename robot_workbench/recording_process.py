@@ -45,16 +45,16 @@ def _environment():
         OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',NUMEXPR_NUM_THREADS='1'))
 
 
-def export_playback_process(raw_root,output,*,environment,python=None):
-    """Export/verify in a CPU child so large raw indexes never enter Owner Python."""
+def _export_process(action,request,*,python=None):
+    """Export/verify in a CPU child so codecs and raw indexes stay out of the Owner."""
     executable=python or os.environ.get('WORKBENCH_CPU_PYTHON') or sys.executable
     if not Path(executable).is_absolute():raise ValueError('absolute CPU Python interpreter required')
-    with (Path(raw_root).parent/('playback-worker-'+secrets.token_hex(6)+'.log')).open('xb') as log:
-        child=subprocess.Popen([executable,'-u','-B','-m',__name__,'export'],stdin=subprocess.PIPE,
+    with (Path(request['raw_root']).parent/(action+'-worker-'+secrets.token_hex(6)+'.log')).open('xb') as log:
+        child=subprocess.Popen([executable,'-u','-B','-m',__name__,action],stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,stderr=log,text=True,env=_environment(),start_new_session=True)
         try:
-            result,_=child.communicate(_encode(dict(raw_root=str(raw_root),output=str(output),environment=environment)),timeout=600)
-            if child.returncode or len(result)>LIMIT:raise ValueError('isolated playback export failed; inspect '+log.name)
+            result,_=child.communicate(_encode(request),timeout=600)
+            if child.returncode or len(result)>LIMIT:raise ValueError('isolated '+action+' failed; inspect '+log.name)
             return json.loads(result)
         except BaseException:
             if child.poll() is None:
@@ -62,6 +62,14 @@ def export_playback_process(raw_root,output,*,environment,python=None):
                 try:child.wait(5)
                 except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait(5)
             raise
+
+
+def export_playback_process(raw_root,output,*,environment,python=None):
+    return _export_process('export',dict(raw_root=str(raw_root),output=str(output),environment=environment),python=python)
+
+
+def export_lerobot_process(raw_root,output,*,task,repo_id='workbench/arx6-coffee-collection',python=None):
+    return _export_process('export-lerobot',dict(raw_root=str(raw_root),output=str(output),task=task,repo_id=repo_id),python=python)
 
 
 class ProcessRecordingSession:
@@ -358,10 +366,15 @@ def _worker():
 
 
 if __name__=='__main__':
-    if sys.argv[1:]==['export']:
+    if sys.argv[1:] in (['export'],['export-lerobot']):
         from contextlib import redirect_stdout
-        from real_recording import export_playback
         request=json.loads(sys.stdin.readline(LIMIT+1));output=sys.stdout
-        with redirect_stdout(sys.stderr):result=export_playback(request['raw_root'],None,request['output'],environment=request['environment'])
+        with redirect_stdout(sys.stderr):
+            if sys.argv[1]=='export':
+                from real_recording import export_playback
+                result=export_playback(request['raw_root'],None,request['output'],environment=request['environment'])
+            else:
+                from .lerobot_export import export
+                result=export([request['raw_root']],request['output'],task=request['task'],repo_id=request['repo_id'])
         output.write(_encode(result));output.flush()
     else:_worker()

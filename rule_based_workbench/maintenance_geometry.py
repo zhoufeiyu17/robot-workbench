@@ -20,11 +20,6 @@ def validate_request(path, source, environment):
             or value.get('session') != os.environ.get('ROBOT_WORKBENCH_SESSION_ID')
             or not value.get('session') or value.get('support') not in ('table', 'tray')):
         raise ValueError('explicit sealed maintenance geometry request required')
-    acceptance = value.get('error_acceptance')
-    expected_acceptance = {'schema': 'maintenance_orientation_acceptance.v1', 'session': '01a13e4e-70dc-7513-9467-d34b9a7a99a3', 'source_digest': 'af0d293cd6c22d10a56ccdcf6a81bf57d71fe7514755b7b3c48cbf354995e57a', 'original_limit_rad': 0.01, 'observed_error_rad': 0.012156242583612913, 'max_error_rad': 0.012157, 'basis_sha256': 'ce9c53553ae4dd52a68f29a5eb35f0983d2a733b9815e26772fa71577c9f0047', 'human_instruction': '我们接受现在的误差，你来帮忙继续完成两轮真机数采、infer 链路测试吧；infer 链路可以用 2s infer 结果调试', 'scope': 'maintenance initialization requested-vs-realized orientation only; no contact/collision/control exception', 'recorded_at_utc': '2026-10-18T13:51:12.783812+00:00', 'owner_pid': 3120071, 'runtime_nonce': '1505687f8740925f52766715be00472c530fee98c269e869', 'command_epoch': 1, 'applies_to': {'drift': False, 'speed': False, 'closing': False, 'path': False, 'control': False}}
-    if acceptance is not None and (environment != 'physical' or value['support'] != 'tray'
-            or _digest(source) != expected_acceptance['source_digest'] or acceptance != expected_acceptance):
-        raise ValueError('maintenance orientation acceptance differs from the human-approved frozen case')
     files = value.get('files', {})
     required = {'parent_source', 'parent_plan', 'parent_execution', 'asset_pins', 'asset_receipt', 'object_mesh'}
     if set(files) != required:
@@ -52,7 +47,7 @@ def validate_request(path, source, environment):
                 asset_pins_sha256=files['asset_pins']['sha256'],
                 asset_receipt_sha256=files['asset_receipt']['sha256'],
                 object_mesh_sha256=files['object_mesh']['sha256'], support=value['support'],
-                task_characterization='not_run', **({'error_acceptance': acceptance, 'error_acceptance_digest': _digest(acceptance)} if acceptance else {}))
+                task_characterization='not_run')
 
 
 def validate_export(path, source, maintenance_source=None):

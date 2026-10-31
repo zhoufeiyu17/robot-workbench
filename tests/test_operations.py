@@ -16,6 +16,22 @@ TARGET = dict(environment='physical', device_id='cpu-fixture', deployment_id='re
 
 
 class OperationTests(unittest.TestCase):
+    def test_support_policy_is_live_boolean_and_never_granted_by_snapshot(self):
+        required=[False];calls=[]
+        service=self.service(requires_support=lambda request:required[0],run=lambda *args:calls.append(True)or{})
+        self.assertFalse(service.snapshot()['operations']['restart']['requires_support'])
+        required[0]=True
+        self.assertTrue(service.snapshot()['operations']['restart']['requires_support'])
+        with self.assertRaisesRegex(OperationError,'supported'):service.start('restart','no-support',TARGET)
+        self.assertFalse(calls)
+        required[0]=False;service.start('restart','request-1',TARGET)
+        self.assertEqual(self.wait(service)['status'],'succeeded');self.assertEqual(calls,[True])
+
+    def test_invalid_support_policy_fails_closed(self):
+        service=self.service(requires_support=lambda request:'false')
+        self.assertFalse(service.snapshot()['operations']['restart']['allowed'])
+        with self.assertRaisesRegex(OperationError,'boolean'):service.start('restart','bad-policy',TARGET)
+
     def test_failed_receipt_keeps_the_individual_validation_evidence(self):
         detail=dict(checks={'same_runtime':True,'fresh_publication':False},state='FAULT_STOP_UNCONFIRMED')
         def run(request,progress,cancel):raise OperationError('recovery_unconfirmed','injected stale reply',unknown=True,details=detail)

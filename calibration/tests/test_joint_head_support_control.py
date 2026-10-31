@@ -17,7 +17,7 @@ class SupportControlTest(unittest.TestCase):
         app._control_request=lambda action,body=None: {'token':'review','plans':plans}
         app.geometry=SimpleNamespace(_q=lambda values:np.asarray(values,float),limits=np.tile([-2.,2.],(12,1)),
             support_path_check=lambda *args:self.fail('fine support gate must not run'))
-        app.manual_self_collision=SimpleNamespace(check_path=check or (lambda a,b:{'ok':True}),description={'scope':'robot_self_spheres'})
+        app.manual_self_collision=SimpleNamespace(check_path=check or (lambda a,b,**kwargs:{'ok':True}),description={'scope':'robot_self_spheres'})
         return app
 
     def test_every_motion_preview_checks_frozen_owner_path_before_token(self):
@@ -27,7 +27,7 @@ class SupportControlTest(unittest.TestCase):
                        'motion-preview','jaw-preview','trajectory-preview'):
             with self.subTest(action=action):
                 calls=[]
-                app=self.app(plans,lambda a,b:calls.append((list(a),list(b))) or {'ok':True})
+                app=self.app(plans,lambda a,b,**kwargs:calls.append((list(a),list(b))) or {'ok':True})
                 result=app.control_request(action,{})
                 self.assertEqual(calls,[(start[:6]+start[7:13],target[:6]+target[7:13])])
                 self.assertIn('review',app.hardware_tokens)
@@ -44,7 +44,7 @@ class SupportControlTest(unittest.TestCase):
     def test_rejected_later_segment_cannot_be_confirmed(self):
         plans=[{'q_start':[0.]*14,'q_target':[0.]*14},
                {'q_start':[0.]*14,'q_target':[1.]*14}]
-        app=self.app(plans,lambda a,b:{'ok':bool(b[0]==0),'collisions':[['left/link3','right/link4']]})
+        app=self.app(plans,lambda a,b,**kwargs:{'ok':bool(b[0]==0),'collisions':[['left/link3','right/link4']]})
         with self.assertRaisesRegex(ValueError,'第 2 段'):
             app.control_request('trajectory-preview',{})
         self.assertFalse(app.hardware_tokens)
@@ -84,7 +84,7 @@ class SupportControlTest(unittest.TestCase):
         start=[0.]*14;start[1]=raw_value;start[6]=start[13]=.04
         target=[.1]*14;target[6]=target[13]=.04
         plans=[{'q_start':start,'q_target':target}];before=deepcopy(plans);calls=[]
-        def strict_check(a,b):
+        def strict_check(a,b,**kwargs):
             calls.append((list(a),list(b)))
             return {'ok':bool(a[1]>=0 and b[1]>=0),'reason':'joint limits'}
         app=self.app(plans,strict_check)
@@ -105,15 +105,15 @@ class SupportControlTest(unittest.TestCase):
         self.boundary_preview('fake',-.004)
 
     def test_physical_frozen_start_accepts_existing_position_noise(self):
-        self.boundary_preview('physical',-.009)
+        self.boundary_preview('physical',-.03)
 
     def test_frozen_endpoints_beyond_position_noise_never_register_token(self):
         for environment,value in (('fake',-.006),('physical',-.011)):
             for endpoint in ('q_start','q_target'):
                 with self.subTest(environment=environment,endpoint=endpoint):
                     plans=[{'q_start':[0.]*14,'q_target':[0.]*14}]
-                    plans[0][endpoint][1]=value;before=deepcopy(plans)
-                    app=self.app(plans,lambda *args:self.fail('over-noise endpoint reached sphere check'))
+                    plans[0][endpoint][1]=-.035 if environment=='physical' and endpoint=='q_start' else value;before=deepcopy(plans)
+                    app=self.app(plans,lambda *args,**kwargs:self.fail('over-noise endpoint reached sphere check'))
                     app.config.update(environment=environment,simulation_only=environment=='fake')
                     app.geometry.limits[1]=[0.,2.]
                     with self.assertRaisesRegex(ValueError,'position-boundary noise allowance'):

@@ -204,9 +204,11 @@ def hand_template(meshes):
 
 def jaw_gaps(value):
     """Physical inner metal gaps, millimetres; never SDK encoder values."""
+    from .joint_head_jaw_mapping import command_max_mm
     gaps = np.asarray(value, float)
-    if gaps.shape != (2,) or not np.isfinite(gaps).all() or np.any(gaps < 0) or np.any(gaps > 83):
-        raise ValueError('left/right metal inner gaps must be finite, 0..83 mm')
+    maximum = np.asarray([command_max_mm(side) for side in ('left', 'right')])
+    if gaps.shape != (2,) or not np.isfinite(gaps).all() or np.any(gaps < 0) or np.any(gaps > maximum):
+        raise ValueError('left/right metal inner gaps must be finite and within device command limits')
     return gaps
 
 

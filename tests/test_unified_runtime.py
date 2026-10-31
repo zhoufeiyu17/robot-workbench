@@ -19,6 +19,36 @@ from test_frozen_executor import fixture
 
 
 class UnifiedRuntimeTest(unittest.TestCase):
+    def test_pre_backend_lock_wait_is_reported_separately_from_fast_backend(self):
+        runtime,_=self.create();events=[];started=threading.Event();results=[]
+        def invoke():
+            started.set()
+            results.append(runtime._backend_call('read_gains',lambda:{'cpu_fixture':True}))
+        with patch.object(runtime.owner,'event',side_effect=lambda name,**value:events.append((name,value))):
+            with runtime.lock:
+                worker=threading.Thread(target=invoke);worker.start()
+                self.assertTrue(started.wait(1));time.sleep(.025)
+            worker.join(2)
+        self.assertFalse(worker.is_alive());self.assertEqual(results,[{'cpu_fixture':True}])
+        records=[value for name,value in events if name=='sdk_call_latency']
+        self.assertEqual(len(records),1);call=records[0]['call']
+        self.assertGreaterEqual(call['admission_lock_wait_s'],.02)
+        self.assertLess(call['backend_wall_s'],call['admission_lock_wait_s'])
+        self.assertGreaterEqual(call['total_wall_s'],call['admission_lock_wait_s'])
+        self.assertLess(call['admission_lock_cpu_s'],call['admission_lock_wait_s'])
+        self.assertLess(call['entered_monotonic_s'],call['started_monotonic_s'])
+        self.assertGreaterEqual(call['return_bookkeeping_s'],0.)
+
+    def test_slow_sdk_call_is_recorded_at_source_even_without_status_polling(self):
+        runtime,creds=self.create();events=[]
+        with patch.object(runtime.owner,'event',side_effect=lambda name,**value:events.append((name,value))):
+            result=runtime._backend_call('read_gains',lambda:(time.sleep(.012),{'cpu_fixture':True})[1])
+        self.assertEqual(result,{'cpu_fixture':True})
+        records=[value for name,value in events if name=='sdk_call_latency']
+        self.assertEqual(len(records),1);self.assertEqual(records[0]['call']['operation'],'read_gains')
+        call=records[0]['call'];self.assertGreaterEqual(call['returned_monotonic_s']-call['started_monotonic_s'],.01)
+        self.assertLess(call['cpu_s'],.01);self.assertEqual(records[0]['runtime_nonce'],runtime.nonce)
+
     def test_release_waits_for_feedback_cycle_and_keeps_stop_independent(self):
         runtime,creds=self.create();entered=threading.Event();release=threading.Event();result=[]
         runtime.owner.backend.read_delay=lambda:(entered.set(),release.wait(1))

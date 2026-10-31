@@ -2,6 +2,7 @@
 from copy import deepcopy
 from pathlib import Path
 import sys
+import json
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -84,6 +85,18 @@ class ManualSphereTests(unittest.TestCase):
         with self.assertRaises(ValueError):ManualSelfCollision(g,prebuilt=bad)
         missing=deepcopy(data);missing['parts'][1]['name']='link4_missing';missing['proxy_id']=proxy_digest(missing)
         with self.assertRaises(ValueError):ManualSelfCollision(g,prebuilt=missing)
+
+    def test_device_specific_proxy_and_jaw_envelope(self):
+        g=self.g;data=payload(g)
+        data['policy']['jaws_mm']=[80.,89.];data['proxy_id']=proxy_digest(data)
+        path=Path(self.temp.name)/'proxy.json';path.write_text(json.dumps(data))
+        g.config['manual_self_collision_proxy']=str(path)
+        g.with_gaps=lambda a,b:g if (a,b)==(80.,89.) else None
+        with patch('arx_env.joint_head_jaw_mapping.command_max_mm',side_effect=lambda side:80. if side=='left' else 89.):
+            checker=ManualSelfCollision(g)
+            self.assertEqual(checker.description['jaws_mm'],[80.,89.])
+            self.assertTrue(checker.check_path(np.zeros(12),np.zeros(12))['ok'])
+        with self.assertRaises(ValueError):ManualSelfCollision(g)
 
     def test_authored_and_instantiated_sources_bound_without_camera_result(self):
         g=self.g;before=source_fingerprint(g)

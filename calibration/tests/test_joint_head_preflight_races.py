@@ -19,6 +19,40 @@ class EndMirror(BaseException):
 
 
 class PreflightRaceTests(unittest.TestCase):
+    def test_shared_preview_adopts_new_epoch_before_cached_connection_gate(self):
+        a=self.app();a.poll_hardware=Mock(side_effect=[ValueError('owner_identity_or_epoch_changed'),ValueError('等待两臂 SDK 反馈推进'),None])
+        submit=Mock(return_value={'plans':[{'q_start':[0.]*14,'q_target':[0.]*14}]})
+        with patch('joint_head_workbench.time.sleep'):
+            result=a.hardware_trajectory_preview({'waypoints':[{'q':[0.]*12}]},submit_preview=submit,start_q=[0.]*12)
+        self.assertEqual(a.poll_hardware.call_count,3);submit.assert_called_once();self.assertIn('review_generation',result)
+        a=self.app();a.poll_hardware=Mock(side_effect=ValueError('owner_feedback_unhealthy'));submit=Mock()
+        with self.assertRaisesRegex(ValueError,'owner_feedback_unhealthy'):
+            a.hardware_trajectory_preview({'waypoints':[{'q':[0.]*12}]},submit_preview=submit,start_q=[0.]*12)
+        submit.assert_not_called();self.assertEqual(a.poll_hardware.call_count,1)
+
+    def test_wrist_return_projects_only_existing_boundary_noise_and_records_feedback(self):
+        a=self.app();a.config.update(environment='physical',simulation_only=False,
+            wrist_nominal_mounts={side:np.eye(4).tolist() for side in ('left','right')})
+        a.workflow={'kind':'wrist','head_result_id':'head'};a.geometry.config={};a.geometry.k={};a.geometry.marker_size=.02
+        a.geometry.limits[1]=[0.,3.];a.hardware_feedback['owner']['calibration_feedback']['qpos'][1]=-.0002
+        a.hardware_connected=lambda:True;a.wrist_cameras={};a.calibration_results=lambda:[dict(id='head',parameters={})]
+        a.require_calibration_environment=Mock();a.require_joint_head_dependency=Mock();a.register_result=Mock()
+        a.calibration_snapshot=lambda _:dict(snapshot_complete=True,T_link6_marker={},joint_offsets_rad={s:[0.]*6 for s in ('left','right')})
+        a.persist=Mock();a.control_request=Mock(side_effect=AssertionError('planning cannot command hardware'))
+        planner=Mock(side_effect=lambda *args,**kw:dict(planned_frames=[],waypoints=[dict(id='seed-return',q=kw['start_q'].tolist(),capture=False)]))
+        module=SimpleNamespace(plan_wrist=planner);spec=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _:None))
+        with patch('importlib.util.spec_from_file_location',return_value=spec),patch('importlib.util.module_from_spec',return_value=module):
+            a.plan_wrists()
+            self.assertEqual(planner.call_args.kwargs['start_q'][1],0.)
+            self.assertEqual(a.plan['waypoints'][-1]['q'][1],0.)
+            boundary=a.plan['start_position_boundary']
+            self.assertEqual(boundary['requested_q'][1],-.0002);self.assertEqual(boundary['command_q'][1],0.)
+            self.assertEqual(boundary['corrections'][0]['index'],1)
+            self.assertEqual(a.hardware_feedback['owner']['calibration_feedback']['qpos'][1],-.0002)
+            a.hardware_feedback['owner']['calibration_feedback']['qpos'][1]=-.02;planner.reset_mock()
+            with self.assertRaisesRegex(ValueError,'position-boundary noise allowance'):a.plan_wrists()
+            planner.assert_not_called();a.control_request.assert_not_called()
+
     def app(self):
         a = Workbench.__new__(Workbench)
         root = tempfile.TemporaryDirectory()
@@ -160,7 +194,7 @@ class PreflightRaceTests(unittest.TestCase):
                         a.manual_self_collision.check_path = wait
                     elif blocked == 'frozen':
                         checked=[]
-                        def frozen_check(*args):
+                        def frozen_check(*args,**kwargs):
                             checked.append(True)
                             return wait() if len(checked)>1 else {'ok':True}
                         a.manual_self_collision.check_path = frozen_check

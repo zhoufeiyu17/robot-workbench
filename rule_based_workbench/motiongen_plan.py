@@ -74,7 +74,14 @@ def gripper_geometry(planner, urdf_path):
         raise ValueError('URDF and exported gripper opening differ')
     offset = sum(row['native_travel_offset_mm'] for row in measured)/2
     metal=getattr(planner,'requested_metal_gap_mm',65.)
-    if (type(metal) not in (int,float) or metal not in (61.,65.)
+    selection=getattr(planner,'scene_asset_set',None)
+    if selection is not None:
+        from scene_assets import validate
+        validate(selection)
+        if (selection['cup'].get('grasp_command') or {}).get('metal_gap_mm')!=metal:
+            raise ValueError('gripper mapping differs from the selected cup grasp seed')
+    allowed=(61.,65.,71.) if selection is not None else (61.,65.)
+    if (type(metal) not in (int,float) or metal not in allowed
             or not math.isfinite(offset) or not 0 <= metal-offset <= opening):
         raise ValueError('reviewed metal target outside derived model travel')
     return dict(native_travel_offset_mm=offset, open_travel_mm=opening, max_metal_gap_mm=opening+offset,
@@ -473,7 +480,17 @@ def prepare_model(planner, observation, data, urdf_path, opened, engine_cache=No
     world,cup_names,world_description=world_config(planner,observation.sample.world_from_cup,fixed_meshes)
     from cup_envelope import prepare as prepare_cup
     # Reject a mismatched frozen cup proof before creating or updating GPU models.
-    cup_envelope=prepare_cup(world,path=getattr(planner,'operator_assisted_cup_envelope',None))
+    selected=getattr(planner,'scene_asset_set',None)
+    if selected is not None:
+        envelope=selected['cup'].get('inward_envelope')
+        if envelope is None:
+            raise ValueError('selected cup requires its own pinned inward envelope; legacy fallback is forbidden')
+        envelope_path=envelope['path']
+        if hashlib.sha256(Path(envelope_path).read_bytes()).hexdigest()!=envelope['sha256'].removeprefix('sha256:'):
+            raise ValueError('selected cup inward envelope file changed')
+    else:
+        envelope_path=getattr(planner,'operator_assisted_cup_envelope',None)
+    cup_envelope=prepare_cup(world,path=envelope_path)
     model_preparation_seconds=time.perf_counter()-began
     signature=deepcopy(config)
     signature['kinematics']['lock_joints']=sorted(signature['kinematics']['lock_joints'])

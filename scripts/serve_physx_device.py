@@ -75,36 +75,27 @@ def inference_options(setup):
 def inference_source(root):
     """Pin only existing Infer settings/history and indexed playback files."""
     from robot_workbench.collection_history import _file, _pin
+    from robot_workbench.inference_history import DATABASE, entries, checked_entry
     root=Path(root)
     if not root.is_absolute() or root.resolve()!=root or root.is_symlink() or not root.is_dir():
         raise ValueError('retained inference source requires a canonical absolute directory')
     files={};ids=set()
-    for name in ('execution-settings.json','history.json'):
+    for name in ('execution-settings.json','history.json',DATABASE):
         if not (root/name).exists() and not (root/name).is_symlink():continue
         path=_file(root,name)
-        if path.stat().st_size>32*1024*1024:raise ValueError('retained inference metadata exceeds 32 MiB')
-        value=json.loads(path.read_bytes());files[name]=_pin(path)
-        if not isinstance(value,dict):raise ValueError('retained inference metadata must be an object')
+        files[name]=_pin(path)
         if name=='execution-settings.json':
+            if path.stat().st_size>32*1024*1024:raise ValueError('retained inference metadata exceeds 32 MiB')
+            value=json.loads(path.read_bytes())
+            if not isinstance(value,dict):raise ValueError('retained inference metadata must be an object')
             if (type(value.get('execute_steps')) is not int or not 1<=value['execute_steps']<=60
                     or type(value.get('revision')) is not int or value['revision']<0):
                 raise ValueError('invalid retained inference execution settings')
-            continue
-        if value.get('schema')!='inference_history.v1' or not isinstance(value.get('entries'),list):
-            raise ValueError('unknown retained inference history schema')
-        for entry in value['entries']:
-            if not isinstance(entry,dict) or not isinstance(entry.get('result'),dict):
-                raise ValueError('invalid retained inference history entry')
-            identity=entry['result'].get('id')
-            if not isinstance(identity,str) or not identity or identity in ids:
-                raise ValueError('missing or duplicate retained inference result ID')
-            ids.add(identity);relative=entry.get('path')
-            if relative is None:continue
-            if (not isinstance(relative,str) or not relative or '\\' in relative
-                    or Path(relative).is_absolute() or '..' in Path(relative).parts
-                    or Path(relative).as_posix()!=relative or Path(relative).suffix!='.mp4'):
-                raise ValueError('retained inference media path escapes source or is not an MP4')
-            files[relative]=_pin(_file(root,relative))
+    for entry in entries(root):
+        identity,_,_,relative,_=checked_entry(entry)
+        if identity in ids:raise ValueError('duplicate retained inference result ID')
+        ids.add(identity)
+        if relative is not None:files[relative]=_pin(_file(root,relative))
     return dict(schema='inference_retained_source.v1',root=str(root),files=files) if files else None
 
 

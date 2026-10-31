@@ -7,7 +7,40 @@ sys.path[:0]=[str(ROOT),str(ROOT/'tests'),str(ROOT/'calibration'),str(ROOT/'cali
 from robot_workbench.control_owner import ControlChannel,ControlRuntimeClient
 
 
-def _owner_process(root,ready,closing,heartbeat=None,tripped=None):
+class EventReadLockTest(unittest.TestCase):
+    def test_event_reads_snapshot_without_parent_encoding_and_preserve_cursors(self):
+        from collections import deque
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from robot_workbench.control_owner import ControlOwnerService,_encode_event_response,LIMIT
+        service=object.__new__(ControlOwnerService);service.device=SimpleNamespace(runtime=None)
+        service.event_lock=threading.Lock();service.events=deque(maxlen=8192);service.event_sequence=0
+        for i in range(35):
+            service.event('owner_inference'if i%2 else 'control_study_feedback',sample=i)
+        service.event('fault_diagnostic',payload='x'*(LIMIT//2+100))
+        service.event('control_study_feedback',sample=36)
+        with patch('robot_workbench.control_owner._encode',side_effect=AssertionError('parent encoded events')):
+            first=service._read('events',dict(after=0))
+            self.assertEqual(len(first['events']),32)
+            self.assertTrue(service.event_lock.acquire(blocking=False));service.event_lock.release()
+            second=service._read('events',dict(after=32))
+            self.assertEqual([r['sequence']for r in second['events']],[33,34,35])
+            large=service._read('events',dict(after=35))
+            self.assertEqual([r['sequence']for r in large['events']],[36])
+            self.assertEqual(service._read('events',dict(after=36))['events'][0]['sequence'],37)
+        wire=_encode_event_response(dict(ok=True,request_id='cpu',result=large))
+        self.assertGreater(len(wire),LIMIT//2);self.assertLess(len(wire),LIMIT)
+        self.assertEqual(json.loads(wire)['result'],large)
+        rows=[dict(sequence=i,event='control_study_feedback',value='x'*(LIMIT//3))for i in range(1,4)]
+        trimmed=json.loads(_encode_event_response(dict(result=dict(events=rows,latest=3,incomplete=False))))['result']
+        self.assertEqual([r['sequence']for r in trimmed['events']],[1]);self.assertEqual(trimmed['latest'],3)
+        service.events.popleft()
+        self.assertTrue(service._read('events',dict(after=0))['incomplete'])
+        with self.assertRaisesRegex(ValueError,'bounded size'):
+            _encode_event_response(dict(result=dict(events=[dict(payload='x'*LIMIT)])))
+
+
+def _owner_process(root,ready,closing,heartbeat=None,tripped=None,fixture_mode=None):
     import robot_workbench.control_owner as transport
     from robot_workbench.runtime import Runtime
     from robot_workbench.service import Device
@@ -18,6 +51,27 @@ def _owner_process(root,ready,closing,heartbeat=None,tripped=None):
     if sys.platform!='linux':transport._identity=lambda:dict(pid=os.getpid(),start_ticks='cpu-test',boot_id='cpu-test')
     jaw.configure_mapping(None);device=Device('isolated-cpu','fake',None)
     service=transport.ControlOwnerService(device,Path(root)/'service')
+    if fixture_mode=='slow_read_encoding':
+        original_read=service._read;delay_lock=threading.Lock()
+        def delayed_read(operation,arguments):
+            flag=Path(root)/'delay-read'
+            with delay_lock:
+                if operation=='snapshot'and flag.exists():
+                    delay=float(flag.read_text()or'.25');flag.unlink()
+                    service.read_encoder.submit(time.sleep,delay)
+                    (Path(root)/'read-delayed').touch()
+            return original_read(operation,arguments)
+        service._read=delayed_read
+    if fixture_mode=='large_events':
+        service.event('fault_diagnostic',trace=[[(i+j)/10000 for j in range(14)]for i in range(26000)])
+    elif fixture_mode=='write_encoding_failure':
+        original_encode=transport._encode
+        def fail_once(value):
+            if isinstance(value,dict)and value.get('ok')is True and 'stop'in value.get('result',{}):
+                transport._encode=original_encode
+                raise ValueError('CPU response encoding failure after Stop')
+            return original_encode(value)
+        transport._encode=fail_once
     def factory():
         gc.disable()  # Explicit CPU analogue of SDKProcess's connected GC policy.
         raw=WindowBackend(time.monotonic);raw.target_interpreter_profile='x5_shared_precision_v1'
@@ -42,6 +96,9 @@ def _owner_process(root,ready,closing,heartbeat=None,tripped=None):
     serving=threading.Thread(target=service.serve_forever,daemon=True);serving.start()
     ready.put(str(service.descriptor_path));closing.wait(3600)
     if device.runtime is None:service.close()
+    else:
+        service.event_encoder.shutdown(wait=True,cancel_futures=True)
+        service.read_encoder.shutdown(wait=True,cancel_futures=True)
 
 
 def _guard_process(heartbeat,tripped,ready,closed):
@@ -98,7 +155,10 @@ class ControlOwnerProcessTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(prefix='wb-owner-',dir='/tmp');self.addCleanup(self.temp.cleanup)
         self.context=multiprocessing.get_context('spawn');self.ready=self.context.Queue();self.closing=self.context.Event()
         self.heartbeat=self.context.Value('d',0.);self.tripped=self.context.Value('b',False)
-        self.process=self.context.Process(target=_owner_process,args=(self.temp.name,self.ready,self.closing,self.heartbeat,self.tripped));self.process.start()
+        fixture_mode=('large_events'if self._testMethodName.startswith('test_event_')else
+                      'write_encoding_failure'if self._testMethodName=='test_successful_stop_encoding_failure_is_unknown'else
+                      'slow_read_encoding'if self._testMethodName in ('test_read_encoder_delay_does_not_stall_tick_or_stop_and_preserves_sample_age','test_concurrent_state_readers_wait_outside_control_instead_of_failing')else None)
+        self.process=self.context.Process(target=_owner_process,args=(self.temp.name,self.ready,self.closing,self.heartbeat,self.tripped,fixture_mode));self.process.start()
         self.addCleanup(self.cleanup)
         self.descriptor=self.ready.get(timeout=8);self.channel=ControlChannel(self.descriptor)
 
@@ -112,7 +172,8 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     self.channel.call('release',token=lease['token'],arms_supported=True)
                     self.wait(lambda s:s.get('connected')is False)
             except Exception:pass
-        self.closing.set();self.process.join(3)
+        if self.process.is_alive():self.closing.set()
+        self.process.join(3)
         if self.process.is_alive():self.process.terminate();self.process.join(3)  # Only this CPU fake; no physical process.
 
     def wait(self,predicate,seconds=6):
@@ -135,6 +196,62 @@ class ControlOwnerProcessTests(unittest.TestCase):
         token=self.channel.token;self.channel.token='bad'
         with self.assertRaises(PermissionError):self.channel.call('inspect')
         self.channel.token=token
+
+    def test_normal_release_consumes_business_lease_before_second_acquire(self):
+        from robot_workbench.service import Device
+        parent=Device('isolated-cpu','fake',lambda:ControlRuntimeClient(self.descriptor).acquire())
+        self.addCleanup(parent.closed.set);parent.connect({})
+        client=parent.runtime;before=client.nonce;client.begin_maintenance()
+        client.channel.call('release',expected_nonce=before,token=client.lease['token'],arms_supported=True)
+        self.wait(lambda s:s.get('connected')is False)
+        deadline=time.monotonic()+4
+        while time.monotonic()<deadline and(parent.runtime is not None or parent.thread.is_alive()):time.sleep(.01)
+        self.assertIsNone(parent.runtime,parent.error);self.assertIsNone(client.lease)
+        self.assertTrue(parent.release_receipt['maintenance_cleanup_confirmed'])
+        parent.connect({});self.assertNotEqual(parent.runtime.nonce,before)
+        self.assertTrue(parent.snapshot('calibration')['connected'])
+
+    def test_research_is_an_explicit_holder_on_the_same_owner_and_sdk(self):
+        initial=self.acquire();client=ControlRuntimeClient(self.descriptor);self.addCleanup(client.detach)
+        calibration=client.register_business('calibration');research=client.register_business('research')
+        client.handoff(calibration,'research');state=client.snapshot(research)
+        self.assertEqual(state['holder'],'research');self.assertEqual(state['runtime_nonce'],initial['runtime_nonce'])
+        self.assertEqual(state['pid'],initial['pid']);self.assertTrue(state['connected'])
+        self.assertTrue(state['execution_settings']['settings']['speed_protection']['enabled'])
+        with self.assertRaises(PermissionError):client.submit(calibration,dict(action='preview_workbench',waypoints=[]))
+        row=dict(q12=[.01]+[0.]*11,speeds12=[.1]*12)
+        review=client.submit(research,dict(action='preview_workbench',waypoints=[row]))
+        client.submit(research,dict(action='confirm',token=review['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+        self.wait(lambda s:s.get('automatic_enabled'));self.channel.call('stop')
+        done=self.wait(lambda s:s.get('stationary')and not s.get('automatic_enabled'))
+        self.assertEqual(done['runtime_nonce'],initial['runtime_nonce'])
+
+    def test_prepare_after_completed_return_clears_binding_via_actual_owner_admission(self):
+        from types import SimpleNamespace as NS
+        from robot_workbench.cup_return import clear
+        self.acquire();client=ControlRuntimeClient(self.descriptor)
+        self.addCleanup(client.detach);client.begin_maintenance()
+        actor=NS(action='ops_prepare_collection',require=lambda runtime:None)
+        root=Path(self.temp.name);binding=root/'binding.json';previous=root/'previous-binding.json'
+        binding.write_text(json.dumps(dict(source_digest='completed-return')))
+        previous.write_text(json.dumps(dict(source_digest='ordinary-collection')))
+        state=client.refresh('collection')
+        task=dict(submitted=True,submitted_monotonic_s=0.,timeline_digest='return',directory=str(root),
+            parent_speed_scale=1.,parent_plan_id='parent',duration_s=2.,offset_xy_mm=[0.,0.],binding_path=str(binding),source_digest='completed-return',
+            runtime_nonce=state['runtime_nonce'],command_epoch=state['command_epoch'])
+        state.update(frozen=dict(timeline_digest='return',status='completed'),execution_calibration=dict(accepted_monotonic_s=1.))
+        device=NS(runtime=client,cup_return_task=task,snapshot=lambda _:state)
+        # The remote maintenance lease is authoritative; a local actor alone is insufficient.
+        lease=client.lease;client.lease=None
+        with self.assertRaisesRegex(PermissionError,'lease required'):clear(device,maintenance_actor=actor)
+        self.assertEqual(json.loads(binding.read_text())['source_digest'],'completed-return')
+        self.assertIs(device.cup_return_task,task)
+        client.lease=lease
+        clear(device,maintenance_actor=actor)
+        self.assertEqual(json.loads(binding.read_text())['source_digest'],'ordinary-collection')
+        self.assertIsNone(device.cup_return_task);self.assertEqual(client.refresh()['holder'],'collection')
+        self.assertTrue(client.state['feedback_healthy']);self.assertFalse(client.state['automatic_enabled'])
+        client.end_maintenance()
 
     def check_business_failure(self,mode):
         initial=self.acquire();business_ready=self.context.Queue()
@@ -250,14 +367,152 @@ class ControlOwnerProcessTests(unittest.TestCase):
         self.assertFalse(stopped['automatic_enabled'])
 
     def test_independent_manager_stop_reaches_owner_with_no_business_http(self):
-        from types import SimpleNamespace
         from robot_workbench.management import WorkbenchManager
         self.acquire()
-        manager=SimpleNamespace(config=dict(device_id='isolated-cpu',control_owner_descriptor=self.descriptor),stop_generation=0)
-        result=WorkbenchManager.stop(manager,dict(expected_device_id='isolated-cpu',request_id='cpu-direct-stop'))
+        manager=WorkbenchManager.__new__(WorkbenchManager)
+        manager.config=dict(device_id='isolated-cpu',control_owner_descriptor=self.descriptor)
+        manager.stop_generation=0
+        result=manager.stop(dict(expected_device_id='isolated-cpu',request_id='cpu-direct-stop'))
         self.assertEqual(result['status'],'accepted')
         state=self.wait(lambda s:s.get('state')=='STOPPED_DAMPING_HOLD')
         self.assertFalse(state['automatic_enabled'])
+
+    def test_successful_stop_encoding_failure_is_unknown(self):
+        from robot_workbench.control_owner import ControlCallUnknown
+        self.acquire()
+        with self.assertRaises(ControlCallUnknown)as result:self.channel.call('stop')
+        state=self.wait(lambda s:s.get('state')=='STOPPED_DAMPING_HOLD')
+        receipt=self.channel.call('receipt',request_id=result.exception.request_id)
+        self.assertTrue(receipt['done']);self.assertNotIn('error',receipt)
+        self.assertEqual(receipt['operation'],'stop');self.assertFalse(state['automatic_enabled'])
+
+    def test_event_large_reads_do_not_starve_owner_or_guard(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.acquire();ready=self.context.Queue();closed=self.context.Event()
+        guard=self.context.Process(target=_guard_process,args=(self.heartbeat,self.tripped,ready,closed));guard.start()
+        try:
+            self.assertTrue(ready.get(timeout=3)['armed'])
+            state=self.channel.call('snapshot',business='calibration');q=state['calibration_feedback']['qpos'][:];q[0]=.04
+            review=self.channel.call('submit',business='calibration',command=dict(action='preview',active_arm='left',q_active=q[:6],max_velocity=.03))
+            self.channel.call('submit',business='calibration',command=dict(action='confirm',token=review['token'],confirmation='START_REVIEWED_SINGLE_ARM',physical_clearance=True))
+            self.wait(lambda s:s.get('automatic_enabled'))
+            def read():
+                for _ in range(8):
+                    batch=ControlChannel(self.descriptor).call('events',after=0)
+                    self.assertEqual(batch['events'][0]['sequence'],1)
+                    self.assertEqual(batch['events'][0]['event'],'fault_diagnostic')
+                    self.assertFalse(batch['incomplete'])
+            with ThreadPoolExecutor(max_workers=2)as pool:
+                tasks=[pool.submit(read)for _ in range(2)]
+                for task in tasks:task.result(timeout=15)
+            final=self.wait(lambda s:(s.get('motion')or{}).get('status')=='READY',seconds=8)
+            self.assertLess(abs(final['calibration_feedback']['qpos'][0]-.04),1e-4)
+            self.assertFalse(self.tripped.value);self.assertTrue(final['feedback_healthy'])
+        finally:
+            closed.set();guard.join(3)
+            if guard.is_alive():guard.terminate();guard.join(2)
+
+    def test_event_encoder_exit_keeps_stop_and_maintenance_available(self):
+        import signal
+        self.acquire();encoder=self.channel.call('inspect')['control_owner']['event_encoding']
+        self.assertEqual(encoder['mode'],'spawned_cpu');self.assertNotEqual(encoder['pid'],self.process.pid)
+        os.kill(encoder['pid'],signal.SIGTERM)
+        with self.assertRaises(ValueError):self.channel.call('events',after=0)
+        self.assertTrue(self.channel.call('inspect')['feedback_healthy'])
+        self.channel.call('stop');self.wait(lambda s:s.get('state')=='STOPPED_DAMPING_HOLD')
+        lease=self.channel.call('maintenance_begin')
+        self.channel.call('release',token=lease['token'],arms_supported=True)
+        self.wait(lambda s:not s['connected'])
+        self.closing.set();self.process.join(4);self.assertEqual(self.process.exitcode,0)
+
+    def test_read_encoder_exit_keeps_stop_and_event_evidence_independent(self):
+        import signal
+        self.acquire();facts=self.channel.call('inspect')['control_owner']
+        self.assertEqual(facts['read_encoding']['mode'],'spawned_cpu')
+        self.assertNotEqual(facts['read_encoding']['pid'],facts['event_encoding']['pid'])
+        os.kill(facts['read_encoding']['pid'],signal.SIGTERM)
+        with self.assertRaises(ValueError):self.channel.call('inspect')
+        self.channel.call('stop')
+        end=time.monotonic()+2
+        while time.monotonic()<end:
+            rows=self.channel.call('events',after=0)['events']
+            if any(r['event']=='stop'for r in rows):break
+            time.sleep(.01)
+        else:self.fail('Stop did not reach Owner after facts encoder exit')
+        lease=self.channel.call('maintenance_begin')
+        result=self.channel.call('release',token=lease['token'],arms_supported=True)
+        self.assertEqual(result['queued'],'release')
+
+    def test_read_encoder_delay_does_not_stall_tick_or_stop_and_preserves_sample_age(self):
+        self.acquire();results=[]
+        (Path(self.temp.name)/'delay-read').touch()
+        def read():
+            results.append(self.channel.call('snapshot',business='calibration'))
+        reader=threading.Thread(target=read);reader.start()
+        end=time.monotonic()+1
+        while not(Path(self.temp.name)/'read-delayed').exists()and time.monotonic()<end:time.sleep(.002)
+        self.assertTrue((Path(self.temp.name)/'read-delayed').exists())
+        initial=self.heartbeat.value;time.sleep(.06)
+        self.assertGreater(self.heartbeat.value,initial)
+        self.assertLess(time.monotonic()-self.heartbeat.value,.1)
+        started=time.monotonic();self.channel.call('stop')
+        self.assertLess(time.monotonic()-started,.1)
+        reader.join(2);self.assertFalse(reader.is_alive());self.assertEqual(len(results),1)
+        self.assertGreaterEqual(results[0]['control_owner']['reply_age_s'],.2)
+        self.assertGreaterEqual(time.monotonic()-results[0]['calibration_feedback']['sample_time_s'],.2)
+        state=self.wait(lambda s:s.get('state')=='STOPPED_DAMPING_HOLD')
+        self.assertTrue(state['feedback_healthy']);self.assertFalse(state['automatic_enabled'])
+
+    def test_concurrent_state_readers_wait_outside_control_instead_of_failing(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.acquire();(Path(self.temp.name)/'delay-read').write_text('.06')
+        gate=threading.Barrier(3)
+        def read():
+            gate.wait();return self.channel.call('snapshot',business='calibration')
+        before=self.heartbeat.value
+        with ThreadPoolExecutor(max_workers=3)as pool:
+            futures=[pool.submit(read)for _ in range(3)]
+            values=[future.result(2)for future in futures]
+        self.assertEqual(len(values),3);self.assertTrue(all(v['feedback_healthy']for v in values))
+        self.assertGreater(self.heartbeat.value,before)
+
+    @unittest.skipUnless(sys.platform=='linux','Linux parent-death lifecycle')
+    def test_event_encoder_follows_owner_lifetime(self):
+        import signal
+        facts=self.channel.call('inspect')['control_owner']
+        encoders=[facts[k]['pid']for k in('event_encoding','read_encoding')]
+        os.kill(self.process.pid,signal.SIGKILL);self.process.join(3)
+        end=time.monotonic()+3
+        while time.monotonic()<end:
+            live=[]
+            for encoder in encoders:
+                try:state=Path('/proc/'+str(encoder)+'/stat').read_text().rsplit(')',1)[1].split()[0]
+                except FileNotFoundError:continue
+                if state!='Z':live.append(encoder)
+            if not live:return
+            time.sleep(.02)
+        self.fail('CPU event encoder survived Owner process exit')
+
+    def test_event_encoder_normal_shutdown(self):
+        from unittest.mock import patch
+        import robot_workbench.control_owner as transport
+        from robot_workbench.service import Device
+        with tempfile.TemporaryDirectory(prefix='wb-codec-',dir='/tmp')as directory:
+            with patch.object(transport,'_identity',return_value=dict(pid=os.getpid())):
+                service=transport.ControlOwnerService(Device('cpu-codec','fake',None),directory)
+            serving=threading.Thread(target=service.serve_forever);serving.start()
+            service.close();serving.join(2)
+            self.assertFalse(serving.is_alive())
+            with self.assertRaises(RuntimeError):service.event_encoder.submit(os.getpid)
+            with self.assertRaises(RuntimeError):service.read_encoder.submit(os.getpid)
+            self.assertFalse((Path(directory)/'control-token').exists())
+            with patch.object(transport,'_identity',return_value=dict(pid=os.getpid())):
+                restarted=transport.ControlOwnerService(Device('cpu-codec','fake',None),directory)
+            self.assertNotEqual(restarted.instance,service.instance)
+            self.assertNotEqual(restarted.token,service.token)
+            serving=threading.Thread(target=restarted.serve_forever);serving.start()
+            restarted.close();serving.join(2)
+            self.assertFalse(serving.is_alive())
 
     def test_lost_mutating_response_is_unknown_and_never_replayed(self):
         import socket

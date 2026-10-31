@@ -39,6 +39,162 @@ def wait_until(predicate, timeout=3):
     raise AssertionError('test child did not reach the expected state')
 
 
+class GuardCANBudgetTests(unittest.TestCase):
+    def test_non_ipc_batch_keeps_wall_stages_without_extra_thread_usage_reads(self):
+        with patch.object(guard.CANBatchTiming,'read_usage',side_effect=AssertionError('no per-loop rusage')):
+            probe=guard.CANBatchTiming(detailed=False)
+            probe.mark('recvmsg');probe.mark('validate_feedback');timing=probe.finish()
+        self.assertIn('recvmsg',timing['stages'])
+        self.assertIsNone(timing['stages']['recvmsg']['cpu_s'])
+        self.assertIsNone(timing['thread_usage_delta'])
+
+    def test_pending_ipc_probe_attributes_wait_to_receive_without_changing_feedback(self):
+        class Reader:
+            done=False
+            def recvmsg(self,*_):
+                if self.done:raise BlockingIOError
+                self.done=True;time.sleep(.004);ns=time.time_ns();ident,data=frame(6)
+                return struct.pack('=IB3x8s',ident,8,data),[(socket.SOL_SOCKET,35,
+                    struct.pack('@ll',ns//10**9,ns%10**9))],0,None
+        reader=Reader();latch=guard.FeedbackLatch(('can3','can1'))
+        latch.phase='active';latch.started=time.monotonic()-.1
+        probe=guard.CANBatchTiming()
+        self.assertEqual(guard.receive_ready_can([reader],{reader:'can3'},latch,probe),1)
+        timing=probe.finish()
+        self.assertIn(('can3',6),latch.seen);self.assertIsNone(latch.reason)
+        self.assertGreaterEqual(timing['stages']['recvmsg']['wall_s'],.003)
+        self.assertLess(timing['stages']['recvmsg']['cpu_s'],timing['stages']['recvmsg']['wall_s'])
+        self.assertIn('validate_feedback',timing['stages'])
+        self.assertIn('apply_coalesced',timing['stages'])
+
+    def test_coalescing_matches_ordered_active_and_release_health_updates(self):
+        def packet(motor,status=1,stamp=.999,flags=0):
+            ident,data=frame(motor,status)
+            return ident,data,stamp,flags
+        normal=[packet(m)for _ in range(8)for m in (1,2,4,5,6,7,8)]
+        cases=[normal, normal+[packet(6,2),packet(6,1)],
+               normal+[packet(6,0),packet(6,1)],
+               normal+[packet(6,1,.8),packet(6,1,1.1)],
+               [packet(6,2,.999,socket.MSG_DONTROUTE)]+normal]
+        for phase in ('active','releasing'):
+            for retired in (set(),{'can3'}):
+                for values in cases:
+                    baseline=guard.FeedbackLatch(('can3','can1'),clock=lambda:1.,disabled_grippers=['right'])
+                    candidate=guard.FeedbackLatch(('can3','can1'),clock=lambda:1.,disabled_grippers=['right'])
+                    for latch in (baseline,candidate):
+                        latch.phase=phase;latch.started=.9;latch.retired=set(retired)
+                        latch.enabled=set(latch.expected)
+                    for bus in ('can3','can1'):
+                        for ident,data,stamp,flags in values:
+                            baseline.receive(bus,ident,data,stamp,flags)
+                            if baseline.reason:break
+                        if baseline.reason:break
+                    class Reader:
+                        def __init__(self):self.rows=iter(values)
+                        def recvmsg(self,*_):
+                            try:ident,data,stamp,flags=next(self.rows)
+                            except StopIteration:raise BlockingIOError
+                            ns=round(stamp*1e9)
+                            return struct.pack('=IB3x8s',ident,8,data),[(socket.SOL_SOCKET,35,
+                                struct.pack('@ll',ns//10**9,ns%10**9))],flags,None
+                    left,right=Reader(),Reader();calls=[];apply=candidate.apply_feedback
+                    def observe(*row):calls.append(row);apply(*row)
+                    candidate.apply_feedback=observe
+                    with patch.object(guard.time,'monotonic',return_value=1.),patch.object(guard.time,'time_ns',return_value=10**9):
+                        guard.receive_ready_can([left,right],{left:'can3',right:'can1'},candidate)
+                    self.assertEqual(candidate.seen,baseline.seen)
+                    self.assertEqual(candidate.statuses,baseline.statuses)
+                    self.assertEqual(candidate.enabled,baseline.enabled)
+                    self.assertEqual(candidate.reason,baseline.reason)
+                    if not baseline.reason:self.assertLessEqual(len(calls),13)
+                    # The original timeout/retirement gate still sees the same
+                    # last actual RX time after normal updates are compressed.
+                    for latch in (baseline,candidate):latch.clock=lambda:1.101
+                    self.assertEqual(candidate.check(),baseline.check())
+
+    def test_connected_backlog_is_time_bounded_fair_and_keeps_original_rx_time(self):
+        for phase in ('active','releasing','starting'):
+            now=[1.];seen=[]
+            class Reader:
+                def __init__(self):self.remaining=128
+                def recvmsg(self,*_):
+                    if not self.remaining:raise BlockingIOError
+                    self.remaining-=1;now[0]+=.0002
+                    ident,data=frame(3)
+                    return struct.pack('=IB3x8s',ident,8,data),[(socket.SOL_SOCKET,35,struct.pack('@ll',0,999000000))],0,None
+            left,right=Reader(),Reader();parent=object()
+            latch=SimpleNamespace(phase=phase,started=.9,reason=None,receive=lambda *v:seen.append(v),
+                                  rx_evidence=guard.FeedbackLatch(('left','right')).rx_evidence)
+            latch.validated_feedback=lambda bus,ident,data,stamp,flags:(bus,ident,None,stamp)
+            latch.apply_feedback=lambda *v:seen.append(v)
+            with patch.object(guard.time,'monotonic',side_effect=lambda:now[0]),patch.object(guard.time,'time_ns',side_effect=lambda:round(now[0]*1e9)):
+                count=guard.receive_ready_can([left,parent,right],{left:'left',right:'right'},latch)
+            if phase=='starting':self.assertEqual(count,256,'activation keeps the prior acquisition order')
+            else:
+                self.assertLessEqual(now[0]-1.,.0013);self.assertEqual(count,6)
+                self.assertEqual(left.remaining,125);self.assertEqual(right.remaining,125)
+            self.assertEqual(left.remaining+right.remaining+count,256,'unprocessed frames remain queued')
+            self.assertEqual({r[0]for r in seen},{'left','right'})
+            self.assertTrue(all(abs(r[3]-.999)<1e-8 for r in seen),'backlog must not become freshly timestamped feedback')
+
+    def test_known_can_fault_does_not_wait_for_another_batch_or_heartbeat(self):
+        class Reader:
+            def recvmsg(self,*_):
+                ident,data=frame(3,2)
+                return struct.pack('=IB3x8s',ident,8,data),[(socket.SOL_SOCKET,35,struct.pack('@ll',1,0))],0,None
+        reader=Reader();latch=SimpleNamespace(phase='active',started=0.,reason=None,
+                                            rx_evidence=guard.FeedbackLatch(('left',)).rx_evidence)
+        latch.receive=lambda *_:setattr(latch,'reason','motor fault')
+        latch.validated_feedback=lambda bus,ident,data,stamp,flags:(bus,3,2,stamp)
+        latch.apply_feedback=latch.receive
+        with patch.object(guard.time,'monotonic',return_value=1.),patch.object(guard.time,'time_ns',return_value=1_000_000_000):
+            self.assertEqual(guard.receive_ready_can([reader],{reader:'left'},latch),1)
+        self.assertEqual(latch.reason,'motor fault')
+
+
+class GuardClientIPCTests(unittest.TestCase):
+    def test_heartbeat_reply_after_60ms_does_not_trigger_the_old_50ms_selfkill(self):
+        trace=guard.IPCFailureTrace.create();parent,peer=socket.socketpair()
+        code=("import socket,sys,json;sys.path.insert(0,sys.argv[1]);"
+              "from robot_workbench.arx_output_guard import GuardClient,IPCFailureTrace;"
+              "c=GuardClient(socket.socket(fileno=int(sys.argv[2])),IPCFailureTrace(int(sys.argv[3])));"
+              "c.call('heartbeat');print('returned',flush=True);print(json.dumps(c.last_call_timing),flush=True)")
+        child=subprocess.Popen([sys.executable,'-B','-c',code,str(ROOT),str(peer.fileno()),str(trace.fd)],
+            pass_fds=(peer.fileno(),trace.fd),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        peer.close()
+        try:
+            parent.settimeout(2);request=parent.recv(4096);self.assertEqual(json.loads(request)['action'],'heartbeat')
+            time.sleep(.06);parent.sendall(b'{"healthy":true}\n')
+            output,error=child.communicate(timeout=2)
+            self.assertEqual(child.returncode,0,error);self.assertIn('returned',output);self.assertIsNone(trace.snapshot())
+            timing=json.loads(output.splitlines()[-1]);self.assertEqual(timing['action'],'heartbeat')
+            self.assertGreaterEqual(timing['response_wait_decode_s'],.055)
+            self.assertGreaterEqual(timing['total_s'],timing['response_wait_decode_s'])
+            self.assertLess(timing['cpu_s'],timing['response_wait_decode_s']/2.,'waiting must not be labeled as computation')
+        finally:
+            if child.poll()is None:child.kill();child.wait()
+            parent.close();trace.close()
+
+    def test_no_reply_still_fails_stop_and_preserves_failure_memory_without_disk_io(self):
+        trace=guard.IPCFailureTrace.create();parent,peer=socket.socketpair()
+        code=("import socket,sys;sys.path.insert(0,sys.argv[1]);"
+              "from robot_workbench.arx_output_guard import GuardClient,IPCFailureTrace;"
+              "GuardClient(socket.socket(fileno=int(sys.argv[2])),IPCFailureTrace(int(sys.argv[3]))).call('heartbeat')")
+        child=subprocess.Popen([sys.executable,'-B','-c',code,str(ROOT),str(peer.fileno()),str(trace.fd)],
+            pass_fds=(peer.fileno(),trace.fd),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        peer.close()
+        try:
+            parent.settimeout(2);parent.recv(4096);child.communicate(timeout=2)
+            self.assertEqual(child.returncode,-signal.SIGKILL)
+            receipt=trace.snapshot();self.assertEqual(receipt['action'],'heartbeat');self.assertEqual(receipt['stage'],'receive')
+            self.assertTrue(receipt['self_sigkill_requested']);self.assertEqual(receipt['source_pid'],child.pid)
+            self.assertEqual(receipt['budget_s'],guard.TIMEOUT)
+            self.assertGreaterEqual(receipt['failed_monotonic_ns']-receipt['started_monotonic_ns'],90_000_000)
+        finally:
+            if child.poll()is None:child.kill();child.wait()
+            parent.close();trace.close()
+
+
 class FeedbackTests(unittest.TestCase):
     def setUp(self):
         self.now = 10.
@@ -239,6 +395,27 @@ with out.open('ab', buffering=0) as stream:
 
 
 class ProcessTests(unittest.TestCase):
+    def test_receive_evidence_distinguishes_stale_queue_future_clock_and_socket_loss(self):
+        from collections import deque
+        latch=guard.FeedbackLatch(('can3','can1'),clock=lambda:10.)
+        latch.started=9.;latch.phase='active'
+        raw=struct.pack('=IB3x8s',1,8,b'\x20'+b'\0'*7)
+        frames=deque((raw,[(socket.SOL_SOCKET,35,struct.pack('@ll',sec,nano)),
+                          (socket.SOL_SOCKET,40,struct.pack('=I',4))],0,None)
+                     for sec,nano in ((19,800_000_000),(20,10_000_000),(19,999_000_000)))
+        class Reader:
+            def recvmsg(self,*_):
+                if frames:return frames.popleft()
+                raise BlockingIOError()
+        reader=Reader()
+        with patch.object(guard.time,'monotonic',return_value=10.),patch.object(guard.time,'time_ns',return_value=20_000_000_000):
+            self.assertEqual(guard.receive_ready_can([reader],{reader:'can3'},latch),3)
+        row=latch.diagnostic_snapshot()['receive_evidence']['can3']
+        self.assertEqual((row['frames'],row['valid_feedback_frames'],row['stale_frames'],row['future_frames'],row['socket_drops']),(3,1,1,1,4))
+        self.assertAlmostEqual(row['maximum_rx_age_s'],.2)
+        self.assertAlmostEqual(latch.seen['can3',1],9.999)
+        self.assertEqual(latch.heartbeat,10.)
+
     def test_expired_supervisor_kills_before_latch_persistence_and_skips_diagnostic_signal(self):
         latch_type=guard.FeedbackLatch;order=[];peers=[]
         class Child:
@@ -327,7 +504,8 @@ class ProcessTests(unittest.TestCase):
                 parent.wait(timeout=2)
                 def stopped():
                     stat = Path(f'/proc/{child_pid}/stat')
-                    return not stat.exists() or stat.read_text().split(') ', 1)[1].startswith('Z ')
+                    try:return stat.read_text().split(') ', 1)[1].startswith('Z ')
+                    except (FileNotFoundError,ProcessLookupError):return True
                 wait_until(stopped)
                 size = out.stat().st_size
                 time.sleep(.05)
@@ -414,7 +592,11 @@ for _ in range(100):
     if mode=='trip_detail':
         client.call('trip',detail='RuntimeError: CPU construction sentinel')
         time.sleep(1)
-    client.call('heartbeat')
+    heartbeat=client.call('heartbeat')
+    loop=heartbeat['server_timing']['loop']
+    assert loop['select_started_monotonic_ns']<=heartbeat['server_timing']['selected_monotonic_ns']
+    assert all(loop[k]>=0 for k in ('before_select_s','select_wall_s','select_cpu_s'))
+    assert loop['previous_batch']['can_batch_s']>=0
     if mode == 'heartbeat_future':
         threading.Timer(.3,lambda:(directory/'future-reference-applied').write_text('must not survive guard')).start()
     if mode.startswith('heartbeat'): time.sleep(.5)

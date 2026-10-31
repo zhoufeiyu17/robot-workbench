@@ -15,6 +15,7 @@ SCOPE='maintenance_current_state_and_historical_parent'
 CURRENT_GEOMETRY_SCHEMA='physical_cup_current_geometry.v1'
 PICKUP_POLICY='current-cup-candidates-v1'
 PICKUP_TRANSITION_POLICY='motiongen-to-inherited-carry-entry-v1'
+PARENT_REVERSE_POLICY='completed-parent-reverse-no-replanning-v1'
 PICKUP_STAGES={'approach_pre','approach','preclose_settle','close_ramp','close_and_hold','lift','transport'}
 
 
@@ -150,7 +151,7 @@ def build_source(parent_source,initial,context,run_id):
     context=deepcopy(context)
     context.setdefault('right_hold_reported',deepcopy(initial['planned_reported']['right_arm_joints']))
     inherited=parent_source.get('scene',{}).get('source',{}).get('assistance_receipt',{}).get('fixed_right_collision_policy')
-    if inherited is not None:
+    if inherited is not None and context.get('return_policy')!=PARENT_REVERSE_POLICY:
         context.setdefault('right_static_authorization',dict(mode='skip_fixed_static_checks',approved_by='user',
             approval_id=inherited['approval_id'],parent_policy_digest=_digest(inherited),
             scope='same_left_arm_cup_task; fresh fixed-right reference; moving-left/cup checks retained'))
@@ -168,6 +169,19 @@ def build_source(parent_source,initial,context,run_id):
             scene_digest=_digest(context['current_scene']),observation_scope=SCOPE))
     validate_source(source)
     return source
+
+
+def build_parent_replay_source(parent,parent_source,parent_execution,initial,run_id):
+    """Use the completed parent's scene as historical provenance, never a new detection."""
+    validate_parent_execution(parent,parent_source,parent_execution)
+    reference=dict(schema_version='completed_parent_reference.v1',parent_source_digest=_digest(parent_source),
+        parent_timeline_digest=parent['timeline_digest'],parent_execution_digest=_digest(parent_execution),
+        pose_basis='completed_parent_commands; no new perception')
+    context=dict(schema_version=CONTEXT_SCHEMA,return_policy=PARENT_REVERSE_POLICY,
+        parent_timeline_digest=parent['timeline_digest'],parent_execution_digest=_digest(parent_execution),
+        return_origin=deepcopy(parent_source['scene']['environment_from_cup']),offset_world_xy_mm=[0.,0.],
+        current_scene=reference)
+    return build_source(parent_source,initial,context,run_id)
 
 
 def validate_source(source,binding=None):
@@ -188,11 +202,15 @@ def validate_source(source,binding=None):
     if initial.get('disabled_grippers')!=['right'] or initial.get('held_arms')!=['right']:
         raise ValueError('physical cup maintenance requires the current disabled right gripper and held right arm')
     if not initial.get('reported_joint_limits'):raise ValueError('maintenance requires current observed Owner joint limits')
+    c=source.get('maintenance_context',{})
+    direct=c.get('return_policy')==PARENT_REVERSE_POLICY
+    if c.get('return_policy') not in (None,PARENT_REVERSE_POLICY):raise ValueError('unknown physical return policy')
     command=source.get('grasp_command',{})
     expected=parent.get('grasp_command') or dict(metal_gap_mm=65.,units='metal_inner_gap_mm',controlled_gripper='left_gripper')
-    if command!=expected or command not in [dict(metal_gap_mm=g,units='metal_inner_gap_mm',controlled_gripper='left_gripper') for g in (61.,65.)]:
+    gap=command.get('metal_gap_mm')
+    if (command!=expected or (not direct and command not in [dict(metal_gap_mm=g,units='metal_inner_gap_mm',controlled_gripper='left_gripper') for g in (61.,65.)])
+            or direct and (type(gap) not in (int,float) or not math.isfinite(gap) or not 0<=gap<=profile['gripper']['max_opening_mm'])):
         raise ValueError('maintenance grip must preserve the physical parent command')
-    c=source.get('maintenance_context',{})
     current_geometry_binding(source)
     if c.get('pickup_policy')not in (None,PICKUP_POLICY):raise ValueError('unknown current pickup policy')
     if c.get('pickup_policy')and current_geometry_binding(source)is None:
@@ -216,7 +234,7 @@ def validate_source(source,binding=None):
     inherited=parent.get('scene',{}).get('source',{}).get('assistance_receipt',{}).get('fixed_right_collision_policy')
     expected_authorization=(dict(mode='skip_fixed_static_checks',approved_by='user',approval_id=inherited['approval_id'],
         parent_policy_digest=_digest(inherited),scope='same_left_arm_cup_task; fresh fixed-right reference; moving-left/cup checks retained')
-        if inherited is not None else None)
+        if inherited is not None and not direct else None)
     if c.get('right_static_authorization')!=expected_authorization:raise ValueError('fixed-right authorization inheritance differs')
     offset=c.get('offset_world_xy_mm')
     if (not isinstance(offset,list) or len(offset)!=2 or any(type(v) not in (int,float) or not math.isfinite(v) or abs(v)>50 for v in offset)):
@@ -225,12 +243,21 @@ def validate_source(source,binding=None):
     expected_goal=deepcopy(origin);expected_goal['position'][:2]=[q+d/1000 for q,d in zip(origin['position'][:2],offset)]
     if goal!=expected_goal:raise ValueError('maintenance target must use the fixed origin, not accumulate offsets')
     scene=c.get('current_scene',{})
-    for key in ('cup_pose','machine_pose','world_from_robot'):_pose_values(scene.get(key))
-    observation=scene.get('observation',{})
-    if (observation.get('environment')!='physical' or observation.get('simulation_only') is True
-            or type(observation.get('observed_wall_ns')) is not int or observation['observed_wall_ns']<=0
-            or not _sha(observation.get('evidence_sha256')) or not observation.get('method')):
-        raise ValueError('independent physical cup/machine observation with timestamp and pinned evidence required')
+    if direct:
+        expected_reference=dict(schema_version='completed_parent_reference.v1',parent_source_digest=source['parent_source_digest'],
+            parent_timeline_digest=c['parent_timeline_digest'],parent_execution_digest=c['parent_execution_digest'],
+            pose_basis='completed_parent_commands; no new perception')
+        if (scene!=expected_reference or offset!=[0.,0.] or origin!=parent['scene']['environment_from_cup']
+                or any(c.get(key) is not None for key in ('current_geometry','pickup_policy','pregrasp_policy',
+                    'pickup_proxy_profile','pickup_transition_policy'))):
+            raise ValueError('direct parent replay requires unchanged origin, zero offset and no new scene/IK/collision evidence')
+    else:
+        for key in ('cup_pose','machine_pose','world_from_robot'):_pose_values(scene.get(key))
+        observation=scene.get('observation',{})
+        if (observation.get('environment')!='physical' or observation.get('simulation_only') is True
+                or type(observation.get('observed_wall_ns')) is not int or observation['observed_wall_ns']<=0
+                or not _sha(observation.get('evidence_sha256')) or not observation.get('method')):
+            raise ValueError('independent physical cup/machine observation with timestamp and pinned evidence required')
     if source.get('scene')!=dict(schema_version='physical_maintenance_scene.v1',scene_digest=_digest(scene),observation_scope=SCOPE):
         raise ValueError('maintenance current scene digest differs')
     from robot_workbench.sample_clock import clock_for_source
@@ -283,10 +310,20 @@ def reverse_stages(parent,parent_source):
 
 def parent_execution_receipt(events,parent,parent_source,events_sha256):
     """Bind preserved controller events, not a potentially empty/failed raw recorder."""
-    commands=[];completion=None;terminal=None
+    commands=[];completion=None;terminal=None;windows=[]
     for row in events:
+        if 'value'in row:
+            # Independent Owner events have a cursor and observer receipt time;
+            # reference/feedback retain their actual send/sample timestamps.
+            envelope=row;row=dict(deepcopy(envelope['value']),event=envelope['event'])
+            if row['event']not in ('command','source_target','feedback','motion_state','native_reference_window'):continue
+            row['wall_ns']=(row.get('send_wall_ns')if row['event']in ('command','source_target')else
+                (row.get('raw')or{}).get('sample_wall_ns')if row['event']=='feedback'else envelope.get('observed_wall_ns'))
+            row['owner_event_sequence']=envelope['sequence']
+            row['event_clock_basis']='send/sample time; terminal uses observer receipt time'
         event=row.get('event')
-        if event=='command':commands.append(deepcopy(row))
+        if event in ('command','source_target'):commands.append(deepcopy(row))
+        elif event=='native_reference_window':windows.append(deepcopy(row))
         elif event=='feedback' and (row.get('frozen') or {}).get('status')=='completed':
             f=row['frozen']
             completion=dict(wall_ns=row['wall_ns'],**{key:deepcopy(f.get(key)) for key in
@@ -296,6 +333,9 @@ def parent_execution_receipt(events,parent,parent_source,events_sha256):
         parent_timeline_digest=parent['timeline_digest'],controller_events_sha256=events_sha256,
         commands=commands,completion=completion,terminal=terminal,
         evidence_scope='submitted controller targets and terminal state; not raw-data validity or task success')
+    if any(row['event']=='source_target'for row in commands):
+        result.update(native_reference_windows=windows,
+            evidence_scope='continuous source-reference knots, native window admissions and completed feedback; not per-knot SDK sends or firmware acknowledgment')
     validate_parent_execution(parent,parent_source,result)
     return result
 
@@ -312,10 +352,25 @@ def validate_parent_execution(parent,parent_source,receipt):
             or not _sha(receipt.get('controller_events_sha256'))):raise ValueError('physical parent controller receipt identity differs')
     commands=receipt.get('commands');completion=receipt.get('completion') or {};terminal=receipt.get('terminal') or {}
     if not isinstance(commands,list) or not commands:raise ValueError('complete parent command evidence required')
+    kind=commands[0].get('event')
+    if kind not in ('command','source_target'):raise ValueError('known parent reference semantics required')
+    if kind=='source_target':
+        windows=receipt.get('native_reference_windows')
+        if not isinstance(windows,list)or not windows:raise ValueError('continuous parent needs native reference admission evidence')
+        reference=None
+        for window in windows:
+            admission=window.get('admission')or{};reference=reference or window.get('reference_id')
+            if (not _sha(reference)or window.get('reference_id')!=reference
+                    or type(window.get('frames'))is not int or not 2<=window['frames']<=32
+                    or admission.get('reference_id')!=reference or admission.get('frames')!=window['frames']
+                    or not window.get('controller_profile')or admission.get('controller_profile')!=window['controller_profile']
+                    or window.get('command_semantics')!='native_future_window_admission_not_source_knot_send'):
+                raise ValueError('continuous parent native reference admission differs')
     source_index=0;previous=-math.inf;runtime_digest=None
     for index,row in enumerate(commands):
         stamp=row.get('send_monotonic_s')
-        if (row.get('event')!='command' or row.get('tick')!=index or row.get('timeline_digest')!=parent['timeline_digest']
+        if (row.get('event')!=kind or kind=='source_target'and row.get('execution_semantics')!='source_reference_knot'
+                or row.get('tick')!=index or row.get('timeline_digest')!=parent['timeline_digest']
                 or type(stamp) not in (int,float) or not math.isfinite(stamp) or stamp<=previous
                 or type(row.get('wall_ns')) is not int or not _sha(row.get('execution_timeline_digest'))):
             raise ValueError('parent controller command order/clock/timeline is incomplete')
@@ -516,6 +571,8 @@ def _stages(parent,parent_source,source,offset_result):
 
 
 def _freeze(stages,parent,parent_source,receipt,source,offset_result,geometry):
+    direct=source['maintenance_context'].get('return_policy')==PARENT_REVERSE_POLICY
+    geometry={} if geometry is None and direct else geometry
     ticks=[];actions=[];starts=[]
     for stage in stages:
         starts.append(dict(name=stage['name'],substage=stage.get('substage',stage['name']),start_tick=len(ticks),start_s=len(ticks)/30))
@@ -524,7 +581,7 @@ def _freeze(stages,parent,parent_source,receipt,source,offset_result,geometry):
     gap=parent['gripper_distance_control']['closed_metal_gap_mm'];opening=source['calibration_profile']['gripper']['max_opening_mm']
     release=release_targets(gap,opening)[1];release['initial_model_gap_mm']=gap-gripper_offset_mm(source['calibration_profile'])
     proof=dict(schema_version='physical_cup_maintenance_derivation.v1',parent_plan=deepcopy(parent),
-        parent_source=deepcopy(parent_source),parent_execution=deepcopy(receipt),geometry_receipt=deepcopy(geometry),
+        parent_source=deepcopy(parent_source),parent_execution=deepcopy(receipt),geometry_receipt=None if direct else deepcopy(geometry),
         parent_plan_digest=_digest(parent),parent_execution_digest=_digest(receipt),
         stages_sha256=_digest(stages),offset_result=deepcopy(offset_result),
         right_reference_scope='moving-left parent reversal; newly observed fixed right arm',
@@ -547,11 +604,20 @@ def _freeze(stages,parent,parent_source,receipt,source,offset_result,geometry):
         joint_space=contract(source['calibration_profile'],actions),maintenance_derivation=proof)
     from control_motion import validate_control
     result['control_validation']=validate_control(result)
-    result['planning_validation']=dict(schema_version='geometric_path_validation.v1',passed=True,source_digest=_digest(source),
-        timeline_digest=result['timeline_digest'],collision_coverage=['base_link','left','right'],max_sample_step_rad=geometry['max_sample_step_rad'],
-        maintenance_derivation_digest=_digest(proof),hardware_validated=False,scope='complete checked maintenance commands; task outcome unverified')
+    if not direct:
+        result['planning_validation']=dict(schema_version='geometric_path_validation.v1',passed=True,source_digest=_digest(source),
+            timeline_digest=result['timeline_digest'],collision_coverage=['base_link','left','right'],max_sample_step_rad=geometry['max_sample_step_rad'],
+            maintenance_derivation_digest=_digest(proof),hardware_validated=False,scope='complete checked maintenance commands; task outcome unverified')
     if source['maintenance_context'].get('pickup_proxy_profile'):
         result['planning_backend']=deepcopy(geometry['planning_backend'])
+    if direct:
+        proof['derivation_kind']=PARENT_REVERSE_POLICY
+        proof['right_reference_scope']='same completed parent targets; fresh feedback checks only drift and limits'
+        result['motion_profile']='physical-completed-parent-reverse-30hz'
+        result['planning_validation']=dict(schema_version='completed_parent_replay_validation.v1',passed=True,
+            source_digest=_digest(source),timeline_digest=result['timeline_digest'],maintenance_derivation_digest=_digest(proof),
+            perception=dict(performed=False),ik=dict(performed=False),collision_check=dict(performed=False),
+            hardware_validated=False,scope='exact completed parent target reversal and CPU control limits; no new geometry qualification')
     return result
 
 
@@ -561,8 +627,13 @@ def derive_return(parent_plan,parent_source,parent_execution,source,offset_resul
             or source['maintenance_context']['parent_timeline_digest']!=parent_plan['timeline_digest']
             or source['maintenance_context']['parent_execution_digest']!=_digest(parent_execution)):
         raise ValueError('maintenance source differs from its actual parent execution')
-    stages=_stages(parent_plan,parent_source,source,offset_result)
-    _validate_geometry(geometry_receipt,stages,source,parent_plan,(offset_result or {}).get('pickup_derivation'))
+    if source['maintenance_context'].get('return_policy')==PARENT_REVERSE_POLICY:
+        if offset_result is not None or geometry_receipt is not None:
+            raise ValueError('direct parent reversal cannot consume new IK or collision results')
+        stages=reverse_stages(parent_plan,parent_source)
+    else:
+        stages=_stages(parent_plan,parent_source,source,offset_result)
+        _validate_geometry(geometry_receipt,stages,source,parent_plan,(offset_result or {}).get('pickup_derivation'))
     result=_freeze(stages,parent_plan,parent_source,parent_execution,source,offset_result,geometry_receipt)
     _validate_controls(result,source)
     return result

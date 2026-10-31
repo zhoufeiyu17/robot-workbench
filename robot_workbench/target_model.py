@@ -7,6 +7,7 @@ SCHEMA='workbench.target_model.v1'
 MAX_BYTES=64*1024*1024
 
 def export_model(geometry,output,device_id):
+    from arx_env.joint_head_jaw_mapping import command_max_mm
     output=Path(output);output.mkdir(mode=0o700,parents=True,exist_ok=True)
     model=geometry.model;meshes=[];buffers=[];offset=0
     for side in ('left','right'):
@@ -36,6 +37,7 @@ def export_model(geometry,output,device_id):
             for j,(side,off)in enumerate((('left',0),('right',10)))for i in (7,8)],
         meshes=rows,bounds=bounds,binary_bytes=len(binary),binary_sha256=hashlib.sha256(binary).hexdigest(),
         urdf_sha256=hashlib.sha256(Path(geometry.config['urdf']).read_bytes()).hexdigest(),
+        jaw_limits_mm=[[0.,command_max_mm(side)] for side in ('left','right')],
         display_only=True,measurement_qualified=False)
     canonical=json.dumps(metadata,sort_keys=True,separators=(',',':')).encode();model_id=hashlib.sha256(canonical).hexdigest()
     metadata['model_id']=model_id;raw=json.dumps(metadata,separators=(',',':')).encode();packed=gzip.compress(binary,mtime=0)

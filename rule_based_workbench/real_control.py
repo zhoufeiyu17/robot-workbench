@@ -107,22 +107,26 @@ def load_calibration(root):
     return module
 
 
-def classes(ref, *, jaw_mapping_file=None):
+def classes(ref, *, jaw_mapping_file=None, device_id=None):
     from arx_env.joint_head_real_motion import MotionRunner, make_plan, MotionTrackingError, _state
     from arx_env import joint_head_jaw_mapping as jaw
     mapping_id = jaw.mapping_identity()['version']
     if jaw_mapping_file is not None:
-        import jaw_mapping_v2 as candidate
-        rows = json.loads(Path(jaw_mapping_file).read_text())['reinterpreted_mapping']
-        for side in ('left', 'right'):
-            for field, table in (('command_sdk_knots', candidate.COMMAND),
-                                 ('feedback_sdk_knots', candidate.FEEDBACK),
-                                 ('metal_knots_mm', candidate.GAP_MM)):
-                if rows[side].get(field) != list(table[side]):
-                    raise ValueError('jaw mapping file differs from reviewed A1 mapping')
-        # Configure the shared implementation: Owner hold/drift checks also use it.
-        jaw.configure_mapping(jaw_mapping_file)
-        mapping_id = candidate.MAPPING_ID
+        data=json.loads(Path(jaw_mapping_file).read_text())
+        if data.get('schema_version')=='native_gripper_mapping.v1':
+            if not device_id or data.get('robot_id')!=device_id:
+                raise ValueError('native jaw mapping belongs to another physical device')
+            mapping_id=jaw.configure_mapping(jaw_mapping_file)['version']
+        else:
+            import jaw_mapping_v2 as candidate
+            rows=data['reinterpreted_mapping']
+            for side in ('left','right'):
+                for field,table in (('command_sdk_knots',candidate.COMMAND),
+                                    ('feedback_sdk_knots',candidate.FEEDBACK),('metal_knots_mm',candidate.GAP_MM)):
+                    if rows[side].get(field)!=list(table[side]):
+                        raise ValueError('jaw mapping file differs from reviewed A1 mapping')
+            jaw.configure_mapping(jaw_mapping_file)
+            mapping_id=candidate.MAPPING_ID
     mapping_identity = jaw.mapping_identity()
 
     def check_mapping():
@@ -177,6 +181,7 @@ def classes(ref, *, jaw_mapping_file=None):
             self.runtime = self.runtime_error = None
             self.last_sent_index = -1
             self.last_submission_s = None
+            self.recording_endpoint_s = None
             self.index = -1
             # Preview already validated this private, single-use executor. Repeating
             # the full scan here blocks the owner feedback loop before its first tick.
@@ -380,6 +385,8 @@ def classes(ref, *, jaw_mapping_file=None):
                 if self.target_interpreter is None:self.send(sdk_target(target))
                 self.last_submission_s = self.owner.control_time()
                 send_wall_ns=time.time_ns()
+                if self.recording_endpoint_s is None:
+                    self.recording_endpoint_s=self.last_submission_s+self.frozen.duration_s
                 self.last_sent_index = self.index
                 timing={}
                 if self.owner.environment=='fake':
@@ -424,7 +431,8 @@ def classes(ref, *, jaw_mapping_file=None):
                     if self.recording_waits_for_endpoint:
                         self.owner.recording_call('submit','feedback',tick=max(0,self.index),state=physical_feedback(q),
                             sample_monotonic_s=state['sample_time_s'],sample_wall_ns=state['sample_wall_ns'],raw=state)
-                        if self.frozen.final_feedback_qualified:
+                        if (self.frozen.final_feedback_qualified and self.recording_endpoint_s is not None
+                                and state['sample_time_s']>=self.recording_endpoint_s):
                             self.owner.recording_call('finish','completed')
                             self.recording_waits_for_endpoint=False
                     self.target_error = self.frozen.errors
@@ -460,8 +468,7 @@ def classes(ref, *, jaw_mapping_file=None):
                 if result['status'] == 'completed':
                     self.status = 'READY'
                     if self.recording:
-                        if self.frozen.final_feedback_qualified:self.owner.recording_call('finish','completed')
-                        else:self.recording_waits_for_endpoint=True
+                        self.recording_waits_for_endpoint=True
                 self.previous = now
                 return self.status
             except Exception as error:
@@ -660,17 +667,13 @@ def classes(ref, *, jaw_mapping_file=None):
                                     execution_settings=getattr(self, 'execution_error_settings', None),
                                     disabled_grippers=getattr(self.backend, 'passive_jaws', ()))
             if self.hardware:
-                receipt = payload['plan'].get('planning_validation', {})
-                gpu=receipt.get('schema_version')=='physical_curobo_motiongen_path_validation.v1'
-                if (not gpu and (not isinstance(receipt, dict) or receipt.get('schema_version') != 'geometric_path_validation.v1'
-                        or receipt.get('passed') is not True
-                        or not isinstance(receipt.get('collision_coverage'), list)
-                        or not all(name in receipt['collision_coverage'] for name in ('base_link', 'left', 'right')))):
-                    raise ValueError('旧轨迹未通过含立柱的完整几何检查，请在 Playground 重新规划')
                 # A prior rollout success must not short-circuit the new geometry
-                # receipt's timeline/source/density verification.
+                # receipt's timeline/source/density verification. The shared
+                # validator also verifies completed-parent reversal provenance;
+                # it must not be replaced with a second legacy schema allowlist.
                 geometry_plan = dict(payload['plan'], simulation={'validated': False, 'outcome': 'not_run'})
-                validate_plan_evidence(geometry_plan, payload['source'])
+                try:validate_plan_evidence(geometry_plan, payload['source'])
+                except ValueError as error:raise ValueError('硬件冻结轨迹或父执行证据未通过：'+str(error))from error
             control = frozen.plan['control']
             if control['physics_hz'] / control['substeps'] != 30:
                 raise ValueError('physical collection requires the frozen 30 Hz cadence')
@@ -935,7 +938,7 @@ def controller_conflicts():
         if (('joint_head_real_owner.py' in text and '--connect-hardware' in text)
                 or any(value.endswith('/serve_sdk_control.py') for value in argv_as_strings(argv))
                 or ('real_control.py' in text and '--hardware' in argv_as_strings(argv))
-                or any(value == 'prometheus.web' for value in argv_as_strings(argv))):
+                or any(value in ('prometheus.web','prometheus.robots.arx5_robot_node','prometheus.system.collection_manager') for value in argv_as_strings(argv))):
             conflicts.append(int(path.parent.name))
     return conflicts
 

@@ -64,7 +64,7 @@ def load_config(path):
     config = json.loads(data)
     allowed = {*PATH_KEYS, "environment", "execution", "compute_transport", "resident_deadline_wall_ns", "contract_path", "finger_envelope_sha256", "prompt_file", "opening_mm",
                "remote_run_root", "record_raw", "render_replay", "motion_profile", "force_diagnostic", "diagnostic_input_root", "detector_service",
-               "planning_backend", "curobo_root", "detection_runtime_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service", "scene_service"}
+               "planning_backend", "curobo_root", "detection_runtime_root", "observation_input_root", "detection_input_root", "planned_input_root", "replay_profile_stop_after_ticks", "cup_contact_preset", "simulation_speed_scale", "planner_service", "scene_service", "scene_asset_set"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError("unknown pipeline configuration field")
     from real_contract import namespace
@@ -119,6 +119,15 @@ def load_config(path):
         raise ValueError("finger envelope SHA256 is required")
     contract_bytes = read_contract_bytes(config)
     contract = json.loads(contract_bytes)
+    selection = config.get('scene_asset_set')
+    if selection is not None:
+        from scene_assets import validate, _sha
+        validate(selection)
+        pins = {k: v for group in pinned_files(contract) for k, v in group.items()}
+        if (config['assets']+'/scene-assets.json' not in pins
+                or any(pins.get(k) != v for k, v in selection['input_sha256'].items())
+                or _sha(pins.get(config['detection_node_config'])) != _sha(selection['perception']['node_config_sha256'])):
+            raise ValueError('pipeline must pin the selected asset manifest, dependencies and detection configuration')
     fs, resources = contract["filesystem"], contract["resources"]
     execution=validate_local(config,contract)
     persistent=persistent_service(resources)
@@ -219,7 +228,8 @@ def verify_observation(config, contract):
     if config.get('observation_input_root'):
         previous_path = capture.parent/'pipeline-config.json'
         previous = json.loads(previous_path.read_text())
-        if any(previous[k]!=config[k] for k in ('native_code','assets','opening_mm','finger_envelope_sha256')):
+        if (any(previous[k]!=config[k] for k in ('native_code','assets','opening_mm','finger_envelope_sha256'))
+                or previous.get('scene_asset_set')!=config.get('scene_asset_set')):
             raise ValueError('completed observation scene inputs differ')
         previous_suite = Path(previous['initial_suite'])
         if previous_suite.read_bytes()!=Path(config['initial_suite']).read_bytes():
@@ -249,7 +259,8 @@ def install_accepted_plan(config, contract):
     import shutil
     previous=Path(config['planned_input_root']);root=Path(config['remote_run_root'])
     old=json.loads((previous/'pipeline-config.json').read_text())
-    if any(old[k]!=config[k] for k in ('native_code','assets','opening_mm','finger_envelope_sha256')):
+    if (any(old[k]!=config[k] for k in ('native_code','assets','opening_mm','finger_envelope_sha256'))
+            or old.get('scene_asset_set')!=config.get('scene_asset_set')):
         raise ValueError('accepted plan scene inputs differ')
     required=[previous/'pipeline-config.json',Path(old['initial_suite']),previous/'plan.json',
               previous/'detection-bridge/source.json',previous/'detection-bridge/suite.json']
@@ -646,6 +657,7 @@ assert (root/'plan.json').is_file() and (root/'detection-bridge/source.json').is
             "--result-timeout-s", "240"], fp_env)
     stage("bridge", source_side, command(source_side, ["python3", "-B", wb + "/source_from_detection.py",
         "--profile", capture + "/profile.json", "--detection-dir", detection, "--output", detected,
+        "--assets", c['assets'], *(['--asset-set-digest',c['scene_asset_set']['asset_set_digest']] if c.get('scene_asset_set') else []),
         "--run-id", run_id + "-source",*(['--simulation-initial-suite',c['initial_suite']] if c.get('planning_backend')=='motiongen' else [])]))
     if c.get('planning_backend') == 'motiongen':
         scene_dir, plan_dir = root+'/motiongen-scene', root+'/motiongen-plan'

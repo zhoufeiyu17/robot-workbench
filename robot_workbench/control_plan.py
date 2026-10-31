@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from .release_trace import create_memfd,F_ADD_SEALS,F_GET_SEALS
 
 MAX_INPUT=16*1024*1024
 MAX_METADATA=256*1024
@@ -134,7 +135,7 @@ class Rows(Sequence):
                 raise ValueError('invalid control array metadata')
             size=os.fstat(fd).st_size
             if sys.platform.startswith('linux'):
-                if fcntl.fcntl(fd,fcntl.F_GET_SEALS)&SEALS!=SEALS:raise ValueError('control array is not fully sealed')
+                if fcntl.fcntl(fd,F_GET_SEALS)&SEALS!=SEALS:raise ValueError('control array is not fully sealed')
             elif fcntl.fcntl(fd,fcntl.F_GETFL)&os.O_ACCMODE!=os.O_RDONLY:
                 raise ValueError('CPU fallback requires a read-only anonymous descriptor')
             if not HEADER.size<size<=128*1024*1024:raise ValueError('invalid control array size')
@@ -174,7 +175,7 @@ class Rows(Sequence):
 def _rows(commands,nonce):
     linux=sys.platform.startswith('linux');temporary=None
     if linux:
-        fd=os.memfd_create('workbench-validated-plan',os.MFD_ALLOW_SEALING|os.MFD_CLOEXEC)
+        fd=create_memfd('workbench-validated-plan')
     else:
         fd,temporary=tempfile.mkstemp(prefix='control-plan-cpu-')
     names=[];indices={}
@@ -189,7 +190,7 @@ def _rows(commands,nonce):
                 q=row['target'];values=[*q['left_arm_joints'],q['left_gripper'],*q['right_arm_joints'],q['right_gripper']]
                 stream.write(ROW.pack(row['time_s'],*values,-1 if row['source_tick'] is None else row['source_tick'],
                     row['holding'],row['unloading'],name(row['stage']),name(row['substage'])))
-        if linux:fcntl.fcntl(fd,fcntl.F_ADD_SEALS,SEALS)
+        if linux:fcntl.fcntl(fd,F_ADD_SEALS,SEALS)
         else:
             os.close(fd);fd=os.open(temporary,os.O_RDONLY);os.unlink(temporary);temporary=None
         return fd,dict(row_count=len(commands),names=names,immutability='linux_sealed_memfd' if linux else 'cpu_only_readonly_anonymous_fd')

@@ -140,7 +140,7 @@ class BridgeTests(unittest.TestCase):
         calls=[];checks=[]
         a.control_request=lambda action,body=None,**kwargs:calls.append(action) or {'token':'t','plans':[]}
         a.geometry.with_gaps=lambda *args:self.fail('A1 manual path must not call full-mesh checks')
-        def check(start,target):
+        def check(start,target,**kwargs):
             checks.append(np.asarray(target).tolist())
             return {'ok':len(checks)>1,'fraction':.5,'collisions':[['left/link4','right/link4']]}
         a.manual_self_collision=SimpleNamespace(check_path=check,
@@ -523,7 +523,7 @@ class BridgeTests(unittest.TestCase):
         a.queue_is_plan_checked=lambda rows:False
         a.geometry.support_path_check=lambda *args:self.fail('old fine support gate returned')
         checked=[];transport=[]
-        def check(start,target):
+        def check(start,target,**kwargs):
             checked.append((list(start),list(target)))
             return {'ok':True,'scope':'robot_self_spheres'}
         a.manual_self_collision=SimpleNamespace(check_path=check,description={'scope':'robot_self_spheres'})
@@ -548,7 +548,7 @@ class BridgeTests(unittest.TestCase):
         for invalid in (False,True):
             with self.subTest(invalid=invalid):
                 calls=[]
-                def check(start,target):
+                def check(start,target,**kwargs):
                     calls.append(True)
                     return {'ok':len(calls)==1,'collisions':[['left/link3','right/link4']]}
                 a.manual_self_collision=SimpleNamespace(check_path=check,description={'scope':'robot_self_spheres'})
@@ -566,7 +566,7 @@ class BridgeTests(unittest.TestCase):
         raw=[0.]*12;raw[1]=-.004;a.current_pose=lambda:np.asarray(raw)
         a.geometry.limits[1]=[0.,3.5]
         seen=[]
-        def strict_check(start,target):
+        def strict_check(start,target,**kwargs):
             seen.append((list(start),list(target)))
             return {'ok':bool(start[1]>=0 and target[1]>=0)}
         a.manual_self_collision=SimpleNamespace(check_path=strict_check,description={'scope':'robot_self_spheres'})

@@ -27,6 +27,12 @@ def configure_native(native_code):
 def load(path, source, native_code, assets, *, maintenance_source=None):
     from maintenance_geometry import validate_export
     data=validate_export(path,source,maintenance_source)
+    if source['scene'].get('asset_set') is not None:
+        from scene_assets import load as load_scene_assets, check_geometry
+        selection=load_scene_assets(assets,expected_digest=source['scene']['asset_set']['asset_set_digest'])
+        if selection!=source['scene']['asset_set']:
+            raise ValueError('exported planning scene differs from prepared asset selection')
+        check_geometry(selection,data['observation']['scene']['profile_sha256'],data['cup']['profile_sha256'])
     configure_native(native_code)
     from robot_sim.asset_cfg.objects.coffee_machine import RigidTransform
     from robot_sim.asset_cfg.objects.cup import CupBand, CupInteractionProfile
@@ -57,6 +63,15 @@ def load(path, source, native_code, assets, *, maintenance_source=None):
     planner.gripper_mode='distance'
     planner.open_position_m=data['open_position_m'];planner.parts=tuple(HandPart(**v) for v in data['parts'])
     planner.cup=CupInteractionProfile(**{**data['cup'],'bands':tuple(CupBand(**b) for b in data['cup']['bands'])})
+    if source['scene'].get('asset_set') is not None:
+        from scene_assets import derive_grasp_command
+        from gripper_distance_plan import requested_metal_gap_mm
+        from robot_sim.asset_cfg.robots.ac_one_finger_contact import ac_one_finger_contact_spec
+        planner.scene_asset_set=source['scene']['asset_set']
+        expected=derive_grasp_command(planner.cup,pad_thickness_m=ac_one_finger_contact_spec().rubber_thickness_m)
+        if expected!=source.get('grasp_command'):
+            raise ValueError('selected grasp seed differs from the loaded cup/pad geometry')
+        planner.requested_metal_gap_mm=requested_metal_gap_mm(source)
     if source.get('adapter')=='operator_assisted_rgbd':
         from gripper_distance_plan import requested_metal_gap_mm
         planner.operator_assisted_cup_geometry=source['cup_geometry']

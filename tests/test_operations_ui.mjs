@@ -22,6 +22,13 @@ const fixture=(environment='physical',manager='manager-v1')=>({schema:'robot_wor
     restart_planner:{label:'重启规划服务',impact:'保留健康场景模型，数采待预热',allowed:true},
     restart_scene:{label:'重启场景服务',impact:'只重启场景，数采待预热',allowed:true},
     unknown_shell:{label:'不得出现的未知操作',allowed:true}}});
+
+{
+ const value=fixture();value.recent_jobs=[{request:{action:'exit_environment'},status:'succeeded',verification:{ok:true}}];
+ value.services=Object.fromEntries(['workbench','control_owner','cameras','model'].map(name=>[name,{state:'stopped',running:false}]));
+ assert.equal(operationsGuidance(value).title,'工作台环境已退出');
+ value.services.model={state:'running',running:true};assert.notEqual(operationsGuidance(value).title,'工作台环境已退出','historical exit cannot override a currently running resource');
+}
 function harness({environment='physical',standalone=false,query='',crypto={randomUUID:()=> 'request-fixed'}}={}){
   const nodes=[],container=new Element('section'),select=new Element('select'),entry=new Element('a'),back=new Element('a');select.value=environment;
   if(standalone)container.dataset.operationsStandalone='true';
@@ -48,6 +55,23 @@ function harness({environment='physical',standalone=false,query='',crypto={rando
   h.api.destroy();
 }
 
+{
+  const h=harness(),value=fixture();
+  value.operations.reclaim_control={label:'清理现有控制并接入',impact:'正常结束数采，保留数据；不强杀、不续跑旧动作',allowed:true,requires_support:true};
+  h.reply(0,value);await settle();
+  assert(h.button('reclaim_control'),'the supported reclaim action must be visible');
+  h.button('reclaim_control').fire('click');
+  assert.equal(h.api.elements.confirm.disabled,true);
+  assert.match(h.api.elements.dialog.textContent,/正常结束数采/);
+  h.api.elements.support.checked=true;h.api.elements.support.fire('change');
+  h.api.elements.confirm.fire('click');await settle();
+  const payload=JSON.parse(h.requests[h.last()].options.body);
+  assert.equal(payload.action,'reclaim_control');assert.equal(payload.arms_supported,true);
+  assert.deepEqual(payload.expected_target,value.target);
+  h.reply(h.last(),{job_id:'reclaim-cpu',status:'succeeded',phase:'complete',verification:{ok:true},request:payload});await settle();
+  h.api.destroy();
+}
+
 for(const environment of ['fake','physical']){
   const h=harness({environment}),value=fixture(environment);
   value.collection={services_ready:true,ready:false,declared_roles:['detector','planner'],
@@ -67,7 +91,7 @@ for(const environment of ['fake','physical']){
 
 for(const environment of ['fake','physical']){
   const h=harness({environment});h.reply(0,fixture(environment));await settle();
-  assert.equal(h.entry.href,`/operations?environment=${environment}&business=calibration`);
+  assert.equal(h.entry.href,'#operations-panel');
   assert.equal(h.api.elements.groups.length,4);assert.equal(h.api.elements.groups[2].node.open,false);
   for(const role of ['detector','planner','scene'])assert(h.button('restart_'+role),'registered role restart stays in the existing advanced group');
   assert.equal(h.requests[0].url,`/api/environment?environment=${environment}&view=summary`);
@@ -108,6 +132,13 @@ for(const environment of ['fake','physical']){
   h.api.elements.guidanceLink.fire('click');assert.equal(h.api.elements.guidanceLink.href.endsWith('-action-recover_maintenance'),true);assert.equal(h.requests.length,1,'next-step navigation cannot submit an operation');h.api.destroy();
 }
 
+for(const environment of ['fake','physical']){
+  const h=harness({environment:environment==='fake'?'physical':'fake',query:'?environment='+environment});
+  assert.equal(h.api.environment,environment,'embedded operations must use the explicit page environment before the app initializes');
+  assert.equal(h.select.value,environment);assert.equal(h.requests[0].url,`/api/environment?environment=${environment}&view=summary`);
+  assert(h.requests.every(row=>row.options.method!=='POST'),'initial environment selection only reads state');h.api.destroy();
+}
+
 for(const business of ['inference','collection','constructor']){
   const h=harness({standalone:true,query:'?environment=fake&business='+business});
   const valid=business==='constructor'?'calibration':business;
@@ -119,7 +150,7 @@ for(const business of ['inference','collection','constructor']){
   assert(h.requests.every(row=>row.options.method!=='POST'&&!row.url.includes('business=')));
   h.entry.dataset.business='inference';
   const refresh=h.api.refresh();h.reply(h.last(),state);await refresh;
-  assert.equal(h.entry.href,'/operations?environment=fake&business=inference','polling must preserve main-page business');
+  assert.equal(h.entry.href,'/operations?environment=fake&business=inference','standalone rescue page preserves business');
   assert.equal(h.api.elements.dialog.open,false);h.api.destroy();
 }
 
@@ -136,7 +167,7 @@ for(const business of ['inference','collection','constructor']){
   assert.equal(h.api.elements.dialog.open,false);assert.equal(h.api.elements.support.checked,false);assert.match(h.api.elements.status.textContent,/旧确认已撤销/);
   h.button('restart_workbench').fire('click');h.api.elements.support.checked=true;
   h.select.value='fake';h.select.fire('change');assert.equal(h.api.elements.dialog.open,false);assert.equal(h.api.elements.support.checked,false);
-  assert.equal(h.entry.href,'/operations?environment=fake&business=calibration');
+  assert.equal(h.entry.href,'#operations-panel');
   h.reply(h.last(),fixture('fake'));await settle();assert.equal(h.api.environment,'fake');assert.match(h.api.elements.identity.textContent,/cpu-fake/);h.api.destroy();
 }
 

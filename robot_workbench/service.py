@@ -17,7 +17,7 @@ from robot_workbench.sample_clock import host_sample_status
 from robot_workbench.inference_owner import episode_duration
 
 ROOT = Path(__file__).resolve().parents[1]
-BUSINESSES = ('calibration', 'collection', 'inference')
+BUSINESSES = ('calibration', 'collection', 'inference', 'research')
 INFERENCE_MODEL_TOOLS = ('inference_refresh','inference_select','inference_prepare')
 INFERENCE_TOOLS = (*INFERENCE_MODEL_TOOLS, 'inference_preview')
 WARM_C_ACTIONS = ('generate_plan','execute','install',*CALIBRATION_TOOLS)
@@ -90,7 +90,19 @@ class Device:
             runtime = self.factory()
             runtime.prior_control_retirement=retirement
             if maintenance_actor is not None:
-                if getattr(runtime,'remote_control_owner',False):runtime.begin_maintenance()
+                if getattr(runtime,'remote_control_owner',False):
+                    try:runtime.begin_maintenance()
+                    except Exception as error:
+                        # Acquisition already succeeded in the independent Owner.
+                        # Keep its authoritative state visible even when the next
+                        # management step fails; never report it as disconnected.
+                        self._attach_existing_owner_locked(runtime)
+                        self.error='SDK仍连接，接入维护未完成；已请求停止：'+str(error)
+                        try:maintenance_actor.adopt(runtime)
+                        except Exception as adopt_error:self.error+='；维护实例绑定待核验：'+str(adopt_error)
+                        try:runtime.request_stop()
+                        except Exception as stop_error:self.error+='；停止结果未确认：'+str(stop_error)
+                        raise ValueError(self.error)from error
                 else:
                     with runtime.lock:runtime.maintenance_active=True
             installed = (self.release_receipt or {}).get('calibration_snapshot_id')
@@ -160,8 +172,13 @@ class Device:
             finally:
                 receipt=runtime.release_receipt
                 if receipt and receipt.get('status')=='released':
+                    try:runtime.end_maintenance()
+                    except Exception as error:
+                        self.error='SDK已释放，但维护租约清理未确认：'+str(error)
+                        self.release_receipt=dict(receipt,maintenance_cleanup_confirmed=False)
+                        return  # Retain the client/capability; do not admit another acquire.
                     runtime.detach()
-                    self.release_receipt=deepcopy(receipt);self.closed.set()
+                    self.release_receipt=dict(deepcopy(receipt),maintenance_cleanup_confirmed=True);self.closed.set()
                     with self.lock:
                         if self.runtime is runtime:self.runtime=None;self.credentials={}
         self.thread=threading.Thread(target=monitor,daemon=True,name='control-facts-'+self.environment)
@@ -172,8 +189,11 @@ class Device:
         if not getattr(runtime,'remote_control_owner',False)or runtime.nonce is None:raise ValueError('existing independent Owner required')
         with self.lock:
             if self.runtime is not None:raise ValueError('business already attached to an Owner')
-            self.runtime=runtime;self.credentials={name:runtime.register_business(name)for name in BUSINESSES}
-            self.error=None;self.closed.clear();self._start_remote_monitor(runtime)
+            self._attach_existing_owner_locked(runtime)
+
+    def _attach_existing_owner_locked(self,runtime):
+        self.runtime=runtime;self.credentials={name:runtime.register_business(name)for name in BUSINESSES}
+        self.error=None;self.closed.clear();self._start_remote_monitor(runtime)
 
     def submit(self, business, command):
         if command.get('action') == 'stop':
@@ -277,10 +297,32 @@ class Application:
             application_generation=self.generations[device.environment],
             inference_generation=self.inference_generations[device.environment])
 
+    def triton_read(self, environment, job_id=None):
+        client = getattr(self.device(environment), 'triton_preview', None)
+        if client is None:
+            if job_id is not None:raise ValueError('当前设备未配置Triton输出预览')
+            return dict(configured=False, available=False, sources=[], models=[], reason='当前设备未配置Triton服务')
+        return client.job(job_id) if job_id is not None else client.catalog()
+
+    def triton_action(self, action, body):
+        if not isinstance(body, dict) or body.get('business') != 'inference':
+            raise ValueError('Triton操作仅属于推理输出预览')
+        device = self.device(body.get('environment'))
+        client = getattr(device, 'triton_preview', None)
+        if client is None:raise ValueError('当前设备未配置Triton输出预览')
+        runtime = device.snapshot('inference')
+        with self.lock:
+            if self.maintenance.get(device.environment) or device.maintenance or device.connecting:
+                raise ValueError('设备维护中，暂不启动Triton任务')
+        if runtime.get('automatic_enabled') or any(x.snapshot().get('busy') for x in device.workflows.values()):
+            raise ValueError('请先结束当前设备动作或采集，再启动Triton任务')
+        return client.start(action, {k:v for k,v in body.items() if k not in ('environment','business')})
+
     def inference_run_reason(self, device, workflow, runtime, *, ignore_job=None,
                              workflow_view=None,workflow_views=None,holder_runtime=None):
         if not workflow or not all(callable(getattr(workflow,name,None)) for name in ('bind_device','preview_episode','execute_review')):
             return '当前推理工作流尚未支持 Run，请使用分步诊断'
+        if getattr(workflow,'control_mapping_pending',None):return workflow.control_mapping_pending
         value=workflow.snapshot() if workflow_view is None else workflow_view;inference=value.get('inference') or {}
         if not (inference.get('model_ready') or (inference.get('model') or {}).get('loaded')):
             return '先选择 checkpoint，并等待模型加载与预热完成'
@@ -378,9 +420,14 @@ class Application:
             maintenance=public_state(self.maintenance.get(environment));action_calls=self.action_calls[environment]
         recording=runtime.get('recording') or {}
         from .gc_timing import snapshot as gc_snapshot
+        hold_status=(runtime.get('control_operation')or{}).get('status')
+        protection=runtime.get('control_protection')or{}
+        exited=(runtime.get('connected')is False and protection.get('worker_exit_confirmed')is True
+                and protection.get('supervisor_exit_confirmed')is True)
+        hold_busy=hold_status in ('queued','verifying_feedback','holding','stopping') or hold_status=='unknown' and not exited
         activity=dict(busy=bool(device.connecting or any(row.get('busy') for row in views.values()) or collection.get('busy')
             or any(row.get('status')=='running' for row in jobs) or action_calls or runtime.get('automatic_enabled')
-            or (runtime.get('control_operation') or {}).get('status') in ('queued','verifying_feedback','holding','stopping','unknown')
+            or hold_busy
             or recording and recording.get('done') is not True),connecting=device.connecting,requests=jobs,
             businesses={name:{key:view.get(key) for key in ('busy','status','stage_id')} for name,view in views.items()},
             recording_active=bool(recording and recording.get('done') is not True))
@@ -497,12 +544,15 @@ class Application:
                      dict(label='本次驻留剩余时间',value=f"{preparation['remaining_wall_s']:.0f} 秒")],
             outcomes=dict(calibration='已安装并保留' if retained else '等待有效安装',preparation=phase),preparation=preparation)
 
-    def state(self, environment, business):
+    def state(self, environment, business, *, results_before=None, results_after=None):
         if business not in BUSINESSES:
             raise ValueError('未知业务')
+        paging = results_before is not None or results_after is not None
+        if paging and business != 'inference':raise ValueError('历史分页仅用于推理结果')
         device = self.device(environment)
         runtime = device.snapshot(business)
         workflow = device.workflows.get(business)
+        manual_workflow=device.workflows.get('calibration')
         readiness=None
         if business=='calibration' and isinstance(workflow,CalibrationWorkflow):
             reader=getattr(workflow.app,'hardware_reader',None)
@@ -517,6 +567,8 @@ class Application:
             job = deepcopy(self.jobs.get((environment,business)))
             review = deepcopy(self.reviews.get((environment,business)))
             manual_task = deepcopy(self.manual_tasks.get((environment,business)))
+        precision_job=job if job and job['action'].startswith('precision_')else None
+        if precision_job:job=None  # Study progress belongs to its own panel.
         workflow_views={name:flow.snapshot() for name,flow in device.workflows.items()}
         value = workflow_views[business] if workflow else dict(status='unconfigured',busy=False,
             stage_id='configuration',title='配置业务后端',message='设备控制可独立验证；当前业务的采集、求解与数据路径尚未配置。',
@@ -544,8 +596,9 @@ class Application:
             elif workflow and review.get('workflow_generation') is not None and review['workflow_generation']!=workflow.generation:
                 review=None
             elif review['action']=='manual_execute' and workflow and (value.get('busy') or
-                    review.get('manual_revision') is not None and review['manual_revision']!=workflow.manual_revision()):
+                    review.get('manual_revision') is not None and review['manual_revision']!=device.workflows['calibration'].manual_revision()):
                 review=None
+        business_task=deepcopy(value)
         manual = self.manual_state(manual_task,runtime,review,value.get('busy'))
         if manual:
             if manual['status']=='completed' and value.get('primary_action'):
@@ -604,15 +657,16 @@ class Application:
             if workflows_busy:
                 allowed['handoff'] = dict(allowed=False,reason='业务任务仍在进行；请先结束或取消当前任务')
         motion_reason = allowed['preview']['reason']
-        manual_ready=business=='calibration' and allowed['preview']['allowed'] and not value.get('busy')
-        manual_reason=motion_reason or ('当前标定任务正在进行' if value.get('busy') else None)
-        if business!='calibration':manual_reason='人工姿态工具需要交接到标定业务'
-        if environment=='physical' and not (workflow and hasattr(workflow,'manual_preview')):
+        manual_ready=allowed['preview']['allowed'] and not workflows_busy and not settings_job_busy
+        manual_reason=motion_reason or ('当前业务任务或请求正在进行' if workflows_busy or settings_job_busy else None)
+        if environment=='physical' and not (manual_workflow and hasattr(manual_workflow,'manual_preview')):
             manual_ready=False;manual_reason='物理人工规划需要标定路径校验服务'
+        if business!='calibration' and 'shared_manual_trajectory_v1' not in runtime.get('capabilities',[]):
+            manual_ready=False;manual_reason='当前Owner尚未加载共用人工轨迹入口，请在服务运维核验控制版本'
         allowed['manual_preview']=dict(allowed=bool(manual_ready),reason=manual_reason)
-        queue=value.get('manual_queue') or dict(available=False,reason='未配置标定服务，人工队列不可用')
+        queue=(workflow_views.get('calibration') or {}).get('manual_queue') or dict(available=False,reason='未配置标定服务，人工队列不可用')
         for name in ('manual_queue','manual_queue_preview'):
-            allowed[name]=dict(allowed=bool(manual_ready and queue.get('available')),reason=manual_reason or queue.get('reason'))
+            allowed[name]=dict(allowed=bool(business=='calibration' and manual_ready and queue.get('available')),reason='标定动作队列仅属于标定业务' if business!='calibration' else manual_reason or queue.get('reason'))
         allowed['manual_execute'] = dict(allowed=bool(review and review['action']=='manual_execute') and allowed['confirm']['allowed'],
             reason=allowed['confirm']['reason'] or (None if review else '请先生成并审阅人工姿态'))
         allowed['recover'] = dict(allowed=bool(runtime.get('recoverable_fault')) and holder==business,
@@ -621,6 +675,10 @@ class Application:
             for action in ('connect','release','recover'):
                 allowed[action]=dict(allowed=False,reason='operation_required：请从统一运维入口执行设备生命周期操作')
         preview=self.preview_state(device,runtime)
+        if preview and callable(getattr(manual_workflow,'mesh_candidates',None)):
+            preview['mesh_candidates']=manual_workflow.mesh_candidates()
+        if environment=='physical' and preview and callable(getattr(manual_workflow,'mesh_calibrations',None)):
+            preview['mesh_calibrations']=manual_workflow.mesh_calibrations()
         for action in ('preview_target','preview_overview','preview_mesh'):
             supported=preview.get('capabilities',{}).get(action.removeprefix('preview_'),True)
             ready=bool(preview.get('connected')) and supported
@@ -710,22 +768,39 @@ class Application:
                 allowed[name]=dict(allowed=False,reason='请等待取回动作结束')
         raw = (runtime.get('calibration_feedback') or {}).get('qpos')
         limits = runtime.get('joint_limits')
+        geometry = getattr(getattr(manual_workflow, 'app', None), 'geometry', None)
+        model_limits = getattr(geometry, 'limits', None)
+        limit_provider=getattr(getattr(manual_workflow,'app',None),'manual_joint_limits',None)
+        if callable(limit_provider):model_limits=limit_provider()
+        arm_limits = limits[:6]+limits[7:13] if limits else (
+            model_limits.tolist() if hasattr(model_limits, 'tolist') else model_limits)
         manual = {}
-        if raw and limits:
-            from arx_env.joint_head_jaw_mapping import feedback_gaps
+        if arm_limits is not None:
+            from arx_env.joint_head_jaw_mapping import feedback_gaps,command_max_mm,feedback_max_mm,feedback_min_mm
             from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
-            gaps=feedback_gaps(raw)
+            gaps=feedback_gaps(raw) if raw else [None,None]
             valid=(runtime.get('calibration_feedback') or {}).get('gripper_feedback_valid',[True,True])
             manual=dict(joint_names=[side+' J'+str(i) for side in ('左','右') for i in range(1,7)],
-                positions=raw[:6]+raw[7:13], limits=limits[:6]+limits[7:13],
+                positions=raw[:6]+raw[7:13] if raw else None, limits=arm_limits,
                 jaw_gaps_mm=[value if valid[i] else None for i,value in enumerate(gaps)],
+                jaw_command_ranges_mm=[[0.,command_max_mm(side)]for side in ('left','right')],
+                jaw_feedback_ranges_mm=[[feedback_min_mm(side),feedback_max_mm(side)]for side in ('left','right')],
                 disabled_grippers=list(runtime.get('passive_jaws') or []),
                 position_noise_rad=position_noise_rad(environment),
                 default_joint_speed_rad_s=DEFAULT_VELOCITY,default_jaw_speed_mm_s=10.)
         manual['queue']=queue
+        manual['execution']=deepcopy(value) if manual_task and value.get('stage_id','').startswith('manual.') else None
+        if manual or job and job['action'].startswith('manual_'):value['business_task']=business_task
         calibration=device.workflows.get('calibration')
         arrival=(workflow_views.get('calibration') or {}).get('arrival_statistics') or {'error':'未配置标定到位统计；协议 Fake 不生成统计数据'}
         history=getattr(device,'collection_history',None) if business=='collection' else None
+        results_page = None
+        if business == 'inference' and callable(getattr(workflow, 'results_page', None)):
+            results_page = workflow.results_page(before=results_before, after=results_after)
+            results = results_page.pop('results')
+        else:
+            if paging:raise ValueError('当前推理服务未配置历史分页')
+            results = workflow.results() if workflow else []
         inference_flow=device.workflows.get('inference')
         inference_execution=inference_flow.execution_settings() if hasattr(inference_flow,'execution_settings') else None
         allowed['inference_execution_settings']=dict(allowed=bool(inference_execution and inference_execution['allowed'] and not settings_job_busy),
@@ -736,11 +811,25 @@ class Application:
             for action,gate in allowed.items():
                 if action!='stop':gate.update(allowed=False,reason='服务维护中：'+maintenance['purpose'])
             if value.get('primary_action'):value['primary_action'].update(allowed=False,reason='服务维护中')
+        study=getattr(device,'precision_study',None)
+        precision=study.snapshot(runtime,business)if study else None
+        if precision:
+            precision['request']=precision_job
+            reason=('服务维护中'if maintenance else '当前请求尚未结束'if settings_job_busy else precision['reason'])
+            allowed['precision_preview']=dict(allowed=reason is None,reason=reason)
+            allowed['precision_execute']=dict(allowed=reason is None and precision['execute_allowed'],reason=reason or '先准备并审阅研究动作')
+            allowed['precision_analyze']=dict(allowed=not maintenance and not settings_job_busy and bool(precision['latest'])
+                and precision['latest'].get('status')not in('submitted','running'),reason='需已有记录且执行已收尾')
+            allowed['precision_settings']=dict(allowed=not maintenance and not settings_job_busy and precision.get('settings_allowed',False),reason='研究仍在执行或维护中，不能保存配置')
+            for name in('precision_select','precision_notes'):
+                allowed[name]=dict(allowed=not maintenance and not settings_job_busy and bool(precision.get('history')),reason='需已有已收尾的研究记录')
         return dict(schema='robot-workbench-ui.v1',server_instance_id=self.server_instance_id,
             revision=revision,revision_semantics='response_order_within_server_instance',server_wall_ns=time.time_ns(),csrf=self.csrf,
             device=dict(id=device.id,label=device.label,environment=environment),runtime=runtime,
+            scene_assets=({**preparation['scene_assets'],**{k:preparation.get(k)for k in ('status','busy','can_retry','retry_reason')}}
+                if preparation and preparation.get('scene_assets') else None),
             workflow=value,media=[provider.snapshot() for provider in device.media.values()],
-            results=(workflow.results() if workflow else [])+(history.results() if history else []),diagnostics=[
+            results=results+(history.results() if history else []),results_page=results_page,diagnostics=[
                 {'label':'控制器状态','value':runtime.get('state','未知')},
                 {'label':'控制器当前原因','value':runtime.get('reason') or '未提供当前状态原因'},
                 {'label':'服务线程异常','value':device.error or '未报告服务线程异常'},
@@ -748,7 +837,7 @@ class Application:
                 *value.get('diagnostics',[])],
             mesh=workflow.mesh() if workflow and hasattr(workflow,'mesh') else {'requested':False,'applied':False},manual=manual,
             arrival_statistics=arrival,preview=preview,inference_execution=inference_execution,
-            maintenance=maintenance)
+            maintenance=maintenance,precision_study=precision)
 
     def action(self, action, body):
         if not isinstance(body,dict) or body.get('business') not in BUSINESSES:
@@ -808,6 +897,15 @@ class Application:
                 if previous['body'] != body or previous['action'] != action:
                     raise ValueError('同一请求身份不可绑定不同操作')
                 return previous['response']
+        if action in ('precision_preview','precision_execute','precision_analyze','precision_settings','precision_select','precision_notes'):
+            if business!='research':raise ValueError('控制研究操作须使用research业务身份')
+            fields={'precision_preview':{'kind','speed'},'precision_execute':{'review_id'},'precision_analyze':set(),
+                'precision_settings':{'settings','expected_revision'},'precision_select':{'record_id'},'precision_notes':{'record_id','text','expected_revision'}}[action]
+            if action=='precision_preview' and 'feedforward_artifact' in body:fields=fields|{'feedforward_artifact'}
+            if set(body)!=({'environment','business','request_id'}|fields):raise ValueError('精度研究请求字段不完整或未知')
+            if not getattr(device,'precision_study',None):raise ValueError('当前设备未配置精度研究模块')
+            gate=self.state(environment,business)['runtime']['allowed_operations'][action]
+            if not gate['allowed']:raise ValueError(gate['reason']or '当前不能执行研究操作')
         if action=='inference_execution_settings':
             if business not in ('calibration','inference') or set(body)!={'environment','business','request_id','execute_steps','expected_revision'}:
                 raise ValueError('请从标定或推理页面提交执行长度和当前设置版本')
@@ -964,6 +1062,9 @@ class Application:
         if business=='collection' and action in ('generate_plan','execute','collection_plan') and device.collection_preparation:
             return_review=action=='execute' and (self.reviews.get((environment,business)) or {}).get('purpose')=='cup_return'
             preparation=device.collection_preparation.snapshot()
+            if (preparation.get('requested_asset_pair_id')!=preparation.get('applied_asset_pair_id')
+                    and not return_review):
+                raise ValueError('所选场景资产尚未准备成功，旧位置与计划不能用于新组合')
             if preparation['status']!='ready' and not return_review:
                 restoring=action=='generate_plan' and body.get('restore_frozen_plan') is True
                 if (preparation.get('busy') or action=='collection_plan' or body.get('replan')
@@ -995,7 +1096,7 @@ class Application:
                     raise ValueError('执行前必须明确确认本批轨迹与净空')
                 if review.get('purpose')=='cup_return' and body.get('offset_xy_mm',[0.,0.])!=review.get('offset_xy_mm',[0.,0.]):
                     raise ValueError('场景恢复偏移已变化，请重新生成并确认')
-                if business=='inference' and (body.get('seed',review.get('seed'))!=review.get('seed')
+                if business=='inference' and action!='manual_execute' and (body.get('seed',review.get('seed'))!=review.get('seed')
                         or episode_duration(body.get('duration_s',120))!=review.get('duration_s',120)):
                     raise ValueError('本轮推理种子或时长已变化，请重新准备并审阅')
                 if review.get('purpose')=='cup_return' and (getattr(device,'cup_return_task',None) or {}).get('review_id')!=review_id:
@@ -1009,7 +1110,7 @@ class Application:
             if workflow and review.get('workflow_generation') is not None and review['workflow_generation']!=workflow.generation:
                 raise ValueError('数采任务已变化，请重新审阅')
             if action=='manual_execute' and workflow and (workflow.snapshot().get('busy') or
-                    review.get('manual_revision') is not None and review['manual_revision']!=workflow.manual_revision()):
+                    review.get('manual_revision') is not None and review['manual_revision']!=device.workflows['calibration'].manual_revision()):
                 raise ValueError('人工队列或标定任务已变化，请重新预览')
             status=device.snapshot(business)
             if (status.get('runtime_nonce'),status.get('command_epoch')) != (review['runtime_nonce'],review['epoch']):
@@ -1043,7 +1144,7 @@ class Application:
                     raise
             body={**body,'token':review['token']}
             if review.get('speed_scale') is not None:body['speed_scale']=review['speed_scale']
-        if action not in {'connect','prepare_collection','inference_run','fake_scene_update','return_cup','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS}:
+        if action not in {'precision_preview','precision_execute','precision_analyze','precision_settings','precision_select','precision_notes','connect','prepare_collection','inference_run','fake_scene_update','return_cup','manual_preview','manual_queue','manual_queue_preview','generate_plan','execute','recover','cancel','install','select_result','mesh',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS}:
             raise ValueError('未知操作')
         if business=='collection' and action in ('generate_plan','collection_plan','collection_prepare','fake_scene_update'):
             with self.lock:
@@ -1051,7 +1152,7 @@ class Application:
                     self.reviews.pop((environment,business),None)
             from robot_workbench.cup_return import clear
             clear(device)
-        if action not in ('connect','prepare_collection','inference_run',*INFERENCE_MODEL_TOOLS,'mesh','select_result','cancel',*HISTORY_ACTIONS):
+        if action not in ('precision_analyze','precision_settings','precision_select','precision_notes','connect','prepare_collection','inference_run',*INFERENCE_MODEL_TOOLS,'mesh','select_result','cancel',*HISTORY_ACTIONS):
             if device.runtime is None:raise ValueError('请先连接设备')
             if device.runtime.holder != business:
                 raise PermissionError('请先交接控制权限：当前由 '+device.runtime.holder+' 持有')
@@ -1098,7 +1199,7 @@ class Application:
 
     @staticmethod
     def manual_state(task, runtime, review, workflow_busy):
-        if not task or workflow_busy or (task['runtime_nonce'],task['epoch'],'calibration') != (
+        if not task or workflow_busy or (task['runtime_nonce'],task['epoch'],task.get('business','calibration')) != (
                 runtime.get('runtime_nonce'),runtime.get('command_epoch'),runtime.get('holder')):
             return None
         submitted=task.get('submitted_monotonic_s')
@@ -1152,6 +1253,15 @@ class Application:
         if workflow is not None:workflow.invalidate()
 
     def perform(self, device, business, action, body, *, request_job_id=None):
+        if action.startswith('precision_'):
+            study=getattr(device,'precision_study',None)
+            if study is None:raise ValueError('当前设备未配置精度研究')
+            if action=='precision_preview':return study.prepare(business,body['kind'],body['speed'],body.get('feedforward_artifact'))
+            if action=='precision_execute':return study.execute(business,body['review_id'])
+            if action=='precision_analyze':return study.analyze()
+            if action=='precision_settings':return study.update_settings(body['settings'],body['expected_revision'])
+            if action=='precision_select':return study.select(body['record_id'])
+            if action=='precision_notes':return study.notes(body['record_id'],body['text'],body['expected_revision'])
         if action=='connect':return device.connect(body)
         if action=='prepare_collection':return device.collection_preparation.retry()
         if business=='inference' and action in INFERENCE_MODEL_TOOLS:
@@ -1187,16 +1297,17 @@ class Application:
                 raise ValueError('场景移动只接受杯子和咖啡机的平面偏移')
             return device.fake_scene_update({key:body[key] for key in ('cup_xy_m','machine_xy_m') if key in body})
         if action in ('manual_preview','manual_queue','manual_queue_preview'):
-            if business!='calibration':raise ValueError('人工姿态工具需要交接到标定业务')
+            if action!='manual_preview' and business!='calibration':raise ValueError('标定动作队列仅属于标定业务')
             gate=device.snapshot(business)['allowed_operations']['preview']
             if not gate['allowed']:raise ValueError(gate['reason'] or '当前控制器不允许人工规划')
-            workflow=device.workflows.get(business)
+            workflow=device.workflows.get('calibration')
+            if any(flow.snapshot().get('busy') for flow in device.workflows.values()):raise ValueError('请先结束当前业务任务，再进行人工规划')
             with self.lock:self.reviews.pop((device.environment,business),None)
             if action=='manual_queue':
                 if not workflow or not hasattr(workflow,'manual_queue'):raise ValueError('未配置标定动作队列')
                 return workflow.manual_queue(body)
             if workflow and hasattr(workflow,'manual_preview'):
-                preview=workflow.manual_preview(body,queue=action=='manual_queue_preview')
+                preview=workflow.manual_preview(body,queue=action=='manual_queue_preview',**({'business':business} if business!='calibration' else {}))
             else:
                 if action=='manual_queue_preview' or device.environment!='fake':raise ValueError('未配置标定路径校验与队列服务')
                 from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
@@ -1232,8 +1343,9 @@ class Application:
     def add_review(self, device, business, preview, action, summary, *, request_job_id=None):
         state=device.snapshot(business)
         workflow=device.workflows.get(business)
-        manual_revision=(preview.get('review_generation',workflow.manual_revision())
-                         if action=='manual_execute' and workflow and hasattr(workflow,'manual_revision') else None)
+        manual_provider=device.workflows.get('calibration')
+        manual_revision=(preview.get('review_generation',manual_provider.manual_revision())
+                         if action=='manual_execute' and manual_provider and hasattr(manual_provider,'manual_revision') else None)
         with self.lock:
             generation=preview.get('workflow_generation')
             if generation is not None and (workflow is None or generation!=workflow.generation):return
@@ -1267,7 +1379,7 @@ class Application:
                 review.update(request_job_id=request_job_id,total_motion_duration_s=preview['total_motion_duration_s'],
                     waypoint_jaw_gap_mm=[[command_gap_mm(side,plan['q_target'][i]) for side,i in (('left',6),('right',13))]
                                         for plan in preview.get('plans',[])])
-                self.manual_tasks[(device.environment,business)]=dict(review,
+                self.manual_tasks[(device.environment,business)]=dict(review,business=business,
                     plan_sha256=[plan['sha256'] for plan in preview.get('plans',[])])
 
 
@@ -1298,11 +1410,28 @@ def handler(app):
                 self.close_connection=True;return self.send(409,{'error':'GET request body is not supported'})
             path=urlsplit(self.path);query=parse_qs(path.query)
             try:
+                if path.path=='/api/triton/catalog' or path.path.startswith('/api/triton/jobs/'):
+                    if set(query)!={'environment'} or len(query['environment'])!=1:raise ValueError('one explicit environment required')
+                    job_id=path.path.removeprefix('/api/triton/jobs/') if path.path.startswith('/api/triton/jobs/') else None
+                    return self.send(200,app.triton_read(query['environment'][0],job_id))
                 if path.path=='/api/state':
-                    return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0]))
+                    paging = {}
+                    for key in ('results_before', 'results_after'):
+                        if key in query:
+                            if len(query[key]) != 1:raise ValueError('one history cursor value required')
+                            paging[key] = int(query[key][0])
+                    return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0],**paging))
                 if path.path=='/api/environment':
                     if set(query)!={'environment'} or len(query['environment'])!=1:raise ValueError('one explicit environment required')
                     return self.send(200,app.environment_state(query['environment'][0]))
+                if path.path=='/api/scene-assets/preview':
+                    if set(query)!={'environment','asset_id','catalog_digest'}or any(len(v)!=1 for v in query.values()):
+                        raise ValueError('明确的资产、环境与目录版本必需')
+                    preparation=app.device(query['environment'][0]).collection_preparation
+                    catalog=getattr(preparation,'asset_catalog',None)
+                    if catalog is None:raise ValueError('场景资产目录尚未登记')
+                    raw,kind=catalog.preview(query['asset_id'][0],query['catalog_digest'][0])
+                    return self.send(200,raw,kind,{'Cache-Control':'private, max-age=3600'})
                 if path.path=='/api/fake-scene':
                     if query.get('environment',[''])[0]!='fake' or query.get('business',[''])[0]!='collection':
                         raise ValueError('仿真场景实测只读入口仅用于 Fake 数采诊断')
@@ -1320,8 +1449,9 @@ def handler(app):
                 if path.path=='/api/calibration-file':
                     workflow=app.device(query.get('environment',['fake'])[0]).workflows.get('calibration')
                     if not workflow:raise ValueError('标定服务未配置')
-                    return self.send(200,workflow.download(query.get('result_id',[''])[0]),
-                        headers={'Content-Disposition':'attachment; filename="calibration.json"'})
+                    result=workflow.download(query.get('result_id',[''])[0])
+                    name='calibration-'+result['sha256'][:12]+'.json' if result.get('schema')=='robot_workbench.calibration_bundle.v1' else 'calibration.json'
+                    return self.send(200,result,headers={'Content-Disposition':'attachment; filename="'+name+'"'})
                 if path.path=='/api/result-media':
                     device=app.device(query.get('environment',['fake'])[0])
                     business=query.get('business',['calibration'])[0]
@@ -1365,7 +1495,7 @@ def handler(app):
                     if self.headers.get('If-None-Match')==meta['etag']:return self.send(304,b'','image/jpeg',headers)
                     return self.send(200,raw,'image/jpeg',headers)
                 resource=path.path.removeprefix('/web') if path.path.startswith('/web/') else path.path
-                if resource not in ('/','/index.html','/app.js','/style.css','/session.js','/site_cameras.js'):
+                if resource not in ('/','/index.html','/app.js','/style.css','/session.js','/site_cameras.js','/triton.js'):
                     return self.send(404,{'error':'not found'})
                 file=ROOT/'web'/('index.html' if resource=='/' else resource[1:])
                 return self.send(200,file.read_bytes(),mimetypes.guess_type(str(file))[0] or 'application/octet-stream')
@@ -1385,11 +1515,12 @@ def handler(app):
                 if size>4*1024*1024:return self.send(413,{'error':'small JSON required'})
                 if size<=0:raise ValueError('small JSON required')
                 path=urlsplit(self.path).path
-                if not path.startswith(('/api/actions/','/api/maintenance/')):return self.send(404,{'error':'not found'})
+                if not path.startswith(('/api/actions/','/api/maintenance/','/api/triton/')):return self.send(404,{'error':'not found'})
                 raw=self.rfile.read(size)
                 if len(raw)!=size:raise ValueError('request body is incomplete')
                 self.close_connection=not keep_alive
-                result=(app.maintenance_action(path.removeprefix('/api/maintenance/'),json.loads(raw))
+                result=(app.triton_action(path.removeprefix('/api/triton/'),json.loads(raw)) if path.startswith('/api/triton/') else
+                    app.maintenance_action(path.removeprefix('/api/maintenance/'),json.loads(raw))
                     if path.startswith('/api/maintenance/') else app.action(path.removeprefix('/api/actions/'),json.loads(raw)))
                 self.send(202 if result.get('job_id') else 200,result)
             except (ValueError,KeyError,TypeError,PermissionError) as error:self.send(409,{'error':str(error)})

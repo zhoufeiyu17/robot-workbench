@@ -6,6 +6,8 @@ Only a new, physically reviewed plan can enable position control.
 """
 import argparse
 from collections import deque
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
@@ -21,9 +23,12 @@ import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'infra'))
-from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity, FEEDBACK_MAX_MM
-from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, arrival_tolerances, active_indices, feedback_to_command, observe_arm_positions
-from robot_workbench.joint_bounds import position_noise_rad, feedback_position_margin_rad
+from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity, FEEDBACK_MAX_MM,command_max_mm,feedback_min_mm,feedback_max_mm
+from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, ControlTickGapError, arrival_tolerances, active_indices, feedback_to_command, observe_arm_positions
+from robot_workbench.joint_bounds import position_noise_rad, feedback_position_margin_rad, JointPositionBoundaryError
+from robot_workbench.execution_settings import JointSpeedProtectionError
+from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRejected,SDKNativeFault,validate_native_faults
+from robot_workbench.target_interpreter import ReferenceFeedbackStaleError,ReferenceRevokedError
 
 
 def legacy_modules(source):
@@ -39,10 +44,26 @@ def legacy_modules(source):
     return importlib.import_module('arx_env.coffee_safety')
 
 
-def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_diagnostic_kp=None, right_j4_diagnostic_kd=None, left_j6_diagnostic=False, prepared_reference_enabled=False, target_interpreter_profile=None):
+def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_diagnostic_kp=None, right_j4_diagnostic_kd=None, left_j6_diagnostic=False, prepared_reference_enabled=False, target_interpreter_profile=None, motion_gain_profile=None, native_reference_api='legacy_recompute', dm_joint_velocity_wire_scale=None, dm_torque_unit_contract=None, ec_torque_unit_contract=None, gravity_calibration=None, can_interfaces=None, gripper_calibration=None):
     # Importing this factory does not initialize CAN; only connect() does.
     from arx_env.backends.arx5_backend import Arx5Backend, Arx5BackendConfig
     import numpy as np
+    interfaces = {'left':'can3','right':'can1'} if can_interfaces is None else dict(can_interfaces)
+    if interfaces not in ({'left':'can3','right':'can1'},{'left':'can13l','right':'can13r'}):
+        raise ValueError('unreviewed physical CAN role mapping')
+    if dm_joint_velocity_wire_scale is not None and (type(dm_joint_velocity_wire_scale)not in(int,float)or dm_joint_velocity_wire_scale!=1.5):
+        raise ValueError('only the measured45/30 DM joint velocity contract is qualified')
+    from robot_workbench.sdk_quiesce import EC_STATIC_UNITS,EC_J2_EQUIVALENT_UNITS,EC_J2_GRAVITY_SCALES,DM_EQUIVALENT_UNITS,DM_LEGACY_TO_PROTOCOL
+    if dm_torque_unit_contract is not None and (dm_torque_unit_contract!=DM_EQUIVALENT_UNITS
+            or interfaces!={'left':'can13l','right':'can13r'}or dm_joint_velocity_wire_scale!=1.5
+            or ec_torque_unit_contract is not None):
+        raise ValueError('reviewed ARX13 equivalent DM contract with legacy EC units required')
+    if ec_torque_unit_contract not in (None,EC_STATIC_UNITS,*EC_J2_GRAVITY_SCALES):
+        raise ValueError('unknown EC torque unit contract')
+    if gravity_calibration is not None and ec_torque_unit_contract not in(None,*EC_J2_GRAVITY_SCALES):
+        raise ValueError('calibrated gravity permits only the reviewed left J2 unit profiles')
+    if ec_torque_unit_contract in EC_J2_GRAVITY_SCALES and ec_torque_unit_contract!=EC_J2_EQUIVALENT_UNITS and gravity_calibration is None:
+        raise ValueError('J2 gravity dose requires calibrated gravity')
     if any(side not in ('left','right') for side in disabled_grippers):
         raise ValueError('disabled grippers must name left or right')
     disabled = tuple(side for side in ('left','right')
@@ -63,9 +84,15 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
     if type(prepared_reference_enabled)is not bool or prepared_reference_enabled and diagnostic_kp is not None:
         raise ValueError('prepared reference requires a normal, explicitly enabled hardware profile')
     from robot_workbench.target_interpreter import PROFILES, gains as motion_gains
+    if motion_gain_profile not in (None,'normal_X5'):
+        raise ValueError('explicit normal_X5 motion gains or inherited profile required')
+    selected_gain_profile=motion_gain_profile or target_interpreter_profile or 'normal_X5'
     if target_interpreter_profile is not None and (target_interpreter_profile not in PROFILES
             or not prepared_reference_enabled or diagnostic_kp is not None):
         raise ValueError('shared target interpreter requires a reviewed common motion profile, not one-shot gains')
+    from robot_workbench.motion_reference import NATIVE_REFERENCE_APIS
+    if native_reference_api not in NATIVE_REFERENCE_APIS or native_reference_api=='preserve_reference_v1'and not target_interpreter_profile:
+        raise ValueError('known native reference API and shared profile required')
 
     class PassiveJawController:
         def __init__(self, controller, release=lambda: True):
@@ -73,6 +100,22 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             self.release = release
         def __getattr__(self, name):
             return getattr(self.controller, name)
+        def _read_native(self, name, *args):
+            context=self.__dict__.get('_read_probe')
+            if context is None:return getattr(self.controller,name)(*args)
+            probe,side=context;started=time.monotonic();cpu=time.thread_time_ns()
+            try:return getattr(self.controller,name)(*args)
+            finally:
+                if len(probe['calls'])<32:
+                    probe['calls'].append(dict(side=side,phase=probe['phase'],method=name,
+                        started_s=started,wall_s=time.monotonic()-started,cpu_s=(time.thread_time_ns()-cpu)/1e9))
+        def get_joint_state(self):return self._read_native('get_joint_state')
+        def get_joint_cmd(self):return self._read_native('get_joint_cmd')
+        def get_control_observation(self):return self._read_native('get_control_observation')
+        def get_gain(self):return self._read_native('get_gain')
+        def get_timestamp(self):return self._read_native('get_timestamp')
+        def set_joint_traj(self,frames):return self._read_native('set_joint_traj',frames)
+        def set_joint_reference(self,frames):return self._read_native('set_joint_reference',frames)
         def set_gain(self, gain):
             if self.release():gain.gripper_kp = gain.gripper_kd = 0.
             return self.controller.set_gain(gain)
@@ -80,15 +123,63 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             if self.release():cmd.gripper_vel = cmd.gripper_torque = 0.
             return self.controller.set_joint_cmd(cmd)
 
+    @contextmanager
+    def native_read_probe(controllers):
+        probe=dict(phase='guard',calls=[]);wrapped=[]
+        for side,controller in controllers.items():
+            if isinstance(controller,PassiveJawController):
+                controller._read_probe=(probe,side);wrapped.append(controller)
+        try:yield probe
+        finally:
+            for controller in wrapped:controller._read_probe=None
+
     motion_profile = target_interpreter_profile
+    reference_api = native_reference_api
 
     class SingleArmBackend(Arx5Backend):
         passive_jaws = disabled
         manual_jaws = frozenset()
         target_interpreter_profile = motion_profile
+        motion_gain_profile = selected_gain_profile
+        native_reference_api = reference_api
+        torque_unit_contract = dm_torque_unit_contract or ec_torque_unit_contract or 'legacy_sdk_v1'
+        gravity_calibration_id = None if gravity_calibration is None else gravity_calibration['id']
+
+        def configure_motion_gains(self,value,*,preserve_hold=False):
+            # Default remains RAM-only; a reviewed terminal-hold change preserves output.
+            if type(preserve_hold)is not bool:raise ValueError('explicit hold preservation flag required')
+            if value is not None:
+                from robot_workbench.execution_settings import study_defaults,validate_study
+                validate_study(dict(study_defaults(),gains=value))
+                if motion_profile!='x5_control50_damping_v1':raise ValueError('study gains require V10 profile')
+            if preserve_hold:
+                self._require_connected()
+                if value is None or getattr(self,'study_gain_override',None)is None:
+                    raise ValueError('hold gain change requires an existing explicit study configuration')
+                changed=[side for side in ('left','right')if value[side]!=self.study_gain_override[side]]
+                now=time.monotonic();windows=getattr(self,'_prepared_bias_windows',{})
+                if any(side not in windows or windows[side][0][-1]<now for side in changed):
+                    raise ReferenceWindowRejected('hold gain change requires a current reference window')
+                try:
+                    for side in changed:
+                        gain=self._arx5.Gain(6)
+                        gain.kp()[:],gain.kd()[:]=value[side]['kp'],value[side]['kd']
+                        gain.gripper_kp,gain.gripper_kd=5.,.2
+                        self.command_guard();self._controllers[side].set_gain(gain)
+                    self.command_guard()
+                except BaseException:
+                    self.set_damping_hold(manual=False)
+                    self.reference_cancel_sequence=getattr(self,'reference_cancel_sequence',0)+1
+                    raise
+                self.study_gain_override=deepcopy(value)
+                return dict(configured=True,hardware_write=True,preserved_hold=True,changed_sides=changed)
+            self.study_gain_override=deepcopy(value)
+            return dict(configured=value is not None,hardware_write=False)
 
         def motion_gains(self, side):
-            return motion_gains(target_interpreter_profile or 'normal_X5', side)
+            override=getattr(self,'study_gain_override',None)
+            if override is not None:return override[side]['kp'][:],override[side]['kd'][:]
+            return motion_gains(selected_gain_profile, side)
 
         def _import_arx5(self):
             sdk=super()._import_arx5()
@@ -97,17 +188,69 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             if contract:
                 from robot_workbench.sdk_quiesce import verify_module
                 verify_module(sdk,contract)
-            if not disabled:return sdk
+            if reference_api=='preserve_reference_v1'and(not contract
+                    or not callable(getattr(sdk.Arx5JointController,'set_joint_reference',None))
+                    or not isinstance(getattr(sdk,'ReferenceAdmissionRejected',None),type)):
+                raise ValueError('pinned SDK with preserved-reference capability required')
+            if dm_joint_velocity_wire_scale is not None and not contract:
+                raise ValueError('DM velocity codec requires a pinned native SDK')
+            if ec_torque_unit_contract is not None and not contract:
+                raise ValueError('EC torque contract requires a pinned native SDK')
+            if dm_torque_unit_contract is not None and not contract:
+                raise ValueError('DM torque contract requires a pinned native SDK')
+            if gravity_calibration is not None and not contract:
+                raise ValueError('gravity calibration requires a pinned native SDK')
+            if gripper_calibration is not None and not contract:
+                raise ValueError('gripper endpoint calibration requires a pinned native SDK')
+            if not disabled and dm_joint_velocity_wire_scale is None and ec_torque_unit_contract is None and gravity_calibration is None and gripper_calibration is None:return sdk
+            left_interface=self.config.left_can
             interfaces={getattr(self.config,side+'_can') for side in disabled}
-            class WithoutDisabledGrippers:
+            class ConfiguredControllers:
                 def __getattr__(self,name):return getattr(sdk,name)
                 def Arx5JointController(self,robot,controller,interface):
+                    if gripper_calibration is not None:
+                        side=next((s for s in ('left','right')if interface==getattr(self_backend.config,s+'_can')),None)
+                        if (side is None or robot.robot_model!='X5' or not hasattr(robot,'gripper_closed_readout')
+                                or self_backend.config.gripper_width_m!=gripper_calibration['sdk_width_m']):
+                            raise ValueError('SDK gripper endpoint capability differs from deployment')
+                        row=gripper_calibration['sides'][side]
+                        robot.gripper_closed_readout=row['closed_readout']
+                        robot.gripper_open_readout=row['open_readout']
+                        robot.gripper_width=gripper_calibration['sdk_width_m']
+                    if gravity_calibration is not None:
+                        side=next((s for s in ('left','right')if interface==getattr(self_backend.config,s+'_can')),None)
+                        if (side is None or robot.robot_model!='X5'
+                                or robot.urdf_path!=gravity_calibration['source_pins']['sdk_model']['path']
+                                or list(robot.gravity_vector)!=gravity_calibration['gravity_vector']):
+                            raise ValueError('SDK gravity model differs from the calibrated source')
+                        robot.urdf_path=gravity_calibration['models'][side]['path']
+                    if dm_joint_velocity_wire_scale is not None:
+                        if (robot.robot_model!='X5'or list(robot.motor_id)!=[1,2,4,5,6,7]
+                                or list(robot.motor_type)!=[sdk.MotorType.EC_A4310]*3+[sdk.MotorType.DM_J4310]*3
+                                or not hasattr(robot,'dm_joint_velocity_wire_scale')):
+                            raise ValueError('SDK/robot does not match measured DM joint velocity codec')
+                        robot.dm_joint_velocity_wire_scale=dm_joint_velocity_wire_scale
+                    if ec_torque_unit_contract is not None:
+                        if (robot.robot_model!='X5' or list(robot.motor_id)!=[1,2,4,5,6,7]
+                                or list(robot.motor_type)!=[sdk.MotorType.EC_A4310]*3+[sdk.MotorType.DM_J4310]*3
+                                or not hasattr(robot,'ec_torque_protocol_joints')
+                                or not hasattr(robot,'ec_protocol_gravity_scale')
+                                or list(robot.ec_torque_protocol_joints) or robot.ec_protocol_gravity_scale!=1.):
+                            raise ValueError('SDK/robot does not match reviewed EC torque contract')
+                        if interface==left_interface:
+                            robot.ec_torque_protocol_joints=[1] if ec_torque_unit_contract in EC_J2_GRAVITY_SCALES else[1,2]
+                            robot.ec_protocol_gravity_scale=EC_J2_GRAVITY_SCALES.get(ec_torque_unit_contract,1/1.4)
+                    if dm_torque_unit_contract is not None:
+                        if (not hasattr(robot,'dm_protocol_torque_equivalent')or robot.dm_protocol_torque_equivalent):
+                            raise ValueError('SDK lacks the explicit default-off DM torque contract')
+                        robot.dm_protocol_torque_equivalent=True
                     if interface in interfaces:
                         # Native NONE skips clear, enable and every gripper CAN
                         # output; zero Python gains alone would still transmit.
                         robot.gripper_motor_type=sdk.MotorType.NONE
                     return sdk.Arx5JointController(robot,controller,interface)
-            return WithoutDisabledGrippers()
+            self_backend=self
+            return ConfiguredControllers()
 
         def connect(self):
             from robot_workbench.arx_output_guard import require_guard
@@ -193,19 +336,68 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                 if not isinstance(self._controllers[side], PassiveJawController):
                     self._controllers[side] = PassiveJawController(
                         self._controllers[side], lambda side=side: side in self.manual_jaws or side in self.passive_jaws)
-            result = super().set_damping_hold(manual=manual, **kwargs)
+            sides=self.sides
+            for attempt in range(2):
+                faults=self.native_faults()
+                try:
+                    for side in faults:self._controllers[side].set_to_damping()
+                    # Reuse the legacy measured-pose Stop for only the healthy arm.
+                    # This worker dispatches serially; restore membership even on failure.
+                    self.sides=tuple(side for side in sides if side not in faults)
+                    result = super().set_damping_hold(manual=manual, **kwargs)
+                    if not manual:
+                        for side in self.sides:
+                            gain = self._arx5.Gain(6)
+                            gain.kp()[:] = np.asarray(self._controller_configs[side].default_kp)*.3
+                            gain.kd()[:] = np.minimum(np.asarray(self._controller_configs[side].default_kd)*self.config.teach_kd_scale+1.,4.5)
+                            gain.gripper_kp, gain.gripper_kd = .12, .15
+                            self._controllers[side].set_gain(gain)
+                    break
+                except Exception:
+                    # A native latch can race the initial report. Retry only the
+                    # bounded stop, never a motion, and only for a newly latched arm.
+                    if attempt or not set(self.native_faults())-set(faults):raise
+                finally:self.sides=sides
             self._prepared_reference=None
             self._prepared_bias_windows={}
-            if not manual:
-                # User-reviewed per-joint stop profile; passive motion restriction remains separate.
-                for side in self.sides:
-                    gain = self._arx5.Gain(6)
-                    gain.kp()[:] = np.asarray(self._controller_configs[side].default_kp)*.3
-                    gain.kd()[:] = np.minimum(np.asarray(self._controller_configs[side].default_kd)*self.config.teach_kd_scale+1.,4.5)
-                    gain.gripper_kp, gain.gripper_kd = .12, .15
-                    self._controllers[side].set_gain(gain)
             self._joint_diagnostic_gain_active=False
             return result
+
+        def _stop_gripper_command(self,side,width):
+            if gripper_calibration is None:return width
+            # Validate the measured envelope separately from the command envelope.
+            # Raw SDK feedback is never overwritten, including at the calibrated stop.
+            raw=[0.]*14;raw[6 if side=='left'else 13]=width
+            gap=feedback_gaps(raw)[0 if side=='left'else 1]
+            command=hold_command_sdk(side,gap)
+            if not hasattr(self,'_stop_jaw_projection'):self._stop_jaw_projection={}
+            self._stop_jaw_projection[side]=dict(raw_sdk_m=width,command_sdk_m=command,
+                measured_gap_mm=gap,command_clipped=abs(command-width)>1e-12)
+            return command
+
+        def _stop_arm_command(self,side,position):
+            from robot_workbench.joint_bounds import inspect_joint_feedback
+            command,corrections=inspect_joint_feedback(np.asarray(position).tolist(),
+                np.asarray(self.get_joint_position_limits(side))[:6].tolist(),environment='physical')
+            if not hasattr(self,'_stop_arm_projection'):self._stop_arm_projection={}
+            self._stop_arm_projection[side]=dict(raw_sdk_rad=np.asarray(position).tolist(),
+                command_sdk_rad=list(command),corrections=corrections)
+            return command
+
+        def native_faults(self):
+            result={}
+            for side,controller in self._controllers.items():
+                read=getattr(controller,'get_emergency_state',None)
+                if read is None:continue # Existing pinned SDK remains compatible.
+                report=read()
+                if not report.latched:continue
+                contract=getattr(getattr(self,'output_guard',None),'sdk_contract',None)
+                if (not contract or report.library_build_id!=contract['library_build_id']
+                        or report.controller_instance_id!=controller.controller_instance_id()):
+                    raise ValueError('native fault SDK identity differs')
+                result[side]={k:getattr(report,k)for k in ('library_build_id','controller_instance_id','reason',
+                    'latched','feedback_valid','damping_committed','joint','observed_value','latched_monotonic_ns')}
+            return validate_native_faults(result)
 
         def set_control_mode(self, mode):
             for side in disabled:
@@ -254,8 +446,22 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             return tuple(exact)
 
         def read_calibration_state(self):
-            result=super().read_calibration_state()
+            with native_read_probe(self._controllers)as probe:return self._read_calibration_state(probe)
+
+        def _read_calibration_state(self,probe):
+            # Guard/diagnostics may wait. Acquire the actual control snapshot LAST;
+            # never relabel the timestamp of an older snapshot as fresh.
+            result={};read_started=time.monotonic()
             heartbeat=self.output_guard.call('heartbeat')
+            guard_returned=time.monotonic()
+            faults=self.native_faults()
+            if faults:
+                result['native_faults']=faults
+                if not all(row['feedback_valid'] for row in faults.values()):
+                    self.set_damping_hold(manual=False)
+                    self.output_guard.call('trip',detail='native emergency: invalid feedback')
+                    raise RuntimeError('native emergency: invalid feedback; retained hold unavailable')
+            probe['phase']='jaw_diagnostic'
             result['gripper_feedback_valid']=[side not in disabled for side in ('left','right')]
             result['gripper_feedback_reason']=['operator_disabled_no_feedback' if side in disabled else None for side in ('left','right')]
             result['can_output_guard']=dict(state='armed',feedback_timeout_ms=100,
@@ -264,31 +470,81 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             result['gripper_torque']=[float(self._controllers[side].get_joint_state().gripper_torque) for side in self.sides]
             result['gripper_contact_detection']='unvalidated; torque telemetry only'
             result['last_begin_position_boundary']=getattr(self,'last_begin_position_boundary',None)
+            result['stop_jaw_projection']=deepcopy(getattr(self,'_stop_jaw_projection',None))
+            result['stop_arm_projection']=deepcopy(getattr(self,'_stop_arm_projection',None))
             if diagnostic_kp is not None:
                 result['left_j6_diagnostic'if left_j6_diagnostic else'right_j4_diagnostic']=dict(kp=diagnostic_kp,kd=diagnostic_kd,
                     consumed=getattr(self,'_joint_diagnostic_consumed',False),
                     gain_active=getattr(self,'_joint_diagnostic_gain_active',False),normal_default_kp=20. if left_j6_diagnostic else 30.)
             result['prepared_reference']=getattr(self,'_prepared_reference',None)
+            if gravity_calibration is not None:
+                result['gravity_calibration']=dict(id=gravity_calibration['id'],
+                    joint_offsets_rad=gravity_calibration['joint_offsets_rad'],models=gravity_calibration['models'],
+                    convention=gravity_calibration['convention'],application='SDK model origin only; raw q and command unchanged')
             # Sample diagnostics at 10 Hz; never tune gains or alter commands here.
             now=time.monotonic()
             if now-getattr(self,'_telemetry_time',-math.inf)>=.1:
                 self._telemetry_time=now
                 telemetry=dict(sample_wall_ns=time.time_ns(),sample_time_s=now,
-                    scope='native output before CAN encoding; not firmware acknowledgement',arms={})
+                    scope='native output before CAN encoding; not firmware acknowledgement',arms={},command_sdk_timestamps={})
+                probe['phase']='native_telemetry'
                 try:
                     for side,controller in self._controllers.items():
-                        state,cmd,gain=controller.get_joint_state(),controller.get_joint_cmd(),controller.get_gain()
+                        # Only the native completed-output snapshot pairs the q
+                        # used for gravity with the resulting command and gain.
+                        native=getattr(getattr(controller,'controller',controller),'get_control_observation',None)
+                        if callable(native):
+                            observation=controller.get_control_observation()
+                            if not observation.valid:
+                                raise ValueError('native control observation is not ready')
+                            state,cmd,gain=observation.feedback,observation.command,observation.gain
+                            sequence=int(observation.sequence);stamp_ns=int(observation.sample_monotonic_ns)
+                            age_s=(time.monotonic_ns()-stamp_ns)/1e9
+                            if sequence<=0 or stamp_ns<=0 or age_s<0:
+                                raise ValueError('invalid native control observation identity')
+                            coherence=dict(coherent=True,sequence=sequence,sample_monotonic_ns=stamp_ns,
+                                age_s=age_s,emergency=bool(observation.emergency),scope='completed calculation; not motor acknowledgement')
+                        else:
+                            state,cmd,gain=controller.get_joint_state(),controller.get_joint_cmd(),controller.get_gain()
+                            coherence=dict(coherent=False,reason='legacy separate native getters')
+                        telemetry.setdefault('observations',{})[side]=coherence
                         row=dict(qpos=list(map(float,state.pos())),effort=list(map(float,state.torque())),
                             output_qpos=list(map(float,cmd.pos())),output_qvel=list(map(float,cmd.vel())),output_torque=list(map(float,cmd.torque())),
                             kp=list(map(float,gain.kp())),kd=list(map(float,gain.kd())))
+                        if coherence['coherent']:
+                            row['qvel']=list(map(float,state.vel()))
                         if any(len(values)!=6 or not all(math.isfinite(x) for x in values) for values in row.values()):
                             raise ValueError('invalid native controller telemetry')
                         telemetry['arms'][side]=row
+                        if dm_torque_unit_contract is not None:
+                            telemetry.setdefault('dm_units',{})[side]=dict(contract=DM_EQUIVALENT_UNITS,
+                                protocol_joint_indices=[3,4,5],gravity_scale=DM_LEGACY_TO_PROTOCOL,
+                                output_torque_units=['legacy_SDK']*3+['protocol_nominal_Nm']*3,
+                                feedback_T_nominal_Nm=[x*DM_LEGACY_TO_PROTOCOL for x in row['effort'][3:]],
+                                effort_compatibility='original SDK feedback retained for unchanged protection; T is not independent current')
+                        if ec_torque_unit_contract is not None:
+                            indices=([1] if ec_torque_unit_contract in EC_J2_GRAVITY_SCALES else[1,2]) if side=='left' else []
+                            telemetry.setdefault('ec_units',{})[side]=dict(
+                                protocol_joint_indices=indices,model_gravity_scale=EC_J2_GRAVITY_SCALES.get(ec_torque_unit_contract,1/1.4) if indices else 1.,
+                                effort_compatibility='raw_current_A * 1.4^2; original protection unchanged',
+                                ec_motor_current_A=[x/(1.4*1.4) for x in row['effort'][:3]],
+                                ec_motor_nominal_torque_Nm=[x/1.4 for x in row['effort'][:3]],
+                                output_torque_units=['protocol_Nm' if i in indices else 'legacy_SDK' for i in range(6)])
+                        stamp=getattr(cmd,'timestamp',None)
+                        telemetry['command_sdk_timestamps'][side]=float(stamp)if isinstance(stamp,(int,float))and math.isfinite(stamp)else None
                     telemetry['status']='observed'
                 except Exception as error:
                     telemetry.update(status='unavailable',error=str(error)[:256])
                 self._controller_telemetry=telemetry
             result['controller_telemetry']=self._controller_telemetry
+            snapshot_started=time.monotonic()
+            probe['phase']='raw_snapshot'
+            result.update(super().read_calibration_state())
+            result['feedback_read_timing']=dict(guard_call_s=guard_returned-read_started,
+                diagnostics_s=snapshot_started-guard_returned,raw_snapshot_s=time.monotonic()-snapshot_started,
+                guard_ipc=getattr(self.output_guard,'last_call_timing',None),
+                native_calls=probe['calls'],
+                order='guard_and_diagnostics_then_actual_snapshot')
             return result
 
         def enable_collection_arm(self, side, target):
@@ -336,62 +592,90 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             getattr(self,'_prepared_bias_windows',{}).pop(side,None)
 
         def queue_reference(self, packet):
+            started=time.monotonic();cpu=time.thread_time_ns()
+            with native_read_probe(getattr(self,'_controllers',{}))as probe:
+                probe.update(phase='validation',stages=[])
+                self.last_reference_timing=probe
+                last,last_cpu=started,cpu
+                def mark(phase=None):
+                    nonlocal last,last_cpu
+                    now,current=time.monotonic(),time.thread_time_ns()
+                    probe['stages'].append(dict(phase=probe['phase'],started_s=last,wall_s=now-last,cpu_s=(current-last_cpu)/1e9))
+                    last,last_cpu=now,current
+                    if phase is not None:probe['phase']=phase
+                try:return self._queue_reference(packet,mark)
+                finally:
+                    mark();probe.update(started_s=started,returned_s=last,wall_s=last-started,cpu_s=(last_cpu-cpu)/1e9)
+
+        def _queue_reference(self, packet, mark):
             """Admit a short, epoch-gated window; native SDK alone executes it."""
             self._require_connected()
-            if not prepared_reference_enabled:raise ValueError('prepared reference output is not enabled')
+            if not prepared_reference_enabled:raise ReferenceWindowRejected('prepared reference output is not enabled')
             required={'schema','reference_id','host_times_s','q_sdk14','dq_sdk14','active_arm'}
             from robot_workbench.target_interpreter import SCHEMA as common_schema
             common=isinstance(packet,dict)and packet.get('schema')==common_schema
             fields=required|{'controller_profile','torque_bias_sdk14'} if common else required
-            if not isinstance(packet,dict)or (set(packet)!=fields if common else set(packet)not in(fields,fields|{'torque_bias_sdk6'})):
-                raise ValueError('exact prepared reference packet required')
+            if not isinstance(packet,dict)or (set(packet)not in(fields,fields|{'velocity_source'}) if common else set(packet)not in(fields,fields|{'torque_bias_sdk6'})):
+                raise ReferenceWindowRejected('exact prepared reference packet required')
+            position_only='velocity_source' in packet
+            if position_only and (packet['velocity_source']!='sdk_position_only'
+                    or target_interpreter_profile!='x5_control50_damping_v1' or reference_api!='preserve_reference_v1'):
+                raise ReferenceWindowRejected('explicit shared research SDK position-only contract required')
+            packet_api='legacy_recompute' if position_only else reference_api
             if common:
                 if (target_interpreter_profile is None or packet['controller_profile']!=target_interpreter_profile
                         or packet['active_arm']not in ('left','right','both')):
-                    raise ValueError('shared reference arm or trusted controller profile differs')
+                    raise ReferenceWindowRejected('shared reference arm or trusted controller profile differs')
             elif target_interpreter_profile is not None:
-                raise ValueError('legacy reference packets are disabled by the shared target profile')
+                raise ReferenceWindowRejected('legacy reference packets are disabled by the shared target profile')
             elif packet['schema']!='prepared_motion_reference.v1'or packet['active_arm']!='left':
-                raise ValueError('current prepared-reference qualification is left arm only')
+                raise ReferenceWindowRejected('current prepared-reference qualification is left arm only')
             sides=('left','right')if packet['active_arm']=='both'else(packet['active_arm'],)
             if any(self._controller_configs[side].interpolation_method!='linear'for side in sides):
-                raise ValueError('only the qualified native linear interpolator is permitted')
+                raise ReferenceWindowRejected('only the qualified native linear interpolator is permitted')
             if (not isinstance(packet['reference_id'],str)or len(packet['reference_id'])!=64
                     or any(c not in '0123456789abcdef'for c in packet['reference_id'])):
-                raise ValueError('prepared reference identity required')
+                raise ReferenceWindowRejected('prepared reference identity required')
             times=np.asarray(packet['host_times_s'],dtype=float);q=np.asarray(packet['q_sdk14'],dtype=float);dq=np.asarray(packet['dq_sdk14'],dtype=float)
             now=time.monotonic()
             if (times.ndim!=1 or not 2<=len(times)<=32 or q.shape!=(len(times),14)or dq.shape!=q.shape
                     or not all(np.isfinite(a).all()for a in (times,q,dq))or np.any(np.diff(times)<=0)
                     or times[0]<now+.003 or times[-1]>now+.35 or times[-1]-times[0]>.3):
-                raise ValueError('bounded, ordered future reference window required')
-            from robot_workbench.motion_reference import TORQUE_BIAS_LIMITS,FEEDFORWARD_SLEW_LIMITS
+                first_ms=(float(times[0])-now)*1000 if times.ndim==1 and len(times) else None
+                last_ms=(float(times[-1])-now)*1000 if times.ndim==1 and len(times) else None
+                raise ReferenceWindowRejected('bounded, ordered future reference window required; '
+                    f'rows={times.size}, time_shape={times.shape}, q_shape={q.shape}, dq_shape={dq.shape}, '
+                    f'first_lead_ms={first_ms}, last_lead_ms={last_ms}, admission_monotonic_s={now}')
+            from robot_workbench.motion_reference import torque_bias_limits,FEEDFORWARD_SLEW_LIMITS
             bias=np.asarray(packet['torque_bias_sdk14']if common else
                 np.c_[packet.get('torque_bias_sdk6',np.zeros((len(times),6))),np.zeros((len(times),8))],dtype=float)
-            bound=np.asarray([*TORQUE_BIAS_LIMITS,0.,*TORQUE_BIAS_LIMITS,0.])
+            bound=np.asarray([*torque_bias_limits(target_interpreter_profile,'left'),0.,*torque_bias_limits(target_interpreter_profile,'right'),0.])
             slew=np.asarray([*FEEDFORWARD_SLEW_LIMITS,0.,*FEEDFORWARD_SLEW_LIMITS,0.])
             if bias.shape!=(len(times),14)or not np.isfinite(bias).all()or np.any(np.abs(bias)>bound+1e-12):
-                raise ValueError('reference torque bias exceeds qualified bounded shape or SDK units')
+                raise ReferenceWindowRejected('reference torque bias exceeds qualified bounded shape or SDK units')
+            if position_only and np.any(bias != 0):
+                raise ReferenceWindowRejected('SDK position-only comparison does not admit added torque bias')
             inactive=[i for side in ('left','right')if side not in sides for i in range(*ARM_SLICES[side])]
             if inactive and (np.any(bias[:,inactive]!=0.)or np.any(dq[:,inactive]!=0.)):
-                raise ValueError('inactive arm reference must not add velocity or torque')
+                raise ReferenceWindowRejected('inactive arm reference must not add velocity or torque')
             if np.any(np.abs(np.diff(bias,axis=0))>np.diff(times)[:,None]*slew+1e-8):
-                raise ValueError('reference torque bias exceeds intra-window slew bound')
+                raise ReferenceWindowRejected('reference torque bias exceeds intra-window slew bound')
             previous_windows=getattr(self,'_prepared_bias_windows',{})
             for side in sides:
                 start,end=ARM_SLICES[side];previous=previous_windows.get(side)
                 current=(np.array([np.interp(now,previous[0],previous[1][:,j])for j in range(6)])if previous else np.zeros(6))
                 if np.any(np.abs(bias[0,start:end]-current)>max(0.,times[0]-now)*slew[start:end]+1e-4):
-                    raise ValueError('reference torque bias exceeds admission slew bound')
+                    raise ReferenceWindowRejected('reference torque bias exceeds admission slew bound')
             for side in sides:
                 start,end=ARM_SLICES[side];limits=np.asarray(self.get_joint_position_limits(side))[:6]
                 if (np.any(q[:,start:end]<limits[:,0])or np.any(q[:,start:end]>limits[:,1])
                         or np.max(np.abs(dq[:,start:end]))>2.
                         or np.any(q[:,end]<0)or np.any(q[:,end]>self.config.gripper_width_m+1e-8)
                         or np.any(dq[:,[6,13]]!=0)):
-                    raise ValueError('prepared reference exceeds SDK command bounds')
+                    raise ReferenceWindowRejected('prepared reference exceeds SDK command bounds')
                 if common and np.any(np.abs(np.diff(dq[:,start:end],axis=0))>5.*np.diff(times)[:,None]+1e-7):
-                    raise ValueError('shared reference exceeds acceleration admission bound')
+                    raise ReferenceWindowRejected('shared reference exceeds acceleration admission bound')
+            mark('command_guard')
             try:self.command_guard()
             except BaseException:
                 self.set_damping_hold(manual=False)
@@ -399,37 +683,52 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                 raise
             windows={};clocks={}
             for side in sides:
+                mark('clock_'+side)
                 controller=self._controllers[side];observations=[]
                 for _ in range(3):
                     before=time.monotonic();sdk_now=controller.get_timestamp();after=time.monotonic()
                     observations.append((after-before,before,sdk_now,after))
                 _,before,sdk_now,after=min(observations)
                 if not math.isfinite(sdk_now)or sdk_now<=.11 or after-before>.002:
-                    raise ValueError('SDK clock observation invalid or exceeded2ms; no window queued')
+                    raise ReferenceWindowRejected('SDK clock observation invalid or exceeded2ms; no window queued')
                 offset=sdk_now-(before+after)/2;clocks[side]=dict(offset_s=offset,uncertainty_s=(after-before)/2)
+                mark('frames_'+side)
                 start,end=ARM_SLICES[side];frames=[]
                 for stamp,row,velocity,torque in zip(times,q,dq,bias):
                     cmd=self._arx5.JointState(6);cmd.timestamp=float(stamp+offset)
                     cmd.pos()[:]=row[start:end];cmd.vel()[:]=velocity[start:end];cmd.torque()[:]=torque[start:end]
+                    # Retain analytical dq above for admission checks; the native
+                    # trajectory API derives its own dq solely from position/time.
+                    if position_only:cmd.vel()[:]=0.
                     cmd.gripper_pos=float(row[end]);cmd.gripper_vel=cmd.gripper_torque=0.;frames.append(cmd)
                 windows[side]=frames
             try:
                 for side,frames in windows.items():
+                    mark('commit_'+side)
                     if times[0]<time.monotonic()+.003:
-                        raise ValueError('future reference expired during multi-arm admission')
-                    self.command_guard();self._controllers[side].set_joint_traj(frames)
+                        raise ReferenceWindowRejected('future reference expired during multi-arm admission')
+                    self.command_guard()
+                    if packet_api=='preserve_reference_v1':
+                        try:self._controllers[side].set_joint_reference(frames)
+                        except self._arx5.ReferenceAdmissionRejected as error:
+                            raise ReferenceWindowRejected('native preserved reference rejected: '+str(error))from None
+                    else:self._controllers[side].set_joint_traj(frames)
                 self.command_guard()
             except BaseException:
+                mark('rejected_stop')
                 # Covers epoch revocation racing with admission. The existing
                 # measured-zero-velocity stop also clears pending interpolation.
                 self.set_damping_hold(manual=False)
                 self.reference_cancel_sequence=getattr(self,'reference_cancel_sequence',0)+1
                 raise
+            mark('receipt')
             first=clocks[sides[0]]
             self._prepared_reference=dict(reference_id=packet['reference_id'],active_arm=packet['active_arm'],
                 queued_until_host_s=float(times[-1]),host_to_sdk_offset_s=first['offset_s'],
                 clock_uncertainty_s=first['uncertainty_s'],clock_mappings=clocks,frames=len(times),queued_host_s=time.monotonic(),
                 controller_profile=target_interpreter_profile or 'normal_X5',firmware_ack=False)
+            self._prepared_reference['native_reference_api']=packet_api
+            self._prepared_reference['velocity_source']='sdk_position_only' if position_only else 'prepared_dq'
             if 'torque_bias_sdk6'in packet:self._prepared_reference['torque_bias_last_sdk6']=bias[-1,:6].tolist()
             if common:self._prepared_reference['torque_bias_last_sdk14']=bias[-1].tolist()
             self._prepared_bias_windows=dict(previous_windows)
@@ -440,7 +739,7 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             return dict(self._prepared_reference)
 
     return SingleArmBackend(Arx5BackendConfig(
-        control_mode='damping', left_can='can3', right_can='can1',
+        control_mode='damping', left_can=interfaces['left'], right_can=interfaces['right'],
         left_gripper_open_readout=-3.37205, right_gripper_open_readout=-3.45827))
 
 
@@ -518,6 +817,7 @@ class Owner:
         self.last_capture_ack = None
         self.last_capture_window_ns = 0
         self.recoverable_fault = None
+        self.position_boundary_fault = None
         self.consumed = set()
         self.cache = {'pid': os.getpid(), 'state': 'INITIALIZING', 'connected': False}
         self.last_sdk = None
@@ -659,7 +959,7 @@ class Owner:
                     target = list(q_start)
                     for a, b in ARM_SLICES.values():
                         target[a:b] = [0.]*6
-                        target[b] = command_sdk('left' if b==6 else 'right',83)
+                        side='left' if b==6 else 'right';target[b]=command_sdk(side,command_max_mm(side))
                     plans = (make_plan('both', q_start, target, current['joint_limits'], kind='both_home', created_at_s=self.control_time(),environment=self.position_environment),)
                 elif action == 'preview_jaw_target' and command['active_arm'] == 'both':
                     if getattr(self.backend, 'passive_jaws', ()):
@@ -688,7 +988,7 @@ class Owner:
                         target[a:b] = [0.]*6
                         kind = 'home' if action == 'preview_home' else 'arm_home'
                         if kind == 'home':
-                            target[b] = command_sdk('left' if b==6 else 'right',83)
+                            side='left' if b==6 else 'right';target[b]=command_sdk(side,command_max_mm(side))
                     plan = make_plan(command['active_arm'], q_start, target, current['joint_limits'],
                                      kind=kind, created_at_s=self.control_time(),environment=self.position_environment)
                     plans = (plan,)
@@ -740,10 +1040,22 @@ class Owner:
 
     def recovery_ready(self):
         f = self.cache.get('calibration_feedback') or {}
-        return bool(self.recoverable_fault and self.control.state is self.states.FAULT
+        boundary=getattr(self,'position_boundary_fault',None)
+        if boundary and self.recoverable_fault==boundary['reason']:
+            limits=self.cache.get('joint_limits');q=f.get('qpos')
+            if (not boundary['stop_hold_return_confirmed'] or getattr(self,'fault_manual',False)
+                    or not limits or not q or len(q)!=len(limits)
+                    or f.get('sample_time_s',-1)<boundary.get('stop_return_control_s',math.inf)):return False
+            try:observe_arm_positions(q,limits,environment=self.position_environment)
+            except ValueError:return False
+            if self.hardware:
+                guard=f.get('can_output_guard')or{};stamp=guard.get('heartbeat_monotonic_s')
+                if (guard.get('state')!='armed' or type(stamp)not in(int,float)
+                        or not 0<=self.control_time()-stamp<=.1):return False
+        return bool(self.recoverable_fault and not getattr(self,'native_faults',{}) and self.control.state is self.states.FAULT
                     and self.backend.is_connected and self.feedback_healthy and self.stationary
                     and not self.stop_requested and not self.release_requested
-                    and 0 <= self.control_time()-f.get('sample_time_s', -1) <= .1
+                    and 0 <= self.control_time()-f.get('sample_time_s', -1) <= getattr(self,'recovery_feedback_limit_s',.1)
                     and self.pedal_snapshot()[1:] == (False, True))
 
     def invalidate(self):
@@ -781,19 +1093,68 @@ class Owner:
         self.event('stop', reason=str(reason), epoch=self.epoch,
                    motion_record=self.runner.motion_record() if isinstance(self.runner,MotionRunner) else None)
 
+    def cancel_requested_reference(self, reason):
+        if not isinstance(reason,ReferenceRevokedError):return False
+        with self.lock:
+            if self.control.state is self.states.FAULT or not (self.stop_requested or self.release_requested):return False
+            action='explicit release' if self.release_requested else 'operator stop'
+            self.stop_requested=False
+        self.stop(action)
+        if self.runner:self.runner.status,self.runner.reason='STOPPED',action
+        self.event('reference_cancelled',reason=str(reason),action=action,epoch=self.epoch)
+        return True
+
     def motion_fault(self, reason):
+        if isinstance(reason,SDKNativeFault):
+            self.native_fault(reason.faults)
+            return
+        if self.cancel_requested_reference(reason):return
         diagnostic = self.diagnostic_sample(self.current_feedback)
         diagnostic.update(reasons=['motion_fault'],error=str(reason))
         self.recoverable_fault = None
+        self.recovery_feedback_limit_s = reason.maximum_age_s if isinstance(reason,ReferenceFeedbackStaleError)else .1
         self.stop(reason)
         # A runner fault needs diagnosis; new previews do not reset faults.
         if not (self.runner and self.runner.reason == 'physical/operator pedal'):
             self.control.state = self.states.FAULT
-            if isinstance(reason, MotionTrackingError):
+            if isinstance(reason, (MotionTrackingError,ControlTickGapError,ReferenceFeedbackStaleError,ReferenceWindowRejected,SDKCommandRejected)):
                 self.recoverable_fault = str(reason)
+            if isinstance(reason,ControlTickGapError):
+                diagnostic['control_tick_gap']=dict(observed_gap_s=reason.gap_s,limit_s=.1,
+                    stop_hold_return_confirmed=True,recovery='explicit_ack_after_healthy_stationary_feedback_no_resume')
+            if isinstance(reason,(ReferenceWindowRejected,SDKCommandRejected)):
+                diagnostic['reference_admission']=dict(rejected=True,stop_hold_return_confirmed=True,
+                    recovery='explicit_ack_after_healthy_stationary_feedback_no_resume',
+                    timing=deepcopy(getattr(reason,'timing',None)))
+            if isinstance(reason,ReferenceFeedbackStaleError):
+                diagnostic['reference_feedback']=dict(age_s=reason.age_s,maximum_age_s=reason.maximum_age_s,phase=reason.phase)
+            interpreter=getattr(self.runner,'target_interpreter',None)
+            if interpreter is not None:
+                diagnostic['target_translation_timing']=deepcopy(interpreter.last_timing)
             self.last_fault_diagnostic = diagnostic
             self.event('fault_diagnostic',diagnostic=diagnostic,
                        history=list(self.diagnostic_history),history_capacity=200,epoch_after=self.epoch)
+
+    def native_fault(self, faults):
+        faults=validate_native_faults(faults,required=True)
+        identity=tuple((s,r['controller_instance_id'],r['latched_monotonic_ns'])for s,r in sorted(faults.items()))
+        self.native_faults=faults
+        self.recoverable_fault=None
+        if identity==getattr(self,'native_fault_identity',None):return
+        self.native_fault_identity=identity
+        self.invalidate()
+        self.control.auto_aborted=True
+        self.control.state=self.states.FAULT
+        self.control.reason=str(SDKNativeFault(faults))
+        if self.runner:self.runner.status,self.runner.reason='FAULT',self.control.reason
+        self.last_fault_diagnostic=dict(reasons=['native_emergency_latched'],native_faults=faults,
+            stop_return_confirmed=False,recovery='explicit_release_required_no_in_place_clear',epoch_after=self.epoch)
+        try:self.backend.set_damping_hold(manual=False)
+        except Exception as error:
+            self.last_fault_diagnostic['stop_error']=str(error)
+            raise
+        self.last_fault_diagnostic['stop_return_confirmed']=True
+        self.event('fault_diagnostic',diagnostic=self.last_fault_diagnostic)
 
     def pedal(self):
         self.invalidate()
@@ -813,7 +1174,8 @@ class Owner:
         press, down, healthy = self.pedal_snapshot()
         with self.lock:
             blocked = (self.stop_requested or self.release_requested or self.epoch != self.active_epoch)
-        if blocked or not healthy or down or press != self.review_press:
+        if blocked:raise ReferenceRevokedError('stop/release/epoch changed before SDK command')
+        if not healthy or down or press != self.review_press:
             raise RuntimeError('stop/pedal/epoch changed before SDK command')
 
     def begin(self, arm, measured):
@@ -837,6 +1199,8 @@ class Owner:
     def read_feedback(self):
         read_started = time.monotonic()
         feedback = self.backend.read_calibration_state()
+        if feedback.get('native_faults'):
+            self.native_faults=validate_native_faults(feedback['native_faults'],required=True)
         self.feedback_read_duration_s = time.monotonic()-read_started
         now = self.control_time()
         q, v, sdk = feedback['qpos'], feedback['qvel'], feedback['sdk_timestamps']
@@ -912,9 +1276,11 @@ class Owner:
                 self.control.release()
                 self.cache_state(None, None)
                 return False
-            if self.listener:
-                if not self.listener.input_healthy:
+            pedal_unhealthy = self.listener is not None and not self.listener.input_healthy
+            if pedal_unhealthy:
+                if self.control.state is not self.states.FAULT:
                     raise RuntimeError(self.listener.fault_reason or 'pedal input unhealthy')
+            elif self.listener:
                 for _ in self.listener.take_presses():
                     self.pedal()
             if stop:
@@ -923,6 +1289,8 @@ class Owner:
                 self.stop('operator stop')
             feedback = self.read_feedback()
             self.current_feedback = feedback
+            speed_check=getattr(self,'check_speed_protection',None)
+            if speed_check is not None:speed_check(feedback)
             limits = self.backend.get_bimanual_joint_position_limits()
             if hasattr(limits, 'tolist'):
                 limits = limits.tolist()
@@ -934,6 +1302,15 @@ class Owner:
                 command_projection_allowed=all(abs(row['delta_rad'])<=position_noise_rad(self.position_environment)+1e-12 for row in corrections),
                 corrections=corrections,
                 command_joint_positions_rad=[bounded[i] for i in active_indices('both')])
+            if feedback.get('native_faults'):
+                self.native_fault(feedback['native_faults'])
+                self.cache_state(feedback,limits)
+                return True
+            if pedal_unhealthy:
+                # Keep real feedback/heartbeat after the fault requested damping.
+                # An unavailable pedal cannot admit or resume any queued motion.
+                self.cache_state(feedback,limits)
+                return True
             capture_ack = None
             while not self.commands.empty():
                 action, epoch, review = self.commands.get_nowait()
@@ -949,10 +1326,11 @@ class Owner:
                                 or any(not lo <= q <= hi for q, (lo, hi) in zip(bounded, limits))):
                             self.event('recover_rejected', reason='owner/feedback/pedal changed')
                             continue
-                        reason = self.recoverable_fault
+                        reason = self.recoverable_fault or self.control.reason
                         self.invalidate()
                         self.runner = None
                         self.recoverable_fault = None
+                        self.recovery_feedback_limit_s = .1
                         self.control.state = self.states.STOPPED
                         self.control.auto_aborted = True
                         self.control.reason = 'motion fault acknowledged; preview a new action'
@@ -1068,12 +1446,25 @@ class Owner:
                 self.start_motion(next_plan, feedback, reviewed_deadline=self.sequence_deadline)
             self.cache_state(feedback, limits)
         except Exception as error:
+            if self.cancel_requested_reference(error):
+                self.cache_state(feedback,self.cache.get('joint_limits'))
+                return self.control.state is not self.states.RELEASED
             # Freeze identity and the triggering tick BEFORE epoch invalidation or damping.
             first_fault = self.control.state is not self.states.FAULT
             diagnostic = self.diagnostic_sample(feedback) if first_fault else None
             if diagnostic is not None:
-                diagnostic.update(reasons=guard_reasons or ['owner_exception'],error=str(error))
-            self.recoverable_fault = None
+                diagnostic.update(reasons=['joint_speed_peak'] if isinstance(error,JointSpeedProtectionError) else
+                    ['joint_position_boundary'] if isinstance(error,JointPositionBoundaryError) else guard_reasons or ['owner_exception'],error=str(error))
+            boundary=isinstance(error,JointPositionBoundaryError) and error.details['context']=='feedback'
+            if boundary and first_fault:
+                self.position_boundary_fault=dict(error.details,reason=str(error),stop_hold_return_confirmed=False,
+                    recovery='explicit_ack_after_feedback_inside_observation_envelope_no_resume')
+                diagnostic['position_boundary_violation']=dict(error.details)
+            self.recoverable_fault = (str(error) if isinstance(error,JointSpeedProtectionError) else
+                self.position_boundary_fault['reason'] if boundary and self.position_boundary_fault
+                and self.position_boundary_fault['reason']==self.control.reason else None)
+            if diagnostic is not None and isinstance(error,JointSpeedProtectionError):
+                diagnostic['speed_protection']=deepcopy(error.observation)
             if first_fault:self.invalidate()
             if self.runner:
                 self.runner.status, self.runner.reason = 'FAULT', str(error)
@@ -1081,8 +1472,15 @@ class Owner:
             if self.control.state is not self.states.FAULT:
                 try:
                     self.control.fault(str(error))
+                    if boundary:
+                        self.position_boundary_fault.update(stop_hold_return_confirmed=True,stop_return_control_s=self.control_time())
+                        self.recoverable_fault=self.position_boundary_fault['reason']
+                    if isinstance(error,JointSpeedProtectionError):
+                        self.speed_protection_trip['stop'].update(hold_return_confirmed=True,hold_return_wall_ns=time.time_ns())
                 except Exception as stop_error:
+                    self.recoverable_fault = None
                     self.control.reason += f'; damping failed: {stop_error}'
+                    if isinstance(error,JointSpeedProtectionError):self.speed_protection_trip['stop']['error']=str(stop_error)
             if diagnostic is not None:
                 self.last_fault_diagnostic = diagnostic
                 self.event('fault_diagnostic',diagnostic=diagnostic,
@@ -1091,8 +1489,9 @@ class Owner:
             if first_fault:self.event('fault', reason=self.control.reason)
             with self.lock:
                 self.cache.update(state=self.control.state.value, reason=self.control.reason,
-                                  automatic_enabled=False, feedback_healthy=False, stationary=False,
-                                  command_epoch=self.epoch,last_fault_diagnostic=self.last_fault_diagnostic)
+                                  automatic_enabled=False, feedback_healthy=self.feedback_healthy if isinstance(error,JointSpeedProtectionError) else False, stationary=False,
+                                  command_epoch=self.epoch,last_fault_diagnostic=self.last_fault_diagnostic,
+                                  recoverable_fault=self.recoverable_fault)
                 if self.runner:self.cache['motion']={'status':self.runner.status,'reason':self.runner.reason,'sample_id':None}
         return self.control.state is not self.states.RELEASED
 
@@ -1114,7 +1513,8 @@ class Owner:
     def start_motion(self, plan, feedback, *, reviewed_deadline=None):
         previous=getattr(getattr(self,'runner',None),'target_interpreter',None)
         reuse=bool(previous is not None and not previous.cancelled and previous.epoch==self.epoch
-            and previous.active_arm==plan.active_arm and previous.feedforward is None
+            and previous.active_arm==plan.active_arm
+            and (previous.feedforward is None or self.shared_target_profile!='normal_X5')
             and previous.profile==self.shared_target_profile)
         def begin(measured):
             return tuple(measured)if reuse else self.begin(plan.active_arm,measured)
@@ -1141,14 +1541,16 @@ class Owner:
     def shared_target_profile(self):
         return getattr(self.backend,'target_interpreter_profile',None)
 
-    def make_target_interpreter(self,reference,active_arm,start_s,*,integral=None,feedforward=None,previous=None):
+    def make_target_interpreter(self,reference,active_arm,start_s,*,integral=None,feedforward=None,previous=None,integral_gains=None):
         from robot_workbench.target_interpreter import TargetInterpreter
         profile=self.shared_target_profile
         if profile is None:raise ValueError('shared target interpreter is not configured')
+        # Reference timing and native gains can be selected independently.
+        if integral is None:integral=getattr(self.backend,'motion_gain_profile',profile)!='normal_X5'
         interpreter=TargetInterpreter(self.backend,reference,active_arm=active_arm,start_s=start_s,
             epoch=self.epoch,current_epoch=lambda:self.epoch,gate=self.command_gate,clock=self.control_time,
-            profile=profile,integral=profile=='x5_shared_precision_v1'if integral is None else integral,
-            feedforward=feedforward)
+            profile=profile,integral=integral,
+            feedforward=feedforward,integral_gains=integral_gains)
         interpreter.inherit_hold(previous,self.control_time())
         if reference.metadata.get('kind')=='point'and self.sequence_deadline is not None:
             self.sequence_deadline+=max(0.,reference.duration_s-reference.metadata['source_duration_s'])
@@ -1191,12 +1593,14 @@ class Owner:
                      evidence_logging_healthy=self.evidence_logging_healthy,
                      stationary_diagnostic=getattr(self.stationary_window,'last_diagnostic',None),
                      last_fault_diagnostic=self.last_fault_diagnostic,
+                    position_boundary_fault=deepcopy(self.position_boundary_fault),
                      last_capture_ack=self.last_capture_ack,
                      last_confirm_rejection=self.last_confirm_rejection,
                      simulation_only=not self.hardware,
                      jaw_mapping=mapping_identity(),
                      feedback_limits=dict(joint_position_margin_rad=feedback_position_margin_rad(self.position_environment),
-                                          jaw_range_mm=[-2.,FEEDBACK_MAX_MM],command_limits_unchanged=True),
+                                          jaw_range_mm=[min(feedback_min_mm(s)for s in ('left','right')),max(feedback_max_mm(s)for s in ('left','right'))],
+                                          jaw_ranges_mm={s:[feedback_min_mm(s),feedback_max_mm(s)]for s in ('left','right')},command_limits_unchanged=True),
                      evidence_source='physical_hardware' if self.hardware else 'simulated_owner',
                      control_clock='wall_monotonic' if self.control_clock is None else 'injected',
                      motion_protocol='reviewed-single-arm-v1',
@@ -1217,6 +1621,7 @@ class Owner:
                      local_gains_sample_wall_ns=self.local_gains_wall_ns,
                      release_requires='ARMS_SUPPORTED_RELEASE', stop_damping_scale=self.stop_scale,
                      pedal=dict(input_healthy=healthy, physically_down=down, last_press_ns=press,
+                                stop_key_code=getattr(self.listener,'key_code',None),
                                 latched=bool(self.listener and self.listener.requested.is_set())),
                      motion=None if self.runner is None else dict(status='AWAITING_CAPTURE' if self.capture_wait else self.runner.status, reason=self.runner.reason,
                                                                  sample_id=self.capture_sample,

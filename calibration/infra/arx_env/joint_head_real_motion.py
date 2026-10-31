@@ -10,8 +10,15 @@ import json
 import math
 import time
 
-from .joint_head_jaw_mapping import COMMAND, GAP_MM, command_sdk, feedback_gaps, hold_command_sdk, interpolate
-from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions, inspect_joint_feedback
+from .joint_head_jaw_mapping import COMMAND, GAP_MM, command_sdk, feedback_gaps, hold_command_sdk, interpolate,command_max_mm
+from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions, inspect_joint_feedback, JointPositionBoundaryError
+
+
+class ControlTickGapError(ValueError):
+    """A stopped transient control stall may be explicitly acknowledged later."""
+    def __init__(self,gap_s):
+        self.gap_s=gap_s
+        super().__init__(f'control tick gap exceeds 0.1 s; observed_gap_ms={gap_s*1000:.3f}')
 
 
 class MotionTrackingError(ValueError):
@@ -61,7 +68,10 @@ def observe_arm_positions(q,joint_limits,*,environment,corrections=None):
 
 def _arm_positions(q,joint_limits,environment,corrections,policy):
     values=_numbers(q,14,'qpos');limits=_limits(joint_limits);indices=active_indices('both')
-    bounded,changes=policy([values[i] for i in indices],[limits[i] for i in indices],environment=environment)
+    try:bounded,changes=policy([values[i] for i in indices],[limits[i] for i in indices],environment=environment)
+    except JointPositionBoundaryError as error:
+        error.details['qpos_index']=indices[error.details['index']]
+        raise
     result=list(values)
     for index,value in zip(indices,bounded):result[index]=value
     if corrections is not None:corrections.extend(dict(row,qpos_index=indices[row['index']]) for row in changes)
@@ -74,7 +84,7 @@ def feedback_to_command(q, joint_limits=None,*,environment='physical',correction
     for side, i, gap in zip(("left", "right"), JAW_INDICES, feedback_gaps(q)):
         command[i] = hold_command_sdk(side, gap)
     if joint_limits is not None:
-        command=project_arm_positions(command,joint_limits,environment=environment,corrections=corrections)
+        command=observe_arm_positions(command,joint_limits,environment=environment,corrections=corrections)
     return tuple(command)
 
 
@@ -261,8 +271,8 @@ def make_plan(active_arm, q_start, q_target, joint_limits, *, duration_s=None,
         raise ValueError("inactive arm and jaws must remain unchanged")
     if kind in ("home", "both_home", "arm_home", "both_arm_home") and any(target[i] != 0.0 for i in indices):
         raise ValueError("home requires exactly zero for all active-arm joints")
-    if kind in ("home", "both_home") and any(abs(target[i]-command_sdk("left" if i == 6 else "right", 83)) > 1e-8 for i in jaws):
-        raise ValueError("home requires selected jaws at mapped 83 mm opening")
+    if kind in ("home", "both_home") and any(abs(target[i]-command_sdk("left" if i == 6 else "right", command_max_mm("left" if i==6 else "right"))) > 1e-8 for i in jaws):
+        raise ValueError("home requires selected jaws at their mapped maximum opening")
     if kind == "jaw_target" and any(target[i] not in (start[i], command_start[i]) for i in indices):
         raise ValueError("jaw target keeps arm joints unchanged")
     delta = max(abs(target[i] - command_start[i]) for i in indices)
@@ -408,10 +418,15 @@ class MotionRunner:
         self.command_start_factory=command_start_factory
         self.target_interpreter=None
         self.execution_duration_s=plan.duration_s
+        self.prepared_reference=None
+        self.reference_event=None
+        self.feedback_event=None
 
     def send_reference(self, desired, now, state):
         if self.target_interpreter is not None:
-            return self.target_interpreter.tick(now,state)
+            result=self.target_interpreter.tick(now,state)
+            if result is not None and self.reference_event is not None:self.reference_event(result)
+            return result
         return self.send(desired)
 
     def motion_record(self):
@@ -470,6 +485,7 @@ class MotionRunner:
         if not self.configured_error_policy and any(abs(feedback_gaps(q)[JAW_INDICES.index(i)] - self._start_gaps()[JAW_INDICES.index(i)]) > JAW_DRIFT_MM for i in fixed_jaws):
             raise ValueError("jaw drift exceeds 2 mm")
         self.last_sample, self.last_sdk = sample, sdk
+        if self.feedback_event is not None:self.feedback_event(now,state)
         self.feedback_rows.append((now,sample,q,v,sdk,self.last_sent))
         self.feedback_row_count+=1
         telemetry=state.get('controller_telemetry') or {}
@@ -520,7 +536,7 @@ class MotionRunner:
             if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):
                 raise ValueError("now must be finite")
             if now < self.previous or now - self.previous > 0.1:
-                raise ValueError("control tick gap exceeds 0.1 s")
+                raise ControlTickGapError(now-self.previous)
             q, v = self._feedback(now, state)
             stationary = self.stationary.update(self.last_sample, q, v)
             if self.status == "VERIFYING":
@@ -549,7 +565,10 @@ class MotionRunner:
                 self.started = now
                 if self.interpreter_factory is not None:
                     from robot_workbench.target_interpreter import prepare_point
-                    reference=prepare_point(self.plan,self.execution_start,self.execution_target)
+                    reference=self.prepared_reference or prepare_point(self.plan,self.execution_start,self.execution_target)
+                    if self.prepared_reference is not None:
+                        self.execution_start=reference.sample([0.])[0][0].tolist()
+                        self.execution_target=reference.sample([reference.duration_s])[0][0].tolist()
                     self.execution_duration_s=reference.duration_s
                     self.target_interpreter=self.interpreter_factory(reference,self.plan.active_arm,now)
                 self.status = "RUNNING"
@@ -586,6 +605,8 @@ class MotionRunner:
             # it in (1-s)*a+s*b. Stay within the already validated endpoints.
             desired = tuple(min(max(a+(b-a)*s,min(a,b)),max(a,b))
                             for a, b in zip(self.execution_start, self.execution_target))
+            if self.target_interpreter is not None:
+                desired=tuple(self.target_interpreter.reference.sample([self.last_sample-self.started])[0][0].tolist())
             error = max(abs(q[i] - desired[i]) for i in active_indices('both'))
             jaw_error_mm = max((abs(measured_gaps[n]-command_gap(side, desired[i]))
                                for n, (side, i) in enumerate(zip(("left", "right"), JAW_INDICES)) if i in self.enabled_jaws), default=0.)
@@ -610,7 +631,7 @@ class MotionRunner:
                     self.send_reference(desired,now,state)
                     self.last_sent=desired
                 elif self.target_interpreter is not None:
-                    self.target_interpreter.tick(now,state)
+                    self.send_reference(desired,now,state)
                 if elapsed >= self.execution_duration_s:
                     self.status = 'READY'
                     if self.ready_since is None:
@@ -619,7 +640,7 @@ class MotionRunner:
                 return self.status
             stable = all(abs(q[i]-desired[i]) <= self.arm_tolerances[i if i < 6 else i-1] for i in indices) and jaw_error_mm <= self.error_settings['arrival_jaw_mm'] and stationary
             if self.ready_since is not None:
-                if self.target_interpreter is not None:self.target_interpreter.tick(now,state)
+                if self.target_interpreter is not None:self.send_reference(desired,now,state)
                 if not stable:
                     self.status = "HOLD_UNSETTLED"
                     self.settled_since = None

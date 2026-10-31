@@ -257,7 +257,7 @@ class ControlPlanTests(unittest.TestCase):
             with self.assertRaises(OSError):os.write(rows.fd,b'x')
             with self.assertRaises(TypeError):rows.memory[0]=0
             if sys.platform.startswith('linux'):
-                self.assertEqual(control_plan.fcntl.fcntl(fd,control_plan.fcntl.F_GET_SEALS)&control_plan.SEALS,control_plan.SEALS)
+                self.assertEqual(control_plan.fcntl.fcntl(fd,control_plan.F_GET_SEALS)&control_plan.SEALS,control_plan.SEALS)
                 for length in (os.fstat(fd).st_size-1,os.fstat(fd).st_size+1):
                     with self.assertRaises(OSError):os.ftruncate(fd,length)
             self.assertEqual(rows[0]['target'],row['target'])

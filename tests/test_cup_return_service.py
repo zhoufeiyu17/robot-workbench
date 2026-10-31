@@ -98,6 +98,17 @@ class ReturnViewTest(unittest.TestCase):
         self.assertFalse(result['busy']);self.assertNotEqual(result['status'],'running')
         self.assertRegex(result['message'],'未执行|未启动')
 
+    def test_handoff_or_owner_replacement_retires_old_return_without_claiming_success(self):
+        device=NS(cup_return_task=self.task())
+        for nonce,epoch in [('owner',4),('replacement',0)]:
+            with self.subTest(nonce=nonce,epoch=epoch):
+                result=view(device,dict(runtime_nonce=nonce,command_epoch=epoch,state='READY',frozen={}),{})
+                self.assertFalse(result['busy']);self.assertEqual(result['status'],'superseded')
+                self.assertNotEqual(result['outcomes']['motion'],'completed')
+        # Unknown context and a still-current pending execution remain busy.
+        for runtime in ({},dict(runtime_nonce='owner',command_epoch=3,frozen={})):
+            self.assertTrue(view(device,runtime,{})['busy'])
+
     def test_old_qualified_native_receipt_cannot_mark_current_return_successful(self):
         runtime=dict(state='READY',command_epoch=3,runtime_nonce='owner',
             frozen=dict(timeline_digest='return-timeline',status='completed',execution_timeline_digest='return-execution'),
@@ -287,7 +298,8 @@ class ReturnWithoutWarmupHTTPTest(unittest.TestCase):
         self.assertTrue(self.state('collection')['runtime']['allowed_operations']['return_cup']['allowed'])
         def prepare_fixture(device,offset_xy_mm=None):
             device.cup_return_task=dict(directory='return-job',timeline_digest='return-timeline',duration_s=37.57,
-                parent_plan_id='parent',parent_speed_scale=.97,submitted=False)
+                parent_plan_id='parent',parent_speed_scale=.97,submitted=False,
+                runtime_nonce=owner['runtime_nonce'],command_epoch=owner['command_epoch'])
             return dict(preview=dict(token='return-preview',runtime_nonce=owner['runtime_nonce'],command_epoch=owner['command_epoch'],
                 owner_pid=owner['pid'],purpose='cup_return',speed_scale=.97,offset_xy_mm=offset_xy_mm),summary='取回维护动作')
         with patch('robot_workbench.cup_return.prepare',side_effect=prepare_fixture),patch.object(self.device,'submit',

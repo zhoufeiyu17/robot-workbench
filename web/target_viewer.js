@@ -3,7 +3,9 @@ import * as THREE from './vendor/three.module.js';
 import {OrbitControls} from './vendor/OrbitControls.js';
 
 export function modelFrames(model,q,gaps){
-  if(q.length!==12||gaps.length!==2||!q.every(Number.isFinite)||!gaps.every(v=>Number.isFinite(v)&&v>=0&&v<=83))throw Error('12 finite target joints and 0–83 mm jaws required');
+  const limits=model.jaw_limits_mm||[[0,83],[0,83]];
+  if(limits.length!==2||limits.some(pair=>!Array.isArray(pair)||pair.length!==2||!pair.every(Number.isFinite)||pair[0]!==0||pair[1]<=0||pair[1]>200))throw Error('invalid display jaw limits');
+  if(q.length!==12||gaps.length!==2||!q.every(Number.isFinite)||!gaps.every((v,i)=>Number.isFinite(v)&&v>=limits[i][0]&&v<=limits[i][1]))throw Error('12 finite target joints and device-bounded jaw gaps required');
   const values=new Map(model.joints.map(row=>[row.name,0]));model.q_names.forEach((name,i)=>values.set(name,q[i]));
   for(const row of model.gap_joints)values.set(row.name,gaps[row.side]*row.scale+row.offset);
   const pending=new Map(Object.entries(model.mimics));
@@ -30,7 +32,8 @@ export async function createTargetViewer({container,modelRef,request,signal,onFr
   if(binary.headers.get('X-Model-SHA256')!==model.binary_sha256)throw Error('GPU model digest differs');
   const buffer=await binary.arrayBuffer();if(buffer.byteLength!==model.binary_bytes||buffer.byteLength%4)throw Error('GPU model byte count differs');
   if(signal.aborted)throw Error('GPU display context was replaced');
-  modelFrames(model,Array(12).fill(0),[83,83]);
+  const initialGaps=(model.jaw_limits_mm||[[0,83],[0,83]]).map(pair=>pair[1]);
+  modelFrames(model,Array(12).fill(0),initialGaps);
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'high-performance'});
   renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));renderer.setClearColor(0xffffff);renderer.domElement.draggable=false;
   renderer.domElement.setAttribute('aria-label','GPU 本地目标姿态预览，不代表实际运动');renderer.domElement.dataset.modelId=model.model_id;
@@ -70,5 +73,5 @@ export async function createTargetViewer({container,modelRef,request,signal,onFr
     setTop(enabled){split=enabled;schedule();},
     destroy(){closed=true;if(frame!==null)cancelAnimationFrame(frame);observer.disconnect();controls.dispose();for(const row of meshes)row.mesh.geometry.dispose();material.dispose();renderer.dispose();renderer.domElement.remove();}
   };
-  viewer.setPose(Array(12).fill(0),[83,83]);return viewer;
+  viewer.setPose(Array(12).fill(0),initialGaps);return viewer;
 }

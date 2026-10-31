@@ -39,6 +39,10 @@ class GCTimingTest(unittest.TestCase):
                 gc_timing._record('start',{'generation':0});gc_timing._record('stop',{'generation':0})
         result=gc_timing.snapshot();self.assertEqual(len(result['pauses']),64)
         self.assertEqual(len(result['slow_pauses']),1);self.assertAlmostEqual(result['slow_pauses'][0]['duration_s'],.12)
+        enabled=gc.isenabled();recent=gc_timing.recent()
+        self.assertEqual(gc.isenabled(),enabled);self.assertEqual(len(recent['events']),4)
+        self.assertAlmostEqual(recent['last_slow_event']['duration_s'],.12)
+        self.assertIsInstance(recent['last_slow_event']['thread_id'],int)
 
 
 if __name__=='__main__':unittest.main()

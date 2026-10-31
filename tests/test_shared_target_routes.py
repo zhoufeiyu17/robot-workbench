@@ -28,6 +28,13 @@ class WindowBackend(ClockBackend):
         self.packets=[];self.window=None;self.applied_command=None
         self.position_bias=np.zeros(14);self.control_thread=threading.get_ident()
 
+    def configure_motion_gains(self,value,*,preserve_hold=False):
+        self.study_gain_override=deepcopy(value)
+        if preserve_hold:
+            self.events.append(('hold_gains',deepcopy(value)))
+            return dict(configured=True,hardware_write=True,preserved_hold=True)
+        return dict(configured=value is not None,hardware_write=False)
+
     def queue_reference(self,packet):
         assert threading.get_ident()==self.control_thread,'model/data worker attempted device output'
         assert packet['schema']==SCHEMA,'source escaped shared interpreter'
@@ -109,12 +116,152 @@ class SharedTargetRoutesTest(unittest.TestCase):
         self.assertIsNone(self.raw.window);self.advance(100)
         self.assertEqual(len(self.raw.packets),count)
 
+    def test_pedal_loss_keeps_feedback_after_fault_without_resuming_output(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        self.create()
+        listener=SimpleNamespace(_stop_lock=threading.Lock(),_last_press_ns=None,_key_down=False,
+            input_healthy=True,fault_reason='pedal read failed: OSError: [Errno 19] No such device',
+            take_presses=lambda:[],requested=threading.Event(),close=lambda:None)
+        self.runtime.owner.listener=listener
+        command=dict(action='preview_workbench',waypoints=[dict(q12=[.05]+[0.]*11,speeds12=[.1]*12)])
+        review=self.runtime.submit(self.creds['calibration'],command)
+        self.confirm('calibration',review);self.advance(40);self.assertIsNotNone(self.raw.window)
+        listener.input_healthy=False;self.advance()
+        owner=self.runtime.owner;reason=owner.control.reason
+        self.assertIn('No such device',reason);self.assertEqual(owner.control.state,owner.states.FAULT)
+        self.assertIsNone(self.raw.window);count=len(self.raw.packets)
+        with patch.object(self.raw,'read_calibration_state',wraps=self.raw.read_calibration_state)as read:
+            self.advance(50)
+            self.assertEqual(read.call_count,50,'fault holding must keep the actual feedback/heartbeat path alive')
+        state=self.runtime.snapshot(self.creds['calibration'])
+        self.assertTrue(state['feedback_healthy']);self.assertFalse(state['automatic_enabled'])
+        self.assertEqual(len(self.raw.packets),count)
+        self.runtime.request_stop();self.advance(5)
+        self.assertTrue(self.runtime.stop_receipt['stop_hold_return_confirmed'])
+        listener.input_healthy=True;self.advance(20)
+        self.assertEqual(owner.control.state,owner.states.FAULT);self.assertEqual(owner.control.reason,reason)
+        self.assertEqual(len(self.raw.packets),count)
+        with self.assertRaises(ValueError):self.runtime.submit(self.creds['calibration'],command)
+        listener.input_healthy=False
+        with patch.object(self.raw,'read_calibration_state',side_effect=RuntimeError('feedback unavailable')):
+            self.advance()
+            self.assertFalse(self.runtime.snapshot(self.creds['calibration'])['feedback_healthy'])
+
+    def test_native_pd_defaults_do_not_enable_integral_for_ordinary_businesses(self):
+        from robot_workbench.sdk_quiesce import DM_EQUIVALENT_UNITS
+        self.profile='x5_control50_damping_v1';self.create()
+        self.raw.motion_gain_profile='normal_X5';self.raw.torque_unit_contract=DM_EQUIVALENT_UNITS
+        self.creds['research']=self.runtime.register_business('research')
+        for business in ('calibration','collection','inference','research'):
+            with self.subTest(business=business):
+                if self.runtime.holder!=business:self.runtime.handoff(self.creds[self.runtime.holder],business)
+                review=self.runtime.submit(self.creds[business],dict(action='preview_workbench',
+                    waypoints=[dict(q12=[.02]+[0.]*11,speeds12=[.1]*12)]))
+                self.confirm(business,review);self.advance(250)
+                runner=self.runtime.owner.runner
+                self.assertEqual(runner.status,'READY',runner.reason)
+                self.assertFalse(runner.target_interpreter.integrals)
+                self.assertTrue(self.raw.packets)
+                np.testing.assert_array_equal(self.raw.packets[-1]['torque_bias_sdk14'],0.)
+                self.assert_stop_cancels()
+
+    def test_explicit_dm_integral_refusal_stops_and_recovers_without_resuming(self):
+        import os
+        from robot_workbench.sdk_quiesce import DM_EQUIVALENT_UNITS
+        from robot_workbench.execution_settings import study_defaults
+        self.profile='x5_control50_damping_v1';self.create()
+        self.raw.motion_gain_profile='normal_X5';self.raw.torque_unit_contract=DM_EQUIVALENT_UNITS
+        self.creds['research']=self.runtime.register_business('research')
+        self.runtime.handoff(self.creds['calibration'],'research')
+        settings=study_defaults()
+        settings['integral_gains']={side:[1.,1.,1.,0.,0.,0.]for side in ('left','right')}
+        command=dict(action='preview_workbench',waypoints=[dict(q12=[.02]+[0.]*11,speeds12=[.1]*12)],study_settings=settings)
+        review=self.runtime.submit(self.creds['research'],command)
+        self.confirm('research',review);self.advance(250)
+        self.assertEqual(self.runtime.owner.runner.status,'READY',self.runtime.owner.runner.reason)
+        for side in ('left','right'):
+            np.testing.assert_array_equal(self.runtime.owner.runner.target_interpreter.integrals[side].gains,settings['integral_gains'][side])
+        self.assert_stop_cancels();before=len(self.raw.packets)
+        settings['integral_gains']['right'][3]=1.
+        review=self.runtime.submit(self.creds['research'],command)
+        self.confirm('research',review);self.advance(100)
+        owner=self.runtime.owner
+        self.assertIn('DM unit qualification requires J4/J5/J6 Ki0',owner.recoverable_fault or '')
+        self.assertIsNone(self.raw.window);self.assertEqual(len(self.raw.packets),before)
+        owner.submit(dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',
+            owner_pid=os.getpid(),command_epoch=owner.epoch))
+        self.advance(50)
+        state=self.runtime.snapshot(self.creds['research'])
+        self.assertEqual(state['state'],'STOPPED_DAMPING_HOLD');self.assertIsNone(state['motion'])
+        self.assertEqual(len(self.raw.packets),before)
+
+    def test_native_window_rejection_faults_and_stops_without_disconnecting(self):
+        from robot_workbench.sdk_process import SDKCommandRejected
+        self.create()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+            waypoints=[dict(q12=[.05]+[0.]*11,speeds12=[.1]*12,jaw_gap_mm=[40.,40.])]))
+        self.confirm('calibration',review);self.advance(40)
+        self.assertIsNotNone(self.raw.window)
+        timing=dict(worker=dict(wall_s=.04,cpu_s=.001),native=dict(phase='commit_right'))
+        def reject(packet):
+            error=SDKCommandRejected('bounded, ordered future reference window required');error.timing=timing
+            raise error
+        self.raw.queue_reference=reject;self.advance(12)
+        state=self.runtime.snapshot(self.creds['calibration'])
+        self.assertTrue(state['connected']);self.assertFalse(state['automatic_enabled'])
+        self.assertIn('FAULT',state['state']);self.assertIsNone(self.raw.window)
+        recorded=[data['timing']['sdk_reference_timing']for name,data in self.events
+                  if name=='sdk_call_latency'and 'sdk_reference_timing'in data['timing']]
+        self.assertEqual(recorded,[timing],'even a fast typed refusal must preserve its stage diagnostics')
+        diagnostic=next(data['diagnostic']for name,data in self.events if name=='fault_diagnostic')
+        self.assertEqual(diagnostic['reference_admission']['timing'],timing)
+        translation=diagnostic['target_translation_timing']
+        self.assertEqual(translation['status'],'failed');self.assertEqual(translation['phase'],'native_admission')
+        self.assertEqual(translation['error_type'],'SDKCommandRejected')
+        self.assertEqual(translation,state['target_interpreter']['reference']['timing_s'])
+        count=len(self.raw.packets);self.advance(50)
+        self.assertEqual(len(self.raw.packets),count,'fault cannot auto-retry the rejected trajectory')
+
+    def test_control_gap_stops_then_allows_only_explicit_healthy_stationary_ack(self):
+        import os
+        self.create()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+            waypoints=[dict(q12=[.05]+[0.]*11,speeds12=[.1]*12,jaw_gap_mm=[40.,40.])]))
+        self.confirm('calibration',review);self.advance(40)
+        self.now+=.11;self.runtime.tick();owner=self.runtime.owner
+        self.assertIn('control tick gap exceeds 0.1 s',owner.recoverable_fault)
+        self.assertIsNone(self.raw.window);count=len(self.raw.packets)
+        self.advance(50);self.assertEqual(len(self.raw.packets),count)
+        command=dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',owner_pid=os.getpid(),command_epoch=owner.epoch)
+        owner.feedback_healthy=False
+        with self.assertRaises(ValueError):owner.submit(command)
+        self.advance(1);owner.submit(command);self.advance(2)
+        state=self.runtime.snapshot(self.creds['calibration'])
+        self.assertEqual(state['state'],'STOPPED_DAMPING_HOLD');self.assertIsNone(state['motion'])
+        self.advance(50);self.assertEqual(len(self.raw.packets),count)
+
     def test_calibration_single_target_reaches_shared_executor_and_stop_cancels(self):
         self.create();q=self.runtime.owner.cache['calibration_feedback']['qpos'][:];q[0]=.02
         review=self.runtime.submit(self.creds['calibration'],dict(action='preview',active_arm='left',q_target=q))
         self.confirm('calibration',review);self.advance(230);self.assert_shared()
         self.assertEqual(self.runtime.owner.runner.status,'READY',self.runtime.owner.runner.reason)
         self.assert_stop_cancels()
+
+    def test_manual_trajectory_is_shared_by_collection_and_inference_without_model(self):
+        self.create()
+        for business in ('collection','inference'):
+            self.runtime.handoff(self.creds[self.runtime.holder],business)
+            row=dict(q12=[.02]+[0.]*11,speeds12=[.1]*12)
+            with self.assertRaises(PermissionError):
+                self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',waypoints=[row]))
+            with self.assertRaisesRegex(ValueError,'capture acknowledgement'):
+                self.runtime.submit(self.creds[business],dict(action='preview_workbench',waypoints=[dict(row,capture=True)]))
+            review=self.runtime.submit(self.creds[business],dict(action='preview_workbench',waypoints=[row]))
+            self.assertEqual(review['business'],business)
+            self.confirm(business,review);self.advance(230);self.assert_shared()
+            self.assertEqual(self.runtime.owner.runner.status,'READY',self.runtime.owner.runner.reason)
+            self.assert_stop_cancels()
 
     def test_manual_both_home_has_both_arms_in_the_same_window(self):
         q=[0.]*14;q[0]=.02;q[10]=-.02
@@ -182,8 +329,9 @@ class SharedTargetRoutesTest(unittest.TestCase):
         # The real preparation subprocess needs wall time; this accelerated
         # source-clock fixture must not consume the episode while it starts.
         runner=self.runtime.owner.runner;deadline=time.monotonic()+5
-        while runner.loop._result.empty()and not runner.loop.predictions and time.monotonic()<deadline:time.sleep(.005)
-        self.assertTrue(not runner.loop._result.empty()or runner.loop.predictions,'isolated CPU preparation did not return or get consumed')
+        while runner.loop._result.empty()and not runner.loop._commands and not runner.loop.completed and time.monotonic()<deadline:time.sleep(.005)
+        self.assertTrue(not runner.loop._result.empty()or runner.loop._commands or runner.loop.completed,
+            'isolated CPU preparation must finish; a prediction request count is not a prepared result')
         self.advance(400);self.assert_shared()
         runner=self.runtime.owner.runner
         self.assertEqual(runner.status,'RUNNING',runner.reason)

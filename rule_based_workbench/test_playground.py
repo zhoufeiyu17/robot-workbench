@@ -85,18 +85,20 @@ def main():
         return dict(validated=True, timeline_digest='checked', **files)
 
     def execute(config, output, bridge, plan, progress=None):
-        for key in ('errors', 'recording', 'simulation', 'physical_outcome', 'task_outcome'):
+        for key in ('errors', 'recording', 'simulation', 'physical_outcome', 'task_outcome', 'dataset'):
             assert key not in service.state, f'previous attempt leaked: {key}'
         assert service.state['plan']['timeline_digest'] == plan['timeline_digest']
         current_errors = {'controller': 'current attempt tracking failure'}
         progress('核验真机视频后等待独立仿真视频封存', errors=current_errors,
-                 recording={'directory': str(output/'raw')}, physical_outcome='failed', task_outcome='unverified')
+                 recording={'directory': str(output/'raw')}, physical_outcome='failed', task_outcome='unverified',
+                 dataset={'dataset_ready':False,'error':'current readback failure'})
         current_errors['controller'] = 'mutated after callback'
         live = service.snapshot()
         assert live['busy'] and live['physical_outcome'] == 'failed'
         assert live['error'] == 'controller: current attempt tracking failure'
         assert live['message'].startswith('真机执行未完成；')
         assert live['can_execute'] is False
+        assert live['dataset']['error']=='current readback failure' and 'dataset'not in live['progress']
         assert 'simulation' not in live and 'errors' not in live['progress']
         assert json.loads((service.directory/'state.json').read_text())['errors']['controller'] == 'current attempt tracking failure'
         executed.append(deepcopy(plan))
@@ -163,7 +165,7 @@ def main():
         assert service.snapshot()['can_execute'] is False
         rejected(lambda: service.start({'action': 'execute'}))
         bridge.pedal = False
-        service.state.update(errors={'controller': 'old attempt'}, recording={'directory': '/old/raw'},
+        service.state.update(errors={'controller': 'old attempt'}, recording={'directory': '/old/raw'},dataset={'dataset_ready':True,'dataset_root':'/old/dataset'},
                              simulation={'status': 'old'}, physical_outcome='failed', task_outcome='old')
         for invalid in (.29,1.71,True,float('nan')):
             rejected(lambda: service.start({'action':'execute','speed_scale':invalid}))

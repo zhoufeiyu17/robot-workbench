@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const source=await readFile(new URL('../web/triton.js',import.meta.url),'utf8');
+const session='data:text/javascript;base64,'+Buffer.from(await readFile(new URL('../web/session.js',import.meta.url),'utf8')).toString('base64');
+const {readyModel}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(session))).toString('base64'));
+assert.equal(readyModel({status:'FAILED',selectable:true,deployment_sha256:'a'.repeat(64)}),false);
+assert.equal(readyModel({status:'READY',selectable:true}),false);
+assert.equal(readyModel({status:'READY',selectable:true,deployment_sha256:'a'.repeat(64)}),true);
+assert(!source.includes('/api/actions/'),'conversion component has no motion action endpoint');
+assert(!source.includes('/api/triton/infer'),'Triton model execution must use the common task workflow');
+const html=await readFile(new URL('../web/index.html',import.meta.url),'utf8');
+assert(html.includes('id="inference-backend"'));assert(html.includes('转换为 Triton'));
+assert(!html.includes('id="triton-panel"'));assert(!html.includes('id="triton-infer"'));
+assert(html.indexOf('id="inference-backend"')>html.indexOf('id="task-panel"'));
+console.log('Triton UI: shared task selector, qualified conversion and no independent infer route passed.');

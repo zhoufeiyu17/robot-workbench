@@ -36,6 +36,17 @@ class OperationFixture:
 
 
 class ControlOperationsTests(OperationFixture,unittest.TestCase):
+    def test_unknown_hold_is_not_active_after_both_sdk_process_exits_are_confirmed(self):
+        original=self.device.fact_snapshot()
+        state=dict(original,connected=False,automatic_enabled=False,
+            control_operation=dict(status='unknown'),control_protection=dict(worker_exit_confirmed=True,supervisor_exit_confirmed=True))
+        with patch.object(self.device,'fact_snapshot',return_value=state):
+            self.assertFalse(self.app.environment_state('fake')['activity']['busy'])
+            state['control_protection']['supervisor_exit_confirmed']=False
+            self.assertTrue(self.app.environment_state('fake')['activity']['busy'])
+            state['control_protection']['supervisor_exit_confirmed']=True;state['connected']=True
+            self.assertTrue(self.app.environment_state('fake')['activity']['busy'])
+
     def test_gain_diagnostics_are_cached_between_transitions(self):
         owner=self.runtime.owner;owner.local_gains_key=None
         feedback=deepcopy(owner.cache['calibration_feedback']);limits=deepcopy(owner.cache['joint_limits'])
@@ -248,6 +259,31 @@ class ControlOperationsTests(OperationFixture,unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Stop'):self.operation('prepare_collection',maintenance_token=window['token'])
         self.harness.advance(self.runtime);self.operation('end',maintenance_token=window['token'])
 
+    def test_invalid_asset_choice_is_rejected_before_collection_handoff(self):
+        validate=Mock(side_effect=ValueError('stale asset catalog'))
+        prepare=Mock(side_effect=AssertionError('invalid assets must not prepare services'))
+        self.device.collection_preparation=SimpleNamespace(snapshot=lambda:dict(busy=False),
+            validate_asset_request=validate,operations_prepare=prepare)
+        window=self.begin('prepare_collection');holder=self.runtime.holder;events=list(self.runtime.owner.backend.events)
+        with self.assertRaisesRegex(ValueError,'stale asset catalog'):
+            self.operation('prepare_collection',maintenance_token=window['token'],asset_pair_id='machine-open',expected_catalog_digest='a'*64)
+        validate.assert_called_once_with('machine-open','a'*64);prepare.assert_not_called()
+        self.assertEqual(self.runtime.holder,holder);self.assertEqual(self.runtime.owner.backend.events,events)
+        self.device.factory.assert_not_called();self.operation('end',maintenance_token=window['token'])
+
+    def test_asset_choice_reaches_preparation_inside_the_existing_maintenance_window(self):
+        validate=Mock();seen=[]
+        def prepare(**values):
+            self.assertTrue(values['still_current']());self.assertTrue(values['lifecycle_admission']('start:detector'))
+            seen.append((values['asset_pair_id'],values['expected_catalog_digest']));return dict(ready=True)
+        self.device.collection_preparation=SimpleNamespace(snapshot=lambda:dict(busy=False),
+            validate_asset_request=validate,operations_prepare=prepare)
+        window=self.begin('prepare_collection');events=list(self.runtime.owner.backend.events)
+        result=self.operation('prepare_collection',maintenance_token=window['token'],asset_pair_id='machine-open',expected_catalog_digest='b'*64)
+        self.assertEqual(result,dict(ready=True));self.assertEqual(seen,[('machine-open','b'*64)])
+        self.assertEqual(self.runtime.owner.backend.events,events);self.device.factory.assert_not_called()
+        self.operation('end',maintenance_token=window['token'])
+
     def test_recover_acknowledges_only_original_recoverable_fault_without_sdk_or_reconnect(self):
         from arx_env.joint_head_real_motion import MotionTrackingError
         self.runtime.owner.motion_fault(MotionTrackingError('tracking fixture'));self.harness.advance(self.runtime)
@@ -265,6 +301,40 @@ class ControlOperationsTests(OperationFixture,unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'可确认恢复'):
             self.operation('recover_control',maintenance_token=window['token'])
         self.operation('end',maintenance_token=window['token'])
+
+    def test_feedback_freshness_fault_requires_its_original_budget_and_manual_acknowledgement(self):
+        from robot_workbench.target_interpreter import ReferenceFeedbackStaleError
+        owner=self.runtime.owner
+        owner.motion_fault(ReferenceFeedbackStaleError(.052,.05,phase='terminal_hold'))
+        self.harness.advance(self.runtime)
+        self.assertIsNotNone(owner.recoverable_fault)
+        self.assertEqual(owner.control.state,owner.states.FAULT)
+        stamp=owner.cache['calibration_feedback']['sample_time_s']
+        with patch.object(owner,'control_time',return_value=stamp+.051):self.assertFalse(owner.recovery_ready())
+        with patch.object(owner,'control_time',return_value=stamp+.049):self.assertTrue(owner.recovery_ready())
+
+    def test_explicit_reference_rejection_recovers_only_after_returned_stop_and_manual_ack(self):
+        from robot_workbench.sdk_process import SDKCommandRejected,ReferenceWindowRejected
+        for error in (SDKCommandRejected('expired future head'),ReferenceWindowRejected('expired local window')):
+            owner=self.runtime.owner;owner.motion_fault(error);self.harness.advance(self.runtime)
+            self.assertEqual(owner.control.state,owner.states.FAULT)
+            self.assertIsNotNone(owner.recoverable_fault)
+            self.assertTrue(owner.last_fault_diagnostic['reference_admission']['stop_hold_return_confirmed'])
+            self.assertTrue(owner.recovery_ready())
+            owner.stationary=False;self.assertFalse(owner.recovery_ready());owner.stationary=True
+            owner.feedback_healthy=False;self.assertFalse(owner.recovery_ready());owner.feedback_healthy=True
+            window=self.begin('recover_control');before=list(owner.backend.events)
+            worker,result=self.start(lambda:self.operation('recover_control',maintenance_token=window['token']))
+            deadline=time.monotonic()+1
+            while owner.commands.empty()and worker.is_alive()and time.monotonic()<deadline:time.sleep(.001)
+            self.harness.advance(self.runtime,2);worker.join(1)
+            self.assertFalse(worker.is_alive());self.assertIsInstance(result[0],dict,str(result[0]))
+            self.assertTrue(result[0]['recovered']);self.assertFalse(result[0]['motion_resumed'])
+            self.assertEqual(owner.backend.events,before);self.device.factory.assert_not_called()
+            self.operation('end',maintenance_token=window['token'])
+        with patch.object(owner.backend._backend,'set_damping_hold',side_effect=RuntimeError('stop did not return')):
+            with self.assertRaisesRegex(RuntimeError,'stop did not return'):owner.motion_fault(SDKCommandRejected('window'))
+        self.assertIsNone(owner.recoverable_fault)
 
     def test_physical_support_confirmation_blocks_control_effects(self):
         self.device.environment='physical';self.app=Application({'physical':self.device})
@@ -294,6 +364,66 @@ class ControlOperationsTests(OperationFixture,unittest.TestCase):
         self.assertEqual(self.operation('invalidate_model',maintenance_token=window['token']),{'invalidated':True})
         self.operation('end',maintenance_token=window['token'])
         self.assertEqual(calls,['camera-stop','model-invalidated']);self.device.factory.assert_not_called()
+
+
+class SharedWindowHoldTests(OperationFixture,unittest.TestCase):
+    def setUp(self):
+        from test_shared_target_routes import SharedTargetRoutesTest
+        from robot_workbench.sdk_quiesce import DM_EQUIVALENT_UNITS
+        self.harness=SharedTargetRoutesTest();self.harness.setUp();self.addCleanup(self.harness.doCleanups)
+        self.harness.profile='x5_control50_damping_v1';self.harness.create()
+        self.runtime=self.harness.runtime;self.raw=self.harness.raw
+        self.raw.motion_gain_profile='normal_X5';self.raw.torque_unit_contract=DM_EQUIVALENT_UNITS
+        self.device=Device('shared-target-cpu','fake',Mock(side_effect=AssertionError('must not auto-connect')))
+        self.device.runtime=self.runtime;self.device.credentials=self.harness.creds
+        self.app=Application({'fake':self.device});self.number=0
+
+    def hold(self):
+        window=self.begin('verify_hold')
+        worker,result=self.start(lambda:self.operation('verify_hold',maintenance_token=window['token']))
+        deadline=time.monotonic()+1
+        while self.runtime._hold_verification is None and time.monotonic()<deadline:time.sleep(.001)
+        self.assertIsNotNone(self.runtime._hold_verification)
+        return window,worker,result
+
+    def test_fixed_hold_uses_shared_windows_with_zero_dq_bias_and_confirmed_stop(self):
+        from robot_workbench.sdk_process import ReferenceWindowRejected
+        window,worker,result=self.hold();self.harness.advance(80)
+        self.assertTrue(self.raw.packets,'must use native windows, never the forbidden point send')
+        before=len(self.raw.packets)
+        for field in ('q_sdk14','dq_sdk14','torque_bias_sdk14'):
+            packet=deepcopy(self.raw.packets[-1]);packet[field][0][0]+=.001
+            with self.assertRaisesRegex(ReferenceWindowRejected,'fixed hold'):
+                self.runtime._backend_call('queue_reference',self.raw.queue_reference,packet)
+        self.assertEqual(len(self.raw.packets),before)
+        for _ in range(550):
+            self.harness.advance()
+            if self.runtime._hold_verification is None:break
+        worker.join(1);self.assertFalse(worker.is_alive());receipt=result[0]
+        self.assertIsInstance(receipt,dict,str(receipt));self.assertTrue(hold_verified(receipt),receipt)
+        self.assertEqual(receipt['command_transport'],'native_window');self.assertEqual(receipt['sdk_send_count'],0)
+        self.assertEqual(receipt['sdk_window_count'],len(self.raw.packets));self.assertIsNone(self.raw.window)
+        for packet in self.raw.packets:
+            self.assertTrue(all(row==receipt['fixed_target']for row in packet['q_sdk14']))
+            self.assertFalse(any(v for key in ('dq_sdk14','torque_bias_sdk14')for row in packet[key]for v in row))
+        for field,value in [('sdk_window_count',0),('sdk_send_count',1),('command_transport','unknown')]:
+            bad=deepcopy(receipt);bad[field]=value;self.assertFalse(hold_verified(bad))
+        bad=deepcopy(receipt);next(row for row in bad['sdk_returns']if row['operation']=='queue_reference')['zero_velocity']=False
+        self.assertFalse(hold_verified(bad));self.operation('end',maintenance_token=window['token'])
+
+    def test_terminal_sdk_exit_finishes_hold_as_failed_without_faking_stop(self):
+        window,worker,result=self.hold();self.harness.advance(80)
+        self.raw.terminal_failure='injected SDK exit';self.raw.is_connected=False
+        try:
+            self.assertFalse(self.runtime.tick());worker.join(1);self.assertFalse(worker.is_alive())
+            self.assertIsInstance(result[0],ValueError)
+            receipt=self.runtime.control_operation
+            self.assertEqual(receipt['status'],'failed');self.assertIn('injected SDK exit',receipt['error'])
+            self.assertFalse(receipt['verified']);self.assertIsNone(self.runtime._hold_verification)
+            self.assertFalse((receipt['stop_receipt']or{}).get('stop_hold_return_confirmed'))
+            self.assertFalse(hold_verified(receipt))
+        finally:
+            self.raw.terminal_failure=None;self.raw.is_connected=True
 
 
 class ControlOperationsHTTPTests(OperationFixture,HTTPTest):
@@ -344,7 +474,7 @@ class ControlOperationsHTTPTests(OperationFixture,HTTPTest):
         self.assertEqual(self.device.runtime.owner.timing_probe.thread_id,self.device.thread.ident)
         self.assertIsNotNone(self.device.runtime.owner.timing_probe.current,'shared Owner loop must run its timing probe')
         self.assertTrue(self.device.maintenance);self.assertTrue(self.device.runtime.maintenance_active)
-        self.assertEqual(set(self.device.runtime.clients),{'calibration','collection','inference'})
+        self.assertEqual(set(self.device.runtime.clients),{'calibration','collection','inference','research'})
         self.assertNotEqual(old,result['target'])
         stale=self.body(maintenance_token=window['token']);stale['expected_target']=old
         self.assertEqual(self.request('end',stale)[0],409)

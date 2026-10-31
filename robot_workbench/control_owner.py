@@ -4,9 +4,11 @@ The protocol transports declared control operations and cached facts, never
 Python callables, arbitrary attributes, camera pixels or SDK objects.
 """
 from collections import OrderedDict,deque
+from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import secrets
@@ -21,10 +23,91 @@ SCHEMA='workbench.control_owner.v1'
 READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot'}
 
 
+def collection_recording_root(owner_root):return Path(owner_root)/'collection-raw'
+
+
+PREVIEW_FILES='frozen_preview_files.v1'
+
+
+def _stage_preview(command,root):
+    """Only opaque bytes cross this boundary; full JSON decoding stays in spawn."""
+    from .control_plan import RawPreview,ArtifactPreview,_read_file,MAX_INPUT
+    if not isinstance(command,(RawPreview,ArtifactPreview)):return command,None
+    spool=Path(root)/'preview-inputs';spool.mkdir(mode=0o700,exist_ok=True)
+    info=spool.stat()
+    if spool.is_symlink()or info.st_uid!=os.getuid()or info.st_mode&0o077:
+        raise ValueError('private owned preview spool required')
+    if len(list(spool.iterdir()))>=16:raise ValueError('unresolved preview inputs require receipt inspection')
+    blobs={'raw':command.raw}if isinstance(command,RawPreview)else{n:_read_file(p)for n,p in command.paths.items()}
+    if any(not isinstance(raw,bytes)or not 0<len(raw)<=MAX_INPUT for raw in blobs.values()):
+        raise ValueError('bounded opaque preview bytes required')
+    directory=spool/secrets.token_hex(16);directory.mkdir(mode=0o700);refs={}
+    try:
+        for name,raw in blobs.items():
+            path=directory/(name+'.json')
+            with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o400),'wb')as f:f.write(raw)
+            refs[name]=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest(),size_bytes=len(raw))
+    except BaseException:
+        for path in directory.iterdir():path.unlink()
+        directory.rmdir();raise
+    return dict(action='preview_frozen',preview_files=dict(schema=PREVIEW_FILES,files=refs)),directory
+
+
+def _restore_preview(command,root):
+    if 'preview_files'not in command:return command
+    from .control_plan import RawPreview,ArtifactPreview,_read_file,MAX_INPUT
+    value=command['preview_files'];spool=Path(root)/'preview-inputs'
+    if (set(command)!={'action','preview_files'}or command['action']!='preview_frozen'
+            or not isinstance(value,dict)or set(value)!={'schema','files'}or value['schema']!=PREVIEW_FILES
+            or not isinstance(value['files'],dict)or set(value['files'])not in ({'raw'},{'plan','source'})):
+        raise ValueError('exact frozen preview file reference required')
+    paths={};raw=None
+    for name,ref in value['files'].items():
+        if not isinstance(ref,dict)or set(ref)!={'path','sha256','size_bytes'}:raise ValueError('exact preview pin required')
+        if (not isinstance(ref['path'],str)or type(ref['size_bytes'])is not int or not 0<ref['size_bytes']<=MAX_INPUT
+                or not isinstance(ref['sha256'],str)or len(ref['sha256'])!=64
+                or any(c not in '0123456789abcdef'for c in ref['sha256'])):raise ValueError('bounded preview path, size and SHA256 required')
+        path=Path(ref['path']);parent=path.parent
+        if (not path.is_absolute()or parent.parent!=spool or path.name!=name+'.json'
+                or len(parent.name)!=32 or any(c not in '0123456789abcdef'for c in parent.name)
+                or any(p.is_symlink()for p in (spool,parent,path))):raise ValueError('preview path outside private spool')
+        for p in (spool,parent,path):
+            info=p.stat()
+            if info.st_uid!=os.getuid()or info.st_mode&0o077:raise ValueError('private owned preview files required')
+        if path.stat().st_mode&0o222:raise ValueError('read-only preview input required')
+        data=_read_file(path)
+        if type(ref['size_bytes'])is not int or len(data)!=ref['size_bytes']or hashlib.sha256(data).hexdigest()!=ref['sha256']:
+            raise ValueError('preview input size or SHA256 changed')
+        paths[name]=path
+        if name=='raw':raw=data
+    return RawPreview(raw)if raw is not None else ArtifactPreview(plan_path=paths['plan'],source_path=paths['source'])
+
+
 def _encode(value):
     raw=json.dumps(value,allow_nan=False,separators=(',',':')).encode()+b'\n'
     if len(raw)>LIMIT:raise ValueError('control IPC message exceeds bounded size')
     return raw
+
+
+def _event_encoder_start(owner_pid):
+    import sys
+    if sys.platform=='linux':
+        from .arx_output_guard import parent_death
+        parent_death(owner_pid)
+
+
+def _encode_event_response(response):
+    """Runs only in the CPU child, preserving the existing event byte budget."""
+    result=response['result'];rows=[];size=0
+    for row in result['events']:
+        count=len(_encode(row))
+        if rows and size+count>LIMIT//2:break
+        rows.append(row);size+=count
+    return _encode(dict(response,result=dict(result,events=rows)))
+
+
+def _encode_read_response(response,started_s):
+    return _encode(dict(response,read_snapshot_monotonic_s=started_s))
 
 
 def _private_json(path,value):
@@ -84,7 +167,10 @@ class ControlChannel:
             if result.get('ok')is not True:
                 if result.get('error_type')=='PermissionError':raise PermissionError(result['error'])
                 raise ValueError(result.get('error','control operation rejected'))
-            return result['result']
+            value=result['result']
+            if operation in {'inspect','snapshot'}and 'read_snapshot_monotonic_s'in result:
+                value['control_owner']['reply_age_s']=max(0.,time.monotonic()-result['read_snapshot_monotonic_s'])
+            return value
         except PermissionError:raise
         except (OSError,EOFError,json.JSONDecodeError)as error:
             if submitted and operation not in READS:
@@ -120,19 +206,63 @@ class ControlOwnerService:
         self.identity=_identity()
         self.descriptor_path=self.root/'control-owner.json';socket_path=self.root/'control.sock'
         if socket_path.exists():raise ValueError('control socket already exists; inspect its owner before replacement')
+        if device.environment=='physical'and device.runtime is not None:
+            raise ValueError('control service and encoder must start inert before SDK acquisition')
+        self.event_encoder=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
+            initializer=_event_encoder_start,initargs=(os.getpid(),))
+        # Eager creation binds Linux PDEATHSIG to this long-lived main thread,
+        # never to a temporary request handler. No SDK objects enter the child.
+        self.event_encoder_pid=self.event_encoder.submit(os.getpid).result(timeout=10.)
+        self.event_encoding_slots=threading.BoundedSemaphore(2)
+        # Status JSON competes for this process's GIL even after Runtime.lock
+        # is released. Keep it separate from both control and the event codec.
+        self.read_encoder=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
+            initializer=_event_encoder_start,initargs=(os.getpid(),))
+        self.read_encoder_pid=self.read_encoder.submit(os.getpid).result(timeout=10.)
+        self.read_encoding_slots=threading.BoundedSemaphore(2)
         service=self
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 self.connection.settimeout(10.)
-                request=None
+                request=None;dispatched=False;read_slot=False;read_started=None
                 try:
                     raw=self.rfile.readline(LIMIT+1)
                     if not raw or len(raw)>LIMIT:raise ValueError('bounded control request required')
-                    request=json.loads(raw);result=service.dispatch(request)
+                    request=json.loads(raw)
+                    if isinstance(request,dict)and request.get('operation')in {'inspect','snapshot'}:
+                        # Backpressure waits before snapshot/Runtime locks; normal
+                        # concurrent readers must not turn into false state errors.
+                        if not service.read_encoding_slots.acquire(timeout=.2):
+                            raise ValueError('control facts encoder busy; retry this read')
+                        read_slot=True
+                        read_started=time.monotonic()
+                    result=service.dispatch(request);dispatched=True
                     response=dict(ok=True,request_id=request['request_id'],result=result)
+                    if request['operation']=='events':
+                        if not service.event_encoding_slots.acquire(blocking=False):
+                            raise ValueError('event encoder busy; retry this read cursor')
+                        try:future=service.event_encoder.submit(_encode_event_response,response)
+                        except BaseException:
+                            service.event_encoding_slots.release();raise
+                        # A timed-out client must not free a still-running job's
+                        # slot and allow unbounded work into the process queue.
+                        future.add_done_callback(lambda _:service.event_encoding_slots.release())
+                        encoded=future.result(timeout=8.)
+                    elif read_slot:
+                        future=service.read_encoder.submit(_encode_read_response,response,read_started)
+                        future.add_done_callback(lambda _:service.read_encoding_slots.release())
+                        read_slot=False  # The callback owns this slot, including on timeout.
+                        encoded=future.result(timeout=8.)
+                    else:encoded=_encode(response)
                 except Exception as error:
-                    response=dict(ok=False,request_id=(request or{}).get('request_id'),error_type=type(error).__name__,error=str(error))
-                try:self.wfile.write(_encode(response))
+                    if read_slot:service.read_encoding_slots.release()
+                    # The mutation already happened. Close without a reply so
+                    # ControlChannel reports unknown, never a false rejection.
+                    if dispatched and request['operation']not in READS:return
+                    # An events codec failure is a read failure; Stop, status and
+                    # maintenance remain available without that child process.
+                    encoded=_encode(dict(ok=False,request_id=request.get('request_id')if isinstance(request,dict)else None,error_type=type(error).__name__,error=str(error)[:2000]))
+                try:self.wfile.write(encoded)
                 except (BrokenPipeError,ConnectionResetError):pass
         class Server(socketserver.ThreadingUnixStreamServer):
             daemon_threads=True
@@ -140,7 +270,8 @@ class ControlOwnerService:
         token_path=self.root/'control-token'
         with os.fdopen(os.open(token_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w')as stream:stream.write(self.token)
         descriptor=dict(schema=SCHEMA,instance_id=self.instance,socket_path=str(socket_path),token_file=str(token_path),
-            environment=device.environment,device_id=device.id,identity=self.identity,profile_sha256=profile_sha256)
+            environment=device.environment,device_id=device.id,identity=self.identity,profile_sha256=profile_sha256,
+            frozen_preview_transport=PREVIEW_FILES)
         _private_json(self.descriptor_path,descriptor)
 
     def event(self,event_name,**value):
@@ -152,7 +283,9 @@ class ControlOwnerService:
         state=self.device.snapshot(business)
         state['control_owner']=dict(schema=SCHEMA,instance_id=self.instance,identity=self.identity,
             runtime_nonce=self.device.runtime.nonce if self.device.runtime else None,profile_sha256=self.profile_sha256,
-            tick_owned_by_service=True,business_lifetime_independent=True)
+            tick_owned_by_service=True,business_lifetime_independent=True,
+            event_encoding=dict(mode='spawned_cpu',pid=self.event_encoder_pid),
+            read_encoding=dict(mode='spawned_cpu',pid=self.read_encoder_pid))
         return state
 
     def dispatch(self,request):
@@ -216,14 +349,19 @@ class ControlOwnerService:
             after=args.get('after',0)
             if type(after)is not int or after<0:raise ValueError('event cursor required')
             with self.event_lock:
-                rows=[];size=0
-                for row in self.events:
-                    if row['sequence']<=after:continue
-                    count=len(_encode(row))
-                    if rows and(size+count>LIMIT//2 or len(rows)>=128):break
-                    rows.append(deepcopy(row));size+=count
-                return dict(events=rows,latest=self.event_sequence,
-                    incomplete=bool(rows and rows[0]['sequence']>after+1))
+                pending=[row for row in self.events if row['sequence']>after][:32]
+                latest=self.event_sequence
+            # These rows come from the bounded SDK/window interfaces. Unknown
+            # or large diagnostic events travel singly, bounding parent pickling.
+            small={'control_study_feedback','control_study_native_window','sdk_call_latency','owner_inference'}
+            if pending and pending[0]['event']not in small:pending=pending[:1]
+            else:
+                pending=pending[:next((i for i,row in enumerate(pending)if row['event']not in small),len(pending))]
+            # Append-only rows are snapshotted by the process pipe. JSON work
+            # and byte-budget trimming belong to the CPU child, not this GIL.
+            rows=pending
+            return dict(events=rows,latest=latest,
+                incomplete=bool(rows and rows[0]['sequence']>after+1))
         raise ValueError('unknown read operation')
 
     def _write(self,operation,args):
@@ -231,6 +369,7 @@ class ControlOwnerService:
         if operation=='acquire':
             if args!={'arms_supported':True}:raise ValueError('current supported-arms fact required')
             if runtime is not None:raise ValueError('Owner already acquired; attach without reconnecting')
+            if self.maintenance is not None:raise ValueError('end the prior control maintenance lease before acquiring SDK')
             self.device.connect(args)
             return self.inspect()
         if operation=='maintenance_end':
@@ -254,6 +393,7 @@ class ControlOwnerService:
         if operation=='submit':
             business=args.get('business');command=args.get('command')
             if business not in self.device.credentials or not isinstance(command,dict):raise ValueError('registered business command required')
+            command=_restore_preview(command,self.root)
             if self.device.environment=='physical'and command.get('action')in('release','recover'):
                 raise ValueError('control lifecycle requires maintenance capability')
             return self.device.submit(business,command)
@@ -317,7 +457,12 @@ class ControlOwnerService:
     def close(self):
         if self.device.runtime is not None:raise ValueError('normal supported release or verified protected retirement required before Owner service exit')
         self.server.shutdown();self.server.server_close()
+        self.event_encoder.shutdown(wait=True,cancel_futures=True)
+        self.read_encoder.shutdown(wait=True,cancel_futures=True)
         Path(self.server.server_address).unlink(missing_ok=True)
+        token_path=self.root/'control-token'
+        if not token_path.is_symlink() and token_path.is_file() and token_path.read_text()==self.token:
+            token_path.unlink()
 
 
 class _BackendFacts:
@@ -405,7 +550,7 @@ class ControlRuntimeClient:
         return self
 
     def register_business(self,business):
-        if business not in('calibration','collection','inference')or business in self.clients:raise ValueError('one registered business identity required')
+        if business not in('calibration','collection','inference','research')or business in self.clients:raise ValueError('one registered business identity required')
         value=dict(business=business,token=secrets.token_urlsafe(32),runtime_nonce=self.nonce,environment=self.environment,device_id=self.device_id)
         self.clients[business]=value;return deepcopy(value)
 
@@ -501,7 +646,25 @@ class ControlRuntimeClient:
             alive=thread is None or thread.is_alive(),error=self.recording_error or getattr(recording,'error',None))
     def snapshot(self,credential):return self.refresh(self._business(credential))
     def fact_snapshot(self):return self.refresh()
-    def submit(self,credential,command):return self._call('submit',business=self._business(credential),command=command)
+    def submit(self,credential,command):
+        from .control_plan import RawPreview,ArtifactPreview
+        if isinstance(command,(RawPreview,ArtifactPreview))and self.channel.descriptor.get('frozen_preview_transport')!=PREVIEW_FILES:
+            raise ValueError('independent Owner lacks frozen-preview file transport; no motion submitted')
+        wire,directory=_stage_preview(command,self.descriptor.parent)
+        unknown=False
+        try:return self._call('submit',business=self._business(credential),command=wire)
+        except ControlCallUnknown as error:
+            unknown=True
+            if directory is not None:
+                try:_private_json(directory/'unknown-receipt.json',dict(request_id=error.request_id,wall_ns=time.time_ns(),do_not_replay=True))
+                except OSError:pass  # Retain inputs and the original unknown-result exception even if journaling fails.
+            raise
+        finally:
+            # The compiler copied and pinned its own audit inputs before a known
+            # reply. Unknown IPC completion retains the files and is never retried.
+            if directory is not None and not unknown:
+                for path in directory.iterdir():path.unlink()
+                directory.rmdir()
     def request_stop(self):return self._call('stop')
     def handoff(self,credential,target,*,active=None):
         if active is not None and not active():raise ValueError('handoff revoked')
@@ -542,7 +705,10 @@ class ControlRuntimeClient:
         return self.handoff(self.clients[self.holder],target,active=active)
     def retire_protected(self):
         if self.lease is None:raise PermissionError('Owner maintenance lease required')
-        result=self._call('retire_protected',token=self.lease['token']);self.protected_retirement=result;self.fd=None;return result
+        result=self._call('retire_protected',token=self.lease['token'])
+        # Successful retirement consumes the service-side lease as well.
+        self.protected_retirement=result;self.fd=None;self.lease=None
+        return result
     def close(self):
         if self.state.get('connected'):raise ValueError('Owner still acquired; business detach is separate from release')
         self.detach();self.fd=None

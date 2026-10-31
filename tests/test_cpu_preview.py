@@ -101,6 +101,10 @@ class CpuPreviewTests(unittest.TestCase):
                 descriptor.chmod(0o600)
                 def forbidden():raise AssertionError('display accessed a controller')
                 device=Device('cpu','physical',forbidden);app=Application({'physical':device})
+                candidates=[dict(id='saved-wrist',kind='wrist',mesh_selectable=False,mesh_reason='geometry differs',
+                    details=dict(environment='hardware',robot_source='physical',simulation_only=False,head_result_id='saved-head'))]
+                device.workflows['calibration']=SimpleNamespace(snapshot=lambda:dict(busy=False,status='idle'),
+                    results=lambda:[],mesh_candidates=lambda:candidates,mesh_calibrations=lambda:[dict(id='one-complete-group',kind='calibration')])
                 backend=serve_application(app,port=0);backend_thread=threading.Thread(target=backend.serve_forever);backend_thread.start()
                 manager=SimpleNamespace(config=dict(device_id='cpu',target_display_descriptor=str(descriptor)),
                     port=backend.server_port,deployment=SimpleNamespace(sha256='a'*64),backend_auth=dict(csrf=app.csrf),require_deployment=lambda headers:None)
@@ -118,6 +122,8 @@ class CpuPreviewTests(unittest.TestCase):
                     status,raw,_=request('/api/state?environment=physical&business=calibration');self.assertEqual(status,200,raw);state=json.loads(raw)
                     self.assertFalse(state['runtime']['connected']);self.assertTrue(state['preview']['capabilities']['target'])
                     self.assertIn('mesh',state['preview']['sources'])
+                    self.assertEqual(state['preview']['mesh_candidates'],candidates,'independent target display must preserve the real mesh catalog')
+                    self.assertEqual(state['preview']['mesh_calibrations'],[dict(id='one-complete-group',kind='calibration')])
                     current=state['preview']
                     body=dict(environment='physical',business='calibration',request_id='display-only',q12=[.1]+[0.]*11,jaw_gap_mm=[70.,70.],
                         display_context=current['display_context'],renderer_id=current['renderer_id'],view_revision=0)

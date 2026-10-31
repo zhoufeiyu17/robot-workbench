@@ -263,7 +263,10 @@ def capture(args, frames):
     started=False
     try:
         fcntl.flock(sdk_lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        profile=pipeline.start(config);started=True
+        # Native bounded FIFO retains frames across short align/publish delays;
+        # pipeline.wait_for_frames() otherwise exposes only its latest frameset.
+        ingress=rs.frame_queue(32,True)
+        profile=pipeline.start(config,ingress);started=True
         scale = profile.get_device().first_depth_sensor().get_depth_scale()
         align = rs.align(rs.stream.color)
         last_color = last_depth = None
@@ -273,7 +276,7 @@ def capture(args, frames):
                 return
             frames.publish(status={'ready': False, 'phase': 'warming_up', 'serial': args.serial,
                                    'warmup_frames': warmup, 'warmup_target_frames': 20})
-            pipeline.wait_for_frames(3000)
+            ingress.wait_for_frame(3000).as_frameset()
         rate_start = time.monotonic()
         progress = FrameProgress(rate_start)
         reused_framesets = 0
@@ -283,7 +286,7 @@ def capture(args, frames):
             diagnostics.active_stage='wait'
             before_wait=time.monotonic_ns()
             try:
-                received = pipeline.wait_for_frames(3000)
+                received = ingress.wait_for_frame(3000).as_frameset()
                 stamp = time.time_ns()
             finally:
                 waited=time.monotonic_ns()-before_wait;diagnostics.stage('wait',waited)

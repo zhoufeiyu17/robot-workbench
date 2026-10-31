@@ -377,6 +377,29 @@ class PhysicalCollectionSetupTests(unittest.TestCase):
         self.assertEqual(pipeline['planner_service']['compute_resource'],PHYSICAL_TARGET)
         self.assertFalse(configured['task_or_gpu_qualification'])
 
+    def test_selected_objects_survive_calibrated_asset_conversion_and_contract_pinning(self):
+        from test_scene_assets import selection,seal
+        source=Path(self.base['assets'])/'source-bundle-manifest.json'
+        source.write_text(json.dumps('fixture source',sort_keys=True,allow_nan=False))
+        selected=selection(source)
+        selected['perception']['node_config_sha256']=sha(self.base['detection_node_config'])
+        seal(selected)
+        write(Path(self.base['assets'])/'scene-assets.json',selected)
+        self.base['scene_asset_set']=selected
+        result=self.prepare('selected-objects')
+        output=self.converted(result)
+        configured=finalize_collection_setup(result['setup_path'])
+        self.addCleanup(lambda:Path(configured['detector_parent']).rmdir())
+        pipeline,contract,_=load_config(Path(configured['pipeline_config']))
+        self.assertEqual(pipeline['scene_asset_set'],selected)
+        self.assertEqual(read(output/'native-assets/scene-assets.json'),selected)
+        pins={k:v for group in pinned_files(contract) for k,v in group.items()}
+        self.assertIn(str(output/'native-assets/scene-assets.json'),pins)
+        self.assertEqual(pins[str(source)],selected['input_sha256'][str(source)])
+        source.write_text('changed input')
+        with self.assertRaisesRegex(ValueError,'dependency changed'):
+            self.prepare('changed-selected-input')
+
     def test_missing_or_fake_deployment_and_stale_device_provenance_are_rejected(self):
         for name,changes in [('missing',{'execution':None}),('missing-owner',{'execution':{key:value for key,value in self.execution.items() if key!='owner'}}),
             ('diagnostic',{'diagnostic_source':{'mode':'warm_diagnostic'}}),

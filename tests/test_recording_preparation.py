@@ -183,6 +183,20 @@ class RecordingPreparationTest(unittest.TestCase):
             execution_instance_id=runner.execution_instance_id,execution_owner=runner.recording_owner)
         verify_raw(session.root,environment='fake')
 
+    def test_recording_waits_for_fresh_feedback_past_actual_reference_endpoint(self):
+        # Host command submission may be later than the sampled SDK feedback.
+        self.owner.control_time=lambda:self.clock()+.008
+        runner=self.start()
+        self.until(lambda:runner.status=='READY')
+        self.assertTrue(runner.recording_waits_for_endpoint)
+        self.until(lambda:self.owner.recording.done.is_set())
+        session=self.owner.recording
+        self.assertIsNone(session.error,session.snapshot())
+        self.assertEqual(session.manifest['capture_status'],'complete',session.manifest)
+        command=session.recorder.commands[0];feedback=session.recorder.feedback[-1]
+        self.assertGreaterEqual(feedback['sample_monotonic_s'],command['send_monotonic_s']+runner.frozen.duration_s)
+        verify_raw(session.root,environment='fake')
+
     def test_preparation_does_not_relabel_an_old_queued_camera_packet(self):
         self.until(lambda:self.owner.snapshot().get('stationary') is True)
         self.producer.queue.join()

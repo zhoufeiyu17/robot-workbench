@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import Mock, patch
 
 from owned_process import wait_owned
 
@@ -16,6 +17,13 @@ def live(pid):
 
 
 def test():
+    for membership, denied in [('', False), ('123 S\n', True)]:
+        child=Mock(pid=123);child.wait.return_value=7
+        with patch('owned_process.os.killpg',side_effect=PermissionError), \
+                patch('owned_process.subprocess.check_output',return_value=membership):
+            try:assert wait_owned(child,.2,.2)==7
+            except PermissionError:assert denied, 'vanished group must not mask the original result'
+            else:assert not denied, 'live group permission failure must remain an error'
     worker = "import os,signal,sys,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
     parent = "import subprocess,sys,time; from pathlib import Path; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]);\nwhile not Path(sys.argv[2]).exists(): time.sleep(.01)\nif sys.argv[3]=='exit': sys.exit(7)\ntime.sleep(60)"
     unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])

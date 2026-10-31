@@ -188,7 +188,8 @@ class Workbench:
             saved=restored.get('marker_prior_source')
             if isinstance(saved,str) and saved:self.marker_prior_source=saved
             saved_report=restored.get('pipeline_report')
-            if isinstance(saved_report,dict) and saved_report:self.pipeline_report=saved_report
+            if isinstance(saved_report,dict) and saved_report:
+                self.pipeline_report=saved_report;self.restored_pipeline_report_id=saved_report.get('run_id')
             saved_environments=restored.get('environments')
             if isinstance(saved_environments,dict):
                 self.environments={'simulation':saved_environments.get('simulation') or {},'hardware':saved_environments.get('hardware') or {}}
@@ -319,9 +320,9 @@ class Workbench:
                     if (not isinstance(values,(list,tuple)) or len(values)!=14
                             or any(type(v) not in (int,float) or not np.isfinite(v) for v in values)):
                         raise ValueError('A1 动作预览包含无效冻结关节位置')
-                    bounded,boundary=self.bounded_joint_pose(values[:6]+values[7:13])
+                    bounded,boundary=self.bounded_joint_pose(values[:6]+values[7:13],feedback=key=='q_start')
                     endpoints.append(bounded);boundaries[key]=boundary
-                check=checker.check_path(*endpoints)
+                check=checker.check_path(*endpoints,limits=self.manual_joint_limits())
                 if any(row['corrections'] for row in boundaries.values()):
                     check=dict(check,position_boundary=dict(environment=transport_environment(self.config),**boundaries))
                 if not check['ok']:
@@ -799,10 +800,19 @@ class Workbench:
         if len(rows)!=len(self.queue):return False
         return all(np.allclose(self.geometry._q(a['q']),self.geometry._q(b['q']),atol=1e-9) for a,b in zip(rows,self.queue))
 
-    def bounded_joint_pose(self,value):
-        from robot_workbench.joint_bounds import project_joint_positions
+    def manual_joint_limits(self):
+        owner=(getattr(self,'hardware_feedback',None) or {}).get('owner',{})
+        limits=owner.get('joint_limits')
+        bounds=np.asarray(limits[:6]+limits[7:13] if isinstance(limits,list) and len(limits)==14
+            else self.config.get('command_joint_limits',self.geometry.limits),float)
+        if bounds.shape!=(12,2) or not np.isfinite(bounds).all() or np.any(bounds[:,0]>bounds[:,1]):
+            raise ValueError('twelve finite ordered device command limits required')
+        return bounds.tolist()
+
+    def bounded_joint_pose(self,value,*,feedback=False):
+        from robot_workbench.joint_bounds import project_joint_positions,inspect_joint_feedback
         raw=self.geometry._q(value)
-        bounded,corrections=project_joint_positions(raw.tolist(),np.asarray(self.geometry.limits,float).tolist(),
+        bounded,corrections=(inspect_joint_feedback if feedback else project_joint_positions)(raw.tolist(),self.manual_joint_limits(),
             environment=transport_environment(self.config))
         return np.asarray(bounded),dict(requested_q=raw.tolist(),command_q=bounded,corrections=corrections)
 
@@ -813,7 +823,7 @@ class Workbench:
         previous=np.asarray(start,float)
         for index,row in enumerate(rows):
             target=self.geometry._q(row['q'])
-            check=checker.check_path(previous,target) if checker is not None else geometry.path_check(previous,target)
+            check=checker.check_path(previous,target,limits=self.manual_joint_limits()) if checker is not None else geometry.path_check(previous,target)
             if not check['ok']:
                 pairs=check.get('collisions') or []
                 detail=('超出关节限位' if not pairs else '模型判定干涉/自碰撞：'+'；'.join(
@@ -823,9 +833,21 @@ class Workbench:
             previous=target
         return len(rows)
 
-    def hardware_trajectory_preview(self,body,*,review=None):
+    def hardware_trajectory_preview(self,body,*,review=None,submit_preview=None,start_q=None):
         with self.mode_lock:
             review=self.review_snapshot() if review is None else review
+            self.require_review(review)
+        # Stop/handoff advances the command epoch. Refresh the read-only adapter
+        # instead of treating its previous polling frame as a disconnect. Only
+        # the known transition/two-sample warmup may wait; real health errors fail.
+        if getattr(self,'hardware_reader',None) is not None:
+            deadline=time.monotonic()+.5
+            while True:
+                try:self.poll_hardware();break
+                except ValueError as error:
+                    if str(error)not in ('owner_identity_or_epoch_changed','等待两臂 SDK 反馈推进')or time.monotonic()>=deadline:raise
+                    time.sleep(.01)
+        with self.mode_lock:
             self.require_review(review)
             if not self.hardware_connected():raise ValueError('真机反馈已断开；请重新检查接入状态')
             rows=json.loads(json.dumps(body.get('waypoints'),allow_nan=False))
@@ -840,7 +862,8 @@ class Workbench:
                 if 'jaw_speed_mm_s' in row:waypoint['jaw_speed_mm_s']=row['jaw_speed_mm_s']
                 waypoints.append(waypoint)
                 checked_waypoints.append(dict(waypoint,q=bounded.tolist()))
-            checked=self.queue_is_plan_checked(rows);start,start_boundary=self.bounded_joint_pose(self.current_pose())
+            checked=submit_preview is None and self.queue_is_plan_checked(rows)
+            start,start_boundary=self.bounded_joint_pose(self.current_pose() if start_q is None else start_q,feedback=True)
         progress=self.begin_preflight('正在检查路径')
         trace=dict(schema='manual-motion-preview.v1',request_id=progress['request_id'],
                    started_at_s=progress['started_at_s'],environment=transport_environment(self.config),
@@ -856,7 +879,18 @@ class Workbench:
             self.require_review(review)
             self.preflight_progress(progress,'正在生成执行预览并核验冻结路径')
             trace['phase']='owner_preview';phase_started=time.monotonic()
-            result=self.control_request('trajectory-preview',{'waypoints':waypoints},review=review)
+            result=(self.control_request('trajectory-preview',{'waypoints':waypoints},review=review)
+                    if submit_preview is None else submit_preview(waypoints))
+            if submit_preview is not None:
+                # The shared business route must check the actual frozen path too.
+                plans=result.get('plans')
+                if not isinstance(plans,list) or not plans:raise ValueError('人工执行预览缺少冻结路径，未通过审阅')
+                for plan in plans:
+                    endpoints=[self.bounded_joint_pose(plan[key][:6]+plan[key][7:13],feedback=key=='q_start')[0]
+                               for key in ('q_start','q_target')]
+                    self.require_checked_path([{'q':endpoints[1]}],endpoints[0])
+                self.require_review(review)
+                result['review_generation']=review[0]
             if 'collision_check' in trace:result=dict(result,collision_check=trace['collision_check'])
             if result.get('collision_checks'):trace['collision_checks']=result['collision_checks']
             trace['owner_preview_s']=time.monotonic()-phase_started
@@ -1943,7 +1977,15 @@ class Workbench:
         try:
             if row.get('kind')!='wrist':raise ValueError('需要成对腕参数')
             contract=self.wrist_contract(row)
-            if contract.get('geometry_id')!=self.geometry_id:raise ValueError('几何指纹不一致')
+            if contract.get('geometry_id')!=self.geometry_id:
+                approved=(row.get('id')==self.config.get('readonly_wrist_candidate_id')
+                    and row.get('pair_status')=='complete' and row.get('robot_source')=='physical'
+                    and row.get('simulation_only') is False and contract.get('environment')=='hardware'
+                    and contract.get('robot_source')=='physical' and contract.get('simulation_only') is False
+                    and all(self.config.get(key) and all(value.get(key)==self.config[key]
+                        for value in (row,contract,contract.get('head_snapshot',{})))
+                        for key in ('asset_geometry_id','asset_seal_sha256')))
+                if not approved:raise ValueError('几何指纹不一致')
             snapshot=self.calibration_snapshot(contract['head_snapshot'])
             if not snapshot['snapshot_complete']:raise ValueError('头标定快照不完整')
             digest=hashlib.sha256(json.dumps(contract,sort_keys=True,allow_nan=False).encode()).hexdigest()
@@ -1956,6 +1998,18 @@ class Workbench:
             return None
         except (ValueError,KeyError,TypeError,OSError) as exc:
             return '参数不可绘制：'+str(exc)
+
+    def wrist_display_results(self):
+        """One operator-selected history exception for display; installation stays strict."""
+        rows=self.wrist_results();identity=self.config.get('readonly_wrist_candidate_id')
+        if identity and not any(row['id']==identity for row in rows):
+            try:
+                record=self.calibration_store_record(identity)
+                row={**record['payload']['row'],'id':record['id'],'kind':record['kind'],
+                     'version':record['version'],'environment':record['environment']}
+                if not self.wrist_overlay_error(row):rows.append(row)
+            except (ValueError,KeyError,TypeError,OSError):pass
+        return rows
 
     def wrist_overlay_options(self):
         """Wrist-side choices for the overlay, *including* the ones that cannot be drawn.
@@ -1971,14 +2025,15 @@ class Workbench:
         for record in self.registered_records():
             if record.get('kind')=='head':head_versions.setdefault(record['id'],record.get('version'))
         options={}
-        for row in self.wrist_results():
+        for row in self.wrist_display_results():
             head_id=self.wrist_head_id(row)
             options[row['id']]={'id':row['id'],'version':row.get('version'),'kind':'wrist',
                                 'label':row.get('label'),'head_id':head_id,'head_version':head_versions.get(head_id),
                                 'environment':row.get('environment','simulation'),
                                 'pair_status':row.get('pair_status'),
                                 'accepted':row.get('accepted'),'deployment_status':row.get('deployment_status'),
-                                'selectable':not self.wrist_overlay_error(row),'reason':self.wrist_overlay_error(row)}
+                                'selectable':not self.wrist_overlay_error(row),'reason':self.wrist_overlay_error(row) or
+                                    ('用户指定的历史标定，仅用于只读叠加' if row['id']==self.config.get('readonly_wrist_candidate_id') else None)}
         for record in self.registered_records():
             if record.get('kind')=='head' or record['id'] in options:continue
             payload=record.get('payload') or {}
@@ -2386,6 +2441,7 @@ class Workbench:
         cameras=({side:adapter.read_calibration_frame()[1]['intrinsics'] for side,adapter in self.wrist_cameras.items()} if mode=='hardware_sync' else self.config.get('wrist_simulation_cameras')) or {s:{**self.geometry.k,'rectified':True,'coefficients':[0.]*5} for s in ('left','right')}
         geometry=self.geometry.with_gaps(80.,80.);geometry.config={**geometry.config,'table_z_m':0.,'table_clearance_m':.005}
         start=np.array(self.hardware_feedback['owner']['calibration_feedback']['qpos'][:6]+self.hardware_feedback['owner']['calibration_feedback']['qpos'][7:13]) if mode=='hardware_sync' else self.q.copy()
+        command_start,start_boundary=self.bounded_joint_pose(start)
         cameras={side:{**k,'rectified':True,'coefficients':[0.]*5,'distortion_model':'distortion.inverse_brown_conrady'} for side,k in cameras.items()}
         offsets=np.concatenate([snapshot['joint_offsets_rad'][s] for s in ('left','right')])
         planned_fraction={'left':0.,'right':0.}
@@ -2399,10 +2455,11 @@ class Workbench:
             seed_file=self.config.get('wrist_seed_file')
             seed_path=Path(__file__).resolve().parents[3]/seed_file if seed_file else None
             seed_bytes=seed_path.read_bytes() if seed_path else None
-            result=plan_wrist(geometry,mounts,poses_per_side=16,seed=20,start_q=start,joint_offsets=offsets,cameras=cameras,
+            result=plan_wrist(geometry,mounts,poses_per_side=16,seed=20,start_q=command_start,joint_offsets=offsets,cameras=cameras,
                              marker_mounts=snapshot['T_link6_marker'],progress=progress,
                              motion_seed=json.loads(seed_bytes) if seed_bytes is not None else None)
             if seed_bytes is not None:result['motion_seed_sha256']=hashlib.sha256(seed_bytes).hexdigest()
+            result['start_position_boundary']=start_boundary
         finally:
             with self.lock:self.wrist_plan_progress=None
         contract={'asset_geometry_id':self.config.get('asset_geometry_id'),'asset_seal_sha256':self.config.get('asset_seal_sha256'),

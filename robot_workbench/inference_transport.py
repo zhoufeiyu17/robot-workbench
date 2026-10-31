@@ -23,7 +23,7 @@ import zipfile
 import numpy as np
 
 from .inference_model import (BASE379_ID, CAMS, model_family, model_spec, model_descriptor, model_bundle_digest,
-                              validate_bundle, validate_worker_identity)
+                              validate_bundle, validate_worker_identity, native_runtime)
 
 MAX_PACKET = 8 * 1024 * 1024
 MAX_METADATA = 256 * 1024
@@ -157,15 +157,19 @@ def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bun
         request_id=request['request_id'], seed=request['seed'], source_time=request['observation']['source_time'],
         frame_ids=request['observation'].get('frame_ids', {}))
     if model_family(model_id) == 'base566':metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
+    if native_runtime(model_bundle):metadata['backend']=model_bundle['backend']
     arrays = dict(model_state14=np.asarray(state), model_history=np.asarray(request['applied_history']), **images)
-    _validate_request(metadata, arrays, model_id)
+    _validate_request(metadata, arrays, model_id, model_bundle)
     return encode_packet(metadata, arrays)
 
 
-def _validate_request(metadata, arrays, model_id=MODEL_ID):
+def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
     _identity(metadata, model_id)
     keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'seed', 'source_time', 'frame_ids'}
     if model_family(model_id) == 'base566':keys.add('expected_bundle_digest')
+    if native_runtime(model_bundle):
+        keys.add('backend')
+        if metadata.get('backend')!=model_bundle['backend']:raise ValueError('model backend differs from prepared runtime')
     if set(metadata) != keys:
         raise ValueError('unknown model request metadata')
     if not isinstance(metadata['request_id'], str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}', metadata['request_id']):
@@ -229,30 +233,37 @@ class ModelService:
             rows = self.catalog_rows()
         else:
             catalog = self.catalog() if callable(self.catalog) else self.catalog
-            rows = [dict(model_id=name, status='ready', selectable=True, manifest=value)
+            rows = [dict(model_id=(value or {}).get('model_id',name), status='ready', selectable=True, manifest=value)
                     for name,value in (catalog or {self.model_id:self.model_bundle}).items()]
         result = []
         for row in rows:
-            item = {key:deepcopy(row[key]) for key in ('model_id','label','epoch','step','status','reason','selectable') if key in row}
+            item = {key:deepcopy(row[key]) for key in ('model_id','backend','label','epoch','step','status','reason','selectable') if key in row}
             manifest = row.get('derived_manifest', row.get('manifest'))
             if item.get('selectable'):
                 spec = model_spec(row['model_id'], manifest)
                 item.update(label=spec['label'], epoch=spec['epoch'], step=spec['step'],
                     model_descriptor=model_descriptor(spec['id'],manifest),
                     bundle_digest=model_bundle_digest(spec['id'],manifest))
+                item['backend']=spec.get('backend','torch')
             result.append(item)
         return result
 
     def status(self):
         with self.state_lock:
             result = deepcopy(self.value)
-        worker = getattr(getattr(self.client, 'client', None), 'process', None)
+        if callable(getattr(self.client,'worker_status',None)):
+            worker=self.client.worker_status()
+            result.update(worker_pid=worker['worker_pid'],worker_exit_code=worker['worker_exit_code'],worker_alive=worker['worker_alive'])
+        else:
+            worker = getattr(getattr(self.client, 'client', None), 'process', None)
+            result.update(worker_pid=getattr(worker, 'pid', None),worker_exit_code=worker.poll() if worker is not None else None)
         result.update(protocol=PROTOCOL, model_id=self.model_id, service_pid=os.getpid(),
-            worker_pid=getattr(worker, 'pid', None), worker_exit_code=worker.poll() if worker is not None else None)
-        if result['worker_exit_code'] is not None:
+                      bundle_digest=model_bundle_digest(self.model_id,self.model_bundle))
+        if native_runtime(self.model_bundle):result['backend']=self.model_bundle['backend']
+        if result['worker_exit_code'] is not None or result['loaded'] and result.get('worker_alive')is False:
             result.update(loaded=False, status='error', error=result.get('error') or 'owned model worker exited')
         from .state_contract import fact
-        signature=(result['status'],result['loaded'],result['model_id'],result['worker_pid'],
+        signature=(result['status'],result['loaded'],result['model_id'],result['bundle_digest'],result['worker_pid'],
             result['worker_exit_code'],(result.get('warmup')or{}).get('completed'),result.get('error'))
         with self.state_lock:
             if signature!=self.fact_signature:
@@ -274,18 +285,23 @@ class ModelService:
     def prepare(self, metadata):
         requested = metadata.get('model_id') if isinstance(metadata, dict) else None
         _identity(metadata, requested)
-        if set(metadata) not in ({'protocol','model_id','conversion_id'},
-                                {'protocol','model_id','conversion_id','expected_bundle_digest'}):
-            raise ValueError('prepare accepts model identity only')
         catalog = self.catalog() if callable(self.catalog) else self.catalog
         if catalog is not None:
             if not isinstance(catalog, dict):raise ValueError('trusted checkpoint catalog must be a mapping')
-            if requested not in catalog:raise ValueError('model is absent from the trusted checkpoint catalog')
-            selected = validate_bundle(catalog[requested])
+            choices=[value for key,value in catalog.items() if (value or {}).get('model_id',key)==requested]
+            if 'expected_bundle_digest'in metadata:
+                choices=[value for value in choices if model_bundle_digest(requested,value)==metadata['expected_bundle_digest']]
+            if len(choices)!=1:raise ValueError('catalog model/backend is absent, ambiguous, or bundle identity changed')
+            selected = validate_bundle(choices[0])
             if selected.get('model_id', MODEL_ID) != requested:raise ValueError('catalog entry model identity differs')
         elif requested != self.model_id:
             raise ValueError('model differs from this fixed deployment')
         else:selected = self.model_bundle
+        keys={'protocol','model_id','conversion_id','expected_bundle_digest'}
+        if native_runtime(selected):
+            keys.add('backend')
+            if set(metadata)!=keys or metadata['backend']!=selected['backend']:raise ValueError('explicit prepared backend identity required')
+        elif set(metadata) not in (keys,keys-{'expected_bundle_digest'}):raise ValueError('prepare accepts model identity only')
         if ('expected_bundle_digest' in metadata
                 and metadata['expected_bundle_digest'] != model_bundle_digest(requested,selected)):
             raise ValueError('selected checkpoint bundle identity changed')
@@ -333,7 +349,7 @@ class ModelService:
 
     def infer(self, payload):
         metadata, arrays = decode_packet(payload, {'model_state14', 'model_history', *CAMS}, self.model_id)
-        _validate_request(metadata, arrays, self.model_id)
+        _validate_request(metadata, arrays, self.model_id, self.model_bundle)
         if not self.lock.acquire(blocking=False):
             raise ValueError('model worker busy; inference was not queued')
         try:
@@ -359,6 +375,7 @@ class ModelService:
             action = _finite(result['action14'], (60, 14), 'model action')
             response = {key: metadata[key] for key in ('protocol', 'model_id', 'conversion_id', 'request_id')}
             if 'expected_bundle_digest' in metadata:response['expected_bundle_digest'] = metadata['expected_bundle_digest']
+            if 'backend'in metadata:response['backend']=metadata['backend']
             response['audit'] = result.get('audit', {})
             encoded = encode_packet(response, dict(action14=action))
             self._set(last_request_id=metadata['request_id'], last_infer_wall_s=time.monotonic()-started)
@@ -374,6 +391,22 @@ class ModelService:
     def close(self):
         with self.lock:
             self.client.close();self._set(status='closed', loaded=False, busy=False)
+
+    def unload(self,metadata):
+        if not self.lock.acquire(blocking=False):raise ValueError('model worker busy; unload was not queued')
+        try:
+            _identity(metadata,self.model_id)
+            keys={'protocol','model_id','conversion_id','expected_bundle_digest'}
+            if native_runtime(self.model_bundle):keys.add('backend')
+            if (set(metadata)!=keys or metadata['expected_bundle_digest']!=model_bundle_digest(self.model_id,self.model_bundle)
+                    or native_runtime(self.model_bundle)and metadata['backend']!=self.model_bundle['backend']):
+                raise ValueError('unload requires the current model/backend identity')
+            self.client.close()
+            if callable(getattr(self.client,'worker_status',None)) and self.client.worker_status()['worker_alive']:
+                raise ValueError('model worker exit is not confirmed')
+            self._set(status='not_loaded',loaded=False,busy=False,worker_identity=None,warmup=None,error=None)
+            return dict(**metadata,unloaded=True,worker_exited=True)
+        finally:self.lock.release()
 
 
 def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_ports=()):
@@ -414,7 +447,7 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             auth = self.headers.get_all('Authorization', [])
             if len(auth) != 1 or not secrets.compare_digest(auth[0].encode(), ('Bearer '+token).encode()):
                 return self.reply(403, {'error':'model authorization required'})
-            if self.path not in ('/prepare', '/infer'):return self.reply(404, {'error':'not found'})
+            if self.path not in ('/prepare', '/infer', '/unload'):return self.reply(404, {'error':'not found'})
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get_all('Transfer-Encoding', []) or len(lengths) != 1 or not lengths[0].isascii()
                     or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= MAX_PACKET):
@@ -422,9 +455,9 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             try:
                 raw = self.rfile.read(int(lengths[0]))
                 if len(raw) != int(lengths[0]):raise ValueError('incomplete model request')
-                if self.path == '/prepare':
+                if self.path in ('/prepare','/unload'):
                     if len(raw) > 4096:raise ValueError('bounded prepare identity required')
-                    return self.reply(200, service.prepare(json.loads(raw)))
+                    return self.reply(200, (service.prepare if self.path=='/prepare' else service.unload)(json.loads(raw)))
                 self.reply(200, service.infer(raw), 'application/x-npz')
             except (ValueError, KeyError, TypeError) as error:self.reply(409, {'error':str(error)})
             except Exception as error:self.reply(503, {'error':str(error)})
@@ -476,6 +509,8 @@ class RemoteBaseClient:
         value = json.loads(self._request('/status'))
         if value.get('protocol') != PROTOCOL or value.get('model_id') != self.model_id:
             raise ValueError('remote model status identity mismatch')
+        if native_runtime(self.model_bundle) and (value.get('backend')!=self.model_bundle['backend'] or value.get('bundle_digest')!=self.bundle_digest):
+            raise ValueError('remote backend or runtime identity mismatch')
         return value
 
     def models(self):
@@ -501,11 +536,13 @@ class RemoteBaseClient:
             return deepcopy(identity)
         metadata = dict(protocol=PROTOCOL, model_id=self.model_id, conversion_id=self.conversion_id)
         if model_family(self.model_id) == 'base566':metadata['expected_bundle_digest'] = self.bundle_digest
+        if native_runtime(self.model_bundle):metadata['backend']=self.model_bundle['backend']
         value = json.loads(self._request('/prepare', json.dumps(metadata).encode(), timeout=self.startup_timeout))
         _identity(value, self.model_id)
         identity = value.get('worker_identity') or {}
         if (value['conversion_id'] != self.conversion_id or model_family(self.model_id) == 'base566'
-                and value.get('expected_bundle_digest') != self.bundle_digest):
+                and value.get('expected_bundle_digest') != self.bundle_digest
+                or native_runtime(self.model_bundle)and value.get('backend')!=self.model_bundle['backend']):
             raise ValueError('remote model or conversion identity mismatch')
         validate_worker_identity(identity, self.model_id, bundle=self.model_bundle)
         self.identity = deepcopy(identity)
@@ -517,7 +554,9 @@ class RemoteBaseClient:
         metadata, arrays = decode_packet(self._request('/infer', payload, kind='application/x-npz'), {'action14'}, self.model_id)
         keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'audit'}
         if model_family(self.model_id) == 'base566':keys.add('expected_bundle_digest')
+        if native_runtime(self.model_bundle):keys.add('backend')
         if (set(metadata) != keys or 'expected_bundle_digest' in metadata and metadata['expected_bundle_digest'] != self.bundle_digest
+                or native_runtime(self.model_bundle)and metadata['backend']!=self.model_bundle['backend']
                 or metadata['conversion_id'] != self.conversion_id or metadata['request_id'] != request['request_id']):
             raise ValueError('remote result request or conversion identity mismatch')
         action = _finite(arrays['action14'], (60, 14), 'model action')

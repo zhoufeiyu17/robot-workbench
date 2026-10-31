@@ -137,7 +137,10 @@ class RealMotionTest(unittest.TestCase):
         projected=make_plan('both', raw, raw, bounds, kind='workbench')
         self.assertEqual(projected.requested_q_target,tuple(raw));self.assertEqual(projected.q_target[8],0.)
         self.assertTrue(projected.position_corrections)
-        too_far = raw[:];too_far[8] = -.010001
+        inside = raw[:];inside[8] = -math.radians(1.5)
+        self.assertEqual(feedback_to_command(inside,bounds)[8],0.)
+        self.assertLess(inside[8],0.,'raw feedback must not be clipped')
+        too_far = raw[:];too_far[8] = -math.radians(2.)-.000001
         with self.assertRaisesRegex(ValueError, 'position-boundary'):
             make_workbench_plans(too_far, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds)
         with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
@@ -163,8 +166,9 @@ class RealMotionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'canonical contents'):
                 MotionRunner(replace(plan,requested_q_target=tuple(altered)),begin=lambda q:q,send=lambda q:None,stop=lambda reason:None)
             beyond=raw[:];beyond[0]=-tolerance-.000001
+            beyond_feedback=raw[:];beyond_feedback[0]=-(math.radians(2.)if environment=='physical'else tolerance)-.000001
             with self.assertRaisesRegex(ValueError,'position-boundary'):
-                make_plan('both',beyond,requested,bounds,kind='workbench',environment=environment)
+                make_plan('both',beyond_feedback,requested,bounds,kind='workbench',environment=environment)
             with self.assertRaisesRegex(ValueError,'position-boundary'):
                 make_plan('both',[0.]*14,beyond,bounds,kind='workbench',environment=environment)
 
@@ -456,7 +460,7 @@ class RealMotionTest(unittest.TestCase):
             elif kind == "jaw":
                 state["qpos"][13] += .003
             else:
-                state["qpos"][7] = 2.01001
+                state["qpos"][7] = 2.+math.radians(2.)+.00001
                 expected = "position-boundary"
             self.assertEqual(runner.tick(8500.35, state), "FAULT")
             self.assertIn(expected, runner.reason)

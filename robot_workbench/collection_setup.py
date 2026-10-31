@@ -83,6 +83,8 @@ def selected_dependency_pins(contract,pipeline):
     roots += [str(Path(__file__).resolve().parents[1]),str(Path(pipeline['detection_script']).parent)]
     files={pipeline[key] for key in ('initial_suite','finger_envelope','detection_node_config','detection_python',
             'prompt_file','detection_cuda_home') if pipeline.get(key)}
+    if pipeline.get('scene_asset_set'):
+        files.update(pipeline['scene_asset_set']['input_sha256'])
     result={};excluded=[];seen={}
     code_root=contract.get('code',{}).get('root')
     for name in ('input_sha256','code_sha256','prompt_sha256'):
@@ -118,6 +120,7 @@ def connection_config(setup,pipeline_path,calibration_root,capture_root,jobs_roo
             measured_initial_state=True,transport=dict(endpoint=endpoint,remote_root=str(capture_root)))),
         playground=dict(enabled=True,pipeline_config=str(pipeline_path)))
     if setup['environment']=='fake':config['native_task_root']=str(Path(setup['resident_root'])/'native-tasks')
+    else:config.update(dataset_format='lerobot-v2.1',render_replay=False)
     return config
 
 
@@ -227,6 +230,11 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
     base.update(workbench_code=str(wb),detection_runtime_root=str(Path(detection_runtime_root).resolve()),
                 environment=environment,execution=deepcopy(execution),render_replay=False,record_raw=False,
                 resident_deadline_wall_ns=resident_deadline_wall_ns)
+    from scene_assets import load as load_scene_assets
+    declared=base.get('scene_asset_set')
+    selected=load_scene_assets(base['assets'],expected_digest=declared['asset_set_digest'] if declared else None)
+    if selected!=declared:
+        raise ValueError('base pipeline and prepared scene asset selection differ')
     contract_template=deepcopy(contract_template)
     diagnostic=contract_template.pop('diagnostic_calibration_source',None)
     admission_source=diagnostic_source if diagnostic_source is not None else diagnostic
@@ -254,6 +262,9 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
             or template_value['source'].get('calibration_available') is not False):
         raise ValueError('explicit static interface template without historical calibration required')
     pins={str(Path(owner['script'])):sha(owner['script'])}
+    if selected:
+        pins.update(selected['input_sha256'])
+        pins[str(Path(base['assets'])/'scene-assets.json')]=sha(Path(base['assets'])/'scene-assets.json')
     if not compute_only:pins.update({str(path):sha(path) for path in (config_path,registration_path,template)})
     else:pins.update(prepared_calibration.get('input_pins',{}))
     output.mkdir(mode=0o700)
@@ -298,6 +309,7 @@ def finalize_collection_setup(setup_path):
     from run_pipeline import load_config,PATH_KEYS,below
     from local_execution import validate as validate_local,owner_spec
     from planner_service import startup_config
+    from scene_assets import load as load_scene_assets
     setup=read(setup_path);verify_inputs(setup)
     if setup.get('schema_version')!='resident_collection_setup.v1' or setup.get('runtime_allowed') is not False:
         raise ValueError('an unactivated current-run setup receipt is required')
@@ -325,6 +337,10 @@ def finalize_collection_setup(setup_path):
     if sha(binding['usd'])!=binding.get('usd_sha256') or sha(binding['urdf'])!=profile['model_binding']['urdf_sha256']:
         raise ValueError('converted planning URDF/USD digest differs')
     pipeline['assets']=str(target)
+    if pipeline.get('scene_asset_set'):
+        selected=load_scene_assets(target,expected_digest=pipeline['scene_asset_set']['asset_set_digest'])
+        if selected!=pipeline['scene_asset_set']:
+            raise ValueError('calibrated planning assets changed the selected object combination')
     jobs=output/'jobs';capture=output/'sealed-observations'
     jobs.mkdir(exist_ok=False);capture.mkdir(exist_ok=False)
     pipeline['remote_run_root']=str(jobs/'template')
@@ -362,6 +378,8 @@ def finalize_collection_setup(setup_path):
     if not runtime_code:raise ValueError('explicit read-only detector ROS package code is missing')
     code.update({str(path):sha(path) for path in runtime_code})
     pins={**inherited['input_sha256'],**setup['input_sha256']}
+    if pipeline.get('scene_asset_set'):
+        pins[str(target/'scene-assets.json')]=sha(target/'scene-assets.json')
     pins.update({str(path):sha(path) for path in (Path(setup_path),output/'calibration'/'profile.json',
         output/'calibration'/'acquisition-binding.json',output/'calibration'/'model'/'SHA256SUMS.json',
         target/'a1-binding.json',Path(binding['urdf']),Path(binding['usd']),
@@ -639,9 +657,53 @@ def remote_compute_call(compute,request,*,runner=None,cancel=None):
     return result
 
 
+def _current_control_channel(reference):
+    from .control_owner import ControlChannel
+    if (not isinstance(reference,dict)or set(reference)!={'descriptor','runtime_nonce'}
+            or not isinstance(reference['runtime_nonce'],str)or not reference['runtime_nonce']
+            or not isinstance(reference['descriptor'],str)or not Path(reference['descriptor']).is_absolute()):
+        raise ValueError('current independent Owner reference required')
+    return ControlChannel(reference['descriptor'])
+
+
+def trusted_binding_location(path,root,control_owner_reference=None):
+    """A separate Owner supplies one exact binding location, never a writable root."""
+    if control_owner_reference is None:return inside(path,root,exists=False)
+    import os
+    channel=_current_control_channel(control_owner_reference)
+    inputs=channel.call('inputs',expected_nonce=control_owner_reference['runtime_nonce'])
+    path=Path(path)
+    if (channel.descriptor['environment']!='physical'or str(path)!=inputs.get('hardware_binding')
+            or not path.is_absolute()or '..'in path.parts or path.suffix!='.json'or path.is_symlink()
+            or path.parent.resolve()!=path.parent or path.parent.stat().st_uid!=os.getuid()):
+        raise ValueError('trusted binding must equal the current independent Owner location')
+    return path
+
+
+def trusted_recording_location(path,root,control_owner_reference=None):
+    """Use the declared standalone Owner storage layout; keep raw containment strict."""
+    if control_owner_reference is None:return inside(path,root)
+    import os
+    from .control_owner import collection_recording_root
+    channel=_current_control_channel(control_owner_reference)
+    state=channel.call('inspect',expected_nonce=control_owner_reference['runtime_nonce'])
+    owner_root=Path(control_owner_reference['descriptor']).parent;path=Path(path)
+    if (channel.descriptor['environment']!='physical' or state.get('recording_configured')is not True
+            or Path(channel.descriptor['identity']['script']).name!='serve_control_owner.py'
+            or Path(channel.descriptor['socket_path']).parent!=owner_root
+            or path!=collection_recording_root(owner_root)or path.is_symlink()
+            or owner_root.resolve()!=owner_root or owner_root.stat().st_uid!=os.getuid()):
+        raise ValueError('raw recording root must equal the current standalone Owner collection location')
+    path.mkdir(mode=0o700,exist_ok=True)
+    if path.resolve()!=path or not path.is_dir()or path.stat().st_uid!=os.getuid():
+        raise ValueError('owned regular recording directory required')
+    return path
+
+
 def prepare_remote_collection(*,compute,run_root,calibration_config,capture_root,expected_install,registration,
         profile_template,control_url,token_file,producer_ports,producer_directories,trusted_binding_path,
-        local_recording_root,output,still_current,transfer=None,runner=None,cancel=None,camera_spool_root=None):
+        local_recording_root,output,still_current,transfer=None,runner=None,cancel=None,camera_spool_root=None,
+        control_owner_reference=None):
     """CPU profile sealing and explicit transport; returns uninstalled shared D configuration."""
     from artifact_transport import manifest,transfer as send,validate_endpoint
     from robot_workbench.calibration_profile import build_device_profile
@@ -659,7 +721,8 @@ def prepare_remote_collection(*,compute,run_root,calibration_config,capture_root
     if set(directories)!={'base_0','left_wrist_0','right_wrist_0'}:raise ValueError('all local common camera directories required')
     setup=dict(environment=c['environment'],robot_id=c['robot_id'],camera_serials=c['hardware_camera_serials'],resident_root=str(root),
         control_url=loopback(control_url),token_file=str(token),producer_ports=producer_ports,producer_directories=directories,
-        trusted_binding_path=str(inside(trusted_binding_path,root,exists=False)),local_recording_root=str(inside(local_recording_root,root)))
+        trusted_binding_path=str(trusted_binding_location(trusted_binding_path,root,control_owner_reference)),
+        local_recording_root=str(trusted_recording_location(local_recording_root,root,control_owner_reference)))
     if not still_current():raise InterruptedError('remote preparation request already revoked')
     output.mkdir();capsule=output/'inputs';capsule.mkdir()
     template=read(profile_template)
@@ -715,6 +778,7 @@ def prepare_remote_collection(*,compute,run_root,calibration_config,capture_root
         collection_config=connection_path,initial_trusted_binding_source=str(capsule/'calibration/acquisition-binding.json'),
         trusted_binding_path=setup['trusted_binding_path'],playground_directory=str(output/'playground'),worker_state_directory=str(output/'workers'),
         remote_compute_receipt=str(output/'remote-compute-receipt.json'))
+    if control_owner_reference is not None:result['control_owner_reference']=deepcopy(control_owner_reference)
     if not still_current() or any(sha(path)!=expected for path,expected in bridge['input_sha256'].items()):
         raise InterruptedError('remote reply no longer matches current installation; not published')
     write(client/'configured.json',result)

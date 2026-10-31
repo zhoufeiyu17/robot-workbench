@@ -372,7 +372,15 @@ class CollectionPreparation:
             raise ValueError('数采服务生命周期缺少运维准入：'+action)
         return callback(*args,**kwargs)
 
-    def operations_prepare(self,*,still_current,lifecycle_admission,service_role=None,restart=False):
+    def validate_asset_request(self,asset_pair_id=None,expected_catalog_digest=None):
+        if asset_pair_id is not None or expected_catalog_digest is not None:
+            raise ValueError('当前数采部署未登记可选择的场景资产')
+
+    def _configure_asset_request(self,asset_pair_id,expected_catalog_digest):
+        self.validate_asset_request(asset_pair_id,expected_catalog_digest)
+
+    def operations_prepare(self,*,still_current,lifecycle_admission,service_role=None,restart=False,
+            asset_pair_id=None,expected_catalog_digest=None):
         if not callable(still_current) or not callable(lifecycle_admission):raise ValueError('数采运维回调缺失')
         if type(restart)is not bool or (service_role is None and restart) or (service_role is not None and
                 (service_role not in ('detector','planner','scene') or not restart)):
@@ -383,6 +391,9 @@ class CollectionPreparation:
         try:
             self._require_operation()
             self._require_control()
+            if service_role is not None and (asset_pair_id is not None or expected_catalog_digest is not None):
+                raise ValueError('单角色重启不能同时更换场景资产')
+            if service_role is None:self._configure_asset_request(asset_pair_id,expected_catalog_digest)
             if service_role is not None:return self._restart_role(service_role)
             result=self._retry()
             while True:
@@ -665,6 +676,10 @@ class CollectionPreparation:
         # process before taking the application/installation locks.
         validated=prepare_collection_attachment_process(configured_path,expected,still_current=current)
         if configured!=validated['configured']:raise ValueError('prepared collection configuration changed before attachment')
+        if configured.get('control_owner_reference')is not None:
+            from .collection_setup import trusted_binding_location,trusted_recording_location
+            trusted_binding_location(configured['trusted_binding_path'],self.output,configured['control_owner_reference'])
+            trusted_recording_location(validated['bridge_config']['local_recording_root'],self.output,configured['control_owner_reference'])
         calibration=self.device.workflows.get('calibration')
         # Installation notification takes this same lock before revoking reviews.
         # Stop revokes the application generation; it never waits for model loading.

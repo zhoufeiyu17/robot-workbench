@@ -63,6 +63,22 @@ class Runner:
 
 
 class InferenceWorkflowTests(unittest.TestCase):
+    def test_same_checkpoint_native_modes_are_selected_by_bound_runtime_digest(self):
+        from test_native_model_runtime import descriptor
+        from robot_workbench.inference_model import model_bundle_digest
+        values=[descriptor('torch'),descriptor('triton')]
+        rows=[dict(model_id=v['model_id'],backend=v['backend'],selectable=True,status='ready',model_descriptor=v,
+                   bundle_digest=model_bundle_digest(v['model_id'],v))for v in values]
+        self.workflow.model_catalog_provider=lambda:rows
+        view=self.workflow.refresh_models();self.assertEqual({x['backend']for x in view['models']},{'torch','triton'})
+        self.assertEqual(len({x['id']for x in view['models']}),1)
+        self.assertEqual(len(self.workflow.model_descriptors),2)
+        with self.assertRaisesRegex(ValueError,'多个推理模式'):self.workflow._model_selection(values[0]['model_id'])
+        for row in rows:
+            identity,bundle,digest=self.workflow._model_selection(row['model_id'],row['bundle_digest'])
+            self.assertEqual(bundle['backend'],row['backend']);self.assertEqual(digest,row['bundle_digest'])
+        self.assertEqual(self.submitted,[])
+
     def test_preview_observation_uses_authoritative_envelope_even_if_status_cache_lags_handoff(self):
         self.prepare();now,feedback,identity,_=self.workflow._feedback()
         self.owner.epoch-=1  # Explicitly stale asynchronous business status projection.

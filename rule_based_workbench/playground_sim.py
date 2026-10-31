@@ -164,6 +164,8 @@ def validate_inputs(source,binding,suite,plan=None,execution_timeline=None,*,env
     if not isinstance(episodes,list) or len(episodes)!=1:
         raise ValueError('one detected episode required')
     episode=episodes[0]
+    if (episode.get('metadata') or {}).get('scene_asset_set') != source['scene'].get('asset_set'):
+        raise ValueError('suite and observed scene asset sets differ')
     keys=('episode_id','seed','machine_asset','environment_from_machine_root','environment_from_cup')
     if ({k:episode[k] for k in keys}!=source['scene']['episode_scene'] or episode.get('randomization') is not None
             or (episode.get('metadata') or {}).get('initial_robot_state')!=source['initial_state']['model']
@@ -338,8 +340,7 @@ def setup(args,source,suite,plan,execution_timeline=None):
             from functools import partial
             from maintenance_geometry import PURPOSE,audit_initial_support
             _,info=runtime.maintenance_geometry_reset(purpose=PURPOSE,
-                audit=partial(audit_initial_support,support=args.maintenance_scope['support']),options={'episode':episode},
-                orientation_tolerance_rad=args.maintenance_scope.get('error_acceptance',{}).get('max_error_rad',.01))
+                audit=partial(audit_initial_support,support=args.maintenance_scope['support']),options={'episode':episode})
             write(args.output/'maintenance-initialization-audit.json',dict(task_characterization='not_run',
                 audits=info['maintenance_audit_trace'],history=runtime.evaluator.history))
         else:
@@ -444,6 +445,9 @@ def plan_episode(args,source,runtime,episode,control,acceptance,info,*,planner=N
     geometry_ready=time.monotonic()
     print(json.dumps(dict(stage='geometry-ready',elapsed_s=geometry_ready-started)),flush=True)
     sample,scene=runtime.read(runtime.loop.physics_steps)
+    if source['scene'].get('asset_set') is not None:
+        from scene_assets import check_geometry
+        check_geometry(source['scene']['asset_set'], scene.profile_sha256, planner.cup.profile_sha256)
     obs=RuleObservation(info['episode_id'],info['step_id'],dict(info['oracle_facts']),sample,scene,
         ((info.get('execution_report') or {}).get('event') or {}).get('reason'),bool(info['contact_state']['support_acquired']))
     identity=dict(control=asdict(control),acceptance=asdict(acceptance),physical_configuration=runtime.physical_identity,

@@ -20,6 +20,79 @@ from test_owner_clock import ClockBackend,Safety,calibration,jaw
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_machine_pedal_mapping_reaches_listener_and_keeps_legacy_default(self):
+        from types import ModuleType
+        for key in (None,46):
+            value=dict(self.profile)
+            if key is not None:value['pedal_stop_key_code']=key
+            self.path.write_text(json.dumps(value));read_profile(self.path)
+            module=ModuleType('arx_env.pedal_stop');module.PedalStopListener=Mock()
+            backend=Mock();runtime=NS(owner=NS(backend=backend))
+            with patch.dict(sys.modules,{'arx_env.pedal_stop':module}),patch('real_control.controller_conflicts',return_value=[]),patch(
+                    'robot_workbench.device_bootstrap.preflight',return_value={'configuration_ready':True}),patch(
+                    'examples.scripts.debug.joint_head_real_owner.legacy_modules',return_value=NS()),patch(
+                    'robot_workbench.runtime.Runtime',return_value=runtime):
+                physical_runtime_factory(value)()
+            module.PedalStopListener.assert_called_once_with(key_code=5 if key is None else key)
+            backend.send.assert_not_called()
+        for bad in (True,0,768,'46',None):
+            self.path.write_text(json.dumps(dict(self.profile,pedal_stop_key_code=bad)))
+            with self.assertRaisesRegex(ValueError,'pedal_stop_key_code'):read_profile(self.path)
+
+    def test_initial_hold_mode_reaches_existing_stop_without_motion(self):
+        from types import ModuleType
+        module=ModuleType('arx_env.pedal_stop');module.PedalStopListener=Mock
+        for mode,manual in [('manual_gravity',True),('retained_hold',False)]:
+            backend=Mock();runtime=NS(owner=NS(backend=backend))
+            value=dict(self.profile,initial_hold_mode=mode)
+            with patch.dict(sys.modules,{'arx_env.pedal_stop':module}),patch('real_control.controller_conflicts',return_value=[]),patch(
+                    'robot_workbench.device_bootstrap.preflight',return_value={'configuration_ready':True}),patch(
+                    'examples.scripts.debug.joint_head_real_owner.legacy_modules',return_value=NS()),patch(
+                    'robot_workbench.runtime.Runtime',return_value=runtime):
+                self.assertIs(physical_runtime_factory(value)(),runtime)
+            backend.connect.assert_called_once_with()
+            backend.set_damping_hold.assert_called_once_with(manual=manual)
+            backend.send.assert_not_called()
+
+    def test_collection_handoff_must_be_stopped_before_sdk_acquisition(self):
+        value=dict(self.profile,robot_id='arx13',can_interfaces=dict(left='can13l',right='can13r'),
+                   exclusive_idle_units=['prometheus-arx13-web.service'])
+        for active,pid,expected in [('inactive','0',True),('active','12',False),('failed','0',False),('inactive','12',False)]:
+            result=NS(returncode=0,stdout=f'ActiveState={active}\nSubState={"dead" if active=="inactive" else "running"}\nMainPID={pid}\n')
+            with patch('robot_workbench.device_bootstrap.subprocess.run',return_value=result):
+                row=next(r for r in preflight(value,net_root=self.net)['checks']if r['name']=='exclusive collection handoff')
+                self.assertEqual(row['passed'],expected)
+        self.path.write_text(json.dumps(dict(value,exclusive_idle_units=['unrelated.service'])))
+        with self.assertRaisesRegex(ValueError,'handoff unit'):read_profile(self.path)
+
+    def test_arx13_mapping_and_commissioning_are_inert_and_device_bound(self):
+        value=dict(self.profile,robot_id='arx13',can_interfaces=dict(left='can13l',right='can13r'),
+                   acquisition_blocked_reason='new device parameters not qualified')
+        self.path.write_text(json.dumps(value))
+        with patch('subprocess.Popen',side_effect=AssertionError('must not start SDK')):
+            self.assertEqual(read_profile(self.path)['can_interfaces'],value['can_interfaces'])
+            report=preflight(value,net_root=self.net)
+            self.assertFalse(report['configuration_ready'])
+            self.assertTrue(any(r['name']=='device commissioning' and not r['passed'] for r in report['checks']))
+        for changes in (dict(robot_id='arx6'),dict(can_interfaces=dict(left='can13r',right='can13l')),
+                        dict(acquisition_blocked_reason='')):
+            self.path.write_text(json.dumps(dict(value,**changes)))
+            with self.assertRaises(ValueError):read_profile(self.path)
+
+    def test_preserved_native_reference_is_explicit_and_requires_pinned_shared_profile(self):
+        self.assertNotIn('native_reference_api',read_profile(self.path))
+        for mode in (None,True,'automatic'):
+            self.path.write_text(json.dumps(dict(self.profile,native_reference_api=mode)))
+            with self.assertRaisesRegex(ValueError,'native_reference_api'):read_profile(self.path)
+        value=dict(self.profile,native_reference_api='preserve_reference_v1')
+        self.path.write_text(json.dumps(value))
+        with self.assertRaisesRegex(ValueError,'pinned SDK'):read_profile(self.path)
+        value.update(prepared_reference_enabled=True,target_interpreter_profile='x5_control50_damping_v1',
+                     sdk_quiesce={'library_build_id':'candidate validated in preflight'})
+        self.path.write_text(json.dumps(value))
+        with patch('subprocess.Popen',side_effect=AssertionError('profile parsing must remain inert')):
+            self.assertEqual(read_profile(self.path)['native_reference_api'],'preserve_reference_v1')
+
     def test_prepared_reference_output_requires_explicit_normal_sdk_profile(self):
         from robot_workbench.device_bootstrap import _inference_options
         value=dict(self.profile,disabled_grippers=['right'],inference=dict(prepared_reference_execution=True))
@@ -109,6 +182,25 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotIn('pyrealsense2',sys.modules)
         self.assertNotIn('arx_env.backends.arx5_backend',sys.modules)
         self.assertFalse((self.root/'storage').exists())
+
+    def test_wrist_seed_is_checked_in_the_current_release_before_hardware_start(self):
+        from robot_workbench.device_bootstrap import calibration_configuration
+        config=self.root/'calibration-config.json';self.profile['calibration_config']=str(config)
+        seed=self.root/'release/calibration/configs/wrist-motion-seed-v7.json'
+        config.write_text(json.dumps(dict(wrist_seed_file='configs/wrist-motion-seed-v7.json')))
+        with patch('robot_workbench.device_bootstrap.ROOT',self.root/'release'),patch('subprocess.Popen',side_effect=AssertionError('preflight must not start hardware')):
+            missing=preflight(self.profile,net_root=self.net)
+            self.assertFalse(missing['configuration_ready'])
+            failed=next(row for row in missing['checks'] if row['name']=='calibration wrist_seed_file')
+            self.assertIn('calibration.wrist_seed_file',failed['detail']);self.assertIn(str(seed),failed['detail'])
+            seed.parent.mkdir(parents=True);seed.write_text('{}')
+            self.assertTrue(preflight(self.profile,net_root=self.net)['configuration_ready'])
+            self.assertEqual(calibration_configuration(config)['wrist_seed_file'],str(seed))
+            # Explicit external paths remain explicit; never substitute another seed.
+            config.write_text(json.dumps(dict(wrist_seed_file=str(seed))))
+            self.assertEqual(calibration_configuration(config)['wrist_seed_file'],str(seed))
+            config.write_text(json.dumps(dict(wrist_seed_file=str(seed)+'-absent')))
+            with self.assertRaisesRegex(ValueError,'calibration.wrist_seed_file'):calibration_configuration(config)
 
     def test_profile_rejects_wrong_can_duplicate_serial_and_fake_identity(self):
         for edit in (lambda p:p.update(can_interfaces=dict(left='can1',right='can3')),
@@ -212,7 +304,7 @@ class BootstrapTests(unittest.TestCase):
         result=dict(id='prior-run',status='invalid',label='preserved failure')
         output=first.inference.output
         self.assertEqual(output,Path(profile['storage_root'])/'inference')
-        (output/'history.json').write_text(json.dumps(dict(schema='inference_history.v1',entries=[dict(result=result,path=None)])))
+        first.inference.history.append([(result,None)])
         close_deployment(first)
         second=build_physical_application(profile,output=self.root/'second-service')
         try:
@@ -315,7 +407,7 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(calls,[])
             device.connect({'arms_supported':True})
             self.assertEqual(calls,['constructed'])
-            self.assertEqual(set(device.credentials),{'calibration','collection','inference'})
+            self.assertEqual(set(device.credentials),{'calibration','collection','inference','research'})
             self.assertIs(device.runtime.ref,calibration)
             device.closed.set();device.thread.join(1)
             device.runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'))

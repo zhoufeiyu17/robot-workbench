@@ -24,6 +24,37 @@ BASE566_FAMILY_ID = '9f52982d7f5592583d36d90c48439de173aef110915b0bb658254c8fe69
 BASE566_MODEL_CONFIG = dict(paligemma_variant='gemma_2b', action_expert_variant='gemma_300m',
     dtype='bfloat16', image_keys=list(CAMS), disable_color_aug=False, use_joint_eef_mask=False,
     action_horizon=60, action_dim=32, rtc_max_delay=0)
+MANIPULATION_SCHEMA = 'workbench.manipulation_base566.v1'
+
+
+def native_runtime(bundle):
+    return isinstance(bundle,dict) and bundle.get('schema')==MANIPULATION_SCHEMA
+
+
+def validate_native_descriptor(bundle):
+    """Public checkpoint/implementation identities; host paths stay in the adapter registry."""
+    required={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime'}
+    if not native_runtime(bundle) or set(bundle)!=required:
+        raise ValueError('explicit manipulation Base566 descriptor required')
+    match=re.fullmatch(r'base566-epoch([0-9]+)-step([1-9][0-9]*)',str(bundle['model_id']))
+    if (match is None or type(bundle['epoch'])is not int or type(bundle['step'])is not int
+            or [int(x)for x in match.groups()]!=[bundle['epoch'],bundle['step']]
+            or bundle['backend']not in('torch','triton')):
+        raise ValueError('checkpoint and backend identity differ')
+    def sha(value):return isinstance(value,str)and re.fullmatch('[a-f0-9]{64}',value)is not None
+    artifacts=bundle['artifacts'];runtime=bundle['runtime']
+    if (not isinstance(artifacts,dict) or set(artifacts)!={'checkpoint','metadata','stats','tokenizer','io_contract','model_config'}
+            or any(not isinstance(v,dict) or set(v)!={'sha256'} or not sha(v['sha256']) for v in artifacts.values())
+            or not sha(bundle['model_bundle_sha256'])):
+        raise ValueError('public native descriptor requires actual artifact SHA256 values, without paths')
+    if (artifacts['stats']['sha256']!=BASE566_PINS['stats'] or artifacts['tokenizer']['sha256']!=BASE566_PINS['tokenizer']):
+        raise ValueError('native descriptor differs from frozen Base566 normalization/tokenizer')
+    if (not isinstance(runtime,dict) or set(runtime)!={'adapter','source_manifest_sha256','frozen_model_source_sha256','triton_deployment_sha256'}
+            or runtime['adapter']!='manipulation_process_model_client.v1'
+            or not all(sha(runtime[k])for k in ('source_manifest_sha256','frozen_model_source_sha256'))
+            or (not sha(runtime['triton_deployment_sha256'])if bundle['backend']=='triton' else runtime['triton_deployment_sha256']is not None)):
+        raise ValueError('native implementation and qualified deployment identities required')
+    return deepcopy(bundle)
 BASE379_PINS = dict(
     bundle='64460fbbb8324fd8ae5862aa2bb94568c3af463346c80995fe643f0a2bd05643',
     checkpoint='c9254e838362db0649833fc85fa7f9093075b290c5f81e2bccadceccd3c70b68',
@@ -61,6 +92,12 @@ def model_spec(model_id=BASE379_ID, bundle=None):
                     prompt=PROMPT, pins=BASE379_PINS, label='Base379 · epoch 010 / step 29450')
     if model_family(model_id) == 'base566':
         epoch, step = (int(value) for value in re.fullmatch(r'base566-epoch([0-9]+)-step([0-9]+)', model_id).groups())
+        if native_runtime(bundle):
+            value=validate_native_descriptor(bundle)
+            if value['model_id']!=model_id:raise ValueError('native descriptor model identity differs')
+            return dict(id=model_id,schema=MANIPULATION_SCHEMA,epoch=epoch,step=step,prompt=BASE566_PROMPT,
+                        pins={k:v['sha256']for k,v in value['artifacts'].items()},backend=value['backend'],
+                        label=f'Base566 · epoch {epoch:03d} / step {step} · '+value['backend'])
         pins = dict(BASE566_PINS)
         if bundle is not None:
             if bundle.get('model_id') != model_id or bundle.get('epoch') != epoch or bundle.get('step') != step:
@@ -82,6 +119,17 @@ def model_spec(model_id=BASE379_ID, bundle=None):
 
 def worker_identity(model_id=BASE379_ID, bundle=None):
     spec = model_spec(model_id, bundle); pins = spec['pins']
+    if native_runtime(bundle):
+        value=dict(status='ready',model_id=model_id,epoch=spec['epoch'],step=spec['step'],backend=bundle['backend'],
+            mode='abs',strict_load=bundle['backend']=='torch',checkpoint_sha256=pins['checkpoint'],
+            checkpoint_metadata_sha256=pins['metadata'],stats_sha256=pins['stats'],tokenizer_sha256=pins['tokenizer'],
+            io_contract_sha256=pins['io_contract'],model_config_sha256=pins['model_config'],
+            model_bundle_sha256=bundle['model_bundle_sha256'],runtime=deepcopy(bundle['runtime']),
+            prompt=BASE566_PROMPT,action_horizon=60,history_steps=60,action_hz=30,inference_steps=10,
+            rtc_off=True,vision_variant='original_unpatched',family_identity_sha256=BASE566_FAMILY_ID,
+            history_audit_outputs=False)
+        if bundle['backend']=='triton':value.update(deployment_qualified=True,load_validation='qualified_packed_artifact')
+        return value
     value = dict(status='ready', epoch=spec['epoch'], step=spec['step'], mode='abs', strict_load=True,
         checkpoint_sha256=pins['checkpoint'], stats_sha256=pins['stats'], tokenizer_sha256=pins['tokenizer'],
         checkpoint_metadata_sha256=pins['metadata'], prompt=spec['prompt'], inference_steps=10,
@@ -96,6 +144,7 @@ def worker_identity(model_id=BASE379_ID, bundle=None):
 
 def model_descriptor(model_id=BASE379_ID, bundle=None):
     spec = model_spec(model_id, bundle)
+    if native_runtime(bundle):return validate_native_descriptor(bundle)
     return dict(model_id=spec['id'], epoch=spec['epoch'], step=spec['step'],
         artifacts={key:dict(sha256=value) for key,value in spec['pins'].items()})
 
@@ -112,6 +161,8 @@ def validate_worker_identity(identity, model_id=BASE379_ID, *, full=False, bundl
         expected = {key:expected[key] for key in ('checkpoint_sha256','epoch','step')}
     if not isinstance(identity, dict) or any(identity.get(k) != v for k,v in expected.items()):
         raise ValueError('worker identity differs from pinned '+model_id)
+    if native_runtime(bundle) and bundle['backend']=='triton' and not re.fullmatch('[a-f0-9]{64}',str(identity.get('packed_sha256',''))):
+        raise ValueError('qualified native packed artifact SHA256 required')
     return deepcopy(identity)
 
 
@@ -139,6 +190,10 @@ def validate_base566_metadata(metadata, bundle, stats):
 
 def validate_bundle(bundle, *, verify_files=False):
     """Validate an explicit deployment manifest; caller supplies paths on model host."""
+    if native_runtime(bundle):
+        value=validate_native_descriptor(bundle)
+        if verify_files:raise ValueError('native adapter must verify its registered host artifacts; public descriptors contain no paths')
+        return value
     if isinstance(bundle, dict) and bundle.get('schema') == 'workbench.base566.v1':
         spec = model_spec(bundle.get('model_id'), bundle)
         fixed = dict(schema=spec['schema'], epoch=spec['epoch'], step=spec['step'], prompt=BASE566_PROMPT,

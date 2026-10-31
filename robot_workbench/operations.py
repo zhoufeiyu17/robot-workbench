@@ -43,10 +43,15 @@ class Operation:
     check: Callable
     run: Callable
     verify: Callable
-    requires_support: bool = False
+    requires_support: bool | Callable = False
     cancellable: bool = False
     timeout_s: float | None = None
     parameter_keys: tuple[str, ...] = ()
+
+    def support_required(self, request):
+        value=self.requires_support(deepcopy(request))if callable(self.requires_support)else self.requires_support
+        if type(value)is not bool:raise OperationError('invalid_check','Support policy must return a boolean.')
+        return value
 
 
 def _json(value):
@@ -93,7 +98,7 @@ class OperationService:
             if (not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', row.name)
                     or not row.label or not row.impact
                     or not all(callable(fn) for fn in (row.check, row.run, row.verify))
-                    or type(row.requires_support) is not bool or type(row.cancellable) is not bool
+                    or not(type(row.requires_support)is bool or callable(row.requires_support)) or type(row.cancellable) is not bool
                     or not isinstance(row.parameter_keys, tuple) or any(not isinstance(key, str) for key in row.parameter_keys)
                     or row.timeout_s is not None and (type(row.timeout_s) not in (int, float)
                         or not math.isfinite(row.timeout_s) or row.timeout_s <= 0)):
@@ -160,7 +165,7 @@ class OperationService:
     def _preflight(self, operation, request):
         if not _same(_identity(self.target()), request['expected_target']):
             raise OperationError('target_changed', 'Target identity changed; refresh and review the operation.')
-        if operation.requires_support and request['arms_supported'] is not True:
+        if operation.support_required(request) and request['arms_supported'] is not True:
             raise OperationError('support_required', 'Confirm both arms are supported for this operation and target.')
         reason = operation.check(deepcopy(request))
         if reason is not None:
@@ -180,6 +185,7 @@ class OperationService:
             recent = sorted(self.jobs.values(), key=lambda row: row['created_at_ns'], reverse=True)
             copy_job=job_summary if summary else deepcopy
             for name, operation in self.operations.items():
+                support=operation.requires_support if type(operation.requires_support)is bool else True
                 reason = (self.storage_error or ('Manager is closed.' if self.closed else None)
                           or ('Another management operation is still in flight.' if busy else None)
                           or target_error)
@@ -188,6 +194,7 @@ class OperationService:
                         # Support is separately confirmed on each start, never granted by a GET.
                         request = dict(action=name, request_id='snapshot', expected_target=target,
                                        arms_supported=False)
+                        support=operation.support_required(request)
                         reason = operation.check(deepcopy(request))
                         if reason is not None and (not isinstance(reason, str) or not reason):
                             reason = 'Invalid operation check result.'
@@ -195,7 +202,7 @@ class OperationService:
                         reason = str(exc) or type(exc).__name__
                 latest = next((row for row in recent if row['request']['action'] == name), None)
                 operations[name] = dict(name=name, label=operation.label, impact=operation.impact,
-                    allowed=reason is None, disabled_reason=reason, requires_support=operation.requires_support,
+                    allowed=reason is None, disabled_reason=reason, requires_support=support,
                     cancellable=operation.cancellable, latest_job=copy_job(latest))
             return dict(schema='robot_workbench.operations.v1', target=target, target_error=target_error,
                 operations=operations, busy=busy, active_job=copy_job(self.jobs.get(self.active)),

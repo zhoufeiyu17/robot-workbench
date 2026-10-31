@@ -121,6 +121,10 @@ class StreamingDetection:
         self.stream_id = uuid4().hex
         self.observations, self.summaries = [], []
         self.ended = False
+        self.selected_cup=(pipeline.get('scene_asset_set') or {}).get('cup') or {}
+        if self.selected_cup.get('pose_refinement') is not None:
+            from cup_pose_refinement import validate_spec
+            validate_spec(self.selected_cup['pose_refinement'],self.selected_cup['interaction_profile_sha256'])
 
     def rpc(self, payload, timeout):
         from run_pipeline import transport, python_command
@@ -175,6 +179,9 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:
         if self.summaries and any(summary.get(k) != self.summaries[0].get(k) for k in
                 ('tracking_session_id','runtime_config_id','node_config_sha256','adapter_sha256','service')):
             raise ValueError('detector/model identity changed inside acquisition')
+        if self.selected_cup.get('pose_refinement') is not None:
+            from cup_pose_refinement import refine_observation
+            observation=refine_observation(observation,directory/row['path'],self.selected_cup)
         self.observations.append(observation)
         self.summaries.append(summary)
         # Preserve failed-window observations and exact detector output locations
@@ -207,6 +214,11 @@ with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:
             window_semantics='terminal valid captured samples; >=3 source seconds, >=9 frames, <=1s gaps, cup pairwise span <6mm',
             cleanup_boundary='acquisition tracking reset; shared models retained',
             stream_frame_summaries=[s['manifest_sha256'] for s in self.summaries])
+        if self.selected_cup.get('pose_refinement') is not None:
+            from cup_pose_refinement import source_sha256
+            summary['pose_refinement']=dict(spec=self.selected_cup['pose_refinement'],source_sha256=source_sha256(),
+                applies_before='unchanged full3D continuous observation window',
+                raw_producer='FoundationPose; original outputs retained in each frame provenance')
         detected = capture_dir/'detection';detected.mkdir()
         (detected/'summary.json').write_text(json.dumps(summary,allow_nan=False)+'\n')
         (detected/'observations.jsonl').write_text(''.join(json.dumps(o,allow_nan=False)+'\n' for o in self.observations))

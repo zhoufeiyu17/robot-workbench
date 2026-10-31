@@ -138,6 +138,9 @@ class CalibrationWorkflow:
         report=state.get('pipeline') or {}
         live_run=getattr(self.app,'pipeline_run_id',None)
         report_run=report.get('run_id')
+        restored_failure=report if report_run and report_run==getattr(self.app,'restored_pipeline_report_id',None) and not live_run and state.get('status')=='READY' and report.get('aborted') else None
+        if restored_failure:
+            report={};state={**state,'pipeline':report}
         if live_run and report_run and live_run!=report_run:
             # A new job may be queued before it replaces the prior report. No
             # previous failure, successful install or fraction belongs to it.
@@ -203,6 +206,7 @@ class CalibrationWorkflow:
         if capture_batch:value['details'].append({'label':'采集批次','value':capture_batch})
         value['pipeline']={key:deepcopy(report[key]) for key in
             ('run_id','phase','failed_phase','aborted','stopped','steps','subprogress','head_capture','wrist_capture') if key in report}
+        if restored_failure:value['previous_pipeline']=deepcopy(restored_failure)
         value['quality']=dict(counts=deepcopy(state.get('counts') or {}),completion=deepcopy(completion),
             results=[{key:deepcopy(row[key]) for key in ('half','step','round','result_id','metrics','pair_status','acceptance','reused','adopted') if key in row}
                      for row in report.get('steps',[]) if row.get('metrics') is not None],
@@ -231,6 +235,21 @@ class CalibrationWorkflow:
                 elif hasattr(self.app,'wrist_head_id'):
                     item['details']['head_result_id']=self.app.wrist_head_id(row)
                 catalog.append(item)
+            # Preserve read-only wrist choices even when a changed Workbench
+            # fingerprint excludes them from current execution/install eligibility.
+            if hasattr(self.app,'wrist_overlay_options') and hasattr(self.app,'registered_records'):
+                registered={row['id']:row for row in self.app.registered_records()}
+                present={row['id'] for row in catalog}
+                for option in self.app.wrist_overlay_options():
+                    record=registered.get(option['id'])
+                    if option['id'] in present or option.get('kind')!='wrist' or record is None:continue
+                    row=(record.get('payload') or {}).get('row') or {}
+                    catalog.append(dict(id=option['id'],kind='wrist',label=option.get('version') or option['id'][:12],
+                        status=option.get('pair_status') or 'candidate',mesh_selectable=option.get('selectable') is True,
+                        mesh_reason=option.get('reason'),details={**{k:deepcopy(row[k]) for k in
+                            ('robot_source','simulation_only','left','right','batch','file','acceptance') if k in row},
+                            'environment':record['environment'],'version':record['version'],'head_result_id':record.get('dependency_id'),
+                            'current_geometry':False,'compatibility_reason':option.get('reason')}))
             history=self.app.history()
             catalog += [dict(id='capture:'+row['id'],label=row['id'],kind='capture',status=row.get('status','unknown'),details=deepcopy(row)) for row in history]
             installed=self.app.installed_pair()
@@ -249,6 +268,9 @@ class CalibrationWorkflow:
             self.last_catalog=time.monotonic()
         operation=getattr(self,'operation',None)
         if operation and not running:
+            if value['pipeline']:value['previous_pipeline']=value['pipeline']
+            value['pipeline']={}
+            value['quality']={**{key:value['quality'][key] for key in ('counts','completion')},'results':[]}
             phase=operation['action'];kind=operation['kind']
             status='failed' if state.get('status')=='REJECTED' else 'stopped' if state.get('status')=='STOPPED' else 'running' if busy else 'awaiting_review' if phase=='review' else 'completed'
             titles={'plan':'独立标定批次规划','review':'独立标定批次待审阅','capture':'独立标定批次采集','fit':'指定批次重新求解'}
@@ -398,10 +420,49 @@ class CalibrationWorkflow:
             self.last_catalog=0.
 
     def results(self):
-        with self.lock:return deepcopy(self.catalog)
+        from arx_env.joint_head_calibration_store import calibration_group_id
+        with self.lock:catalog=deepcopy(self.catalog)
+        by_id={row['id']:row for row in catalog};paired=set();groups=[]
+        for wrist in catalog:
+            if wrist.get('kind')!='wrist' or wrist.get('status')!='complete' or not wrist.get('details',{}).get('version'):continue
+            head=by_id.get(wrist.get('details',{}).get('head_result_id'))
+            if not head or head.get('kind')!='head' or not head.get('details',{}).get('version'):continue
+            ident=calibration_group_id(head['id'],wrist['id'])
+            group=deepcopy(head);group.update(id=ident,kind='calibration',status='complete',
+                label='头部与双腕 · '+head['details']['version']+' / '+wrist['details']['version'],
+                components=dict(head=head['id'],wrist=wrist['id']),
+                download_url='/api/calibration-file?'+urlencode(dict(environment=self.device.environment,result_id=ident)))
+            group['details'].update(left=wrist['details'].get('left'),right=wrist['details'].get('right'),
+                wrist_version=wrist['details']['version'],head_result_id=head['id'],wrist_result_id=wrist['id'],
+                current_geometry=wrist['details'].get('current_geometry',True),
+                compatibility_reason=wrist.get('mesh_reason'))
+            gate=group.get('install')
+            if gate and gate.get('wrist_result_id')!=wrist['id']:
+                group['install']=dict(allowed=False,installed=False,head_result_id=head['id'],wrist_result_id=wrist['id'],
+                    reason=wrist.get('mesh_reason') or gate.get('reason') or '当前可安装组不是此双腕版本；旧结果仅供读取与回放')
+            groups.append(group);paired.update((head['id'],wrist['id']))
+        return groups+[row for row in catalog if row['id'] not in paired]
+
+    def mesh_candidates(self):
+        with self.lock:return deepcopy([row for row in self.catalog if row['kind'] in ('head','wrist')])
+
+    def mesh_calibrations(self):
+        components={row['id']:row for row in self.mesh_candidates()}
+        groups=[]
+        for group in self.results():
+            if group['kind']!='calibration':continue
+            wrist=components[group['components']['wrist']]
+            group.update(mesh_selectable=wrist.get('mesh_selectable',True),mesh_reason=wrist.get('mesh_reason'))
+            groups.append(group)
+        return groups
 
     def download(self,identity):
-        if not any(row['id']==identity and row['kind'] in ('head','wrist') for row in self.results()):
+        group=next((row for row in self.results() if row['id']==identity and row['kind']=='calibration'),None)
+        if group:
+            from arx_env.joint_head_calibration_store import bundle_records
+            return bundle_records(*(self.app.calibration_store_record(group['components'][kind]) for kind in ('head','wrist')))
+        # Legacy direct links remain readable; the completed result UI exports one bundle.
+        if not any(row['id']==identity for row in self.mesh_candidates()):
             raise ValueError('所选标定版本不存在')
         return self.app.calibration_store_record(identity)
 
@@ -431,7 +492,7 @@ class CalibrationWorkflow:
         with self.lock:self.value['manual_queue']=queue
         return result
 
-    def manual_preview(self,body,*,queue=False):
+    def manual_preview(self,body,*,queue=False,business='calibration'):
         from arx_env.joint_head_real_motion import DEFAULT_VELOCITY
         if body.get('active_arm') is not None:
             from arx_env.joint_head_real_motion import ARM_SLICES
@@ -456,7 +517,15 @@ class CalibrationWorkflow:
                        jaw_gap_mm=body.get('jaw_gap_mm'),jaw_speed_mm_s=body.get('jaw_speed_mm_s',10.))]
         # Reuse C path/seed policy and the shared Owner compiler; do not send each
         # waypoint separately or hold the page lock during geometry preflight.
-        return self.app.action('/api/hardware-trajectory-preview',{'waypoints':rows})
+        if business=='calibration':return self.app.action('/api/hardware-trajectory-preview',{'waypoints':rows})
+        if business not in ('collection','inference','research') or queue or body.get('active_arm') is not None:
+            raise ValueError('标定队列和单臂诊断仅支持标定业务')
+        runtime=self.device.snapshot(business)
+        raw=(runtime.get('calibration_feedback') or {}).get('qpos')
+        if not isinstance(raw,list) or len(raw)!=14:raise ValueError('当前反馈姿态不完整，未生成人工执行预览')
+        def submit(waypoints):
+            return self.device.submit(business,dict(action='preview_workbench',waypoints=waypoints))
+        return self.app.hardware_trajectory_preview({'waypoints':rows},submit_preview=submit,start_q=raw[:6]+raw[7:13])
 
     def mesh(self):
         remote=self.app.remote or {}
@@ -490,10 +559,19 @@ class CalibrationWorkflow:
 
     def select_result(self,body):
         identity=body.get('result_id')
+        selection_id=identity
+        group=next((row for row in self.results() if row['id']==identity and row['kind']=='calibration'),None)
+        if group:
+            identity=group['components']['wrist' if body.get('camera') in ('left','right') else 'head']
+            body={**body,'result_id':identity}
         with self.lock:previous_context=deepcopy(self.replay_context or {})
         if previous_context.get('result_id')!=identity:previous_context={}
         heads={row['id']:row for row in self.app.calibration_results()}
         wrists={row['id']:row for row in self.app.wrist_results()}
+        if group and identity not in heads and identity not in wrists:
+            record=self.app.calibration_store_record(identity)
+            row=deepcopy(record['payload']['row']);row.update(kind=record['kind'],version=record['version'])
+            (heads if record['kind']=='head' else wrists)[identity]=row
         if identity in heads:kind,row='head',heads[identity];batch=row['batch']
         elif identity in wrists:kind,row='wrist',wrists[identity];batch=str(Path(row['file']).parent)
         elif isinstance(identity,str) and identity.startswith('capture:') and identity[8:] in {r['id'] for r in self.app.history()}:
@@ -547,12 +625,13 @@ class CalibrationWorkflow:
         message='已打开只读回放；未配置实时 mesh 渲染器'
         previous=(self.replay_context or {}).get('result_id')
         if self.snapshot().get('busy') or getattr(self.app,'pipeline_running',False):message='当前任务仍在进行；已打开只读回放，未变更实时叠加选择'
+        elif group:message='已打开完整标定的只读回放；实时 mesh 候选仍在预览区单独选择'
         elif previous==identity or 'candidate_id' in body:message='已更新只读回放'
         elif kind=='wrist' or kind=='head' and getattr(self.app,'live',None):
             reply=self.app.action('/api/wrist-select' if kind=='wrist' else '/api/calibration',{'result_id':identity})
             message=reply.get('message','已选择标定结果')
-        context=dict(result_id=identity,batch_id=batch,frame_index=index,frame_count=len(frames),camera=camera,
-            cameras=sorted(image_urls),overlay=overlay,overlay_available=overlay_available,
+        context=dict(result_id=selection_id,batch_id=batch,frame_index=index,frame_count=len(frames),camera=camera,
+            cameras=['head','left','right'] if group else sorted(image_urls),overlay=overlay,overlay_available=overlay_available,
             candidate_id=overlay_id,candidates=candidates,overlay_result_id=overlay_id if overlay_available else None,
             frame={key:deepcopy(frames[index][key]) for key in
                 ('id','name','image','split','valid','valid_for_fit','detections','detections_by_camera') if key in frames[index]} if frames else None,
@@ -616,6 +695,12 @@ class CalibrationWorkflow:
         if action=='mesh':return self.app.action('/api/overlay-rendering',{'enabled':body.get('enabled')})
         if action=='select_result':return self.select_result(body)
         if action=='install':
+            selected=next((row for row in self.results() if row['id']==body.get('result_id') and row['kind']=='calibration'),None)
+            if selected:
+                gate=selected.get('install') or {}
+                if gate.get('allowed') is not True and gate.get('installed') is not True:
+                    raise ValueError(gate.get('reason') or '本结果仅供历史读取，当前不能安装')
+                body={**body,'result_id':selected['components']['head']}
             group=next((row for row in self.app.calibration_groups() if row['id']==body.get('result_id')),None)
             if not group or not group.get('wrist'):raise ValueError('请选择含头部与匹配双腕的完整标定组')
             if not group.get('installable') and not group.get('installed'):raise ValueError(group.get('reason') or '该组尚不能安装')
@@ -768,7 +853,8 @@ class CollectionWorkflow:
         if not busy:title={'completed':'本次数采流程已完成','failed':'本次数采流程失败','stopped':'本次数采流程已停止'}.get(state.get('status'),title)
         recording=state.get('recording') or {}
         validation=(recording.get('manifest') or {}).get('validation') or {}
-        data_error=recording.get('error') or recording.get('seal_error') or recording.get('diagnostics_error')
+        data_error=(recording.get('error') or recording.get('seal_error') or recording.get('diagnostics_error')
+            or (state.get('errors') or {}).get('dataset'))
         data_outcome=(dict(status='invalid',message=data_error) if data_error else
             {'passed':'valid','failed':'invalid'}.get(validation.get('status')) or recording.get('status') or
             ('pending' if recording.get('done') else 'recording' if recording.get('ready') else '未录制'))
@@ -826,6 +912,9 @@ class CollectionWorkflow:
             diagnostics.append(dict(label='本轮原生任务回执',value=detail))
         simulation=state.get('simulation')
         if isinstance(simulation,dict):diagnostics.append(dict(label='本轮辅助回放',value={key:simulation[key] for key in ('status','scope','same_plant','task_success_evidence','timeline_digest','error') if key in simulation}))
+        if state.get('dataset'):
+            value['collection']['dataset']=deepcopy(state['dataset'])
+            diagnostics.append(dict(label='本轮 LeRobot 保存与原生读回',value=deepcopy(state['dataset'])))
         value['diagnostics']=diagnostics
         catalog=[];files={}
         if plan.get('plan_path') and (plan.get('validated') or state.get('action')=='execute'):

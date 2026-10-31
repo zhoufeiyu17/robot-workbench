@@ -93,6 +93,7 @@ def stage_candidate(path,directory):
         parent_plan_id=parent['run_id'],parent_speed_scale=parent.get('normal_recipe',{}).get('requested_speed_scale',1.),
         source_digest=_digest(source),offset_xy_mm=context['offset_world_xy_mm'],
         origin_position_m=context['return_origin']['position'],goal_position_m=context['return_goal']['position'],
+        return_policy=context.get('return_policy'),
         metal_gap_mm=plan['gripper_distance_control']['closed_metal_gap_mm'])
     directory=Path(directory);directory.mkdir(exist_ok=False)
     for name,value in proof_files.items():(directory/name).write_bytes(value)

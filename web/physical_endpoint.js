@@ -32,7 +32,7 @@ export function mountPhysicalEndpoint({document:doc,fetch:request,location=globa
   const initial=new URLSearchParams(location?.search||new URL(location?.href||'http://localhost/').search);
   let environment=['fake','physical'].includes(initial.get('environment'))?initial.get('environment'):(environmentSelect?.value==='physical'?'physical':'fake'),state=null,stale=true,busy=false,epoch=0,destroyed=false,timer=null,reading=null,review=null,uncertain=null,lastRequest=null,profileKey='',dirty=false,stopFlight=null,stopNotice='',targetError='';
   const listeners=new Set(),same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),copy=value=>JSON.parse(JSON.stringify(value));
-  const business=()=>doc.getElementById('operations-link')?.dataset.business||(['calibration','collection','inference'].includes(initial.get('business'))?initial.get('business'):'calibration');
+  const business=()=>doc.getElementById('operations-link')?.dataset.business||(['calibration','collection','inference','research'].includes(initial.get('business'))?initial.get('business'):'calibration');
   const operation=name=>state?.operations?.[name];
   const compatible=()=>client.compatible(state);
   function permission(name){
@@ -50,7 +50,8 @@ export function mountPhysicalEndpoint({document:doc,fetch:request,location=globa
     retry.hidden=!uncertain;retry.disabled=busy||stale||!compatible()||!same(uncertain?.expected_target,state?.target);
     confirm.disabled=!review||!permission(review.action).allowed||!same(review.target,state?.target)||review.requires_support&&!support.checked;
     reason.textContent=!review?'':!same(review.target,state?.target)?'目标身份已变化，请重新检查':!permission(review.action).allowed?permission(review.action).reason:review.requires_support&&!support.checked?'请确认本次现场支撑条件':'';
-    receipt.href='/operations?environment='+environment+'&business='+business();
+    receipt.href=doc.getElementById('operations-panel')?'#operations-panel':'/operations?environment='+environment+'&business='+business();
+    receipt.onclick=event=>{const panel=doc.getElementById('operations-panel');if(panel){event?.preventDefault();doc.getElementById('operations-link')?.click?.();}};
     for(const listener of listeners)listener();
   }
   function render(){

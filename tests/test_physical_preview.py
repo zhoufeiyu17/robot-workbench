@@ -24,6 +24,43 @@ from robot_workbench.service import Application,Device
 
 
 class PreviewTests(unittest.TestCase):
+    def test_one_group_identity_survives_all_camera_views(self):
+        from arx_env.joint_head_calibration_store import calibration_group_id
+        identity=calibration_group_id('head-a','wrist-a')
+        self.preview.bind_context('group-context');self.preview.start()
+        for camera in ('head','left','right','all'):
+            selected=self.preview.mesh(True,camera=camera,candidate_id=identity)
+            self.assertEqual(selected['candidate_id'],identity)
+            self.wait(lambda:self.preview.state().get('frames',{}).get('mesh',{}).get('camera')==camera)
+            raw,meta=self.preview.media('mesh')
+            self.assertEqual(meta['candidate_id'],identity)
+            self.assertEqual(meta['head_candidate_id'],'head-a')
+            self.assertEqual(meta['wrist_candidate_id'],'wrist-a')
+            self.assertTrue(raw)
+
+    def test_only_explicit_historical_wrist_with_same_sealed_asset_is_displayable(self):
+        assets=dict(asset_geometry_id='asset-a',asset_seal_sha256='seal-a')
+        self.app.config.update(assets)
+        parameters=Workbench.calibration_snapshot(dict(self.head['parameters'],**assets))
+        self.head['parameters']=parameters
+        self.contract.update(assets,geometry_id='old-workbench',head_snapshot=parameters,robot_source='physical',simulation_only=False)
+        self.wrist.update(assets,pair_status='complete',version='v000006')
+        self.wrist['result']=dict(contract_sha256=hashlib.sha256(json.dumps(self.contract,sort_keys=True,allow_nan=False).encode()).hexdigest(),
+            head_snapshot_sha256=parameters['snapshot_sha256'])
+        self.app.wrist_results=lambda:[]  # Current installation/solver eligibility stays strict.
+        self.app.calibration_store_record=lambda identity:dict(id='wrist-a',kind='wrist',version='v000006',environment='hardware',
+            payload=dict(row=deepcopy(self.wrist),contract=deepcopy(self.contract)))
+        self.app.wrist_display_results=lambda:Workbench.wrist_display_results(self.app)
+        with self.assertRaises(ValueError):self.preview._candidates('left','wrist-a')
+        self.app.config['readonly_wrist_candidate_id']='wrist-a'
+        for camera in ('left','right'):
+            selected=self.preview._candidates(camera,'wrist-a')
+            self.assertEqual(selected['candidate_id'],'wrist-a');self.assertEqual(selected['head']['id'],'head-a')
+        self.assertEqual(self.app.wrist_results(),[])
+        self.assertIsNotNone(self.app.wrist_overlay_error(dict(self.wrist,id='another-wrist')))
+        self.app.config['asset_seal_sha256']='different-seal'
+        self.assertIsNotNone(self.app.wrist_overlay_error(self.wrist))
+
     def setUp(self):
         configure_mapping(None)
         self.tmp=TemporaryDirectory();self.addCleanup(self.tmp.cleanup);root=Path(self.tmp.name)

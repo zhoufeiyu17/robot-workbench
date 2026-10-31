@@ -44,7 +44,8 @@ def _inference_options(profile):
     if catalog is not None and (not isinstance(catalog,str) or not Path(catalog).is_absolute() or '..' in Path(catalog).parts):
         raise ValueError('absolute inference catalog_root required')
     options=dict(model_id=model_id,model_bundle=deepcopy(bundle),catalog_root=catalog,
-                disabled_grippers=list(profile['disabled_grippers']),recording_enabled=config.get('recording_enabled',True))
+                disabled_grippers=list(profile['disabled_grippers']),recording_enabled=config.get('recording_enabled',True),
+                control_mapping_pending=config.get('control_mapping_pending'))
     if 'reference_trajectory' in config:options['reference_trajectory']=deepcopy(config['reference_trajectory'])
     if 'prepared_reference_execution'in config:
         if type(config['prepared_reference_execution'])is not bool or config['prepared_reference_execution']and not profile.get('prepared_reference_enabled'):
@@ -59,18 +60,69 @@ def _inference_options(profile):
 
 def read_profile(path):
     value = json.loads(Path(path).read_text())
+    if 'triton_preview' in value:
+        from .triton_preview import validate_config
+        validate_config(value['triton_preview'])
     if (not isinstance(value, dict) or value.get('schema') != 'robot_workbench.physical_device.v1'
             or value.get('environment') != 'physical' or not isinstance(value.get('robot_id'), str)
             or not value['robot_id'].strip() or value['robot_id'].startswith('fake-')):
         raise ValueError('explicit physical-device schema and non-fake robot identity required')
-    # The reused, verified SDK adapter has these exact A1 CAN roles. Fail clearly
-    # for another wiring instead of silently addressing the wrong arm.
-    if value.get('can_interfaces') != {'left': 'can3', 'right': 'can1'}:
-        raise ValueError('current A1 hardware adapter requires left can3 / right can1')
+    expected_can = ({'left': 'can13l', 'right': 'can13r'} if value['robot_id']=='arx13'
+                    else {'left': 'can3', 'right': 'can1'})
+    if value.get('can_interfaces') != expected_can:
+        raise ValueError('CAN roles differ from the declared physical device: '+str(expected_can))
+    if 'acquisition_blocked_reason' in value and (not isinstance(value['acquisition_blocked_reason'],str)
+            or not 1 <= len(value['acquisition_blocked_reason']) <= 1024):
+        raise ValueError('nonempty bounded acquisition_blocked_reason required')
+    if 'exclusive_idle_units' in value and (value['robot_id']!='arx13'
+            or value['exclusive_idle_units']!=['prometheus-arx13-web.service']):
+        raise ValueError('reviewed ARX13 collection handoff unit required')
+    if value.get('initial_hold_mode','manual_gravity') not in ('manual_gravity','retained_hold'):
+        raise ValueError('explicit initial hold mode required')
+    if 'pedal_stop_key_code'in value and (type(value['pedal_stop_key_code'])is not int or not 1<=value['pedal_stop_key_code']<=0x2ff):
+        raise ValueError('pedal_stop_key_code must be an explicit Linux key code in 1..767')
     if value.get('disabled_grippers',[]) not in ([],['left'],['right'],['left','right']):
         raise ValueError('disabled_grippers must list left and/or right explicitly')
     if type(value.get('prepared_reference_enabled',False))is not bool:
         raise ValueError('prepared_reference_enabled must be boolean')
+    from .motion_reference import NATIVE_REFERENCE_APIS
+    native_api=value.get('native_reference_api','legacy_recompute')
+    if native_api not in NATIVE_REFERENCE_APIS:
+        raise ValueError('known native_reference_api required')
+    if native_api=='preserve_reference_v1'and(not value.get('prepared_reference_enabled')
+            or not value.get('target_interpreter_profile')or not isinstance(value.get('sdk_quiesce'),dict)):
+        raise ValueError('preserved reference requires enabled shared windows and a pinned SDK contract')
+    if 'dm_joint_velocity_contract'in value:
+        from .sdk_quiesce import dm_joint_velocity_wire_scale
+        if not isinstance(value.get('sdk_quiesce'),dict):raise ValueError('DM velocity codec requires a pinned SDK')
+        dm_joint_velocity_wire_scale(value['dm_joint_velocity_contract'],can_interfaces=value['can_interfaces'],robot_id=value['robot_id'])
+    if 'native_gripper_calibration' in value:
+        from .sdk_quiesce import load_gripper_calibration
+        if not isinstance(value.get('sdk_quiesce'),dict):raise ValueError('gripper endpoints require pinned SDK')
+        load_gripper_calibration(value['native_gripper_calibration'],robot_id=value['robot_id'])
+        mapping=json.loads(Path(value['jaw_mapping_file']).read_text())
+        if mapping.get('native_gripper_calibration')!=value['native_gripper_calibration']:
+            raise ValueError('jaw mapping and native gripper calibration must share one binding')
+    if 'dm_torque_contract'in value:
+        from .sdk_quiesce import dm_torque_units
+        if (not isinstance(value.get('sdk_quiesce'),dict)or native_api!='preserve_reference_v1'
+                or value.get('ec_torque_contract')is not None or not value.get('dm_joint_velocity_contract')):
+            raise ValueError('DM torque migration requires pinned SDK, velocity mapping, preserved references and legacy EC units')
+        dm_torque_units(value['dm_torque_contract'],can_interfaces=value['can_interfaces'],robot_id=value['robot_id'])
+    if 'ec_torque_contract' in value:
+        from .sdk_quiesce import ec_torque_units,EC_J2_GRAVITY_SCALES,EC_J2_EQUIVALENT_UNITS
+        if not isinstance(value.get('sdk_quiesce'),dict) or native_api!='preserve_reference_v1':
+            raise ValueError('EC torque contract requires pinned SDK and preserved references')
+        mode=ec_torque_units(value['ec_torque_contract'])
+        if mode in EC_J2_GRAVITY_SCALES and mode!=EC_J2_EQUIVALENT_UNITS and 'sdk_gravity_calibration'not in value:
+            raise ValueError('J2 gravity dose requires calibrated gravity binding')
+    if 'sdk_gravity_calibration' in value:
+        from .gravity_calibration import load_gravity_calibration
+        from .sdk_quiesce import ec_torque_units,EC_J2_GRAVITY_SCALES
+        if (not isinstance(value.get('sdk_quiesce'),dict)
+                or ec_torque_units(value.get('ec_torque_contract')) not in(None,*EC_J2_GRAVITY_SCALES)):
+            raise ValueError('gravity calibration requires pinned SDK and reviewed J2 EC units')
+        load_gravity_calibration(value['sdk_gravity_calibration'])
     if value.get('control_owner_descriptor') is not None:
         path=Path(value['control_owner_descriptor'])
         if not path.is_absolute()or '..'in path.parts:raise ValueError('absolute private Owner descriptor required')
@@ -79,6 +131,22 @@ def read_profile(path):
         if (value['target_interpreter_profile'] not in PROFILES or not value.get('prepared_reference_enabled')
                 or 'right_j4_diagnostic_kp' in value or value.get('left_j6_diagnostic')):
             raise ValueError('shared target interpreter requires one trusted motion profile and native windows')
+    if 'motion_gain_profile' in value and (value['motion_gain_profile']!='normal_X5' or not value.get('target_interpreter_profile')):
+        raise ValueError('explicit normal_X5 motion gains require the shared target interpreter')
+    if 'reference_start_allowance' in value:
+        policy=value['reference_start_allowance']
+        if (value['robot_id']!='arx13' or value.get('motion_gain_profile')!='normal_X5'
+                or not isinstance(policy,dict) or set(policy)-{'reference_id','maximum_error_rad','study_bindings'}
+                or not {'reference_id','maximum_error_rad'}<=set(policy)
+                or not isinstance(policy['reference_id'],str) or len(policy['reference_id'])!=64
+                or any(c not in '0123456789abcdef' for c in policy['reference_id'])
+                or type(policy['maximum_error_rad'])not in (int,float)
+                or not .01<policy['maximum_error_rad']<=math.radians(2.)):
+            raise ValueError('ARX13 default-PD study allowance requires one reference and at most 2 degrees')
+        bindings=policy.get('study_bindings',[])
+        if (not isinstance(bindings,list)or len(bindings)>12 or len(set(map(str,bindings)))!=len(bindings)
+                or any(not isinstance(x,str)or len(x)!=64 or any(c not in '0123456789abcdef'for c in x)for x in bindings)):
+            raise ValueError('bounded unique study input hashes required for transient start allowance')
     if type(value.get('left_j6_diagnostic',False))is not bool or value.get('left_j6_diagnostic')and (
             value.get('disabled_grippers')!=['right']or 'right_j4_diagnostic_kp'in value or 'right_j4_diagnostic_kd'in value):
         raise ValueError('left J6 diagnostic requires fixed 40/1 profile and disabled right jaw')
@@ -113,7 +181,8 @@ def read_profile(path):
     setup = value.get('collection_setup')
     if setup is not None:
         import re
-        if (not isinstance(setup,dict) or set(setup)!={'compute','registration','profile_template'}
+        if (not isinstance(setup,dict) or set(setup)-{'compute','registration','profile_template','asset_catalog'}
+                or not {'compute','registration','profile_template'}<=set(setup)
                 or not value.get('calibration_config') or value.get('collection_config')):
             raise ValueError('collection_setup requires current calibration and replaces legacy collection_config')
         for key in ('registration','profile_template'):
@@ -127,6 +196,9 @@ def read_profile(path):
         _paths()
         from artifact_transport import validate_endpoint
         validate_endpoint(compute['endpoint'])
+        if setup.get('asset_catalog') is not None:
+            from .scene_asset_catalog import SceneAssetCatalog
+            SceneAssetCatalog(setup['asset_catalog'],setup)
     if 'calibration_output' in value and (not isinstance(value['calibration_output'],str)
             or not Path(value['calibration_output']).is_absolute()):
         raise ValueError('absolute durable calibration output required')
@@ -147,10 +219,28 @@ def read_profile(path):
             raise ValueError('inference requires an explicitly deployed loopback model endpoint; no automatic SSH route')
         if setup is not None and {'profile_path','binding_path'} & set(inference):
             raise ValueError('current C installation profile cannot be mixed with a static inference profile')
-        for key in (('model_token_file',) if setup is not None else ('model_token_file','profile_path','binding_path')):
+        pending=inference.get('control_mapping_pending')
+        if pending is not None and (not isinstance(pending,str) or not pending.strip() or len(pending)>1024):
+            raise ValueError('explicit bounded pending model control mapping reason required')
+        if pending and {'profile_path','binding_path'}&set(inference):
+            raise ValueError('pending mapping cannot also claim an installed control profile')
+        for key in (('model_token_file',) if setup is not None or pending else ('model_token_file','profile_path','binding_path')):
             if not isinstance(inference.get(key), str) or not Path(inference[key]).is_absolute():
                 raise ValueError('absolute inference artifact path required: '+key)
     return value
+
+
+def calibration_configuration(path):
+    config=json.loads(Path(path).read_text())
+    if not isinstance(config,dict):raise ValueError('calibration configuration must be an object')
+    seed=config.get('wrist_seed_file')
+    if seed is not None:
+        if not isinstance(seed,str) or not seed:raise ValueError('calibration.wrist_seed_file must be a nonempty path')
+        seed_path=ROOT/'calibration'/seed
+        if not seed_path.is_file():
+            raise ValueError('calibration.wrist_seed_file is missing from this deployment: '+str(seed_path))
+        config['wrist_seed_file']=str(seed_path)
+    return config
 
 
 def preflight(profile, *, net_root='/sys/class/net'):
@@ -158,6 +248,15 @@ def preflight(profile, *, net_root='/sys/class/net'):
     checks = []
     def check(name, ok, detail):
         checks.append(dict(name=name, passed=bool(ok), detail=str(detail)))
+    if profile.get('acquisition_blocked_reason'):
+        check('device commissioning',False,profile['acquisition_blocked_reason'])
+    for unit in profile.get('exclusive_idle_units',[]):
+        try:
+            result=subprocess.run(['systemctl','--user','show',unit,'--property=ActiveState,SubState,MainPID'],
+                capture_output=True,text=True,timeout=3)
+            state=dict(line.split('=',1)for line in result.stdout.splitlines()if '='in line)
+            check('exclusive collection handoff',result.returncode==0 and state==dict(ActiveState='inactive',SubState='dead',MainPID='0'),unit+' '+str(state))
+        except (OSError,subprocess.TimeoutExpired)as error:check('exclusive collection handoff',False,str(error))
     if 'sdk_quiesce' in profile:
         from .sdk_quiesce import validate_contract
         try:
@@ -183,6 +282,11 @@ def preflight(profile, *, net_root='/sys/class/net'):
     for key in ('calibration_config', 'collection_config', 'hardware_binding'):
         if key in profile:
             check(key, Path(profile[key]).is_file(), profile[key])
+    if profile.get('calibration_config'):
+        try:
+            config=calibration_configuration(profile['calibration_config'])
+            if config.get('wrist_seed_file'):check('calibration wrist_seed_file',True,config['wrist_seed_file'])
+        except (OSError,ValueError,TypeError) as error:check('calibration wrist_seed_file',False,error)
     for key in ('registration','profile_template'):
         path=(profile.get('collection_setup') or {}).get(key)
         if path:check('collection '+key,Path(path).is_file(),path)
@@ -292,11 +396,11 @@ def physical_runtime_factory(profile, *, recording_factory=None, event=None, har
             execution_root=execution_root, event=event)
         try:
             from arx_env.pedal_stop import PedalStopListener
-            listener = PedalStopListener()
+            listener = PedalStopListener(key_code=profile.get('pedal_stop_key_code',5))
             runtime.owner.listener = listener
             listener.start()
             runtime.owner.backend.connect()
-            runtime.owner.backend.set_damping_hold(manual=True)
+            runtime.owner.backend.set_damping_hold(manual=profile.get('initial_hold_mode','manual_gravity')=='manual_gravity')
         except Exception as exc:
             # Keep the sole Owner/lock even when acquisition partially fails.
             # Explicit supported release is needed before another acquisition.
@@ -388,7 +492,48 @@ class RemoteCollectionPreparation(CollectionPreparation):
     def __init__(self,*,details,calibration,calibration_config,**kwargs):
         self.details=deepcopy(details);self.calibration=calibration
         self.calibration_config=Path(calibration_config)
+        from .scene_asset_catalog import SceneAssetCatalog
+        self.asset_catalog=(SceneAssetCatalog(details['asset_catalog'],details)if details.get('asset_catalog')else None)
         super().__init__(**kwargs)
+
+    def snapshot(self):
+        value=super().snapshot()
+        if self.asset_catalog is not None:
+            value['scene_assets']=self.asset_catalog.public(self.device.environment,
+                requested=value.get('requested_asset_pair_id'),applied=value.get('applied_asset_pair_id'))
+        return value
+
+    def validate_asset_request(self,asset_pair_id=None,expected_catalog_digest=None):
+        if self.asset_catalog is None:return super().validate_asset_request(asset_pair_id,expected_catalog_digest)
+        if asset_pair_id is None and expected_catalog_digest is None:
+            with self.lock:asset_pair_id=self.value.get('requested_asset_pair_id')
+            if asset_pair_id is None:raise ValueError('请先选择与现场实物一致的咖啡机和杯子组合')
+            expected_catalog_digest=self.asset_catalog.digest
+        return asset_pair_id,self.asset_catalog.resolve(asset_pair_id,expected_catalog_digest)
+
+    def _configure_asset_request(self,asset_pair_id,expected_catalog_digest):
+        selection=self.validate_asset_request(asset_pair_id,expected_catalog_digest)
+        if selection is None:return
+        with self.lock:
+            if self.busy or self.running:raise ValueError('数采资产正在准备，不能并发更换组合')
+        self._require_idle()
+        pair,details=selection
+        with self.lock:
+            if self.busy or self.running:raise ValueError('数采资产正在准备，不能并发更换组合')
+            changed=pair!=self.value.get('requested_asset_pair_id')
+            self.details=details
+            if changed:
+                self.request_generation+=1;self.value.update(requested_asset_pair_id=pair)
+        if changed:self.application.invalidate_collection_preparation(self.device)
+
+    def _reuse_parts(self,expected,current):
+        with self.lock:changed=self.value.get('applied_asset_pair_id')!=self.value.get('requested_asset_pair_id')
+        return False if changed else super()._reuse_parts(expected,current)
+
+    def _status(self,status,**fields):
+        if status=='ready' and self.asset_catalog is not None:
+            fields['applied_asset_pair_id']=self.value.get('requested_asset_pair_id')
+        return super()._status(status,**fields)
 
     def installation(self,snapshot):
         if not snapshot or snapshot.get('verified') is not True:
@@ -399,6 +544,12 @@ class RemoteCollectionPreparation(CollectionPreparation):
 
     def _prepare(self,snapshot):
         from .collection_setup import prepare_remote_collection_process
+        from .control_owner import collection_recording_root
+        runtime=self.device.runtime
+        owner_reference=(dict(descriptor=str(runtime.descriptor),runtime_nonce=runtime.nonce)
+            if getattr(runtime,'remote_control_owner',False)else None)
+        recording_root=(collection_recording_root(Path(runtime.descriptor).parent)
+            if owner_reference else self.output/'collection-raw')
         expected=self.installation(snapshot)
         current=self.request_fence(snapshot,expected)
         if not current():raise InterruptedError('remote preparation request or installation changed')
@@ -411,9 +562,10 @@ class RemoteCollectionPreparation(CollectionPreparation):
             calibration_config=self.calibration_config,capture_root=self.calibration.output,expected_install=expected,
             registration=self.details['registration'],profile_template=self.details['profile_template'],
             control_url=self.control_url,token_file=self.token_file,producer_ports=self.ports,producer_directories=self.directories,
-            trusted_binding_path=getattr(self,'binding_path',self.output/'collection-binding.json'),local_recording_root=self.output/'collection-raw',
+            trusted_binding_path=getattr(self,'binding_path',self.output/'collection-binding.json'),local_recording_root=recording_root,
             output=destination,still_current=current,cancel=lambda:not current(),
-            camera_spool_root=Path(self.directories['base_0']).parent)
+            camera_spool_root=Path(self.directories['base_0']).parent,
+            control_owner_reference=owner_reference)
         if not current():raise InterruptedError('late remote preparation was not installed')
         configured_path=Path(configured['setup_path']).parent/'configured.json'
         self._activate_configured(configured,configured_path,expected,time.time_ns()+1200_000_000_000,still_current=current)
@@ -447,6 +599,9 @@ def _attach_remote_collection(profile,deployment,tokens):
 def build_physical_application(profile, *, output, start_cameras=False, event=None):
     """Start only CPU UI/camera backend; sensors require start_cameras explicitly."""
     _paths()
+    if profile.get('native_gripper_calibration'):
+        from arx_env.joint_head_jaw_mapping import configure_mapping
+        configure_mapping(profile['jaw_mapping_file'])
     from .service import Application, Device
     from .bridges import start_control_gateway
     from .rgbd_service import CommonCameraService
@@ -473,6 +628,12 @@ def build_physical_application(profile, *, output, start_cameras=False, event=No
     device = create_device(profile['robot_id'], 'physical', runtime_factory=runtime_factory,
                            label=profile.get('label') or 'A1 真机 · 待显式连接')
     device.control_owner_descriptor=profile.get('control_owner_descriptor')
+    if profile.get('triton_preview'):
+        from .triton_preview import TritonPreviewClient
+        device.triton_preview = TritonPreviewClient(profile['triton_preview'])
+    if profile.get('precision_study'):
+        from .precision_study import PrecisionStudy
+        device.precision_study=PrecisionStudy(device,profile['precision_study'])
     if profile.get('control_owner_descriptor'):
         from .control_owner import ControlRuntimeClient
         try:
@@ -511,7 +672,7 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
     gateway,ports,output = deployment.gateway,deployment.camera_ports,deployment.output
     if profile.get('calibration_config'):
         from examples.scripts.debug.joint_head_workbench import Workbench
-        config = json.loads(Path(profile['calibration_config']).read_text())
+        config = calibration_configuration(profile['calibration_config'])
         if config.get('environment') != 'physical' or config.get('simulation_only') is True:
             raise ValueError('physical calibration configuration required, never relabel a fake config')
         config.setdefault('calibration_root',str(Path(profile['storage_root'])/'calibrations'))
@@ -535,6 +696,8 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
         from .inference_workflow import InferenceWorkflow
         config = profile['inference']
         def profile_provider():
+            if config.get('control_mapping_pending'):
+                raise ValueError(config['control_mapping_pending'])
             from .calibration_profile import load_device_profile
             profile,binding=load_device_profile(config['profile_path'],environment='physical',robot_id=device.id)
             if json.loads(Path(config['binding_path']).read_text())!=binding:
