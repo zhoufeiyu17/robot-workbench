@@ -18,6 +18,24 @@ from examples.scripts.debug.joint_head_real_owner import hardware_backend
 
 
 class TargetInterpreterTests(unittest.TestCase):
+    def test_bound_position_guard_rejects_corrupt_reference_before_sdk(self):
+        from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash
+        reference,_=self.point();original=reference.sample
+        def corrupt(times):
+            q,v,a=original(times);q[:,0]=9.;return q,v,a
+        broken=NS(metadata=reference.metadata,duration_s=reference.duration_s,sample=corrupt)
+        parameters=control_parameters(defaults('inference'),business='inference')
+        frozen=dict(revision=2,parameters=parameters,policy_hash=policy_hash(parameters))
+        guard=Guard.bind(frozen,dict(joint_limits=[[-1.,1.]]*12,feedback_timeout_s=.1,starvation_margin_s=.015))
+        backend=NS(queue_reference=lambda packet:self.fail('G18 must reject before SDK admission'))
+        interpreter=TargetInterpreter(backend,broken,active_arm='left',start_s=100.,epoch=1,
+            current_epoch=lambda:1,gate=lambda:None,clock=lambda:100.,guard=guard)
+        with self.assertRaisesRegex(ValueError,'G18'):
+            interpreter.tick(100.,dict(sample_time_s=100.,qpos=[0.]*14))
+        decision=interpreter.last_timing['guard_decisions'][-1]
+        self.assertEqual(decision['rule_id'],'G18');self.assertEqual(decision['policy_hash'],frozen['policy_hash'])
+        self.assertEqual(decision['observed']['active_arm'],'left')
+
     def test_unknown_torque_units_are_not_accepted_as_legacy(self):
         from robot_workbench.sdk_process import ReferenceWindowRejected
         reference,_=self.point()

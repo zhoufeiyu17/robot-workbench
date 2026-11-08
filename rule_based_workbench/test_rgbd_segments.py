@@ -70,8 +70,9 @@ class BoundsTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             executable=program(Path(directory),'show-env','import json,os\nprint(json.dumps({k:os.environ.get(k) for k in ("LD_PRELOAD","LD_LIBRARY_PATH","PYTHONHOME","PATH")}))\n')
             with patch.dict(os.environ,{'LD_PRELOAD':'/isaac-sim/kit/libcarb.so',
-                                        'LD_LIBRARY_PATH':'/isaac-sim/kit','PYTHONHOME':'/isaac-sim/kit/python'}):
-                child=segments._Child([executable],2)
+                                        'LD_LIBRARY_PATH':'/isaac-sim/kit','PYTHONHOME':'/isaac-sim/kit/python',
+                                        'PATH':directory+os.pathsep+os.environ['PATH']}):
+                child=segments._Child([Path(executable).name],2)
                 try:
                     child.process.stdin.close();output=bytearray()
                     while block:=child.read(1,eof=True):output.extend(block)
@@ -81,6 +82,7 @@ class BoundsTest(unittest.TestCase):
             self.assertIsNone(value['LD_PRELOAD']);self.assertIsNone(value['LD_LIBRARY_PATH'])
             self.assertIsNone(value['PYTHONHOME'])
             self.assertNotIn('isaac',value['PATH'])
+            self.assertNotIn(directory,value['PATH'])
 
     def test_invalid_paths_and_headers(self):
         with TemporaryDirectory() as directory:
@@ -265,16 +267,16 @@ class AsyncCommitTest(unittest.TestCase):
             self.assertTrue(writer.aborted)
             self.assertFalse(list((root / 'base_0').glob('*.commit.json')))
 
-    def test_second_full_segment_has_bounded_backpressure(self):
+    def test_third_full_segment_has_bounded_backpressure(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             probe = program(root, 'stall-probe', 'import time\ntime.sleep(60)\n')
             writer = segments.SegmentWriter(root, 'base_0', segment_frames=3, ffmpeg=self.fake_codec(root),
                                              ffprobe=probe, timeout_s=.3)
             with self.assertRaises(TimeoutError):
-                for index in range(6):
+                for index in range(9):
                     self.add(writer, index)
-            self.assertEqual(writer.issued_index, 2)
+            self.assertEqual(writer.issued_index, 3)
             self.assertTrue(writer.pending.done())
             self.assertFalse(writer._owned_children)
             self.assertFalse(list((root / 'base_0').glob('*.commit.json')))
@@ -284,6 +286,27 @@ class AsyncCommitTest(unittest.TestCase):
 class CodecTest(unittest.TestCase):
     def writer(self, root, **kwargs):
         return segments.SegmentWriter(root, 'base_0', segment_frames=3, ffmpeg=FFMPEG, ffprobe=FFPROBE, **kwargs)
+
+    def test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(self):
+        with segments._PROBE_LOCK:segments._PROBE_CACHE.clear()
+        with TemporaryDirectory()as directory:
+            root=Path(directory);writer=self.writer(root)
+            original=segments.subprocess.Popen;probes=[]
+            def launch(argv,*args,**kwargs):
+                if argv[0]==FFPROBE:probes.append(tuple(argv))
+                return original(argv,*args,**kwargs)
+            with patch.object(segments.subprocess,'Popen',side_effect=launch):
+                for i in range(3):
+                    meta,_,_,color,depth=frame(i);writer.add(meta,color,depth)
+                manifest=writer.finish()[0];count=len(probes)
+                self.assertGreater(count,0)
+                for _ in range(2):segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE)
+                self.assertEqual(len(probes),count,'identical bytes must not be decoded again just to count frames')
+                path=root/manifest['files']['rgb']['path'];before=path.stat();data=bytearray(path.read_bytes())
+                data[-1]^=1;path.write_bytes(data);os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns))
+                with self.assertRaisesRegex(ValueError,'hash/size'):
+                    segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE)
+                self.assertEqual(len(probes),count)
 
     def test_exact_pixels_at_tiny_odd_and_camera_dimensions(self):
         # Small images exposed FFV1's automatic slice-grid row loss. Exercise

@@ -778,26 +778,28 @@ def export_playback(raw_root,target_manifest_path,output,*,runner=subprocess.run
             stamps = [sample_stamp({**row,'host_receive_ns':int(row['host_receive_ns'])},clock)[0] for row in rows]
             periods = [(b-a)/1e9 for a,b in zip(stamps,stamps[1:])]
             last = statistics.median(periods) if periods else 1/rows[0]['capture_fps']
-            # Concat parses each duration in microseconds. Quantize absolute
-            # offsets first so sub-microsecond rounding cannot accumulate.
+            # Quantize absolute source PTS so rounding cannot accumulate.
             offsets_us = [(stamp-stamps[0]+500)//1000 for stamp in stamps]
-            concat_periods = [(b-a)/1e6 for a,b in zip(offsets_us,offsets_us[1:])]
             entries = []
-            for index,(row,duration) in enumerate(zip(rows,concat_periods+[last])):
+            for index,row in enumerate(rows):
                 path = temporary/f'{camera}-{index:08d}.png'
                 escaped = str(path).replace("'", "'\\''")
-                entries.extend([f"file '{escaped}'",'option framerate 1000',f'duration {duration:.9f}'])
+                entries.append(f"file '{escaped}'")
             concat = temporary/f'{camera}.txt'; concat.write_text('\n'.join(entries)+'\n')
+            from segmented_playback import _setpts
+            filters=temporary/f'{camera}.filter'
+            filters.write_text("settb=1/1000000,setpts='"+_setpts(offsets_us)+"'\n")
             destination = output/f'source-{camera}.mp4'
-            # Concat does not carry the final duration through encoding. Disable
-            # frame reordering so the final packet is the final displayed frame,
-            # then set its duration without adding a frame or changing captured PTS.
-            tail_ns = max(1, round(last * 1e9))
+            # Use the same source-PTS/tail contract as segmented playback;
+            # old concat demuxers do not support per-file framerate options.
+            tail_us = max(1, round(last * 1e6))
             before=time.monotonic()
-            runner(['ffmpeg','-nostdin','-v','error','-n','-threads','2','-f','concat','-safe','0','-i',str(concat),
+            runner(['ffmpeg','-nostdin','-v','error','-n','-threads','2','-f','concat','-safe','0',
+                    '-r',f'1000000/{tail_us}','-i',str(concat),
+                    '-filter_script:v',str(filters),'-frames:v',str(len(rows)),
                     '-an','-c:v','libx264','-threads','2','-preset','fast','-crf','24','-pix_fmt','yuv420p',
-                    '-bf','0','-bsf:v',f'setts=duration=if(eq(N\\,{len(rows)-1})\\,{tail_ns}/1000000000/TB\\,DURATION)',
-                    '-fps_mode','vfr','-enc_time_base','1:1000','-video_track_timescale','1000000','-movflags','+faststart',str(destination)],check=True,timeout=300)
+                    '-bf','0',
+                    '-vsync','vfr','-enc_time_base','1:1000000','-video_track_timescale','1000000','-movflags','+faststart',str(destination)],check=True,timeout=300)
             diagnostics['cameras'][camera]['encode_wall_s']=time.monotonic()-before
             timing[camera] = dict(clock='simulation' if environment=='fake' else 'host_receive',frame_offsets_s=[(stamp-command_start)/1e9 for stamp in stamps],
                                  frame_count=len(rows),depth_in_raw=True,last_frame_duration_s=last,

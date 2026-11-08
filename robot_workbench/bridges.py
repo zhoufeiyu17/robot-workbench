@@ -114,7 +114,7 @@ class CameraMedia:
     def refresh(self):
         raw,metadata=self.read_frame()
         frame_id=metadata.get('pair_id',metadata.get('frame_number'))
-        stamp=metadata.get('host_receive_ns',metadata.get('frame_timestamp_ns'))
+        stamp=metadata.get('host_receive_ns')or metadata.get('source_time_ns')or metadata.get('frame_timestamp_ns')
         if frame_id is None or stamp is None:raise ValueError('frame identity and source timestamp required')
         if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,200}',str(frame_id)) or type(stamp) is bool or int(stamp)<=0:
             raise ValueError('invalid frame identity or actual wall timestamp')

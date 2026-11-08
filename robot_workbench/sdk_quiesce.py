@@ -78,16 +78,18 @@ def load_gripper_calibration(pin, *, robot_id=None):
     import math
     value=json.loads(_read(pin))
     if (not isinstance(value,dict) or set(value)!={'schema','robot_id','source','sdk_width_m','sides'}
-            or value['schema']!='native_gripper_endpoints.v1' or value['robot_id']!='arx13'
+            or value['schema']!='native_gripper_endpoints.v1' or value['robot_id']not in ('arx6','arx13')
             or robot_id is not None and value['robot_id']!=robot_id
             or value['sdk_width_m']!=.082 or not isinstance(value['sides'],dict) or set(value['sides'])!={'left','right'}):
         raise ValueError('exact machine-bound native gripper endpoint schema required')
     source=json.loads(_read(value['source']))
-    if (source.get('id')!=value['robot_id'] or source.get('left_can')!='can13l'
-            or source.get('right_can')!='can13r' or source.get('left_model')!='X5' or source.get('right_model')!='X5'):
+    buses={'left':'can3','right':'can1'}if value['robot_id']=='arx6'else{'left':'can13l','right':'can13r'}
+    if (source.get('id')!=value['robot_id'] or any(source.get(side+'_can')!=bus for side,bus in buses.items())
+            or source.get('left_model')!='X5' or source.get('right_model')!='X5'):
         raise ValueError('gripper source hardware identity differs')
     for side,row in value['sides'].items():
         expected={name:source.get(side+'_gripper_'+name) for name in ('open_readout','closed_readout','width_m')}
+        if expected['width_m']is None:expected['width_m']=source.get('gripper_width_m')
         if (row!=expected or any(type(v)not in(int,float) or not math.isfinite(v) for v in row.values())
                 or not 0<row['width_m']<=.1 or max(abs(row['open_readout']),abs(row['closed_readout']))>12.5
                 or abs(row['open_readout']-row['closed_readout'])<.05):

@@ -35,6 +35,30 @@ def observation(state='DISCONNECTED',connected=False):
 
 
 class StartupTest(unittest.TestCase):
+    def test_native_camera_uses_its_live_registered_recording_descriptor(self):
+        self.assertEqual(d.camera_descriptor({'native_rgb':{'directory':'/dev/shm/cpu'}},{}),'/dev/shm/cpu/recording-camera-service.json')
+        self.assertEqual(d.camera_descriptor({}, {'camera_service_descriptor':'/registered/rgbd.json'}),'/registered/rgbd.json')
+        self.assertIsNone(d.camera_descriptor({},{}))
+
+    def test_live_camera_owner_descriptor_is_not_a_static_release_input(self):
+        with TemporaryDirectory()as tmp:
+            root=Path(tmp);entry=root/'serve_prometheus_rgb.py';entry.write_text('pass\n')
+            live=root/'owner.json';live.write_text('{}');profile=root/'profile.json';profile.write_text('{}')
+            self.assertEqual(list(d.command_inputs(['/usr/bin/python3',str(entry),'--owner',str(live),'--profile',str(profile)])),[str(entry),str(profile)])
+            camera=root/'camera_owner.py';camera.write_text('pass\n')
+            self.assertEqual(list(d.command_inputs(['/usr/bin/python3',str(camera),'--observe-existing','--state',str(live)])),[str(camera)])
+
+    def test_seal_existing_user_unit_model_keeps_endpoint_and_credential_binding(self):
+        with TemporaryDirectory()as tmp:
+            root=Path(tmp);unit=root/'model.service';script=root/'serve_mixed366_model.py';credential=root/'model-token'
+            unit.write_text(f'ExecStart=/usr/bin/python3 {script} --registry {root}/registry.json --token-file {credential} --port 18925\n')
+            spec=dict(kind='user_unit',unit='robot-workbench-model.service',expected_script=str(script),identity_path=str(root/'identity.json'))
+            manager=dict(model_port=18925,services={'model':spec});business=dict(inference=dict(model_endpoint='http://127.0.0.1:18925',model_token_file=str(credential)))
+            with patch.object(d,'unit_pin',return_value=dict(unit=spec['unit'],files={str(unit):'a'*64})):
+                self.assertEqual(d.seal_model_service(manager,business)['kind'],'user_unit')
+                for body in (dict(business,inference=dict(business['inference'],model_token_file='/different')),dict(business,inference=dict(business['inference'],model_endpoint='http://127.0.0.1:18926'))):
+                    with self.assertRaises(d.Blocked):d.seal_model_service(manager,body)
+
     def setUp(self):
         self.temp=TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         self.m=dict(root=str(self.root),device_id='arx13',url='http://10.17.32.3:18868',
@@ -45,6 +69,16 @@ class StartupTest(unittest.TestCase):
         d.private_write(self.m['owner_descriptor'],dict(identity=dict(pid=42)))
         self.events=[]
     def units(self,running=False):return {k:Unit(k,self.events,running)for k in d.ORDER}
+    def test_recording_starts_before_consumers_and_checks_its_own_pid(self):
+        units=self.units();units['recording']=Unit('recording',self.events)
+        self.m['services']['recording']=dict(unit='recording.service',expected_script='/none/recording.py')
+        with patch.dict(os.environ,WORKBENCH_RECORDING_SERVICE='/registered/service.json'),patch.object(
+                d,'observe',return_value=observation()),patch.object(d,'old_owner_files'),patch(
+                'robot_workbench.control_owner.ControlChannel') as channel,patch(
+                'robot_workbench.recording_process.recording_call',return_value=dict(ready=True,pid=42)) as call:
+            channel.return_value.call.return_value={'connected':False}
+            self.assertTrue(d.start(self.m,units)['ok'])
+        self.assertEqual(self.events,['recording',*d.ORDER]);call.assert_called_with('/registered/service.json','inspect',timeout=2)
     def test_cold_start_order_and_new_owner_is_inert(self):
         units=self.units()
         with patch.object(d,'observe',return_value=observation()),patch.object(d,'old_owner_files')as cleanup,patch('robot_workbench.control_owner.ControlChannel')as channel:
@@ -52,6 +86,15 @@ class StartupTest(unittest.TestCase):
             result=d.start(self.m,units)
         self.assertTrue(result['ok']);self.assertEqual(self.events,list(d.ORDER));self.assertEqual(result['sdk_acquisitions'],0)
         channel.return_value.call.assert_called_once_with('inspect');self.assertEqual(cleanup.call_count,2);cleanup.assert_called_with(self.m,apply=True)
+
+    def test_ros_cold_start_uses_live_frames_without_legacy_camera_descriptor(self):
+        self.m['camera_descriptor']=None
+        with patch.object(d,'observe',return_value=observation()),patch.object(d,'old_owner_files'),\
+                patch('robot_workbench.control_owner.ControlChannel') as channel:
+            channel.return_value.call.return_value={'connected':False}
+            result=d.start(self.m,self.units())
+        self.assertTrue(result['checks']['cameras_ready'])
+        self.assertEqual(result['sdk_acquisitions'],0)
     def test_repeated_start_preserves_live_control_without_lifecycle_calls(self):
         with patch.object(d,'observe',return_value=observation('READY',True)):
             result=d.start(self.m,self.units(True))

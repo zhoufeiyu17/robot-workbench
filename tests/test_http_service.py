@@ -21,6 +21,88 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_inference_page_reuses_its_snapshot_for_action_permissions(self):
+        from test_inference_workflow import InferenceWorkflowTests
+        fixture=InferenceWorkflowTests('runTest');fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        flow=fixture.workflow
+        self.device.workflows['inference']=flow
+        with patch.object(flow,'snapshot',wraps=flow.snapshot) as snapshot:
+            state=self.state('inference')
+        # One workflow view plus the existing execution-settings view. The
+        # per-action loop must never copy the growing mode receipt ledger.
+        self.assertEqual(snapshot.call_count,2)
+        self.assertFalse(state['workflow']['busy'])
+        self.assertFalse(state['runtime']['allowed_operations']['execute']['allowed'])
+
+    def test_page_module_dependency_graph_loads_without_connecting_device(self):
+        import re
+        from urllib.parse import urljoin
+        with self.http.open(self.url+'/') as response:
+            html=response.read().decode()
+        pending=re.findall(r'(?:src|href)="([^"]+\.(?:js|css))"',html)
+        seen=set()
+        while pending:
+            path=pending.pop()
+            if path in seen:continue
+            seen.add(path)
+            with self.http.open(self.url+path) as response:
+                raw=response.read()
+                self.assertIn(response.headers['Content-Type'],('text/javascript','application/javascript','text/css'))
+            relative=path.removeprefix('/web/')
+            self.assertEqual(raw,(ROOT/'web'/relative).read_bytes())
+            if path.endswith('.js'):
+                dependencies=re.findall(r"(?:\bfrom\s*|\bimport\s*\()\s*['\"]([^'\"]+)['\"]",raw.decode())
+                pending.extend(urljoin(path,value) for value in dependencies if value.startswith('.'))
+        self.assertIn('/web/physical_endpoint.js',seen)
+        self.assertIn('/web/operations.js',seen)
+        for path in ('/web/../AGENTS.md','/web/unknown.js','/web/vendor/unknown.js'):
+            with self.assertRaises(HTTPError) as error:self.http.open(self.url+path)
+            self.assertEqual(error.exception.code,404)
+        self.assertIsNone(self.device.runtime)
+
+    def test_control_policy_read_commit_conflict_and_retry(self):
+        url=lambda business:self.url+'/api/control-policy?environment=fake&business='+business
+        with self.assertRaises(HTTPError):self.http.open(url('calibration'))
+        self.connect()
+        initial=json.loads(self.http.open(url('calibration')).read())
+        body=dict(environment='fake',business='calibration',request_id='policy-write',
+                  expected_revision=initial['revision'],changes={'measured.limit_rad_s':1.1,'tracking.enabled':False})
+        def submit(value):
+            request=Request(self.url+'/api/actions/control_policy',json.dumps(value).encode(),headers={
+                'Content-Type':'application/json','Origin':self.url,'X-CSRF-Token':self.app.csrf})
+            return json.loads(self.http.open(request,timeout=2).read())
+        result=submit(body)
+        self.assertEqual(submit(body),result)
+        updated=json.loads(self.http.open(url('calibration')).read())
+        self.assertEqual(updated['revision'],initial['revision']+1)
+        self.assertEqual(updated['parameters']['measured']['limit_rad_s'],1.1)
+        self.assertNotIn('policy_id',updated)
+        with self.assertRaises(HTTPError):submit(dict(body,request_id='stale-policy'))
+        with self.assertRaises(HTTPError):self.action('control_policy',business='collection',expected_revision=updated['revision'],changes={'measured.limit_rad_s':1.})
+        self.assertFalse(self.state()['runtime']['automatic_enabled'])
+
+    def test_control_policy_storage_does_not_hold_the_stop_http_path(self):
+        self.connect();entered=threading.Event();release=threading.Event();results=[]
+        runtime=self.device.runtime;original=Path.write_text
+        def write(path,*args,**kwargs):
+            if path==runtime.execution_settings_path.with_suffix('.tmp'):
+                entered.set()
+                if not release.wait(3):raise TimeoutError('test storage barrier')
+            return original(path,*args,**kwargs)
+        def commit():
+            try:results.append(self.action('control_policy',expected_revision=0,changes={'arrival.jaw_mm':3.}))
+            except Exception as error:results.append(error)
+        with patch.object(Path,'write_text',write):
+            thread=threading.Thread(target=commit);thread.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                start=time.monotonic();code,_=self.action('stop')
+                self.assertEqual(code,200);self.assertLess(time.monotonic()-start,.3)
+                self.assertFalse(release.is_set())
+            finally:release.set();thread.join(3)
+        self.assertFalse(thread.is_alive());self.assertIsInstance(results[0],tuple)
+
     def test_disconnected_manual_definition_comes_from_model_for_all_businesses(self):
         limits=[[-1.,1.]]*12
         self.device.workflows['calibration']=SimpleNamespace(
@@ -219,7 +301,9 @@ class HTTPTest(unittest.TestCase):
                 if pause==name:entered.set();release.wait(2)
             def bind_device(self):
                 if device.runtime.holder!='inference':raise ValueError('not inference holder')
+                self.generation+=1;generation=self.generation
                 self.step('bind')
+                return dict(generation=generation)
             def preview_episode(self,seed=0,duration_s=40):
                 self.step('preview');self.last_review=dict(token='cpu-episode-token',seed=seed,duration_s=duration_s)
                 return {'preview':dict(self.last_review)}
@@ -280,14 +364,17 @@ class HTTPTest(unittest.TestCase):
         with self.assertRaises(HTTPError):request(dict(data,duration_s=40))
         self.assertEqual(calls.count('execute'),1)
 
-    def test_run_default_duration_is_120_and_other_durations_are_rejected(self):
+    def test_run_default_duration_is_120_and_arbitrary_positive_durations_are_accepted(self):
         flow,calls,_,_=self.infer_run_fixture();body=self.infer_run_body()
-        for duration in (0,3,39,41,True,'1',float('nan')):
+        for duration in (0,-1,True,'1',float('nan'),float('inf')):
             with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**dict(body,duration_s=duration))
         self.assertIsNone(self.device.runtime);self.assertFalse(calls)
         self.connect();body=self.infer_run_body();body.pop('duration_s');self.action('inference_run',business='inference',**body)
         job=self.wait_infer_job('completed');self.assertEqual(flow.last_review['duration_s'],120)
         self.assertEqual(job['result']['duration_s'],120)
+        for duration in (5,5.125,39):
+            self.action('inference_run',business='inference',**dict(self.infer_run_body(),duration_s=duration))
+            job=self.wait_infer_job('completed');self.assertEqual(job['result']['duration_s'],duration)
 
     def test_one_second_run_rejects_a_wrong_duration_review_before_confirmation(self):
         flow,calls,_,_=self.infer_run_fixture();self.connect();original=flow.preview_episode
@@ -305,7 +392,7 @@ class HTTPTest(unittest.TestCase):
     def test_one_run_rejects_stale_context_missing_consent_busy_other_business_and_fault(self):
         _,calls,_,_=self.infer_run_fixture();body=self.infer_run_body()
         for change in ({'physical_clearance':False},{'scene_reset':False},{'expected_bundle_digest':'b'*64},
-                       {'state_wall_ns':0},{'expected_context':{}},{'duration_s':41}):
+                       {'state_wall_ns':0},{'expected_context':{}},{'duration_s':-41}):
             with self.assertRaises(HTTPError):self.action('inference_run',business='inference',**dict(body,**change))
         self.assertIsNone(self.device.runtime);self.assertFalse(calls)
         self.connect()
@@ -322,6 +409,18 @@ class HTTPTest(unittest.TestCase):
         self.action('inference_run',business='inference',**self.infer_run_body());self.assertTrue(entered.wait(1))
         start=time.monotonic();self.action('stop',business='inference');self.assertLess(time.monotonic()-start,.2)
         release.set();self.wait_infer_job('cancelled');self.assertEqual(calls,['bind'])
+
+    def test_operator_hold_during_review_cancels_preparation_without_motion_or_release(self):
+        flow,calls,entered,release=self.infer_run_fixture('preview');self.connect()
+        flow.request_operator_stop=lambda request_id:dict(accepted=True,no_op=True)
+        self.action('inference_run',business='inference',**self.infer_run_body());self.assertTrue(entered.wait(1))
+        state=self.device.snapshot('inference');nonce=self.device.runtime.nonce
+        self.action('inference_hold',business='inference',runtime_nonce=nonce,epoch=state['command_epoch'])
+        release.set();self.wait_infer_job('completed')
+        self.assertEqual(calls,['bind','preview'])
+        self.assertTrue(self.app.jobs[('fake','inference')]['result']['operator_stopped'])
+        self.assertEqual(self.device.runtime.nonce,nonce)
+        self.assertTrue(self.device.snapshot('inference')['connected'])
 
     def test_disconnected_run_reports_operations_gap_without_calling_factory(self):
         _,calls,_,_=self.infer_run_fixture()
@@ -390,7 +489,7 @@ class HTTPTest(unittest.TestCase):
         self.action('handoff',target_business='collection')
         self.assertNotIn(('fake','inference'),self.app.reviews)
         self.assertEqual(self.device.runtime.holder,'collection')
-        for body in (dict(model_path='/tmp/model'),dict(duration_s=41),dict(seed=-1),dict(seed=True)):
+        for body in (dict(model_path='/tmp/model'),dict(duration_s=-41),dict(seed=-1),dict(seed=True)):
             with self.assertRaises(HTTPError):self.action('inference_prepare',business='inference',**body)
 
     def test_inference_history_shares_media_route_without_connecting(self):

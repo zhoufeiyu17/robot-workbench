@@ -214,6 +214,108 @@ def _extrema(coefficients,breaks):
     return lo,hi,velocity,acceleration
 
 
+def _check_c2(coefficients,breaks):
+    """Numerical polynomial identity check, not a physical tracking tolerance."""
+    for index,(c,width)in enumerate(zip(coefficients,np.diff(breaks))):
+        q=c[0].copy();v=np.zeros(12);a=np.zeros(12)
+        for term in c[1:]:
+            a=a*width+2*v;v=v*width+q;q=q*width+term
+        expected=([coefficients[index+1,-1],coefficients[index+1,-2],2*coefficients[index+1,-3]]
+                  if index+1<len(coefficients)else[q,np.zeros(12),np.zeros(12)])
+        if any(not np.allclose(x,y,rtol=1e-9,atol=1e-9)for x,y in zip((q,v,a),expected)):
+            raise ValueError('normal reference requires joint C2 joins and a zero-v/a terminal hold')
+
+
+def infer_reference_policy(value):
+    """Explicit current-infer policy; never changes legacy/research defaults."""
+    expected=dict(schema='workbench.infer-reference-policy.v1',curve='cubic_c2_quintic_ends',
+        velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
+        boundary_scope='complete_prepared_segment',timing_policy='retime_allowed')
+    if (not isinstance(value,dict)or set(value)!=set(expected)|{'max_execution_duration_s'}
+            or any(value[k]!=v for k,v in expected.items() if k not in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
+            or any(type(value[k])not in(int,float) for k in('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s','max_execution_duration_s'))
+            or any(not math.isfinite(value[k]) or not 0<value[k]<=expected[k] for k in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
+            or not math.isfinite(value['max_execution_duration_s'])or not 0<value['max_execution_duration_s']<=8.):
+        raise ValueError('explicit reviewed infer curve policy and complete-segment boundaries required')
+    result=dict(expected,max_execution_duration_s=float(value['max_execution_duration_s']))
+    for key in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'):
+        result[key]=float(value[key])
+    return result
+
+
+def _quintic_end(q0,q1,v0,v1,a0,a1,width):
+    """Hermite coefficients for one endpoint segment, vectorized over joints."""
+    d=q1-q0-v0*width-a0*width**2/2
+    v=(v1-v0)*width-a0*width**2;a=(a1-a0)*width**2
+    return np.stack([6*d-3*v+a/2,-15*d+7*v-a,10*d-4*v+a/2,
+        a0*width**2/2,v0*width,q0])/width**np.arange(5,-1,-1)[:,None]
+
+
+def _cubic_with_quintic_ends(breaks,q,initial_velocity,initial_acceleration):
+    from scipy.interpolate import CubicSpline
+    zero=np.zeros(12)
+    if len(breaks)==2:
+        return _quintic_end(q[0],q[-1],initial_velocity,zero,initial_acceleration,zero,breaks[-1])[None]
+    spline=CubicSpline(breaks,q,axis=0,bc_type=((1,initial_velocity),(1,zero)))
+    c=np.pad(np.moveaxis(spline.c,1,0),((0,0),(2,0),(0,0)))
+    # Interior cubic q/v/a are shared at every join. Only the two outer a
+    # constraints need quintics; interior accelerations are never forced to 0.
+    c[0]=_quintic_end(q[0],q[1],initial_velocity,spline(breaks[1],1),
+        initial_acceleration,spline(breaks[1],2),breaks[1]-breaks[0])
+    c[-1]=_quintic_end(q[-2],q[-1],spline(breaks[-2],1),zero,
+        spline(breaks[-2],2),zero,breaks[-1]-breaks[-2])
+    return c
+
+
+def _root_real_parts(rows):
+    """All real-root candidates, grouped by exact polynomial degree.
+
+    Include the real parts of complex roots as extra sample points too. This
+    cannot enlarge the true range and avoids dropping near-real multiple roots
+    via an imaginary tolerance. No stationary-root sampling shortcut is used.
+    """
+    if rows.shape[1]<=1:return np.empty((len(rows),0))
+    maximum=rows.shape[1]-1;roots=np.full((len(rows),maximum),np.nan)
+    nonzero=rows!=0;degree=np.where(nonzero.any(axis=1),maximum-nonzero.argmax(axis=1),0)
+    for order in range(1,maximum+1):
+        indices=np.flatnonzero(degree==order)
+        if not len(indices):continue
+        c=rows[indices,-order-1:]
+        if order==1:values=(-c[:,1]/c[:,0])[:,None]
+        else:
+            companion=np.zeros((len(indices),order,order))
+            companion[:,1:,:-1]=np.eye(order-1)
+            companion[:,0,:]=-c[:,1:]/c[:,0,None]
+            if not np.isfinite(companion).all():raise ValueError('nonfinite polynomial companion; no path admission')
+            values=np.linalg.eigvals(companion).real
+        if not np.isfinite(values).all():raise ValueError('nonfinite polynomial roots; no path admission')
+        roots[indices,:order]=values
+    return roots
+
+
+def _extrema_batched(coefficients,breaks):
+    """Full polynomial extrema, vectorized in normalized segment time [0,1]."""
+    c=np.asarray(coefficients,dtype=float);b=np.asarray(breaks,dtype=float)
+    if (c.ndim!=3 or c.shape[2]!=12 or not 2<=c.shape[1]<=6 or b.shape!=(len(c)+1,)
+            or not np.isfinite(c).all()or not np.isfinite(b).all()or np.any(np.diff(b)<=0)):
+        raise ValueError('finite piecewise polynomial and increasing breaks required')
+    widths=np.diff(b);powers=np.arange(c.shape[1]-1,-1,-1)
+    rows=(c*widths[:,None,None]**powers[None,:,None]).transpose(0,2,1).reshape(-1,len(powers))
+    bounds=[]
+    for order in range(3):
+        derivative=rows[:,:-1]*np.arange(rows.shape[1]-1,0,-1)
+        roots=_root_real_parts(derivative)
+        candidates=np.c_[np.zeros(len(rows)),np.ones(len(rows)),np.where((roots>0)&(roots<1),roots,0.)]
+        values=np.zeros_like(candidates)
+        for coefficient in rows.T:values=values*candidates+coefficient[:,None]
+        values/=np.repeat(widths,12)[:,None]**order
+        if not np.isfinite(values).all():raise ValueError('nonfinite polynomial extrema; no path admission')
+        bounds.append((values.min(axis=1).reshape(-1,12).min(axis=0),
+                       values.max(axis=1).reshape(-1,12).max(axis=0)))
+        rows=derivative
+    return bounds[0][0],bounds[0][1],np.maximum(abs(bounds[1][0]),abs(bounds[1][1])),np.maximum(abs(bounds[2][0]),abs(bounds[2][1]))
+
+
 @dataclass(frozen=True)
 class PreparedReference:
     breaks:np.ndarray
@@ -240,7 +342,7 @@ class PreparedReference:
             acceleration=acceleration*u+2*velocity
             velocity=velocity*u+joint
             joint=joint*u+term
-        velocity[(t<=0)|(t>=self.duration_s)]=0.
+        velocity[(t<0)|(t>=self.duration_s)]=0.
         acceleration[(t<0)|(t>self.duration_s)]=0.
         q=np.zeros((len(t),14));dq=np.zeros_like(q);ddq=np.zeros_like(q)
         q[:,JOINTS]=joint;dq[:,JOINTS]=velocity;ddq[:,JOINTS]=acceleration
@@ -261,76 +363,383 @@ class PreparedReference:
 
 
 def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
-                      velocity_limit=.25,acceleration_limit=1.,timing_policy='retime_allowed'):
+                      velocity_limit=.25,acceleration_limit=1.,timing_policy='retime_allowed',sdk_targets14=None,jaw_scales=None,
+                      planning_policy=None,initial_velocity_sdk14=None,initial_acceleration_sdk14=None,timing=None):
     """Pure CPU preparation. No SDK, camera, model or file access."""
-    from scipy.interpolate import CubicSpline, PchipInterpolator, CubicHermiteSpline
+    from scipy.interpolate import CubicSpline, PchipInterpolator, BPoly, PPoly
     from .inference_owner import sdk_target
+    import time
+    started=time.perf_counter();fit_wall=extrema_wall=0.
+    policy=None if planning_policy is None else infer_reference_policy(planning_policy)
+    if policy is not None:
+        if source.get('kind')!='online_prediction_chunk':raise ValueError('new planning policy is only for explicit online infer segments')
+        if timing_policy!=policy['timing_policy']:raise ValueError('timing policy differs from frozen infer policy')
+        velocity_limit=policy['velocity_limit_rad_s'];acceleration_limit=policy['acceleration_limit_rad_s2']
+    elif initial_velocity_sdk14 is not None or initial_acceleration_sdk14 is not None:
+        raise ValueError('explicit start derivatives require the reviewed infer curve policy')
     values=np.asarray(source['device_targets14'],dtype=np.float64)
     initial=np.asarray(initial_sdk_command14,dtype=np.float64)
     limits=np.asarray(sdk_limits,dtype=np.float64)
     duration=source.get('duration_s',2.)
-    if (values.ndim!=2 or values.shape[1]!=14 or not 2<=len(values)<=61 or initial.shape!=(14,)or limits.shape!=(14,2)
+    replay=source.get('kind')=='raw_replay'
+    if (values.ndim!=2 or values.shape[1]!=14 or not 2<=len(values)<=(514 if replay else 61) or initial.shape!=(14,)or limits.shape!=(14,2)
             or not np.isfinite(values).all()or not np.isfinite(initial).all()
             or not np.isfinite(limits).all()or np.any(limits[:,0]>limits[:,1])
-            or type(duration)not in(int,float)or not math.isfinite(duration)or not 0<duration<=2.
+            or type(duration)not in(int,float)or not math.isfinite(duration)or not 0<duration<=(30. if replay else 2.)
             or timing_policy not in ('retime_allowed','strict_duration')
             or not all(math.isfinite(v)and v>0 for v in (velocity_limit,acceleration_limit))):
         raise ValueError('finite bounded path, source duration, initial command and limits required')
     if np.any(initial<limits[:,0])or np.any(initial>limits[:,1]):raise ValueError('initial reference command outside limits')
-    sdk=np.asarray([sdk_target(row)for row in values]);sdk[0]=initial
-    sdk[:,7:]=initial[7:]  # Existing inactive-right-arm policy; disabled jaw never gains an output.
+    sdk=np.asarray([sdk_target(row)for row in values]if sdk_targets14 is None else sdk_targets14,dtype=float).copy()
+    if sdk.shape!=values.shape or not np.isfinite(sdk).all():raise ValueError('finite preconverted SDK reference required')
+    sdk[0]=initial
+    active_arms=source.get('active_arms',['left'])
+    if active_arms not in (['left'],['left','right']):raise ValueError('explicit supported active arms required')
+    if active_arms==['left']:sdk[:,7:]=initial[7:]
     if np.any(sdk<limits[:,0]-1e-9)or np.any(sdk>limits[:,1]+1e-9):raise ValueError('reference source outside SDK command limits')
     breaks=np.linspace(0.,duration,len(values))
+    if replay:
+        breaks=np.asarray(source['source_times_s'],dtype=float)
+        if (breaks.shape!=(len(values),)or not np.isfinite(breaks).all()or breaks[0]!=0.
+                or breaks[-1]!=duration or np.any(np.diff(breaks)<=0)):
+            raise ValueError('Raw replay must retain ordered source sample intervals')
     online=source.get('kind')=='online_prediction_chunk'
-    if online:
+    fit_started=time.perf_counter()
+    if policy is not None:
+        v0=np.asarray(initial_velocity_sdk14,dtype=float);a0=np.asarray(initial_acceleration_sdk14,dtype=float)
+        if (v0.shape!=(14,)or a0.shape!=(14,)or not np.isfinite(v0).all()or not np.isfinite(a0).all()
+                or np.any(v0[[6,13]]!=0)or np.any(a0[[6,13]]!=0)
+                or np.max(abs(v0))>velocity_limit or np.max(abs(a0))>acceleration_limit
+                or active_arms==['left']and(np.any(v0[7:]!=0)or np.any(a0[7:]!=0))):
+            raise ValueError('explicit feasible start q/v/a and position-only jaws required')
+        fit_started=time.perf_counter()
+        coefficients=_cubic_with_quintic_ends(breaks,sdk[:,JOINTS],v0[list(JOINTS)],a0[list(JOINTS)])
+        fit_wall+=time.perf_counter()-fit_started
+    elif online or replay:
         slopes=PchipInterpolator(breaks,sdk[:,JOINTS],axis=0).derivative()(breaks)
         slopes[[0,-1]]=0.
-        spline=CubicHermiteSpline(breaks,sdk[:,JOINTS],slopes,axis=0)
+        # One C2 polynomial supplies q/v/a, including zero-acceleration ends.
+        # Jaws retain their separate position-only, piecewise-linear contract.
+        spline=PPoly.from_bernstein_basis(BPoly.from_derivatives(
+            breaks,[[q,v,np.zeros(12)]for q,v in zip(sdk[:,JOINTS],slopes)]))
     else:spline=CubicSpline(breaks,sdk[:,JOINTS],axis=0,bc_type='clamped')
-    coefficients=np.moveaxis(spline.c,1,0)
-    low,high,v,a=_extrema(coefficients,breaks)
+    if policy is None:
+        coefficients=np.moveaxis(spline.c,1,0)
+        fit_wall=time.perf_counter()-fit_started
+    extrema_started=time.perf_counter()
+    extrema=_extrema_batched if policy is not None else _extrema
+    low,high,v,a=extrema(coefficients,breaks)
+    extrema_wall+=time.perf_counter()-extrema_started
     if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
         raise ValueError('continuous spline exceeds joint command limits; no silent clipping')
     scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit))
     from arx_env.joint_head_real_motion import jaw_peak_scale
-    jaw_velocity=max(float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_peak_scale(side)
+    jaw_scales=jaw_scales or {side:jaw_peak_scale(side)for side in ('left','right')}
+    if set(jaw_scales)!={'left','right'}or any(not math.isfinite(v)or v<=0 for v in jaw_scales.values()):raise ValueError('finite positive jaw unit scales required')
+    jaw_velocity=max(float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
         for side,slot in (('left',6),('right',13)))
     scale=max(scale,jaw_velocity/40.)
     if scale>1.+1e-9 and timing_policy=='strict_duration':raise ValueError('strict 2s reference violates velocity/acceleration bounds')
     scale=scale*1.02 if scale>1 else 1.
-    if scale*duration>30.:raise ValueError('prepared path exceeds 30s bound')
-    breaks=breaks*scale
-    coefficients=coefficients.copy()
-    for i,power in enumerate((3,2,1,0)):coefficients[:,i]/=scale**power
+    maximum_duration=policy['max_execution_duration_s']if policy is not None else 30.
+    if scale*duration>maximum_duration:raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound')
+    refits=0
+    if policy is not None and (np.any(v0!=0)or np.any(a0!=0)) and scale>1:
+        # Stretching coefficients would silently change nonzero initial v/a.
+        # Refit at the longer duration with the same physical boundary instead.
+        for refits in range(1,9):
+            breaks=breaks*scale
+            if breaks[-1]>maximum_duration:raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound')
+            fit_started=time.perf_counter()
+            coefficients=_cubic_with_quintic_ends(breaks,sdk[:,JOINTS],v0[list(JOINTS)],a0[list(JOINTS)])
+            fit_wall+=time.perf_counter()-fit_started
+            extrema_started=time.perf_counter();low,high,v,a=extrema(coefficients,breaks)
+            extrema_wall+=time.perf_counter()-extrema_started
+            if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
+                raise ValueError('retimed curve exceeds joint command limits; no silent clipping')
+            jaw_velocity=max(float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
+                for side,slot in(('left',6),('right',13)))
+            scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit),jaw_velocity/40.)
+            if scale<=1.+1e-9:scale=1.;break
+            scale*=1.02
+        else:raise ValueError('bounded retiming did not preserve feasible initial derivatives')
+    else:
+        breaks=breaks*scale
+        coefficients=coefficients.copy()
+        for i,power in enumerate(range(coefficients.shape[1]-1,-1,-1)):coefficients[:,i]/=scale**power
     metadata=dict(schema=SCHEMA,source_sha256=source_sha256,source_duration_s=float(duration),duration_s=float(breaks[-1]),
         timing_policy=timing_policy,clock='host_monotonic_relative_seconds',joint_units='rad',jaw_units='SDK_m',
-        gain_profile='normal_X5',active_arms=['left'],disabled_grippers=['right'],
+        gain_profile='normal_X5',active_arms=active_arms,disabled_grippers=['right']if active_arms==['left']else[],
         velocity_limit_rad_s=velocity_limit,acceleration_limit_rad_s2=acceleration_limit,
         max_velocity_rad_s=float(np.max(v)/scale),max_acceleration_rad_s2=float(np.max(a)/scale**2),
         interpolation='CPU_correct_cubic_to_SDK_linear_samples',initial_sdk_command14=initial.tolist(),
         model_id=source.get('model_id'),calibration_profile_digest=source.get('calibration_profile_digest'))
-    if online:metadata.update(kind='online_prediction_chunk',interpolation='CPU_monotone_Hermite_to_SDK_linear_samples')
+    if online:metadata.update(kind='online_prediction_chunk',interpolation='CPU_C2_quintic_to_SDK_linear_samples',
+        native_grid='reference_origin_100Hz',
+        derivative_scope='analytic_joint_q_v_a; jaws_position_only',continuity='joint_C2',
+        jerk_limit='not_configured_not_qualified')
+    if replay:
+        _check_c2(coefficients,breaks)
+        metadata.update(kind='raw_replay',raw_replay=source['raw_replay'],native_grid='reference_origin_100Hz',
+            interpolation='CPU_C2_quintic_to_SDK_linear_samples',continuity='joint_C2',
+            derivative_scope='analytic_joint_q_v_a; jaws_position_only',jerk_limit='not_configured_not_qualified')
+    if policy is not None:
+        _check_c2(coefficients,breaks)
+        metadata.update(planning_policy=policy,interpolation='CPU_C2_cubic_with_quintic_ends_to_SDK_linear_samples',
+            initial_velocity_sdk14=v0.tolist(),initial_acceleration_sdk14=a0.tolist(),retiming_refits=refits,
+            internal_derivatives='cubic_spline_solved_v_and_a; not_zeroed')
     metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=40.)
     digest=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode())
     for array in (breaks,coefficients,sdk[:,[6,13]]):digest.update(array.tobytes())
     metadata['reference_id']=digest.hexdigest()
+    if timing is not None:timing.update(fit_s=fit_wall,extrema_s=extrema_wall,prepare_total_s=time.perf_counter()-started,retiming_refits=refits)
     return PreparedReference(_frozen(breaks),_frozen(coefficients),_frozen(sdk[:,[6,13]]),metadata)
 
 
-def prepare_reference_process(source,initial_sdk_command14,sdk_limits,**options):
+def prepare_brake(initial, velocity, acceleration, limits, *, duration_s,
+                  velocity_limit, acceleration_limit, source_sha256):
+    """Finite normal brake from a known future reference state; no SDK/IO.
+
+    Duration and dynamic bounds come from the caller's frozen configuration.
+    A longer brake is not necessarily feasible near a joint limit: reject the
+    entire polynomial on any violation, never clip or relax limits.
+    """
+    q,v,a=(np.asarray(x,dtype=float)for x in(initial,velocity,acceleration))
+    bounds=np.asarray(limits,dtype=float)
+    if (any(x.shape!=(14,)or not np.isfinite(x).all()for x in(q,v,a))
+            or bounds.shape!=(14,2)or not np.isfinite(bounds).all()
+            or np.any(bounds[:,0]>bounds[:,1])
+            or np.any(q<bounds[:,0])or np.any(q>bounds[:,1])
+            or any(type(x)not in(int,float)or not math.isfinite(x)or x<=0
+                   for x in(duration_s,velocity_limit,acceleration_limit))
+            or duration_s>30. or np.any(v[[6,13]]!=0)or np.any(a[[6,13]]!=0)):
+        raise ValueError('bounded brake state, explicit dynamics and held jaws required')
+    t=float(duration_s);qj,vj,aj=q[list(JOINTS)],v[list(JOINTS)],a[list(JOINTS)]
+    # Cubic velocity meets (v0,a0)->(0,0); its integral is the position.
+    c=np.asarray([vj/(2*t**3)+aj/(4*t*t),-vj/(t*t)-2*aj/(3*t),aj/2,vj,qj])[None,:,:]
+    breaks=np.asarray([0.,t]);low,high,peak_v,peak_a=_extrema(c,breaks)
+    if (np.any(low<bounds[list(JOINTS),0]-1e-10)or np.any(high>bounds[list(JOINTS),1]+1e-10)
+            or np.max(peak_v)>velocity_limit+1e-10 or np.max(peak_a)>acceleration_limit+1e-10):
+        raise ValueError('normal brake infeasible within position/velocity/acceleration bounds')
+    meta=dict(schema=SCHEMA,kind='normal_brake',source_sha256=source_sha256,duration_s=t,
+        clock='host_monotonic_relative_seconds',joint_units='rad',jaw_units='SDK_m',
+        max_velocity_rad_s=float(np.max(peak_v)),max_acceleration_rad_s2=float(np.max(peak_a)),
+        velocity_limit_rad_s=velocity_limit,acceleration_limit_rad_s2=acceleration_limit,
+        initial_sdk_command14=q.tolist(),initial_velocity_sdk14=v.tolist(),initial_acceleration_sdk14=a.tolist(),
+        hold_policy='fresh_measured_pose_after_brake; fixed_once; separate_from_brake_endpoint',
+        jerk_limit='not_configured_not_qualified')
+    jaws=np.tile(q[[6,13]],(2,1))
+    identity=hashlib.sha256(json.dumps(meta,sort_keys=True,allow_nan=False).encode())
+    for array in(breaks,c,jaws):identity.update(array.tobytes())
+    meta['reference_id']=identity.hexdigest()
+    return PreparedReference(_frozen(breaks),_frozen(c),_frozen(jaws),meta)
+
+
+def prepare_brake_after(reference, boundary_s, limits, **options):
+    """Keep the prepared prefix exactly, then brake from its future q/v/a.
+
+    The Owner must separately verify that the boundary is still future and
+    covers its committed native prefix before installing this candidate.
+    """
+    if (not isinstance(reference,PreparedReference)or type(boundary_s)not in(int,float)
+            or not math.isfinite(boundary_s)or not 0<boundary_s<30.):
+        raise ValueError('prepared reference and an interior/end brake boundary required')
+    q,v,a=reference.sample([boundary_s])
+    brake=prepare_brake(q[0],v[0],a[0],limits,
+        source_sha256=reference.metadata['reference_id'],**options)
+    if boundary_s+brake.duration_s>30.:raise ValueError('prefix and brake exceed the 30s reference bound')
+    starts=reference.breaks[reference.breaks<boundary_s]
+    degree=max(reference.coefficients.shape[1],brake.coefficients.shape[1])
+    def pad(c):return np.pad(c,((0,0),(degree-c.shape[1],0),(0,0)))
+    prefix=pad(reference.coefficients[:len(starts)])
+    if boundary_s>reference.duration_s:
+        tail=np.zeros((1,degree,12));tail[0,-1]=q[0,list(JOINTS)]
+        prefix=np.concatenate([prefix,tail])
+    c=np.concatenate([prefix,pad(brake.coefficients)])
+    breaks=np.r_[starts,boundary_s,boundary_s+brake.duration_s]
+    jaws=np.vstack([reference.jaws[:len(starts)],brake.jaws])
+    bounds=np.asarray(limits,dtype=float);lo,hi,pv,pa=_extrema(c,breaks)
+    if (np.any(lo<bounds[list(JOINTS),0]-1e-10)or np.any(hi>bounds[list(JOINTS),1]+1e-10)
+            or max(pv)>options['velocity_limit']+1e-10 or max(pa)>options['acceleration_limit']+1e-10):
+        raise ValueError('committed prefix and brake exceed declared bounds')
+    meta=dict(brake.metadata,kind='prefix_then_normal_brake',duration_s=float(breaks[-1]),
+        parent_reference_id=reference.metadata['reference_id'],brake_start_relative_s=float(boundary_s),
+        preserved_prefix_end_relative_s=float(boundary_s),max_velocity_rad_s=float(max(pv)),
+        max_acceleration_rad_s2=float(max(pa)))
+    first=reference.sample([0.])
+    for index,key in enumerate(('initial_sdk_command14','initial_velocity_sdk14','initial_acceleration_sdk14')):
+        meta['brake_'+key]=meta[key];meta[key]=first[index][0].tolist()
+    if 'native_grid'in reference.metadata:meta['native_grid']=reference.metadata['native_grid']
+    meta.pop('reference_id')
+    identity=hashlib.sha256(json.dumps(meta,sort_keys=True,allow_nan=False).encode())
+    for array in(breaks,c,jaws):identity.update(array.tobytes())
+    meta['reference_id']=identity.hexdigest()
+    _check_c2(c,breaks)
+    return PreparedReference(_frozen(breaks),_frozen(c),_frozen(jaws),meta)
+
+
+def _brake_envelope_bounds(coefficients,breaks,duration_s):
+    """All-time bounds retaining the correlation of q(t), v(t), and a(t).
+
+    Brake position bases lie in [0,T/2] and [0,T²/12], velocity bases
+    in [0,1] and [0,4T/27], and acceleration bases in [-1.5/T,0]
+    and [-1/3,1]. Rectangle corners therefore enclose every brake state.
+    Each corner is a polynomial in the original path time; find all extrema.
+    """
+    q=np.asarray(coefficients,dtype=float);powers=np.arange(q.shape[1]-1,-1,-1)
+    v=np.zeros_like(q);v[:,1:]=q[:,:-1]*powers[:-1][None,:,None]
+    a=np.zeros_like(v);a[:,1:]=v[:,:-1]*powers[:-1][None,:,None]
+    t=duration_s;widths=np.diff(breaks)
+    def extent(corners):
+        sequence=np.concatenate(corners)
+        timeline=np.r_[0.,np.cumsum(np.tile(widths,len(corners)))]
+        low,high,_,_=_extrema_batched(sequence,timeline)
+        return low,high
+    low,high=extent([q,q+t*v/2,q+t*t*a/12,q+t*v/2+t*t*a/12])
+    vl,vh=extent([np.zeros_like(v),v,4*t*a/27,v+4*t*a/27])
+    al,ah=extent([-a/3,a,-1.5*v/t-a/3,-1.5*v/t+a])
+    return low,high,np.maximum(abs(vl),abs(vh)),np.maximum(abs(al),abs(ah))
+
+
+def retime_for_brake_reserve(reference,limits,*,duration_s,velocity_limit,acceleration_limit,maximum_duration_s):
+    """Stretch the existing zero-boundary curve to satisfy its normal brake proof."""
+    if not isinstance(reference,PreparedReference):raise ValueError('analytic reference required for brake reserve')
+    _check_c2(reference.coefficients,reference.breaks)
+    _,start_v,start_a=reference.sample([0.])
+    if np.any(start_v!=0.)or np.any(start_a!=0.):raise ValueError('reserve retiming requires a confirmed zero-v/a start')
+    if any(type(x)not in(int,float)or not math.isfinite(x)or x<=0
+           for x in(duration_s,velocity_limit,acceleration_limit,maximum_duration_s)):
+        raise ValueError('explicit positive normal brake budgets required')
+    bounds=np.asarray(limits,dtype=float)
+    if bounds.shape!=(14,2)or not np.isfinite(bounds).all():raise ValueError('finite SDK position limits required')
+    lo,hi,v,a=_extrema_batched(reference.coefficients,reference.breaks)
+    margin=np.minimum(lo-bounds[list(JOINTS),0],bounds[list(JOINTS),1]-hi)
+    def stretch(quadratic,linear,limit):
+        limit=np.broadcast_to(limit,v.shape)
+        if np.any(limit<0)or np.any((limit==0)&((quadratic!=0)|(linear!=0))):
+            return math.inf
+        positive=limit>0
+        scale=np.ones_like(v)
+        scale[positive]=(linear[positive]+np.sqrt(linear[positive]**2+4*limit[positive]*quadratic[positive]))/(2*limit[positive])
+        return float(max(scale))
+    scale=max(1.,stretch(a*duration_s**2/12,v*duration_s/2,margin),
+        stretch((4/27)*a*duration_s,v,velocity_limit),stretch(a,1.5*v/duration_s,acceleration_limit))
+    if scale>1.:scale*=1.02  # Same timing margin as the existing reference planner.
+    if reference.duration_s*scale>maximum_duration_s:
+        maximum_scale=maximum_duration_s/reference.duration_s
+        powers=np.arange(reference.coefficients.shape[1]-1,-1,-1)
+        def feasible(value):
+            c=reference.coefficients/value**powers[None,:,None]
+            lo,hi,pv,pa=_brake_envelope_bounds(c,reference.breaks*value,duration_s)
+            return (np.all(lo>=bounds[list(JOINTS),0]-1e-10)
+                and np.all(hi<=bounds[list(JOINTS),1]+1e-10)
+                and max(pv)<=velocity_limit+1e-10 and max(pa)<=acceleration_limit+1e-10)
+        if maximum_scale<1. or not feasible(maximum_scale):
+            raise ValueError('complete model segment lacks normal brake reserve within execution budget')
+        low,high=1.,maximum_scale
+        if feasible(low):high=low
+        else:
+            for _ in range(6):
+                middle=(low+high)/2
+                if feasible(middle):high=middle
+                else:low=middle
+        scale=min(high*1.02,maximum_scale)
+    if scale==1.:
+        check_brake_reserve(reference,limits,duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit)
+        return reference
+    breaks=reference.breaks*scale;c=reference.coefficients.copy()
+    for i,power in enumerate(range(c.shape[1]-1,-1,-1)):c[:,i]/=scale**power
+    meta=dict(reference.metadata);parent=meta.pop('reference_id')
+    meta.update(parent_reference_id=parent,duration_s=float(breaks[-1]),normal_brake_time_scale=scale,
+        max_velocity_rad_s=float(max(v)/scale),max_acceleration_rad_s2=float(max(a)/scale**2),
+        max_jaw_velocity_mm_s=meta['max_jaw_velocity_mm_s']/scale,
+        normal_brake_reserve_policy=dict(duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit))
+    identity=hashlib.sha256(json.dumps(meta,sort_keys=True).encode())
+    for array in(breaks,c,reference.jaws):identity.update(array.tobytes())
+    meta['reference_id']=identity.hexdigest()
+    result=PreparedReference(_frozen(breaks),_frozen(c),reference.jaws,meta)
+    check_brake_reserve(result,limits,duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit)
+    return result
+
+
+def check_brake_reserve(reference, limits, *, duration_s, velocity_limit, acceleration_limit):
+    """Conservative all-times joint reserve for this analytic brake family.
+
+    Bounds cover every polynomial state, not a sampled collection of stops.
+    They are deliberately sufficient, not necessary; near a boundary they may
+    reject an inward-moving path. Tracking error, transport lead and geometry
+    remain separate Owner obligations.
+    """
+    if not isinstance(reference,PreparedReference):raise ValueError('prepared analytic reference required')
+    _check_c2(reference.coefficients,reference.breaks)
+    # Reuse state/bounds validation without changing the reference or its time.
+    q,_,_=reference.sample([0.])
+    prepare_brake(q[0],np.zeros(14),np.zeros(14),limits,duration_s=duration_s,
+        velocity_limit=velocity_limit,acceleration_limit=acceleration_limit,source_sha256=reference.metadata['reference_id'])
+    lo,hi,v,a=_extrema(reference.coefficients,reference.breaks)
+    # Integrals of velocity bases are bounded by T/2 and T^2/12.
+    distance=v*duration_s/2+a*duration_s**2/12
+    peak_v=v+(4/27)*a*duration_s
+    peak_a=1.5*v/duration_s+a
+    bounds=np.asarray(limits,dtype=float)[list(JOINTS)]
+    if (np.any(lo-distance<bounds[:,0])or np.any(hi+distance>bounds[:,1])
+            or np.any(peak_v>velocity_limit)or np.any(peak_a>acceleration_limit)):
+        low,high,peak_v,peak_a=_brake_envelope_bounds(reference.coefficients,reference.breaks,duration_s)
+        if (np.any(low<bounds[:,0]-1e-10)or np.any(high>bounds[:,1]+1e-10)
+                or np.any(peak_v>velocity_limit+1e-10)or np.any(peak_a>acceleration_limit+1e-10)):
+            raise ValueError('reference lacks conservative all-times normal-brake reserve')
+        return dict(reference_id=reference.metadata['reference_id'],brake_duration_s=duration_s,
+            lower_position_rad=low.tolist(),upper_position_rad=high.tolist(),
+            maximum_velocity_rad_s=float(max(peak_v)),maximum_acceleration_rad_s2=float(max(peak_a)),
+            scope='analytic_joint_reference_all_times; correlated_brake_envelope; excludes_tracking_latency_geometry_and_jaw_events')
+    return dict(reference_id=reference.metadata['reference_id'],brake_duration_s=duration_s,
+        lower_position_rad=(lo-distance).tolist(),upper_position_rad=(hi+distance).tolist(),
+        maximum_velocity_rad_s=float(max(peak_v)),maximum_acceleration_rad_s2=float(max(peak_a)),
+        scope='analytic_joint_reference_all_times; excludes_tracking_latency_geometry_and_jaw_events')
+
+
+def _prepare_encoded(body,profile=False):
+    """Identical bounded CPU calculation for one-shot and warmed child paths."""
+    if len(body)>128*1024:raise ValueError('preparation input exceeds bound')
+    import time
+    started=time.perf_counter();request=json.loads(body);decoded=time.perf_counter();timing={}
+    reference=prepare_reference(request['source'],request['initial'],request['limits'],timing=timing,**request['options'])
+    encoding=time.perf_counter()
+    encoded=json.dumps(dict(breaks=reference.breaks.tolist(),coefficients=reference.coefficients.tolist(),
+        jaws=reference.jaws.tolist(),metadata=reference.metadata),allow_nan=False,separators=(',',':')).encode()
+    if len(encoded)>256*1024:raise ValueError('preparation output exceeds bound')
+    timing.update(worker_json_decode_s=decoded-started,worker_json_encode_s=time.perf_counter()-encoding,
+        worker_total_s=time.perf_counter()-started)
+    return (encoded,timing)if profile else encoded
+
+
+def prepare_reference_process(source,initial_sdk_command14,sdk_limits,*,executor=None,timing=None,**options):
     """Keep SciPy imports, spline fitting and whole-path checks outside Owner Python."""
     import os
     import subprocess
     import sys
+    import time
     from .recording_process import _environment
+    from .inference_owner import sdk_target
+    from arx_env.joint_head_real_motion import jaw_peak_scale
+    # The isolated CPU child must not fall back to its default jaw calibration.
+    if 'sdk_targets14'not in options:options['sdk_targets14']=[sdk_target(row)for row in source['device_targets14']]
+    if 'jaw_scales'not in options:options['jaw_scales']={side:jaw_peak_scale(side)for side in ('left','right')}
     request=dict(source=source,initial=initial_sdk_command14,limits=sdk_limits,options=options)
-    body=json.dumps(request,allow_nan=False).encode()
+    encoding=time.perf_counter();body=json.dumps(request,allow_nan=False).encode();encoded_at=time.perf_counter()
     if len(body)>128*1024:raise ValueError('preparation request exceeds bounded source size')
-    result=subprocess.run([os.environ.get('WORKBENCH_CPU_PYTHON')or sys.executable,'-B','-m',__name__,'--prepare'],
-        input=body,capture_output=True,env=_environment(),timeout=20)
-    if result.returncode or len(result.stdout)>256*1024:
-        raise ValueError('isolated CPU motion preparation failed: '+result.stderr.decode(errors='replace')[-1000:])
-    value=json.loads(result.stdout)
+    stages={}
+    if executor is None:
+        result=subprocess.run([os.environ.get('WORKBENCH_CPU_PYTHON')or sys.executable,'-B','-m',__name__,'--prepare'],
+            input=body,capture_output=True,env=_environment(),timeout=20)
+        if result.returncode or len(result.stdout)>256*1024:
+            raise ValueError('isolated CPU motion preparation failed: '+result.stderr.decode(errors='replace')[-1000:])
+        encoded=result.stdout
+    else:encoded,stages=executor.submit(_prepare_encoded,body,True).result(timeout=20)
+    returned=time.perf_counter();value=json.loads(encoded);decoded=time.perf_counter()
+    if timing is not None:timing.update(stages,request_json_encode_s=encoded_at-encoding,
+        parent_json_decode_s=decoded-returned,roundtrip_s=returned-encoded_at,
+        transport_and_wait_s=max(0.,returned-encoded_at-stages.get('worker_total_s',0.)))
     return PreparedReference(_frozen(value['breaks']),_frozen(value['coefficients']),_frozen(value['jaws']),value['metadata'])
 
 
@@ -339,7 +748,4 @@ if __name__=='__main__':
     if sys.argv[1:]!=['--prepare']:raise SystemExit('private CPU preparation worker only')
     raw=sys.stdin.buffer.read(128*1024+1)
     if len(raw)>128*1024:raise ValueError('preparation input exceeds bound')
-    request=json.loads(raw)
-    reference=prepare_reference(request['source'],request['initial'],request['limits'],**request['options'])
-    print(json.dumps(dict(breaks=reference.breaks.tolist(),coefficients=reference.coefficients.tolist(),
-                         jaws=reference.jaws.tolist(),metadata=reference.metadata),allow_nan=False,separators=(',',':')))
+    sys.stdout.buffer.write(_prepare_encoded(raw))

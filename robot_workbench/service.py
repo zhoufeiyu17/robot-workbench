@@ -5,6 +5,7 @@ from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
+import re
 from pathlib import Path
 import secrets
 import threading
@@ -15,6 +16,7 @@ from robot_workbench.workflows import CALIBRATION_TOOLS,COLLECTION_TOOLS,HISTORY
 from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions
 from robot_workbench.sample_clock import host_sample_status
 from robot_workbench.inference_owner import episode_duration
+from robot_workbench.inference_workflow import InferenceWorkflow
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection', 'inference', 'research')
@@ -52,6 +54,19 @@ class Device:
         self.connecting = False
         self.release_receipt = None
         self.maintenance = False
+        self.capture_results=None
+
+    def configure_capture_results(self,root):
+        from .collection_history import CaptureResults
+        if self.capture_results is not None:raise ValueError('capture result root already bound')
+        self.capture_results=CaptureResults(root,environment=self.environment,device_id=self.id)
+        if self.runtime is not None:self._bind_capture_results(self.runtime)
+
+    def _bind_capture_results(self,runtime):
+        if self.capture_results is None:return
+        callback=self.capture_results.notify
+        if callable(getattr(runtime,'set_capture_result_handler',None)):runtime.set_capture_result_handler(callback)
+        else:runtime.capture_result_handler=callback
 
     def connect(self, body, *, active=None,maintenance_actor=None):
         if getattr(getattr(self,'_operations_application',None),'operations_managed',False) and maintenance_actor is None:
@@ -111,6 +126,7 @@ class Device:
             credentials = {name: runtime.register_business(name) for name in BUSINESSES}
             self.credentials = credentials
             self.runtime = runtime
+            self._bind_capture_results(runtime)
             self.release_receipt = None
             self.error = None
             if maintenance_actor is not None:maintenance_actor.adopt(runtime)
@@ -154,6 +170,7 @@ class Device:
                                 if self.runtime is runtime:
                                     self.runtime = None
                                     self.credentials = {}
+                            if self.capture_results is not None:self.capture_results.notify()
                         except Exception as error:
                             runtime.release_receipt.update(status='unconfirmed', message='连接收尾未确认：'+str(error))
                         self.release_receipt = deepcopy(runtime.release_receipt)
@@ -181,6 +198,7 @@ class Device:
                     self.release_receipt=dict(deepcopy(receipt),maintenance_cleanup_confirmed=True);self.closed.set()
                     with self.lock:
                         if self.runtime is runtime:self.runtime=None;self.credentials={}
+                    if self.capture_results is not None:self.capture_results.notify()
         self.thread=threading.Thread(target=monitor,daemon=True,name='control-facts-'+self.environment)
         self.thread.start()
 
@@ -193,6 +211,7 @@ class Device:
 
     def _attach_existing_owner_locked(self,runtime):
         self.runtime=runtime;self.credentials={name:runtime.register_business(name)for name in BUSINESSES}
+        self._bind_capture_results(runtime)
         self.error=None;self.closed.clear();self._start_remote_monitor(runtime)
 
     def submit(self, business, command):
@@ -263,6 +282,8 @@ class Device:
             result['motion_status'] = 'no_automatic_task'
         if self.error:
             result['service_error'] = self.error
+        elif result.get('feedback_source_error'):
+            result['service_error']='ROS反馈暂不可用：'+result['feedback_source_error']
         return result
 
 
@@ -274,6 +295,7 @@ class Application:
         self.csrf = secrets.token_urlsafe(32)
         self.server_instance_id = str(uuid.uuid4())  # Public lifetime identity, not an authorization token.
         self.lock = threading.RLock()
+        self.policy_write_lock = threading.Lock()
         self.revision = 0
         self.display_actions=threading.Lock()
         self.preview_contexts = {}
@@ -284,7 +306,299 @@ class Application:
         self.maintenance = {}
         self.action_calls = {environment:0 for environment in devices}
         self.operations_managed = False  # Trusted deployment assembly enables the operations-only lifecycle.
+        self.operator_tasks={}
+        self.operator_focus={}
         for device in devices.values():device._operations_application=self
+
+    def _operator_focus_action(self,device,workflow,body):
+        fields={'environment','business','request_id','runtime_nonce','epoch','client_id','active'}
+        if set(body)!=fields or type(body['active'])is not bool or not isinstance(body['client_id'],str)or not 0<len(body['client_id'])<=128:
+            raise ValueError('exact foreground lease required')
+        with self.lock:
+            previous=self.operator_focus.get(device.environment,{})
+            if not body['active']:
+                if previous.get('client_id')==body['client_id']:
+                    self.operator_focus.pop(device.environment,None);workflow.operator_pedal_gesture=None
+                return dict(active=False)
+            state=device.snapshot('inference');runtime=device.runtime
+            if runtime is None or runtime.nonce!=body['runtime_nonce']or state['command_epoch']!=body['epoch']:
+                raise ValueError('foreground lease requires the current Owner identity')
+            same=(previous.get('client_id')==body['client_id'] and previous.get('runtime_nonce')==runtime.nonce
+                and previous.get('expires',0)>time.monotonic())
+            if not same:workflow.operator_pedal_gesture=None
+            self.operator_focus[device.environment]=dict(client_id=body['client_id'],runtime_nonce=runtime.nonce,
+                started_wall=previous['started_wall']if same else time.time(),
+                expires=time.monotonic()+workflow.operator_controls['focus_timeout_s'])
+        return dict(active=True)
+
+    def _operator_model_active(self,device,state):
+        mode=state.get('inference')or{}
+        job=self.jobs.get((device.environment,'inference'),{})
+        return (mode.get('mode')=='MODEL' or mode.get('transition_stage')in('RESUMING','MODEL_ADMITTED')
+            or job.get('action')=='inference_run'and job.get('status')=='running')
+
+    def _operator_pedal_action(self,device,workflow,command,reference,occurred_at,focus):
+        last=getattr(workflow,'operator_pedal_reference',None)
+        if last and last[0]==reference.source_instance_id and reference.sequence<=last[1]:return dict(accepted=False)
+        workflow.operator_pedal_reference=(reference.source_instance_id,reference.sequence)
+        state=device.snapshot('inference');mode=state.get('inference')or{}
+        active=self._operator_model_active(device,state)
+        session=getattr(workflow,'operator_session',None);run=getattr(workflow,'current',None)
+        held=bool(session and run and run['id']==session['run_id']and run.get('ended_wall')is None
+            and session['runtime_nonce']==state.get('runtime_nonce') and state.get('holder')=='inference'
+            and state.get('feedback_healthy')and state.get('stationary')and not state.get('recoverable_fault')
+            and mode.get('runner_status')=='RUNNING'and mode.get('mode')=='HOLD'
+            and not mode.get('transition_stage')and not active)
+        context=(reference.source_instance_id,focus.get('client_id'),focus.get('started_wall'),
+            state.get('runtime_nonce'),session.get('run_id')if session else None)
+        gesture=getattr(workflow,'operator_pedal_gesture',None)
+        body=dict(environment=device.environment,business='inference',
+            request_id='pedal-'+reference.source_instance_id.replace(':','_')+'-'+str(reference.sequence),
+            runtime_nonce=device.runtime.nonce,epoch=state['command_epoch'])
+        if command==11:
+            second=bool(gesture and gesture['context']==context
+                and 0<occurred_at-gesture['occurred_at']<=workflow.operator_controls['double_press_window_s'])
+            if second:
+                workflow.operator_pedal_gesture=None
+                if not(gesture['eligible']and held and gesture['epoch']==state['command_epoch']):return dict(accepted=False)
+                view=workflow.snapshot().get('inference')or{}
+                if view.get('model_ready')is not True:raise ValueError('当前模型尚未就绪，双踩未启动')
+                request={key:body[key]for key in ('environment','business','request_id')}
+                request.update({key:session[key]for key in ('seed','duration_s','model_id','expected_bundle_digest')})
+                request['wam_stall_recovery']=session.get('wam_stall_recovery',False)
+                request.update(expected_context=self.inference_context(device,state,workflow),state_wall_ns=time.time_ns(),
+                    physical_clearance=True,scene_reset=True,arms_supported=True)
+                return self.action('inference_run',request)
+            workflow.operator_pedal_gesture=dict(context=context,occurred_at=occurred_at,
+                eligible=held,epoch=state['command_epoch'])
+            return self.action('inference_hold',body)
+        workflow.operator_pedal_gesture=None
+        if command==22:return self.action('inference_hold'if active else'inference_teach',body)
+        if command==33:
+            if active:return dict(accepted=False)
+            body['physical_clearance']=True
+            return self.action('inference_home',body)
+        return dict(accepted=False)
+
+    def install_operator_pedal(self,device,workflow,descriptor):
+        """Bind the declared event source; never read evdev in the business process."""
+        from .ros_data import RosNode,SourceDirectory,source_descriptor,json_value
+        closed=threading.Event();workflow.operator_input_closed=closed
+        def work():
+            node=None
+            try:
+                plane=workflow.ros_plane
+                node=RosNode('infer_pedal_'+device.id,namespace=plane['namespace'],domain_id=plane['domain_id'])
+                declared=source_descriptor(json.loads(Path(descriptor).read_text()))
+                if declared['device_id']!=device.id or declared['stream_id']!='pedal'or declared['kind']!='event':
+                    raise ValueError('registered pedal belongs to another device/source role')
+                directory=SourceDirectory(node,device.id)
+                source=directory.resolve({'pedal':dict(source_instance_id=declared['source_instance_id'],kind='event')})[0]
+                publishers=node.node.get_publishers_info_by_topic(source['topic'])
+                if len(publishers)!=1:raise ValueError('one pedal publisher required')
+                publisher_gid=bytes(publishers[0].endpoint_gid)
+                workflow.operator_pedal_source=source;workflow.operator_input_status=dict(state='waiting',source_instance_id=source['source_instance_id'])
+                workflow.operator_last_seen=time.monotonic()
+                def receive(message):
+                    ref=message.reference;value=json_value(message.payload_json)
+                    if (ref.source_instance_id!=source['source_instance_id']or ref.stream_id!='pedal'
+                            or directory.values.get('pedal')!=source):return
+                    publishers=node.node.get_publishers_info_by_topic(source['topic'])
+                    if len(publishers)!=1 or bytes(publishers[0].endpoint_gid)!=publisher_gid:
+                        workflow.operator_pedal_gesture=None
+                        workflow.operator_input_status=dict(state='unavailable',error='原踏板发布者已变化或存在多个发布者')
+                        return
+                    if not 0<=time.time()-ref.source_time_ns/1e9<=workflow.operator_controls['event_max_age_s']:return
+                    workflow.operator_last_seen=time.monotonic()
+                    if message.event!='pedal_command':
+                        if workflow.operator_input_status.get('state')in('waiting','unavailable'):
+                            workflow.operator_input_status=dict(state='ready',source_instance_id=source['source_instance_id'])
+                        return
+                    occurred=value.get('occurred_at')
+                    if type(occurred)not in(int,float):return
+                    age=time.time()-occurred
+                    if not 0<=age<=workflow.operator_controls['event_max_age_s']:return
+                    with self.lock:focus=deepcopy(self.operator_focus.get(device.environment,{}))
+                    runtime=device.runtime
+                    if (not focus or focus['expires']<time.monotonic()or runtime is None
+                            or runtime.nonce!=focus['runtime_nonce']or occurred<focus['started_wall']):return
+                    command=value.get('command')
+                    if command not in(11,22,33):return
+                    try:
+                        result=self._operator_pedal_action(device,workflow,command,ref,occurred,focus)
+                        workflow.operator_input_status=dict(state='ready',last_command=command,source_time_ns=ref.source_time_ns,
+                            sequence=ref.sequence,request_id='pedal-'+ref.source_instance_id.replace(':','_')+'-'+str(ref.sequence),
+                            accepted=result.get('accepted',True))
+                    except Exception as error:workflow.operator_input_status=dict(state='rejected',last_command=command,error=str(error))
+                node.subscribe(source['topic'],node.types.DataEvent,receive)
+                while not closed.wait(.1):
+                    if directory.values.get('pedal')!=source:
+                        workflow.operator_pedal_gesture=None
+                        raise ValueError('原踏板来源已停止或身份变化，请重新绑定')
+                    if time.monotonic()-workflow.operator_last_seen>workflow.operator_controls['event_max_age_s']:
+                        workflow.operator_pedal_gesture=None
+                        workflow.operator_input_status=dict(state='unavailable',error='踏板 ROS 心跳中断，请检查踏板连接与来源服务')
+            except Exception as error:workflow.operator_input_status=dict(state='unavailable',error=str(error))
+            finally:
+                if node is not None:node.close()
+        workflow.operator_input_thread=threading.Thread(target=work,daemon=True,name='infer-pedal-consumer')
+        workflow.operator_input_thread.start()
+
+    def _operator_action(self,device,workflow,action,body):
+        fields={'environment','business','request_id','runtime_nonce','epoch'}
+        if action=='inference_home':fields.add('physical_clearance')
+        if set(body)!=fields or body['business']!='inference':raise ValueError('exact operator intent and current Owner identity required')
+        runtime=device.runtime
+        if runtime is None or runtime.nonce!=body['runtime_nonce']:raise ValueError('operator Owner changed')
+        state=device.snapshot('inference')
+        if state['command_epoch']!=body['epoch']or state['holder']!='inference':raise ValueError('operator epoch or control ownership changed')
+        if state.get('recoverable_fault')or not state.get('feedback_healthy'):raise ValueError('operator action cannot recover a control fault')
+        if action=='inference_home'and body['physical_clearance']is not True:raise ValueError('home requires current workspace clearance')
+        if self._operator_model_active(device,state):
+            if action=='inference_home':return dict(accepted=False)
+            if action=='inference_teach':action='inference_hold'
+        if action=='inference_teach':
+            return self._operator_teach(device,workflow,body)
+        if action=='inference_home':
+            return self._operator_native_home(device,workflow,body)
+        with self.lock:
+            previous=self.operator_tasks.get(device.environment,{})
+            if previous.get('kind')=='teach'and previous.get('status')=='running':
+                previous['finish_request_id']=body['request_id']
+                workflow.operator_finish.set()
+                if action=='inference_hold':return dict(accepted=True,operator_task=deepcopy(previous))
+            job=self.jobs.get((device.environment,'inference'),{})
+            if job.get('status')=='running'and job.get('action')=='inference_run':
+                job['operator_stop_request_id']=body['request_id']
+        previous=self.operator_tasks.get(device.environment,{})
+        if previous.get('kind')=='home'and previous.get('status')=='running':
+            return dict(accepted=True,waiting_native_home=True,operator_task=deepcopy(previous))
+        return workflow.request_operator_stop(body['request_id'])
+
+    def _operator_native_home(self,device,workflow,body):
+        session=getattr(workflow,'operator_session',None)
+        run=workflow.current
+        if not session or run is None or run['id']!=session['run_id']or run.get('ended_wall')is not None:
+            raise ValueError('请先准备控制与踏板，再执行原生回零')
+        with self.lock:
+            previous=self.operator_tasks.get(device.environment,{})
+            if previous.get('status')=='running':raise ValueError('等待当前踏板操作完成')
+            task=dict(request_id=body['request_id'],run_id=run['id'],kind='home',status='running',
+                phase='waiting_inference_hold',runtime_nonce=device.runtime.nonce)
+            self.operator_tasks[device.environment]=task;workflow.operator_task=task
+            run['operator_positioning']=task
+        runtime=device.runtime;generation=self.generations[device.environment]
+        deadline=time.monotonic()+workflow.operator_controls['timeout_s']
+        def current():
+            if (device.runtime is not runtime or self.generations[device.environment]!=generation
+                    or workflow.current is not run):raise ValueError('原生回零已撤销')
+            mode=run['runner'].snapshot()
+            if mode.get('runner_status')in('STOPPED','FAULT'):raise ValueError(mode.get('reason')or'原生回零控制已停止')
+            if time.monotonic()>deadline:raise TimeoutError('原生回零完成回执超时')
+            return mode
+        def request(target):
+            mode=current();key=uuid.uuid5(uuid.NAMESPACE_URL,run['id']+'/'+body['request_id']+'/'+target).hex
+            workflow.request_normal_mode(dict(session_id=mode['mode_session_id'],runtime_nonce=runtime.nonce,
+                request_id=key,epoch=mode['command_epoch'],mode=target,target=target))
+            while True:
+                mode=current();receipt=mode.get('mode_receipts',{}).get(key,{})
+                if receipt.get('status')in('failed','rejected'):raise ValueError(receipt.get('error')or'原生回零请求被拒绝')
+                if receipt.get('completed'):return receipt
+                time.sleep(.01)
+        def work():
+            try:
+                mode=current()
+                if mode.get('mode')!='HOLD'or mode.get('transition_stage')=='RESUMING':request('HOLD')
+                else:
+                    while current().get('transition_stage'):time.sleep(.01)
+                task['phase']='native_homing'
+                receipt=request('HOME')
+                task.update(status='completed',phase='holding',receipt=receipt,sdk_released=False)
+            except Exception as error:
+                if device.runtime is runtime and self.generations[device.environment]==generation:device.request_stop()
+                task.update(status='failed'if self.generations[device.environment]==generation else'stopped',
+                    phase='terminated',error=str(error),sdk_released=False)
+        threading.Thread(target=work,daemon=True,name='infer-native-home').start()
+        return dict(accepted=True,operator_task=deepcopy(task))
+
+    def _operator_teach(self,device,workflow,body):
+        """Positioning Run using the existing recorded HOLD/TEACH/HOLD/END chain."""
+        environment=device.environment
+        with self.lock:
+            previous=self.operator_tasks.get(environment,{})
+            if previous.get('status')=='running':
+                if previous.get('kind')!='teach':
+                    raise ValueError('请先停止或等待当前回零/保持操作完成')
+                previous.setdefault('finish_request_id',body['request_id'])
+                workflow.operator_finish.set()
+                return dict(accepted=True,operator_task=deepcopy(previous))
+            if device.maintenance or self.maintenance.get(environment):
+                raise ValueError('工作台正在维护，请等待完成后设置人工起点')
+            if workflow.normal_modes is None or workflow.normal_initial_mode!='HOLD':
+                raise ValueError('当前控制配置尚未启用共享 TEACH/HOLD 模式')
+            if workflow._model_gate()['ready'] is not True:
+                raise ValueError('请先准备当前推理模型，再设置人工起点')
+            session=getattr(workflow,'operator_session',None)
+            if not session or workflow.current is None or workflow.current['id']!=session['run_id']or workflow.current.get('ended_wall')is not None:
+                raise ValueError('请先准备控制与踏板，再切换拖动与保持')
+            runtime=device.runtime
+            generation=self.generations[environment]
+            task=dict(id=body['request_id'],request_id=body['request_id'],action='inference_teach',
+                kind='teach',status='running',phase='waiting_inference_hold',started_wall_ns=time.time_ns(),
+                runtime_nonce=runtime.nonce)
+            self.operator_tasks[environment]=task
+            workflow.operator_task=task
+            workflow.operator_finish=threading.Event()
+            task['run_id']=session['run_id']
+            workflow.current['operator_positioning']=task
+
+        timeout=workflow.operator_controls['timeout_s']
+        def current():
+            return self.generations[environment]==generation and device.runtime is runtime and runtime.nonce==task['runtime_nonce']
+        def normal_state():
+            if not current():raise ValueError('人工定位已被停止或控制实例已变化')
+            run=workflow.current
+            if run is None or run['id']!=task['run_id']:raise ValueError('人工定位 Run 身份已变化')
+            mode=run['runner'].snapshot()if run.get('runner')else{}
+            if mode.get('runner_status')in('STOPPED','FAULT'):
+                facts=device.snapshot('inference')
+                raise ValueError(mode.get('reason')or(facts.get('motion')or{}).get('reason')or facts.get('reason')or'人工定位已停止')
+            return mode
+        def wait_mode(request_id,target):
+            deadline=time.monotonic()+timeout
+            while True:
+                mode=normal_state()
+                receipt=(mode.get('mode_receipts')or{}).get(request_id,{})
+                if receipt.get('status')in('failed','rejected'):
+                    raise ValueError(receipt.get('error')or receipt.get('reason')or'模式转换未通过')
+                if receipt.get('completed')and mode.get('mode')==target and not mode.get('transition_stage'):
+                    return receipt
+                if time.monotonic()>=deadline:raise TimeoutError('人工定位模式回执等待超时')
+                time.sleep(.05)
+        def request_mode(target,request_id):
+            mode=normal_state()
+            request_id=uuid.uuid5(uuid.NAMESPACE_URL,task['run_id']+'/'+request_id+'/'+target).hex
+            workflow.request_normal_mode(dict(session_id=mode['mode_session_id'],runtime_nonce=runtime.nonce,
+                request_id=request_id,epoch=mode['command_epoch'],mode='HOLD'if target=='END'else target,target=target))
+            return wait_mode(request_id,'HOLD'if target=='END'else target)
+        def work():
+            try:
+                task['phase']='entering_teach'
+                mode=normal_state()
+                if mode.get('transition_stage')=='RESUMING':request_mode('HOLD',body['request_id']+'-hold')
+                request_mode('TEACH',body['request_id']+'-teach')
+                task['phase']='teaching'
+                while not workflow.operator_finish.wait(.05):normal_state()
+                task['phase']='locking_start'
+                held=request_mode('HOLD',task['finish_request_id']+'-hold')
+                task.update(status='completed',phase='start_ready',hold_reference_id=held['reference_id'],
+                    finished_wall_ns=time.time_ns(),sdk_released=False)
+            except Exception as error:
+                if current():device.request_stop()
+                task.update(status='failed'if current()else'stopped',phase='terminated',error=str(error),
+                    finished_wall_ns=time.time_ns(),sdk_released=False)
+        threading.Thread(target=work,daemon=True,name='infer-operator-teach').start()
+        return dict(accepted=True,operator_task=deepcopy(task))
 
     def inference_context(self, device, runtime, workflow):
         return dict(server_instance_id=self.server_instance_id,device_id=device.id,
@@ -320,14 +634,25 @@ class Application:
 
     def inference_run_reason(self, device, workflow, runtime, *, ignore_job=None,
                              workflow_view=None,workflow_views=None,holder_runtime=None):
+        if self.operator_tasks.get(device.environment,{}).get('status')=='running':
+            return '请先完成当前位置保持与定位录制封存'
         if not workflow or not all(callable(getattr(workflow,name,None)) for name in ('bind_device','preview_episode','execute_review')):
             return '当前推理工作流尚未支持 Run，请使用分步诊断'
         if getattr(workflow,'control_mapping_pending',None):return workflow.control_mapping_pending
         value=workflow.snapshot() if workflow_view is None else workflow_view;inference=value.get('inference') or {}
+        session=getattr(workflow,'operator_session',None)
+        mode=inference.get('normal_mode')or{}
+        held_session=bool(session and session['run_id']==value.get('id')
+            and session['runtime_nonce']==runtime.get('runtime_nonce')
+            and mode.get('runner_status')=='RUNNING'and mode.get('mode')=='HOLD'
+            and not mode.get('transition_stage'))
+        if (inference.get('input_evidence')or{}).get('error'):
+            return '推理证据写入失败，请检查存储；不会静默继续新一轮推理'
         if not (inference.get('model_ready') or (inference.get('model') or {}).get('loaded')):
             return '先选择 checkpoint，并等待模型加载与预热完成'
         views=(flow.snapshot() for flow in device.workflows.values()) if workflow_views is None else workflow_views.values()
-        if any(view.get('busy') for view in views):return '业务任务正在处理，不能接管控制'
+        if any(view.get('busy') and not(held_session and view.get('id')==value.get('id'))for view in views):
+            return '业务任务正在处理，不能接管控制'
         with self.lock:
             if any(row.get('status')=='running' and row.get('id')!=ignore_job
                     for (environment,_),row in self.jobs.items() if environment==device.environment):
@@ -338,6 +663,8 @@ class Application:
         if str(runtime.get('state','')).upper()=='FAULT' or runtime.get('recoverable_fault'):
             return '设备存在控制故障，请先恢复并核验，不会由 Run 自动恢复'
         if runtime.get('service_error'):return '设备控制线程存在异常，请先核验设备连接'
+        if held_session:
+            return None if runtime.get('feedback_healthy')and runtime.get('stationary')else'等待健康静止反馈'
         holder=runtime.get('holder')
         source=holder_runtime if holder_runtime is not None else device.snapshot(holder) if holder in BUSINESSES else runtime
         # UI readiness is stable across normal 100 Hz reads. Actual admission still
@@ -348,6 +675,8 @@ class Application:
 
     def run_inference(self, device, workflow, body, job, generation, inference_generation, flow_generation):
         environment=device.environment
+        if body.get('prepare_only')and (workflow.normal_modes is None or workflow.recording_backend!='capture_session_v1'):
+            raise ValueError('预备控制会话要求共享正常模式与常驻录制')
         runtime=device.runtime
         binding=self.inference_context(device,device.snapshot('inference'),workflow)
         def current():
@@ -355,6 +684,7 @@ class Application:
                 and workflow.generation==flow_generation)
         def check():
             if not current():raise ValueError('本轮 Run 已撤销，不会继续连接或执行')
+            if job.get('operator_stop_request_id'):raise ValueError('operator stopped before trajectory submission')
             info=workflow.snapshot().get('inference') or {}
             selected=info.get('selected_model_id') or (info.get('model') or {}).get('id')
             digest=info.get('bundle_digest') or (info.get('model') or {}).get('bundle_digest')
@@ -374,8 +704,32 @@ class Application:
             runtime.admit_business('inference',active=current)
             binding=self.inference_context(device,device.snapshot('inference'),workflow)
             check()
-        stage('binding');workflow.bind_device();check()
-        stage('reviewing');review=workflow.preview_episode(body['seed'],duration_s=body['duration_s']);check()
+        session=getattr(workflow,'operator_session',None)
+        if session and workflow.current and workflow.current['id']==session['run_id']and workflow.current.get('ended_wall')is None:
+            if body.get('prepare_only'):raise ValueError('控制会话已准备好')
+            if any(body[name]!=session[name]for name in ('seed','duration_s','model_id','expected_bundle_digest')):
+                raise ValueError('控制会话参数已冻结，请结束会话后重新准备')
+            if body.get('wam_stall_recovery',False)!=session.get('wam_stall_recovery',False):
+                raise ValueError('WAM trick mode differs from the prepared control session')
+            with self.lock:
+                if job.get('operator_stop_request_id'):
+                    return dict(message='启动已停止，当前位置继续保持和录制',
+                        execution=dict(operator_stopped=True,recording_open=True))
+                workflow.current.pop('operator_stop_request_id',None)
+                workflow.current.pop('operator_stop_command',None)
+                workflow.current.pop('operator_positioning',None)
+            job['execution_submitted']=True
+            episode=self.run_normal_episode(device,workflow,job,current,runtime,runtime.nonce,body['duration_s'],keep_session=True)
+            return dict(message='本轮推理已保持，控制会话继续录制',execution=dict(normal_episode=episode))
+        stage('binding');bound=workflow.bind_device()
+        if isinstance(bound,dict)and type(bound.get('generation'))is int:
+            if bound['generation']!=flow_generation+1 or workflow.generation!=bound['generation']:
+                raise ValueError('设备绑定代次与本轮接入不一致')
+            flow_generation=bound['generation']
+            binding=self.inference_context(device,device.snapshot('inference'),workflow)
+        check()
+        stage('reviewing');review=workflow.preview_episode(body['seed'],duration_s=body['duration_s'],
+            **(dict(wam_stall_recovery=True)if body.get('wam_stall_recovery')else{}));check()
         preview=review.get('preview',{})
         token=preview.get('token')
         if not isinstance(token,str) or not token:raise ValueError('本轮执行审阅未生成有效令牌')
@@ -386,15 +740,128 @@ class Application:
         # Order the final enqueue against stop/cancel. No model/camera work in this lock.
         with self.lock:
             if not current() or device.runtime is not runtime:raise ValueError('本轮 Run 在执行前已撤销')
+            if job.get('operator_stop_request_id'):raise ValueError('operator stopped before trajectory submission')
             result=workflow.execute_review(token,physical_clearance=True)
+            job['execution_submitted']=True
             job['stage']='submitted'
-        return dict(message='本轮推理已提交；请查看实际执行与录像状态',execution=result,
+        normal_episode=None
+        if (getattr(workflow,'normal_modes',None) is not None
+                and getattr(workflow,'reference_planning',None) is not None
+                and workflow.normal_initial_mode=='HOLD'):
+            normal_episode=self.run_normal_episode(device,workflow,job,current,runtime,binding['runtime_nonce'],body['duration_s'],
+                prepare_only=body.get('prepare_only',False))
+            if body.get('prepare_only'):
+                workflow.operator_session=dict(run_id=normal_episode['execution_instance_id'],runtime_nonce=runtime.nonce,
+                    wam_stall_recovery=body.get('wam_stall_recovery',False),
+                    **{name:body[name]for name in ('seed','duration_s','model_id','expected_bundle_digest')})
+                return dict(message='控制与录制已准备，踏板可直接切换模式',execution=normal_episode)
+            result=dict(result,normal_episode=normal_episode)
+        return dict(message='本轮持续推理已正常结束'if normal_episode else'本轮推理已提交；请查看实际执行与录像状态',execution=result,
             model_id=body['model_id'],seed=body['seed'],duration_s=body['duration_s'])
+
+    def run_normal_episode(self,device,workflow,job,current,runtime,nonce,duration,*,prepare_only=False,keep_session=False):
+        """Use the existing Run worker to join reviewed HOLD, MODEL and END receipts."""
+        deadline=time.monotonic()+10.
+        execution_id=None
+        model_request=None
+        end_request=None
+        stop_reason=None
+        normal_reasons={'normal MODEL episode budget exhausted',
+            'complete next segment exceeds remaining episode budget',
+            'explicit single-segment acceptance budget finished; normal HOLD requires original Raw gate'}
+        while time.monotonic()<deadline:
+            if not current() or device.runtime is not runtime:
+                raise ValueError('本轮 Run 已撤销，后续 MODEL/END 未提交')
+            view=workflow.snapshot()
+            mode=(view.get('inference')or{}).get('normal_mode')or{}
+            # RemoteRunner starts with no Owner snapshot. Wait within the same
+            # deadline; once bound, a missing or changed identity still rejects.
+            if mode and (execution_id is not None or mode.get('runtime_nonce') is not None):
+                execution_id=execution_id or view['id']
+                if view['id']!=execution_id or mode.get('runtime_nonce')!=nonce:
+                    raise ValueError('本轮推理执行身份已变化')
+                if mode.get('runner_status')in('FAULT','STOPPED'):
+                    raise ValueError(mode.get('reason')or'本轮推理已停止或故障')
+                receipts=mode.get('mode_receipts')or{}
+                held=mode.get('mode')=='HOLD' and not mode.get('transition_stage')
+                initialized=any(row.get('op')=='normal_initialize' and row.get('completed')is True
+                    for row in receipts.values())
+                if prepare_only and held and initialized:
+                    return dict(execution_instance_id=execution_id,mode='HOLD',recording_open=True)
+                positioning=(getattr(workflow,'current',None)or{}).get('operator_positioning')
+                if positioning and positioning.get('status')=='running':
+                    deadline=time.monotonic()+10.
+                    time.sleep(.01)
+                    continue
+                target=None
+                operator_stop=job.get('operator_stop_request_id')or(getattr(workflow,'current',None)or{}).get('operator_stop_request_id')
+                if operator_stop and not held and not mode.get('transition_stage'):
+                    workflow.request_operator_stop(operator_stop)
+                if model_request is None and held and initialized:
+                    if operator_stop and keep_session:
+                        return dict(execution_instance_id=execution_id,reason='operator stopped in position HOLD',
+                            recording_open=True,operator_stopped=True)
+                    target='END'if operator_stop else'MODEL'
+                elif model_request is not None and end_request is None and held:
+                    model_receipt=receipts.get(model_request)or{}
+                    if model_receipt.get('completed')is True or model_receipt.get('status')in('failed','rejected'):
+                        stop_reason=mode.get('reason')or model_receipt.get('error')or model_receipt.get('reason')or 'MODEL ended before its budget'
+                        if keep_session:
+                            if not operator_stop and not positioning and stop_reason not in normal_reasons:
+                                raise ValueError('推理已保持：'+str(stop_reason))
+                            return dict(execution_instance_id=execution_id,reason=stop_reason,recording_open=True,
+                                operator_stopped=bool(operator_stop or positioning))
+                        target='END'
+                if end_request is not None:
+                    ending=receipts.get(end_request)or{}
+                    if ending.get('completed')is True and mode.get('runner_status')=='READY' and not view.get('busy'):
+                        if operator_stop:
+                            return dict(execution_instance_id=execution_id,reason='operator stopped in position HOLD',
+                                operator_stopped=True,ending=ending)
+                        if receipts.get(model_request,{}).get('completed')is not True or stop_reason not in normal_reasons:
+                            raise ValueError('推理提前保持并已正常结束：'+str(stop_reason))
+                        return dict(execution_instance_id=execution_id,reason=stop_reason,ending=ending)
+                    if ending.get('status')in('failed','rejected'):raise ValueError('本轮正常结束未被接纳')
+                if target is not None:
+                    request_id=job.get('request_id')if target=='MODEL'else None
+                    request_id=request_id or uuid.uuid4().hex
+                    request=dict(session_id=mode['mode_session_id'],runtime_nonce=nonce,
+                        request_id=request_id,epoch=mode['command_epoch'],
+                        mode='MODEL'if target=='MODEL'else'HOLD',target=target)
+                    with self.lock:
+                        if not current() or device.runtime is not runtime:
+                            raise ValueError('本轮 Run 已撤销，后续 MODEL/END 未提交')
+                        if target=='MODEL'and(job.get('operator_stop_request_id')or
+                                (getattr(workflow,'current',None)or{}).get('operator_stop_request_id')):
+                            continue
+                        workflow.request_normal_mode(request)
+                        job['stage']='model_running'if target=='MODEL'else'ending'
+                    if target=='MODEL':
+                        model_request=request_id
+                        deadline=time.monotonic()+duration+10.
+                    else:end_request=request_id
+            time.sleep(.02)
+        raise ValueError('本轮正常模式回执等待超时，请核验原请求与控制状态')
 
     def device(self, environment):
         if environment not in self.devices:
             raise ValueError('该环境尚未配置，不能切换到另一个环境代替执行')
         return self.devices[environment]
+
+    def control_policy(self, environment, business):
+        if business not in BUSINESSES:raise ValueError('unknown business')
+        runtime=self.device(environment).runtime
+        if runtime is None or not getattr(runtime,'supports_control_policy',False):
+            raise ValueError('当前Owner尚未提供统一策略接口')
+        policy=runtime.control_policy_snapshot(business)
+        flow=self.device(environment).workflows.get('inference')
+        if (business=='inference' and policy['origins'].get('execution.execute_steps')=='product_default'
+                and hasattr(flow,'execute_steps')):
+            from .execution_settings import policy_hash
+            policy['parameters']['execution']['execute_steps']=flow.execute_steps
+            policy['origins']['execution.execute_steps']='legacy_workflow_settings'
+            policy['policy_hash']=policy_hash(policy['parameters'])
+        return policy
 
     def environment_state(self,environment):
         """Environment facts stay independent from a business's permissions/view."""
@@ -548,8 +1015,8 @@ class Application:
         if business not in BUSINESSES:
             raise ValueError('未知业务')
         paging = results_before is not None or results_after is not None
-        if paging and business != 'inference':raise ValueError('历史分页仅用于推理结果')
         device = self.device(environment)
+        if paging and business!='inference'and device.capture_results is None:raise ValueError('当前业务未配置录制历史分页')
         runtime = device.snapshot(business)
         workflow = device.workflows.get(business)
         manual_workflow=device.workflows.get('calibration')
@@ -623,12 +1090,19 @@ class Application:
                 value['busy'] = True
                 if job['action']=='inference_run':
                     phase=job.get('stage','binding')
-                    value.update(stage_id='inference.'+phase,title='准备本轮推理',message={
+                    value.update(stage_id='inference.'+phase,title='推理进行中'if phase=='model_running'else'本轮正常结束中'if phase=='ending'else'准备本轮推理',message={
                         'connecting':'正在连接设备并等待健康反馈','handoff':'正在交接控制权',
                         'binding':'正在核对模型、标定与相机','reviewing':'正在准备本轮执行审阅',
-                        'confirming':'正在提交已确认的本轮推理','submitted':'本轮已提交，等待控制回执'}.get(phase,phase))
+                        'confirming':'正在提交已确认的本轮推理','submitted':'本轮已提交，等待控制回执',
+                        'model_running':'按所选时长持续观测、推理并执行完整片段，可随时 Stop',
+                        'ending':'轨迹已保持，正在等待本轮 END 回执'}.get(phase,phase))
+                elif job['action']=='inference_teach':
+                    value.update(stage_id='inference.manual_start',title='人工设置推理起点',
+                        message='踏板2切换重力补偿拖动与位置保持，保持完成后可开始下一轮Infer。')
                 if value.get('primary_action'):
                     value['primary_action'].update(allowed=False,reason='当前请求仍在处理')
+            elif job['action']=='inference_run' and job['status']=='failed':
+                value.update(status='failed',message=job.get('error')or'本轮推理未完成')
         allowed = runtime.setdefault('allowed_operations',{})
         execution_settings=runtime.get('execution_settings') or {}
         settings_reason=execution_settings.get('update_reason') or '请先连接设备'
@@ -639,6 +1113,9 @@ class Application:
         if settings_job_busy or workflows_busy:
             settings_allowed=False;settings_reason='请先结束当前请求或业务任务，再应用执行误差设置'
         allowed['execution_settings']=dict(allowed=settings_allowed,reason=None if settings_allowed else settings_reason)
+        policy_supported=bool(getattr(device.runtime,'supports_control_policy',False))
+        allowed['control_policy']=dict(allowed=settings_allowed and policy_supported,
+            reason=('当前Owner尚未提供统一策略接口' if not policy_supported else None if settings_allowed else settings_reason))
         connect_ready=device.runtime is None and not device.connecting and not (device.thread and device.thread.is_alive())
         allowed['connect'] = dict(allowed=bool(connect_ready and device.factory is not None),
                                   reason=('设备控制后端尚未配置' if device.factory is None else
@@ -691,7 +1168,8 @@ class Application:
         if workflow:
             for action in ('cancel','mesh','select_result','install','generate_plan','execute',*CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS):
                 if hasattr(workflow,'allowed'):
-                    allowed[action]=workflow.allowed(action)
+                    allowed[action]=(workflow.allowed(action,current=workflow_views[business])
+                        if isinstance(workflow,InferenceWorkflow) else workflow.allowed(action))
                 if business=='calibration' and action in (*CALIBRATION_TOOLS,'generate_plan') and not allowed['preview']['allowed']:
                     allowed[action]=dict(allowed=False,reason=allowed['preview']['reason'])
         if readiness is not None and not readiness['host_sample_recent']:
@@ -723,6 +1201,22 @@ class Application:
                 if reason:allowed[action]=dict(allowed=False,reason=reason)
             for entry in value.get('collection',{}).get('actions',{}).values():entry.update(allowed[entry['id']])
         if business=='inference':
+            operator_task=getattr(workflow,'operator_task',{})if workflow is not None else{}
+            operator_busy=operator_task.get('status')=='running'
+            operator_ready=(runtime.get('connected')and holder=='inference'and runtime.get('feedback_healthy')
+                and not runtime.get('recoverable_fault')and 'FAULT'not in str(runtime.get('state')))
+            allowed['inference_hold']=dict(allowed=bool(operator_ready),reason=None if operator_ready else'需要当前推理控制权与健康连接')
+            session=getattr(workflow,'operator_session',None)
+            session_ready=bool(session and value.get('id')==session['run_id']
+                and (value.get('inference',{}).get('normal_mode')or{}).get('runner_status')=='RUNNING')
+            model_active=self._operator_model_active(device,runtime)
+            teach_active=operator_busy and operator_task.get('kind')=='teach'
+            teach_ready=bool(operator_ready and (model_active or teach_active or not operator_busy
+                and session_ready and (value.get('inference')or{}).get('model_ready')))
+            allowed['inference_teach']=dict(allowed=teach_ready,
+                reason=None if teach_ready else '请先准备控制与踏板，等待当前模式转换完成')
+            allowed['inference_home']=dict(allowed=bool(operator_ready and session_ready and not operator_busy and not model_active and getattr(workflow,'operator_controls',{})),
+                reason='推理过程中踏板3不执行回零'if model_active else'等待当前踏板操作完成'if operator_busy else None if operator_ready and session_ready else'请先准备控制与踏板')
             for action in ('inference_preview','execute'):
                 reason=('请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有' if holder!=business else
                     '当前推理请求或执行尚未结束' if value.get('busy') else
@@ -738,6 +1232,9 @@ class Application:
                     if value.get('busy'):allowed[action]=dict(allowed=False,reason='当前推理请求或执行尚未结束')
                     else:allowed[action]=dict(allowed=True,reason=None)
             info=value.setdefault('inference',{})
+            session=getattr(workflow,'operator_session',None)
+            info['operator_session']=(deepcopy(session)if session and value.get('id')==session['run_id']
+                and (info.get('normal_mode')or{}).get('runner_status')=='RUNNING'else None)
             info['run_context']=self.inference_context(device,runtime,workflow)
             info['run_action']=dict(id='inference_run',**allowed['inference_run'])
             if primary and primary['id'] in INFERENCE_MODEL_TOOLS:primary.update(allowed[primary['id']])
@@ -799,8 +1296,11 @@ class Application:
             results_page = workflow.results_page(before=results_before, after=results_after)
             results = results_page.pop('results')
         else:
-            if paging:raise ValueError('当前推理服务未配置历史分页')
-            results = workflow.results() if workflow else []
+            results = workflow.results() if workflow and not paging else []
+            if device.capture_results is not None and business in device.capture_results.BUSINESSES:
+                results_page=device.capture_results.page(business,before=results_before,after=results_after)
+                results+=results_page.pop('results')
+            elif paging:raise ValueError('当前推理服务未配置历史分页')
         inference_flow=device.workflows.get('inference')
         inference_execution=inference_flow.execution_settings() if hasattr(inference_flow,'execution_settings') else None
         allowed['inference_execution_settings']=dict(allowed=bool(inference_execution and inference_execution['allowed'] and not settings_job_busy),
@@ -878,7 +1378,7 @@ class Application:
         if action in (*INFERENCE_TOOLS,'inference_run'):
             extra=({'model_id','expected_bundle_digest'} if action=='inference_select' else set())
             if action=='inference_preview':extra.add('reference_feedforward_sha256')
-            if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported'}
+            if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported','prepare_only','wam_stall_recovery'}
             if business!='inference' or set(body)-{'environment','business','request_id','seed','duration_s'}-extra:
                 raise ValueError('推理请求包含未支持的字段；模型须来自 checkpoint 目录')
             if type(body.get('seed',0)) is not int or not 0<=body.get('seed',0)<2**32:
@@ -886,6 +1386,10 @@ class Application:
             episode_duration(body.get('duration_s',120))
             if action=='inference_run' and not {'seed','model_id','expected_bundle_digest','expected_context','state_wall_ns'}.issubset(body):
                 raise ValueError('Run 缺少本轮模型、种子或控制上下文')
+            if 'prepare_only'in body and type(body['prepare_only'])is not bool:
+                raise ValueError('prepare_only requires an explicit boolean')
+            if 'wam_stall_recovery'in body and type(body['wam_stall_recovery'])is not bool:
+                raise ValueError('wam_stall_recovery requires an explicit boolean')
         request_id=body.get('request_id')
         if not isinstance(request_id,str) or not 1 <= len(request_id) <= 128:
             raise ValueError('有效的单次请求身份必需')
@@ -897,6 +1401,14 @@ class Application:
                 if previous['body'] != body or previous['action'] != action:
                     raise ValueError('同一请求身份不可绑定不同操作')
                 return previous['response']
+        if action in ('inference_hold','inference_home','inference_teach'):
+            flow=device.workflows.get('inference')
+            if flow is None:raise ValueError('inference workflow is not configured')
+            result=self._operator_action(device,flow,action,body)
+            with self.lock:self.requests[key]=dict(body=original_body,action=action,response=result)
+            return result
+        if action=='inference_focus':
+            return self._operator_focus_action(device,device.workflows['inference'],body)
         if action in ('precision_preview','precision_execute','precision_analyze','precision_settings','precision_select','precision_notes'):
             if business!='research':raise ValueError('控制研究操作须使用research业务身份')
             fields={'precision_preview':{'kind','speed'},'precision_execute':{'review_id'},'precision_analyze':set(),
@@ -945,6 +1457,11 @@ class Application:
                 if any(row.get('status')=='running' and row.get('action')=='inference_run'
                         for (env,_),row in self.jobs.items() if env==environment):
                     raise ValueError('本轮 Run 正在接入或提交；可停止或取消后再更改配置')
+        if action in ('inference_mode','inference_finish'):
+            workflow=device.workflows.get('inference')
+            if business!='inference' or workflow is None:raise ValueError('推理业务未配置')
+            call=workflow.request_normal_mode if action=='inference_mode'else workflow.request_normal_finish
+            return call({k:v for k,v in body.items() if k not in ('environment','business')})
         if action=='inference_run':
             workflow=device.workflows.get('inference');runtime=device.snapshot('inference')
             reason=self.inference_run_reason(device,workflow,runtime)
@@ -1032,26 +1549,59 @@ class Application:
                 while len(self.requests)>256:self.requests.popitem(last=False)
             self.invalidate(environment,clear_manual=True)
             return result
+        if action=='control_policy':
+            if set(body)!={'environment','business','request_id','changes','expected_revision'}:
+                raise ValueError('统一策略提交须包含字段变更与当前版本')
+            runtime=device.runtime
+            if runtime is None or not getattr(runtime,'supports_control_policy',False):
+                raise ValueError('当前Owner尚未提供统一策略接口')
+            with self.policy_write_lock:
+                with self.lock:
+                    previous=self.requests.get(key)
+                    if previous:
+                        if previous['body']!=original_body or previous['action']!=action:
+                            raise ValueError('同一请求身份不可绑定不同操作')
+                        return previous['response']
+                    if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
+                        raise ValueError('当前请求尚未结束，请稍后应用统一策略')
+                    if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+                        raise ValueError('业务任务仍在进行，请稍后应用统一策略')
+                changes=deepcopy(body['changes'])
+                initial=runtime.control_policy_snapshot(business)
+                flow=device.workflows.get('inference')
+                if (business=='inference' and initial['origins'].get('execution.execute_steps')=='product_default'
+                        and hasattr(flow,'execute_steps') and isinstance(changes,dict)):
+                    changes.setdefault('execution.execute_steps',flow.execute_steps)
+                policy=runtime.update_control_policy(device.credentials[business],
+                    dict(expected_revision=body['expected_revision'],changes=changes))
+                result=dict(control_policy=policy,message='统一策略已保存；下一轮使用新策略，请重新审阅轨迹')
+                with self.lock:
+                    self.requests[key]=dict(body=original_body,action=action,response=result)
+                    while len(self.requests)>256:self.requests.popitem(last=False)
+            self.invalidate(environment,clear_manual=True)
+            return result
         if action=='execution_settings':
             if set(body)!={'environment','business','request_id','settings','expected_revision'}:
                 raise ValueError('执行误差设置须包含完整设置与当前版本')
             runtime=device.runtime
             if runtime is None:raise ValueError('请先连接设备')
-            with self.lock:
-                previous=self.requests.get(key)
-                if previous:
-                    if previous['body']!=original_body or previous['action']!=action:raise ValueError('同一请求身份不可绑定不同操作')
-                    return previous['response']
-                if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
-                    raise ValueError('当前请求尚未结束，请稍后应用执行误差设置')
-                if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
-                    raise ValueError('业务任务仍在进行，请稍后应用执行误差设置')
+            with self.policy_write_lock:
+                with self.lock:
+                    previous=self.requests.get(key)
+                    if previous:
+                        if previous['body']!=original_body or previous['action']!=action:raise ValueError('同一请求身份不可绑定不同操作')
+                        return previous['response']
+                    if any(job.get('status')=='running' for (env,_),job in self.jobs.items() if env==environment):
+                        raise ValueError('当前请求尚未结束，请稍后应用执行误差设置')
+                    if any(flow.snapshot().get('busy') for flow in device.workflows.values()):
+                        raise ValueError('业务任务仍在进行，请稍后应用执行误差设置')
                 if type(body['expected_revision']) is not int or body['expected_revision']!=runtime.execution_settings_snapshot(business)['revision']:
                     raise ValueError('执行误差设置已变化，请重新读取当前设置后应用')
-                result=runtime.update_execution_settings(device.credentials[business],body['settings'])
+                result=runtime.update_execution_settings(device.credentials[business],body['settings'],expected_revision=body['expected_revision'])
                 result=dict(execution_settings=result,message='执行误差设置已生效；原执行审批已撤销，请重新审阅轨迹')
-                self.requests[key]=dict(body=original_body,action=action,response=result)
-                while len(self.requests)>256:self.requests.popitem(last=False)
+                with self.lock:
+                    self.requests[key]=dict(body=original_body,action=action,response=result)
+                    while len(self.requests)>256:self.requests.popitem(last=False)
             self.invalidate(environment,clear_manual=True)
             return result
         if action=='prepare_collection':
@@ -1168,7 +1718,7 @@ class Application:
                 raise ValueError('设备其他请求正在处理，本轮 Run 未开始')
             if action=='inference_run' and body['expected_context']!=self.inference_context(device,device.snapshot('inference'),device.workflows['inference']):
                 raise ValueError('本轮 Run 受理前控制上下文已变化')
-            job=dict(id=secrets.token_hex(12),action=action,status='running',started_wall_ns=time.time_ns())
+            job=dict(id=secrets.token_hex(12),action=action,status='running',started_wall_ns=time.time_ns(),request_id=request_id)
             self.jobs[(environment,business)]=job
             if action in ('generate_plan','manual_preview','manual_queue','manual_queue_preview','cancel',*CALIBRATION_TOOLS,*INFERENCE_TOOLS,'collection_plan'):
                 self.manual_tasks.pop((environment,business),None)
@@ -1181,7 +1731,12 @@ class Application:
             if action=='connect' or action=='inference_run' and device.runtime is None:device.stop_latched=False
             while len(self.requests)>256:self.requests.popitem(last=False)
         def work():
+            trace=None
+            trace_flow=device.workflows.get('inference') if action=='inference_run' else None
             try:
+                if trace_flow is not None and hasattr(trace_flow,'begin_debug_request'):
+                    trace=trace_flow.begin_debug_request(job,original_body)
+                    if trace and trace.get('artifact_error'):job['artifact_error']=trace['artifact_error']
                 with self.lock:
                     if generation != self.generations[environment]:
                         job.update(status='cancelled',finished_wall_ns=time.time_ns())
@@ -1193,7 +1748,15 @@ class Application:
                     job.update(status='completed' if valid else 'cancelled',
                                result=result,finished_wall_ns=time.time_ns())
             except Exception as error:
-                with self.lock:job.update(status='cancelled' if generation!=self.generations[environment] or action=='inference_run' and inference_generation!=self.inference_generations[environment] else 'failed',error=str(error),finished_wall_ns=time.time_ns())
+                with self.lock:
+                    if action=='inference_run'and job.get('operator_stop_request_id')and not job.get('execution_submitted'):
+                        device.workflows['inference'].invalidate()
+                        job.update(status='completed',result=dict(operator_stopped=True,reason='operator stopped before trajectory submission'),finished_wall_ns=time.time_ns())
+                    else:job.update(status='cancelled' if generation!=self.generations[environment] or action=='inference_run' and inference_generation!=self.inference_generations[environment] else 'failed',error=str(error),finished_wall_ns=time.time_ns())
+            finally:
+                if trace is not None:
+                    try:trace_flow.finish_debug_request(trace,deepcopy(job),device.snapshot('inference'))
+                    except Exception as error:job['artifact_error']=str(error)
         threading.Thread(target=work,daemon=True,name='workbench-'+action).start()
         return response
 
@@ -1421,6 +1984,10 @@ def handler(app):
                             if len(query[key]) != 1:raise ValueError('one history cursor value required')
                             paging[key] = int(query[key][0])
                     return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0],**paging))
+                if path.path=='/api/control-policy':
+                    if set(query)!={'environment','business'} or any(len(values)!=1 for values in query.values()):
+                        raise ValueError('one environment and business required')
+                    return self.send(200,app.control_policy(query['environment'][0],query['business'][0]))
                 if path.path=='/api/environment':
                     if set(query)!={'environment'} or len(query['environment'])!=1:raise ValueError('one explicit environment required')
                     return self.send(200,app.environment_state(query['environment'][0]))
@@ -1461,6 +2028,8 @@ def handler(app):
                     returned=getattr(device,'cup_return_task',None) if business=='collection' else None
                     return_media=bool(returned and returned.get('media_id')==result_id)
                     file=Path(returned['directory'])/'plan.json' if return_media else workflow.media(result_id) if workflow else None
+                    if file is None and device.capture_results is not None and business in device.capture_results.BUSINESSES:
+                        file=device.capture_results.media(business,result_id)
                     history=getattr(device,'collection_history',None) if business=='collection' else None
                     if file is None and history is not None:file=history.media(result_id)
                     if file is None:return self.send(404,{'error':'本轮或所选历史媒体尚未就绪'})
@@ -1468,7 +2037,11 @@ def handler(app):
                     kind=mimetypes.guess_type(str(file))[0]
                     current_plan=(kind=='application/json' and business=='collection'
                         and (return_media or workflow and (workflow.snapshot().get('trajectory') or {}).get('id')==result_id))
-                    if kind not in ('video/mp4','image/png','image/jpeg') and not current_plan:raise ValueError('不支持的回放媒体类型')
+                    debug_receipt=(business=='inference' and result_id.startswith('debug-')
+                        and kind=='application/json' and file.name=='debug-receipt.json')
+                    capture_receipt=(result_id.startswith('capture-')and kind=='application/json'
+                        and re.fullmatch(r'receipt-r\d{6}\.json',file.name))
+                    if kind not in ('video/mp4','image/png','image/jpeg') and not current_plan and not debug_receipt and not capture_receipt:raise ValueError('不支持的回放媒体类型')
                     return serve_file(self,file,content_type=kind)
                 if path.path=='/api/recording-quality':
                     device=app.device(query.get('environment',['fake'])[0]);business=query.get('business',[''])[0]
@@ -1495,7 +2068,9 @@ def handler(app):
                     if self.headers.get('If-None-Match')==meta['etag']:return self.send(304,b'','image/jpeg',headers)
                     return self.send(200,raw,'image/jpeg',headers)
                 resource=path.path.removeprefix('/web') if path.path.startswith('/web/') else path.path
-                if resource not in ('/','/index.html','/app.js','/style.css','/session.js','/site_cameras.js','/triton.js'):
+                if resource not in ('/','/index.html','/app.js','/style.css','/session.js','/site_cameras.js','/triton.js',
+                                    '/physical_endpoint.js','/operations.js','/model_probe.js','/target_viewer.js',
+                                    '/vendor/three.module.js','/vendor/OrbitControls.js'):
                     return self.send(404,{'error':'not found'})
                 file=ROOT/'web'/('index.html' if resource=='/' else resource[1:])
                 return self.send(200,file.read_bytes(),mimetypes.guess_type(str(file))[0] or 'application/octet-stream')

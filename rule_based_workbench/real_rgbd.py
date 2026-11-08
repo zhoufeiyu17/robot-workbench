@@ -238,6 +238,61 @@ def _frame_counters(pair):
         depth_device_ms=z.get_timestamp() if z else None)
 
 
+class RosCapture:
+    """The original per-camera SDK process publishes pixels, never a relay."""
+    def __init__(self, profile, role, output, frames):
+        from robot_workbench.ros_data import RosNode,plane_config
+        from sensor_msgs.msg import Image
+        self.plane=plane_config(profile['data_plane']);self.role=role;self.frames=frames
+        self.camera={'head':'base_0','left':'left_wrist_0','right':'right_wrist_0'}[role]
+        self.intrinsics=json.loads(Path(profile['cameras'][role]['intrinsics']).read_text())
+        self.device_id=profile['robot_id'];self.instance_id=uuid.uuid4().hex
+        self.descriptor=dict(environment='physical',intrinsics={self.camera:self.intrinsics})
+        self.directories={self.camera:str(output)};self.sources={}
+        self.ros=RosNode('camera_'+role,namespace=self.plane['namespace'],domain_id=self.plane['domain_id'],localhost_only=False)
+        names=(self.camera,self.camera+'_depth')
+        self.images={name:self.ros.publisher(self.plane['namespace']+'/'+name,Image)for name in names}
+        self.declarations={name:self.ros.publisher('sources/'+name,self.ros.types.SourceDescriptor,retained=True,depth=1)for name in names}
+        self.metadata=self.ros.publisher(self.plane['namespace']+'/'+self.camera+'/metadata',self.ros.types.DataEvent)
+
+    def publish(self,camera,status,rgb,depth,*,width,height,sampled_token=None):
+        from sensor_msgs.msg import Image
+        from robot_workbench.ros_data import StreamRef,descriptor_message,json_text
+        if camera!=self.camera:raise ValueError('wrong original camera publisher')
+        actual=status['intrinsics'];expected=self.intrinsics
+        if (any(actual[k]!=expected[k]for k in ('serial','width','height')) or
+                any(abs(actual[k]-expected[k])>1e-6 for k in ('fx','fy','cx','cy')) or
+                actual.get('coefficients')!=expected.get('coefficients')):
+            raise ValueError('native camera intrinsics differ from the registered calibration')
+        stamp=status['host_receive_ns']
+        for name,encoding,pixels,channels in ((camera,'rgb8',rgb,3),(camera+'_depth','16UC1',depth,2)):
+            meta=dict(actual,environment='physical',clock_domain='host_wall',simulation_only=False,
+                timestamp_kind='host_receive',timestamp_domain=status['timestamp_domain'],camera_name=self.role,
+                evidence_source='physical_rgbd',pixel_format='rgb8'if channels==3 else'depth16le')
+            if channels==3:meta.update(intrinsics=actual,depth_stream_id=camera+'_depth',
+                metadata_topic=self.plane['namespace']+'/'+camera+'/metadata')
+            else:meta.update(depth_scale_m=status['depth_scale_m'],depth_aligned_to='color')
+            source=dict(device_id=self.device_id,stream_id=name,source_instance_id=self.instance_id,source_clock_id='host_wall',
+                topic=self.plane['namespace']+'/'+name,message_type='sensor_msgs/msg/Image',kind='image',units=meta['pixel_format'],
+                coordinate_frame=camera,nominal_hz=status['capture_fps'],available=True,metadata=meta)
+            if name not in self.sources:
+                self.sources[name]=source;self.declarations[name].publish(descriptor_message(self.ros,source))
+            elif source!=self.sources[name]:raise ValueError('camera source geometry or timing domain changed; rebind required')
+            image=Image(width=width,height=height,encoding=encoding,step=width*channels,data=pixels)
+            image.header.stamp.sec=stamp//10**9;image.header.stamp.nanosec=stamp%10**9;image.header.frame_id=camera
+            self.images[name].publish(image)
+        value={key:status[key]for key in ('host_receive_ns','frame_number','depth_frame_number',
+            'device_timestamp_ms','depth_device_timestamp_ms','timestamp_domain')}
+        self.metadata.publish(self.ros.types.DataEvent(reference=StreamRef(camera,self.instance_id,'host_wall',stamp,stamp).message(),
+            run_id='',epoch=0,event='frame_metadata',payload_json=json_text(value)))
+        self.frames.publish(status=status)
+
+    def close(self):
+        from robot_workbench.ros_data import descriptor_message
+        for name,source in self.sources.items():self.declarations[name].publish(descriptor_message(self.ros,dict(source,available=False)))
+        self.ros.close()
+
+
 def capture(args, frames):
     import cv2
     import numpy as np
@@ -245,11 +300,12 @@ def capture(args, frames):
     import fcntl
     from robot_workbench.rgbd_service import CommonCameraService,CAMERAS
     from robot_workbench.capture_diagnostics import CaptureDiagnostics
-    service=CommonCameraService.connect(args.service_descriptor)
+    original=getattr(frames,'source',None)
+    service=original or CommonCameraService.connect(args.service_descriptor)
     if service.descriptor['environment']!='physical':raise ValueError('physical camera service required')
     camera=CAMERAS[args.camera_name]
     if service.descriptor['intrinsics'][camera]['serial']!=args.serial:raise ValueError('camera serial differs from shared service')
-    capture_instance=uuid.uuid4().hex
+    capture_instance=getattr(service,'instance_id',None)or uuid.uuid4().hex
     diagnostics=CaptureDiagnostics(args.output,capture_instance)
     frames.capture_diagnostics=diagnostics
 
@@ -282,7 +338,7 @@ def capture(args, frames):
         reused_framesets = 0
         deadline = rate_start+args.duration_s if args.duration_s else math.inf
         while not frames.stop_requested.is_set() and time.monotonic() < deadline:
-            sampled_token=service.channels[camera].token()
+            sampled_token=None if original is not None else service.channels[camera].token()
             diagnostics.active_stage='wait'
             before_wait=time.monotonic_ns()
             try:
@@ -373,18 +429,28 @@ def main():
     parser.add_argument('--port', type=int,default=None)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--duration-s', type=float, default=0)
-    parser.add_argument('--service-descriptor',type=Path,required=True,
+    source=parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--service-descriptor',type=Path,
                         help='the same shared three-camera service descriptor for all serials')
+    source.add_argument('--profile',type=Path,help='registered ROS camera profile; no raw IPC service')
     args = parser.parse_args()
     if (not args.serial.isascii() or not args.serial.isdecimal() or args.port is not None and not 1024 <= args.port <= 65535
             or not math.isfinite(args.duration_s) or args.duration_s < 0):
         parser.error('decimal serial, unprivileged port and nonnegative duration required')
     args.output.mkdir(parents=True, exist_ok=False)
     from robot_workbench.rgbd_service import CommonCameraService,CAMERAS
-    service=CommonCameraService.connect(args.service_descriptor)
-    ports=service.start_servers({role:args.port if role==args.camera_name and args.port else 0 for role in CAMERAS})
-    if args.port and ports[args.camera_name]!=args.port:raise ValueError('preview port differs from shared camera service')
-    frames=service.frames[CAMERAS[args.camera_name]]
+    original=None
+    if args.profile:
+        profile=json.loads(args.profile.read_text())
+        if profile.get('environment')!='physical'or profile['cameras'][args.camera_name]['serial']!=args.serial:
+            raise ValueError('registered physical camera profile/serial required')
+        if args.port:raise ValueError('ROS source does not host a second preview server')
+        frames=Frames();original=RosCapture(profile,args.camera_name,args.output,frames);frames.source=original
+    else:
+        service=CommonCameraService.connect(args.service_descriptor)
+        ports=service.start_servers({role:args.port if role==args.camera_name and args.port else 0 for role in CAMERAS})
+        if args.port and ports[args.camera_name]!=args.port:raise ValueError('preview port differs from shared camera service')
+        frames=service.frames[CAMERAS[args.camera_name]]
     previous_handlers = {sig: signal.signal(sig, frames.request_stop) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         capture(args, frames)
@@ -399,6 +465,7 @@ def main():
                  'stop_signal': frames.stop_signal, 'stopped_wall_ns': str(time.time_ns())}
         if diagnostics is not None:final['capture_diagnostics']=diagnostics.summary()
         frames.publish(status=final)
+        if original is not None:original.close()
         (args.output/'status.json').write_text(json.dumps(final, indent=2))
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)

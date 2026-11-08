@@ -13,11 +13,14 @@ import sys
 import threading
 import time
 from .release_trace import memory_file, archive_memory_file
+from .execution_settings import NATIVE_WATCHDOG_TIMEOUT_S
 
 LIMIT = 65536
+EXECUTION_CONTEXT_SCHEMA = 'workbench.sdk-execution-context.v1'
 METHODS = {'connect', 'close', 'begin', 'send', 'set_damping_hold',
            'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains',
-           'enable_collection_arm','queue_reference','configure_motion_gains'}
+           'enable_collection_arm','queue_reference','configure_motion_gains','read_execution_output','set_execution_gains',
+           'bind_execution_context','start_native_home'}
 
 
 class SDKCommandRevoked(RuntimeError):
@@ -79,6 +82,8 @@ def serve_worker(connection, backend, epoch=None):
     from .gc_timing import install,recent
     install()
     pending = b'';previous = 0;deadline = 0.;generation=None
+    context_generation = None
+    bound_context = None
     def gate():
         if time.monotonic()>deadline:raise ValueError('expired SDK command')
         if epoch is not None and epoch[:]!=generation.encode():raise SDKCommandRevoked('SDK command epoch revoked')
@@ -97,7 +102,40 @@ def serve_worker(connection, backend, epoch=None):
         cancel_before=getattr(backend,'reference_cancel_sequence',0)
         try:
             dispatch_started=time.monotonic();dispatch_cpu=time.thread_time_ns()
-            value=getattr(backend,request['method'])(*request['args'],**request['kwargs'])
+            capabilities=getattr(backend,'execution_context_capabilities',None)
+            if capabilities is not None and capabilities!={'schema':EXECUTION_CONTEXT_SCHEMA}:
+                raise ValueError('SDK execution context protocol version mismatch; backend operation refused')
+            context_supported = capabilities == {'schema': EXECUTION_CONTEXT_SCHEMA}
+            if request['method'] == 'bind_execution_context':
+                from .execution_settings import validate_execution_context
+                gate()
+                if not context_supported or len(request['args']) != 1 or request['kwargs']:
+                    raise ReferenceWindowRejected('SDK execution context binding is unavailable or malformed')
+                try: context = validate_execution_context(request['args'][0])
+                except ValueError as error: raise ReferenceWindowRejected(str(error)) from None
+                if context_generation == generation and context != bound_context:
+                    raise ReferenceWindowRejected('execution context change requires a new generation')
+            if request['method'] == 'queue_reference' and context_supported:
+                try: gate()
+                except BaseException:
+                    backend.set_damping_hold(manual=False)
+                    backend.reference_cancel_sequence = getattr(backend, 'reference_cancel_sequence', 0) + 1
+                    raise
+                if context_generation != generation:
+                    raise ReferenceWindowRejected('current generation requires execution context binding')
+                required = {'reference_id', 'active_arm', 'host_times_s', 'q_sdk14', 'dq_sdk14'}
+                if (len(request['args']) != 1 or request['kwargs'] or not isinstance(request['args'][0], dict)
+                        or set(request['args'][0]) not in (required, required | {'torque_bias_sdk14'})):
+                    raise ReferenceWindowRejected('minimal bound reference window required')
+            if request['method'] == 'bind_execution_context' and context_generation == generation:
+                value = dict(bound=True)
+            else:
+                value=getattr(backend,request['method'])(*request['args'],**request['kwargs'])
+            if request['method'] == 'bind_execution_context':
+                gate()
+                context_generation, bound_context = generation, context
+            if request['method'] == 'connect' and context_supported:
+                value = dict(value or {}, execution_context={'schema': EXECUTION_CONTEXT_SCHEMA})
             if request['method']=='read_calibration_state'and isinstance(value,dict):
                 value['sdk_worker_read_timing']=dict(dispatch_started_s=dispatch_started,
                     execute_s=time.monotonic()-dispatch_started,cpu_s=(time.thread_time_ns()-dispatch_cpu)/1e9,
@@ -117,8 +155,8 @@ def serve_worker(connection, backend, epoch=None):
                     raise RuntimeError('native fault has no valid retained damping') from error
                 response.update(code='native_fault',faults=faults,connected=True,
                     release_steps=list(getattr(backend,'release_steps',())))
-            guarded_reference=request['method']=='queue_reference'or(request['method']=='configure_motion_gains'and request['kwargs'].get('preserve_hold')is True)
-            if isinstance(error,ReferenceWindowRejected)and guarded_reference:
+            guarded_reference=request['method']in('queue_reference','set_execution_gains','bind_execution_context','start_native_home')or(request['method']=='configure_motion_gains'and request['kwargs'].get('preserve_hold')is True)or(request['method']in('begin','set_damping_hold')and request['kwargs'].get('preserve_jaws')is True)
+            if isinstance(error,ReferenceWindowRejected)and (guarded_reference or request['method']=='read_execution_output'):
                 response.update(code='reference_rejected',connected=bool(backend.is_connected),
                     release_steps=list(getattr(backend,'release_steps',())))
             if isinstance(error,SDKCommandRevoked)and guarded_reference:
@@ -137,11 +175,17 @@ def serve_worker(connection, backend, epoch=None):
 class SDKProcess:
     """One explicitly acquired backend, with bounded RPCs and cached health reads."""
     def __init__(self, profile):
+        from .execution_settings import Guard,control_parameters,defaults,policy_hash
+        parameters=control_parameters(defaults('inference'),business='inference')
+        self._watchdog_guard=Guard.bind(dict(revision=None,policy_hash=policy_hash(parameters),parameters=parameters),{})
         self.profile=deepcopy(profile);self.passive_jaws=tuple(profile.get('disabled_grippers',()))
         self.target_interpreter_profile=profile.get('target_interpreter_profile')
         self.motion_gain_profile=profile.get('motion_gain_profile') or self.target_interpreter_profile or 'normal_X5'
         self.reference_start_allowance=deepcopy(profile.get('reference_start_allowance'))
         self.native_reference_api=profile.get('native_reference_api','legacy_recompute')
+        self.native_gripper_calibration_id=(profile.get('native_gripper_calibration')or{}).get('sha256')
+        self.execution_context_capabilities = None
+        self._bound_execution_context = None
         from .sdk_quiesce import ec_torque_units,dm_torque_units
         self.torque_unit_contract=(dm_torque_units(profile.get('dm_torque_contract'),can_interfaces=profile.get('can_interfaces'),robot_id=profile.get('robot_id'))
                                   or ec_torque_units(profile.get('ec_torque_contract')) or 'legacy_sdk_v1')
@@ -160,8 +204,10 @@ class SDKProcess:
         self.worker_pid=None
 
     def revoke_output(self):
-        self.generation=secrets.token_hex(16)
-        if self.epoch is not None:self.epoch[:]=self.generation.encode()
+        generation = secrets.token_hex(16)
+        self._bound_execution_context = None
+        if self.epoch is not None:self.epoch[:]=generation.encode()
+        self.generation = generation
 
     def dispose(self):
         if self.process is not None and self.process.poll() is None:raise RuntimeError('SDK worker exit not confirmed')
@@ -224,10 +270,10 @@ class SDKProcess:
     def terminal_failure(self):
         return self.failure or ('SDK 控制进程已退出' if self.connected and self.process.poll() is not None else None)
 
-    def call(self, method, *args, **kwargs):
+    def call(self, method, *args, _generation=None, **kwargs):
         if method not in METHODS:raise ValueError('unknown SDK method')
-        generation=self.generation
-        guarded_reference=method=='queue_reference'or(method=='configure_motion_gains'and kwargs.get('preserve_hold')is True)
+        generation=self.generation if _generation is None else _generation
+        guarded_reference=method in('queue_reference','set_execution_gains','bind_execution_context','start_native_home')or(method=='configure_motion_gains'and kwargs.get('preserve_hold')is True)or(method in('begin','set_damping_hold')and kwargs.get('preserve_jaws')is True)
         if method in ('send','begin','enable_collection_arm','queue_reference')or guarded_reference:self.command_guard()
         requested=time.monotonic();requested_cpu=time.thread_time_ns()
         with self.lock:
@@ -277,15 +323,15 @@ class SDKProcess:
                             raise ValueError('native fault output not confirmed')
                         self.connected=True;self.release_steps=reply['release_steps']
                         raise SDKNativeFault(faults)
-                    if guarded_reference and reply.get('code')=='reference_rejected':
+                    if (guarded_reference or method=='read_execution_output')and reply.get('code')=='reference_rejected':
                         if (set(reply)!={'id','error','code','connected','release_steps'}or reply['connected']is not True
                                 or not isinstance(reply['error'],str)or not isinstance(reply['release_steps'],list)
                                 or len(reply['release_steps'])>32):
                             raise ValueError('invalid SDK admission rejection response')
                         self.connected=True;self.release_steps=reply['release_steps']
-                        error=SDKCommandRejected(reply['error']);error.timing=self.last_reference_timing
+                        error=SDKCommandRejected(reply['error']);error.timing=self.last_reference_timing if method=='queue_reference'else None
                         raise error
-                    if guarded_reference and reply.get('code')=='reference_revoked'and reply.get('native_future_cancelled')is True:
+                    if guarded_reference and reply.get('code')=='reference_revoked'and (reply.get('native_future_cancelled')is True or method=='bind_execution_context'):
                         self.connected=reply['connected'];self.release_steps=reply['release_steps']
                         error=SDKCommandRevoked(reply['error']);error.timing=self.last_reference_timing
                         raise error
@@ -305,7 +351,13 @@ class SDKProcess:
                             or row[0]>row[1] for row in result)):
                         raise ValueError('SDK limits require 14 ordered finite pairs')
                     self._joint_limits=deepcopy(result)
-                if method=='connect' and isinstance(result,dict):self.heartbeat=result.get('heartbeat_monotonic_s')
+                if method=='connect' and isinstance(result,dict):
+                    self.heartbeat=result.get('heartbeat_monotonic_s')
+                    capabilities=result.get('execution_context')
+                    if capabilities is not None and capabilities!={'schema':EXECUTION_CONTEXT_SCHEMA}:
+                        raise ValueError('SDK execution context protocol version mismatch; connection refused')
+                    self.execution_context_capabilities = deepcopy(capabilities)
+                    self._bound_execution_context = None
                 if method=='read_calibration_state':
                     self.heartbeat=(result.get('can_output_guard') or {}).get('heartbeat_monotonic_s')
                     worker_pid=(result.get('sdk_worker_read_timing')or{}).get('pid')
@@ -361,17 +413,22 @@ class SDKProcess:
             elapsed=(client_failure['failed_monotonic_ns']-client_failure['started_monotonic_ns'])/1e6
             reason=f"SDK Guard IPC {client_failure.get('action')} {client_failure.get('stage')} · {client_failure.get('exception')} · 等待{elapsed:.1f}ms；已记录SDK请求fail-stop"
         heartbeat_fault=record.get('reason')=='SDK owner heartbeat lost'
+        checked=time.monotonic()
+        self.watchdog_decision=self._watchdog_guard.evaluate(dict(rule_id='G30',signal_id=self.attempt or 'sdk_unconnected',
+            observed=dict(monitored=active or heartbeat_fault,age_s=age,fault_latched=heartbeat_fault),
+            source_time=self.heartbeat if self.heartbeat is not None else checked,checked_time=checked),'native_watchdog')
+        heartbeat_lost=self.watchdog_decision['verdict']=='reject'
         if exited and self.process.returncode and not heartbeat_fault:
             reason=f'SDK监督进程异常退出（退出码 {self.process.returncode}）；'+(reason or '控制通道断开')
         # A reaped worker no longer owes heartbeats. Its fault still requires
         # explicit recovery; an unconfirmed exit remains unavailable, not healthy.
         heartbeat_status=('not_monitored' if worker_exited else 'unavailable' if exited else
-            'lost' if heartbeat_fault or active and (age is None or age>.1) else
+            'lost' if heartbeat_lost else
             'unavailable' if failed else 'healthy' if active else 'not_monitored')
-        return dict(schema='workbench.control_protection.v1',attempt_id=self.attempt,timeout_ms=100,
+        return dict(schema='workbench.control_protection.v1',attempt_id=self.attempt,timeout_ms=NATIVE_WATCHDOG_TIMEOUT_S*1000,
             heartbeat=dict(status=heartbeat_status,age_s=age if heartbeat_status in ('healthy','lost') else None,
                            monitored=not worker_exited and (active or failed)),
-            active_anomaly=not worker_exited and (failed or active and (age is None or age>.1)),
+            active_anomaly=not worker_exited and (failed or heartbeat_lost),
             recovery_required=bool(failed),reason=reason,
             guard_client_failure=client_failure,
             event=(dict(id=self.attempt,wall_ns=record.get('wall_ns'),reason=reason,
@@ -387,12 +444,57 @@ class SDKProcess:
     def read_calibration_state(self):return self.call('read_calibration_state')
     def get_bimanual_joint_position_limits(self):return self.call('get_bimanual_joint_position_limits')
     def read_gains(self):return self.call('read_gains')
-    def begin(self,*args):return self.call('begin',*args)
+    def begin(self,*args,**kwargs):return self.call('begin',*args,**kwargs)
+    def read_execution_output(self):return self.call('read_execution_output')
+    def set_execution_gains(self,rows):return self.call('set_execution_gains',rows)
     def send(self,*args):
         if self.target_interpreter_profile:
             raise ReferenceWindowRejected('ordinary motion requires the shared target interpreter; point-send is disabled')
         return self.call('send',*args)
     def set_damping_hold(self,**kwargs):return self.call('set_damping_hold',**kwargs)
+    def start_native_home(self,side):return self.call('start_native_home',side)
     def enable_collection_arm(self,*args):return self.call('enable_collection_arm',*args)
-    def queue_reference(self,*args):return self.call('queue_reference',*args)
+    def bind_execution_context(self, context):
+        from .execution_settings import validate_execution_context
+        generation = self.generation
+        value = validate_execution_context(context)
+        if self.execution_context_capabilities != {'schema': EXECUTION_CONTEXT_SCHEMA}:
+            raise ReferenceWindowRejected('SDK worker lacks execution context capability')
+        self.command_guard()
+        if self._bound_execution_context == (generation, value):
+            return dict(bound=True)
+        if self._bound_execution_context is not None and self._bound_execution_context[0] == generation:
+            self.revoke_output()
+            generation = self.generation
+        result = self.call('bind_execution_context', value, _generation=generation)
+        if self.generation != generation:
+            raise SDKCommandRevoked('execution context revoked during binding')
+        if not isinstance(result, dict) or set(result) != {'bound'} or result['bound'] is not True:
+            raise ReferenceWindowRejected('execution context binding was not confirmed')
+        self._bound_execution_context = (generation, value)
+        return result
+
+    def queue_reference(self, packet):
+        generation = self.generation
+        if self.execution_context_capabilities is not None:
+            if self._bound_execution_context is None or self._bound_execution_context[0] != generation:
+                raise SDKCommandRevoked('current generation has no confirmed execution context')
+            from .target_interpreter import SCHEMA
+            context = self._bound_execution_context[1]
+            if (not isinstance(packet, dict) or packet.get('schema') != SCHEMA or packet.get('controller_profile') != context['controller_profile']
+                    or packet.get('velocity_source') != context.get('velocity_source')):
+                raise ReferenceWindowRejected('reference window differs from bound execution configuration')
+            fields = {'schema', 'controller_profile', 'reference_id', 'active_arm', 'host_times_s', 'q_sdk14', 'dq_sdk14', 'torque_bias_sdk14'}
+            if set(packet) not in (fields, fields | {'velocity_source'}):
+                raise ReferenceWindowRejected('exact source window required')
+            bias = packet['torque_bias_sdk14']
+            if (not isinstance(bias, list) or len(bias) != len(packet['host_times_s'])
+                    or any(not isinstance(row, list) or len(row) != 14
+                           or any(type(torque) not in (int, float) or not math.isfinite(torque) for torque in row) for row in bias)):
+                raise ReferenceWindowRejected('finite torque bias matching the source window required')
+            value = {key: packet[key] for key in ('reference_id', 'active_arm', 'host_times_s', 'q_sdk14', 'dq_sdk14')}
+            if any(torque != 0 for row in bias for torque in row):
+                value['torque_bias_sdk14'] = packet['torque_bias_sdk14']
+            return self.call('queue_reference', value, _generation=generation)
+        return self.call('queue_reference', packet)
     def configure_motion_gains(self,value,**kwargs):return self.call('configure_motion_gains',value,**kwargs)

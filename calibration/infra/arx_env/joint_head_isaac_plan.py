@@ -134,7 +134,8 @@ def authorize_plan(plan, urdf, identity, q_current_rad, confirmed_hash, consumed
     if confirmed_hash != plan['hash'] or confirmed_hash in consumed:
         raise ValueError('unconfirmed or already consumed plan')
     current = vector(q_current_rad, 12, 'reported current joints')
-    if np.max(abs(current - plan['start_q_reported_rad'])) > .001:
+    from robot_workbench.execution_settings import DEFAULT_JOINT_TOLERANCE_RAD
+    if np.max(abs(current - plan['start_q_reported_rad'])) > DEFAULT_JOINT_TOLERANCE_RAD:
         raise ValueError('start state drifted; preview again')
     consumed.add(confirmed_hash)
     return deepcopy(plan)

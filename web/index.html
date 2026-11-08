@@ -29,6 +29,13 @@
     </nav>
     <section id="context-guidance" class="context-guidance" role="status" aria-live="polite"><strong id="context-guidance-title"></strong><p id="context-guidance-message"></p><a id="context-guidance-next" href="#task-panel"></a></section>
 
+    <details id="control-policy-tools" class="panel execution-settings"><summary>统一控制参数</summary><div class="manual-body">
+      <p class="hint">读取当前业务的实际策略后编辑。保存时整体校验，下一 Run 生效并撤销旧审阅；各快捷设置入口使用同一份策略。</p>
+      <p id="control-policy-status" class="identity" role="status">尚未读取实际策略。</p>
+      <div id="control-policy-fields" class="execution-settings-grid"></div>
+      <div class="manual-actions"><button id="control-policy-load">读取当前策略</button><button id="control-policy-save" disabled>保存参数变更</button></div>
+      <p id="control-policy-reason" class="action-reason"></p>
+    </div></details>
     <section id="speed-protection-tools" class="panel speed-protection" aria-labelledby="speed-protection-title">
       <h2 id="speed-protection-title">关节速度峰值保护</h2>
       <div class="manual-actions"><label class="check-label"><input id="speed-protection-enabled" type="checkbox" checked disabled>启用保护</label><label>速度阈值 · rad/s<input id="speed-protection-limit" type="number" min="0.000001" step="0.1" value="0.8" disabled></label></div>
@@ -52,7 +59,7 @@
 
     <section id="inference-execution-settings" class="panel" hidden aria-labelledby="inference-execution-title">
       <h2 id="inference-execution-title">推理执行长度</h2>
-      <p>每次预测 60 步，执行前 N 步后重新观测和推理。30 步对应约 1 秒动作，模型计算耗时另计；只影响下一轮推理。</p>
+      <p>按所选模型的动作窗口执行前 N 步，然后重新观测和推理。执行长度与整轮控制时间分别配置；新设置只影响下一轮推理。</p>
       <label>每次执行步数<input id="inference-execute-steps" type="number" min="1" max="60" step="1" value="30"></label>
       <button id="inference-steps-apply" disabled>保存推理执行长度</button><button id="inference-steps-reset">重新读取</button>
       <p id="inference-steps-effective" role="status" aria-live="polite"></p>
@@ -60,7 +67,7 @@
     <section id="work-pane" class="workspace" data-business="calibration">
       <div class="workspace-heading calibration-only"><div><span class="eyebrow">标定工作区</span><h2>调姿、采集求解与候选比较</h2></div><nav aria-label="标定工作区导航"><a href="#manual-tools">人工调姿</a><a href="#task-panel">完整标定</a><a href="#calibration-tools">分步采集与求解</a><a href="#results-pane" id="calibration-compare-link">候选比较与安装</a></nav></div>
       <div class="workspace-heading collection-only"><div><span class="eyebrow">数采工作区</span><h2>准备、规划审阅与执行观察</h2></div><p>在这里核对场景、轨迹与执行结果；每轮执行由共用准入核验控制与业务依赖。</p></div>
-      <div class="workspace-heading inference-only"><div><span class="eyebrow">推理工作区 · INFER</span><h2 id="inference-heading-title">加载模型、确认一轮与观察执行</h2></div><p id="inference-heading-message">共用当前设备、控制权、三相机、标定与录制服务；每轮确认后连续执行 120 个设备源时间秒。</p></div>
+      <div class="workspace-heading inference-only"><div><span class="eyebrow">推理工作区 · INFER</span><h2 id="inference-heading-title">加载模型、确认一轮与观察执行</h2></div><p id="inference-heading-message">共用当前设备、控制权、三相机与录制服务；每轮按填写的总控制时间运行，模型轨迹源时长单独记录。</p></div>
       <div class="workspace-heading research-only"><div><span class="eyebrow">控制研究工作区</span><h2>观察、人工调姿与控制参数试验</h2></div><p>显式交接到控制研究后执行；相机、目标浏览与人工规划共用现有模块。</p></div>
       <section id="observation-panel" class="panel observation" aria-labelledby="observation-title">
         <div class="panel-heading"><h2 id="observation-title">姿态与相机</h2><span class="muted">查看画面不会执行动作</span></div>
@@ -115,8 +122,15 @@
         <div class="panel-heading"><h2 id="task-title">当前任务 · 标定</h2><span id="task-status" class="badge">尚未核验</span></div>
         <div class="calibration-only"><ol id="calibration-pipeline-steps" class="workflow-steps" aria-label="标定流程"></ol><div id="calibration-quality-summary"></div></div>
         <section class="inference-only inference-tools" aria-label="推理准备与执行观察">
+          <section id="model-probe-panel" hidden aria-label="仅模型验证">
+            <h3>仅模型验证 · 不控机</h3><p class="hint">使用已保存的验证样本检查模型输出，不读取现场相机，不下发动作。Triton 转换完成并通过数值对照后可验证。</p>
+            <label>样本任务<select id="model-probe-task"><option value="coffee">咖啡制作</option><option value="lid_handoff">盖盖与交接</option></select></label>
+            <button id="model-probe-torch" disabled>Torch infer</button><button id="model-probe-triton" disabled>Triton infer</button>
+            <p id="model-probe-state" role="status">等待模型服务</p><details><summary>预测输出与回执</summary><pre id="model-probe-result" hidden></pre></details>
+          </section>
           <div class="inference-model"><strong id="inference-model">推理模型：尚未选择</strong><span id="inference-model-status" class="badge">尚未加载</span></div>
-          <label>推理模式<select id="inference-backend"><option value="torch">Torch</option><option value="triton">Triton</option></select></label><p id="inference-backend-status" class="hint"></p>
+          <label>模型家族<select id="inference-family"><option value="pi">π / Pi</option><option value="wam">WAM</option></select></label>
+          <label>执行后端<select id="inference-backend"><option value="torch">Torch</option><option value="triton">Triton</option></select></label><p id="inference-backend-status" class="hint"></p>
           <label>使用 checkpoint<select id="inference-checkpoint" aria-describedby="inference-catalog-status"><option value="">读取 checkpoint 目录中</option></select></label><button id="inference-refresh" aria-describedby="inference-refresh-reason" disabled>刷新 checkpoint</button><p id="inference-refresh-reason" class="action-reason"></p><p id="inference-catalog-status" class="hint"></p>
           <details id="triton-conversion-tools"><summary>Triton 权重转换</summary>
             <p class="hint">转换通过数值与制品验证后，刷新上方目录，在同一任务中选择 Triton checkpoint 并执行审阅。转换不执行机器人动作；已有常驻模型时须先在服务运维卸载。</p>
@@ -126,10 +140,15 @@
             <ul id="triton-model-status"></ul>
           </details>
           <p id="inference-model-message" class="hint">选择 checkpoint 后自动加载与预热；这一步不执行动作。</p>
-          <div class="inference-config"><label>本轮随机种子<input id="inference-seed" type="number" min="0" max="4294967295" step="1" value="0"></label><label>单轮时长<select id="inference-duration"><option value="1">1 秒诊断</option><option value="2">2 秒诊断</option><option value="40">40 秒</option><option value="120" selected>120 秒整轮</option></select><small>设备源时间；包含首次预测等待和保持，实际下发数量单独记录</small></label></div>
-          <div class="manual-actions"><button id="inference-run" aria-describedby="inference-run-reason" disabled>Run · 开始本轮推理</button></div><p id="inference-run-reason" class="action-reason"></p>
+          <div id="inference-denoise-tools" class="inference-config" hidden><label>WAM 去噪步数<input id="inference-denoise-steps" type="number" step="1" disabled></label><button id="inference-denoise-apply" disabled>应用去噪配置 · 重新准备</button><p id="inference-denoise-status" class="hint" role="status"></p></div>
+          <p id="inference-task" class="hint"></p>
+          <div id="inference-stall-tools" hidden><label><input id="inference-stall-enabled" type="checkbox">WAM trick · 静止恢复</label><p id="inference-stall-status" class="hint" role="status">连续3秒模型步静止后，交替使用2块顶部黑屏和1块真实画面，并为每块重新采样种子。检测到运动后恢复常规推理。</p></div>
+          <div class="inference-config"><label>本轮随机种子<input id="inference-seed" type="number" min="0" max="4294967295" step="1" value="0"></label><label>本轮最长运行时长 · 秒<input id="inference-duration" type="number" min="0" step="any" value="120" placeholder="填写秒数，例如5"><small id="inference-duration-help">包含观测、推理、等待与运动的总控制时间，实际下发数量单独记录</small></label></div>
+          <div class="manual-actions"><button id="inference-arm" aria-describedby="inference-arm-reason" disabled>准备控制与踏板</button><button id="inference-run" aria-describedby="inference-run-reason" disabled>Run · 开始本轮推理</button><button id="inference-disarm" disabled>结束控制会话并封存</button></div><p id="inference-arm-reason" class="action-reason"></p><p id="inference-run-reason" class="action-reason"></p><p id="inference-recording-status" class="hint" role="status"></p>
+          <div class="manual-actions"><button id="inference-hold" aria-describedby="inference-hold-reason" disabled>停止推理并位置保持 · 踏板1</button><button id="inference-teach" aria-describedby="inference-teach-reason" disabled>重力补偿拖动 · 踏板2</button><button id="inference-home" aria-describedby="inference-home-reason" disabled>SDK原生回零 · 踏板3</button></div><p id="inference-hold-reason" class="action-reason"></p><p id="inference-teach-reason" class="action-reason"></p><p id="inference-home-reason" class="action-reason"></p><p id="inference-operator-status" class="hint" role="status">停止与回零保留SDK连接，全程录制；全局Stop独立可用。</p>
+          <dialog id="inference-home-dialog"><h3>SDK 原生回零</h3><p>双臂依次执行 SDK 原生回零，夹爪按原生逻辑张开。活动推理先进入保持，再执行回零，全程连续录制。正常操作等待回零完成。</p><label><input id="inference-home-clearance" type="checkbox">确认当前回零工作区净空</label><button id="inference-home-confirm" disabled>执行原生回零</button><button id="inference-home-cancel">取消</button></dialog>
           <details><summary>分步诊断</summary><div class="manual-actions"><button id="inference-prepare" aria-describedby="inference-prepare-reason" disabled>加载与预热模型</button><button id="inference-preview" aria-describedby="inference-preview-reason" disabled>准备本轮执行审阅</button></div><p id="inference-prepare-reason" class="action-reason"></p><p id="inference-preview-reason" class="action-reason"></p></details>
-          <p class="hint">本轮仅确认一次，后续模型输出连续执行。位置、速度与加速度越限记录供排查，不因审计超限中断；位置目标的边界投影单独记录，速度与加速度不改速。不执行碰撞检查。</p>
+          <p class="hint">本轮仅确认一次。控制层保留关节限位与既有运动保护，实际目标及时间调整单独记录。不执行碰撞检查。</p>
           <dl id="inference-metrics" class="detail-list"></dl>
           <section class="inference-result" aria-live="polite"><h3>本轮任务结果</h3><p id="inference-outcome">尚未取得末段稳定托盘支撑证据。</p><p class="hint">成功只依据本轮结束时杯子在托盘上稳定支撑；不附加释放、回零、出液口对齐或无碰撞条件。录像完整性单独显示。</p><button id="inference-results">查看本轮录像与结果</button></section>
           <details class="technical-details"><summary>目标审计与投影记录</summary><p id="inference-audit-summary"></p><pre id="inference-audit"></pre></details>
@@ -182,8 +201,8 @@
   </main>
   <dialog id="inference-run-dialog" class="manual-execution-dialog" aria-labelledby="inference-run-title">
     <h2 id="inference-run-title">开始本轮推理</h2><p id="inference-run-summary"></p>
-    <p>确认后核验已接入的控制和本轮业务依赖，再按上方所选时长开始推理（录制按当前配置）。缺少条件时只报告缺口，不连接、恢复或启动服务；停止按钮始终可用。</p>
-    <label><input id="inference-run-clearance" type="checkbox">场景已复位、工作区无人。我允许本轮模型执行；设备控制须已接入，Run 不会重新连接。</label>
+    <p id="inference-run-details"></p>
+    <label><input id="inference-run-clearance" type="checkbox"><span id="inference-run-clearance-label"></span></label>
     <div class="manual-actions"><button id="inference-run-confirm" disabled>确认并开始</button><button id="inference-run-cancel">取消</button></div>
   </dialog>
   <dialog id="manual-execution-dialog" class="manual-execution-dialog" aria-labelledby="manual-confirm-title" aria-describedby="manual-confirm-summary">
@@ -196,6 +215,7 @@
   </dialog>
   <script type="module" src="/web/app.js"></script>
   <script type="module" src="/web/triton.js"></script>
+  <script type="module" src="/web/model_probe.js"></script>
 
 
 </body>

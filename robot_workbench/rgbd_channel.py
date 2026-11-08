@@ -54,6 +54,8 @@ class MemoryRgbdChannel:
             raise ValueError('one execution Owner identity required')
         if lease.get('environment','fake') not in ('physical','fake'):
             raise ValueError('explicit known recording environment required')
+        if lease.get('identity_scope','execution_epoch') not in ('execution_epoch','recording_run'):
+            raise ValueError('known recording identity scope required')
 
     def begin(self, lease):
         self._validate(lease)
@@ -127,21 +129,26 @@ class MemoryRgbdChannel:
 
     def write_pixels(self,status,rgb,depth,*,width,height,sampled_token):
         if (type(width) is not int or type(height) is not int or min(width,height)<=0
-                or not isinstance(rgb,bytes) or not isinstance(depth,bytes)
-                or len(rgb)!=width*height*3 or len(depth)!=width*height*2
-                or max(len(rgb),len(depth))>16*1024**2):
+                or not isinstance(rgb,bytes) or depth is not None and not isinstance(depth,bytes)
+                or len(rgb)!=width*height*3 or depth is not None and len(depth)!=width*height*2
+                or max(len(rgb),len(depth)if depth is not None else 0)>16*1024**2):
             raise ValueError('bounded immutable RGB8 and aligned little-endian depth16 pixels required')
         return self._write(status,dict(rgb=rgb,depth=depth,width=width,height=height,
-            pixel_format='rgb8-depth16le'),sampled_token=sampled_token)
+            pixel_format='rgb8'if depth is None else'rgb8-depth16le'),sampled_token=sampled_token)
 
     def _write(self,status,payload,*,sampled_token):
         lease = self.current_lease()
         environment=lease.get('environment','fake') if lease else None
+        owner=lease['execution_owner'] if lease else {}
+        same_owner=all(status.get(key)==value for key,value in owner.items())
+        if lease and lease.get('identity_scope')=='recording_run':
+            same_owner=(all(status.get(key)==owner[key] for key in ('owner_pid','runtime_nonce'))
+                and type(status.get('command_epoch')) is int and status['command_epoch']>=owner['command_epoch'])
         admitted = (lease is not None and sampled_token == lease['run_id']
                     and self.lease_guard(lease)
                     and int(status['host_receive_ns']) >= lease.get('admission_start_wall_ns', lease['start_wall_ns'])
                     and status.get('environment','fake')==environment
-                    and (environment=='physical' or all(status.get(key) == value for key, value in lease['execution_owner'].items())))
+                    and (environment=='physical' or same_owner))
         with self.lock:
             admitted = (admitted and self.lease is not None and self.lease['run_id'] == sampled_token
                         and self.lease['start_wall_ns'] <= self.clock_ns() < self.lease['deadline_wall_ns'])
@@ -161,6 +168,8 @@ class MemoryRgbdChannel:
             if environment=='physical':
                 status.update(recording_execution_owner=deepcopy(current['execution_owner']),
                               recording_identity_scope='lease association; not simultaneous Owner feedback')
+            if current.get('identity_scope')=='recording_run':
+                status.update(recording_execution_owner=deepcopy(current['execution_owner']),recording_identity_scope='recording_run')
             metadata = deepcopy(status)
             metadata['recorded_frames'] = self.count+1
             closes_after=self._endpoint_reached(metadata)

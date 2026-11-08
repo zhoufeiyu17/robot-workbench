@@ -69,6 +69,21 @@ def loopback(url):
     return url.rstrip('/')
 
 
+def _ros_connection(plane,owner_reference,device_id,environment):
+    if plane is None:return {}
+    from .ros_data import plane_config
+    from .control_owner import SCHEMA
+    plane=plane_config(plane)
+    path=Path((owner_reference or{}).get('descriptor',''))
+    if not path.is_absolute()or path.is_symlink()or not path.is_file():
+        raise ValueError('ROS collection requires the registered Owner descriptor')
+    descriptor=read(path)
+    if (not isinstance(descriptor,dict)or descriptor.get('schema')!=SCHEMA
+            or descriptor.get('device_id')!=device_id or descriptor.get('environment')!=environment):
+        raise ValueError('ROS collection Owner belongs to another device/environment')
+    return dict(data_plane=plane,control_owner_descriptor=str(path))
+
+
 def verify_inputs(setup):
     pins=dict(setup['input_sha256'])
     for group in setup.get('dependency_provenance',{}).values():pins.update(group)
@@ -109,16 +124,23 @@ def connection_config(setup,pipeline_path,calibration_root,capture_root,jobs_roo
     """Device-local addresses/credentials stay on the Owner host in both topologies."""
     calibration_root=Path(calibration_root);jobs_root=Path(jobs_root)
     roles={'base_0':'head','left_wrist_0':'left','right_wrist_0':'right'}
+    ros=setup.get('data_plane')is not None
+    if ros:
+        from .ros_data import plane_config
+        plane_config(setup['data_plane'])
     config=dict(environment=setup['environment'],robot_id=setup['robot_id'],control_url=setup['control_url'],token_file=setup['token_file'],
         trusted_binding_path=setup['trusted_binding_path'],local_recording_root=setup['local_recording_root'],
         cameras={name:dict(url='http://127.0.0.1:'+str(setup['producer_ports'][role]),serial=setup['camera_serials'][role],
-            recording_directory=setup['producer_directories'][name]) for name,role in roles.items()},
+            **({}if ros else dict(recording_directory=setup['producer_directories'][name]))) for name,role in roles.items()},
         source_path=str(jobs_root/'not-yet-observed/source.json'),plan_path=str(jobs_root/'not-yet-planned/plan.json'),
         hardware_binding=str(calibration_root/'acquisition-binding.json'),hardware_access_enabled=True,
         preparation=dict(environment=setup['environment'],pipeline_config=str(pipeline_path),acquisition=dict(
             profile_path=str(calibration_root/'profile.json'),acquisition_binding_path=str(calibration_root/'acquisition-binding.json'),
             measured_initial_state=True,transport=dict(endpoint=endpoint,remote_root=str(capture_root)))),
         playground=dict(enabled=True,pipeline_config=str(pipeline_path)))
+    if ros:
+        config.update(data_plane=deepcopy(setup['data_plane']),control_owner_descriptor=setup['control_owner_descriptor'],
+            recording_backend='capture_session_v1')
     if setup['environment']=='fake':config['native_task_root']=str(Path(setup['resident_root'])/'native-tasks')
     else:config.update(dataset_format='lerobot-v2.1',render_replay=False)
     return config
@@ -166,7 +188,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         registration,profile_template,base_pipeline_config,execution,contract_template,
         detection_runtime_root,control_url,token_file,producer_ports,producer_directories,
         trusted_binding_path,local_recording_root,resident_deadline_wall_ns,output,diagnostic_source=None,
-        prepared_calibration=None):
+        prepared_calibration=None,data_plane=None,control_owner_reference=None):
     """CPU-only. The template supplies interface fields, never installed calibration."""
     from robot_workbench.calibration_profile import build_device_profile
     from robot_workbench.sample_clock import clock_for_source
@@ -186,6 +208,10 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         config_path=inside(calibration_config,root);c=read(config_path)
     environment=c.get('environment')
     if environment not in ('fake','physical'):raise ValueError('explicit current device environment required')
+    if data_plane is not None and contract_template.get('data_plane')is not None and data_plane!=contract_template['data_plane']:
+        raise ValueError('collection and frozen contract data-plane bindings differ')
+    plane=contract_template.get('data_plane')if data_plane is None else data_plane
+    ros={}if compute_only else _ros_connection(plane,control_owner_reference,c['robot_id'],environment)
     if not compute_only and environment=='fake':capture=inside(capture_root,root)
     elif not compute_only:
         capture=Path(capture_root)
@@ -206,14 +232,15 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         raise ValueError('current resident compute owner code changed')
     if environment=='physical' and (diagnostic_source is not None or contract_template.get('diagnostic_calibration_source')):
         raise ValueError('fake diagnostic calibration cannot authorize physical preparation')
-    if not compute_only and (set(producer_ports)!={'head','left','right'} or set(producer_directories)!={'base_0','left_wrist_0','right_wrist_0'}):
+    if not compute_only and (set(producer_ports)!={'head','left','right'} or not ros and set(producer_directories)!={'base_0','left_wrist_0','right_wrist_0'}):
         raise ValueError('all three resident producer ports and spool directories required')
+    if ros and producer_directories:raise ValueError('ROS collection cannot retain parallel camera spool directories')
     expected_ports=None if compute_only else dict(head=c['hardware_camera_port'],**c['hardware_wrist_camera_ports'])
     if not compute_only and (producer_ports!=expected_ports or len(set(producer_ports.values()))!=3):
         raise ValueError('D must use the same three C resident camera producers')
     for value in (producer_ports or {}).values():
         if type(value) is not int or not 0<value<65536:raise ValueError('valid loopback producer ports required')
-    directories={} if compute_only else validated_spool_directories(producer_directories,contract_template,root)
+    directories={} if compute_only or ros else validated_spool_directories(producer_directories,contract_template,root)
     if any(read(Path(value)/'recording-service.json').get('schema')!='rgbd_lease.v1' for value in directories.values()):
         raise ValueError('resident producer raw lease protocol missing')
     if not compute_only:
@@ -296,6 +323,7 @@ def prepare_collection_setup(*,run_root,calibration_config,capture_root,expected
         camera_serials=deepcopy(c['hardware_camera_serials']),producer_ports=deepcopy(producer_ports),
         producer_directories=directories,trusted_binding_path=str(trusted),local_recording_root=str(recording),
         actual_device_configuration_unchanged=True,runtime_allowed=False)
+    setup.update(ros)
     if environment=='fake':setup['actual_plant_unchanged']=True
     if compute_only:
         for key in ('control_url','token_file','producer_ports','producer_directories','trusted_binding_path','local_recording_root'):setup.pop(key,None)
@@ -323,7 +351,8 @@ def finalize_collection_setup(setup_path):
     if owner['scope']!=setup['resident_root']:raise ValueError('compute owner scope changed since preparation')
     if not output.resolve().is_relative_to(Path(setup['resident_root']).resolve()):
         raise ValueError('setup output escaped the current resident scope')
-    if not setup.get('compute_only'):validated_spool_directories(setup['producer_directories'],setup['contract_template'],setup['resident_root'])
+    if not setup.get('compute_only')and not setup.get('data_plane'):
+        validated_spool_directories(setup['producer_directories'],setup['contract_template'],setup['resident_root'])
     target=output/'native-assets';binding=read(target/'a1-binding.json')
     profile=read(output/'calibration'/'profile.json')
     if (binding.get('schema')!='a1_isaac_assets.v1' or binding.get('conversion_complete') is not True
@@ -703,7 +732,7 @@ def trusted_recording_location(path,root,control_owner_reference=None):
 def prepare_remote_collection(*,compute,run_root,calibration_config,capture_root,expected_install,registration,
         profile_template,control_url,token_file,producer_ports,producer_directories,trusted_binding_path,
         local_recording_root,output,still_current,transfer=None,runner=None,cancel=None,camera_spool_root=None,
-        control_owner_reference=None):
+        control_owner_reference=None,data_plane=None):
     """CPU profile sealing and explicit transport; returns uninstalled shared D configuration."""
     from artifact_transport import manifest,transfer as send,validate_endpoint
     from robot_workbench.calibration_profile import build_device_profile
@@ -717,12 +746,15 @@ def prepare_remote_collection(*,compute,run_root,calibration_config,capture_root
     if producer_ports!=dict(head=c['hardware_camera_port'],**c['hardware_wrist_camera_ports']):raise ValueError('same current C camera ports required')
     spool_contract=({} if camera_spool_root is None else dict(camera_spool_root=str(camera_spool_root),
         filesystem=dict(writable_roots=[str(camera_spool_root)])))
-    directories=validated_spool_directories(producer_directories,spool_contract,root)
-    if set(directories)!={'base_0','left_wrist_0','right_wrist_0'}:raise ValueError('all local common camera directories required')
+    ros=_ros_connection(data_plane,control_owner_reference,c['robot_id'],c['environment'])
+    if ros and producer_directories:raise ValueError('ROS collection cannot retain parallel camera spool directories')
+    directories={}if ros else validated_spool_directories(producer_directories,spool_contract,root)
+    if not ros and set(directories)!={'base_0','left_wrist_0','right_wrist_0'}:raise ValueError('all local common camera directories required')
     setup=dict(environment=c['environment'],robot_id=c['robot_id'],camera_serials=c['hardware_camera_serials'],resident_root=str(root),
         control_url=loopback(control_url),token_file=str(token),producer_ports=producer_ports,producer_directories=directories,
         trusted_binding_path=str(trusted_binding_location(trusted_binding_path,root,control_owner_reference)),
         local_recording_root=str(trusted_recording_location(local_recording_root,root,control_owner_reference)))
+    setup.update(ros)
     if not still_current():raise InterruptedError('remote preparation request already revoked')
     output.mkdir();capsule=output/'inputs';capsule.mkdir()
     template=read(profile_template)

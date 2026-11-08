@@ -20,7 +20,7 @@ import time
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT/'calibration'), str(ROOT/'calibration/infra'), str(ROOT/'rule_based_workbench')]
+sys.path[:0] = [str(ROOT), str(ROOT/'scripts'), str(ROOT/'calibration'), str(ROOT/'calibration/infra'), str(ROOT/'rule_based_workbench')]
 from probe_owner_physx import preflight, save
 
 
@@ -70,6 +70,21 @@ def inference_options(setup):
     from robot_workbench.device_bootstrap import _inference_options
     from robot_workbench.inference_transport import MODEL_ID
     return _inference_options(dict(inference=dict(setup,model_id=setup.get('model_id',MODEL_ID)),disabled_grippers=[]))
+
+
+def control_devices(device_id,output,runtime_factory):
+    """Expose the main-thread plant through the existing Owner protocol."""
+    from robot_workbench.device_bootstrap import create_device
+    from robot_workbench.control_owner import ControlOwnerService,ControlRuntimeClient
+    owner=create_device(device_id,'fake',runtime_factory=runtime_factory,
+        drive=lambda runtime,closed:closed.wait(),label='A1 PhysX Owner')
+    service=ControlOwnerService(owner,Path(output)/'control-owner')
+    threading.Thread(target=service.serve_forever,daemon=True,name='fake-control-owner').start()
+    def attach():
+        return ControlRuntimeClient(service.descriptor_path,hardware_binding=str(Path(output)/'collection-binding.json'),
+            recording_backend='capture_session_v1').acquire()
+    business=create_device(device_id,'fake',runtime_factory=attach,label='A1 PhysX · 同源三相机')
+    return owner,service,business
 
 
 def inference_source(root):
@@ -207,6 +222,8 @@ def configure_calibration(nominal, output, intrinsics, ports, gateway_port, toke
 
 
 def run(args, base, nominal):
+    from robot_workbench.ros_data import require_runtime,plane_config
+    plane=plane_config(args.data_plane);require_runtime()
     resident_deadline_wall_ns=args.resident_deadline_wall_ns
     deadline=None if resident_deadline_wall_ns is None else time.monotonic()+max(0.,(resident_deadline_wall_ns-time.time_ns())/1e9)
     os.environ['ROBOT_SIM_ASSET_ROOT']=base['pipeline_config']['assets']
@@ -214,7 +231,7 @@ def run(args, base, nominal):
     app=AppLauncher(headless=True,enable_cameras=True,device='cuda:0',active_gpu=args.gpu,multi_gpu=False,
         kit_args=f'--/renderer/activeGpu={args.gpu} --/renderer/multiGpu/enabled=false '
         '--/renderer/multiGpu/autoEnable=false --/renderer/gpuEnumeration/glInterop/enabled=false').app
-    env=producer=device=ui=gateway=collection_preparation=task_observer=preview_service=model_process=None
+    env=producer=device=owner_device=owner_service=ui=gateway=collection_preparation=task_observer=preview_service=model_process=None
     done=threading.Event();requests=queue.Queue(maxsize=1)
     events=queue.Queue(maxsize=4096);logging_failed=threading.Event()
     writer_done=threading.Event()
@@ -315,6 +332,7 @@ def run(args, base, nominal):
         plant=IsaacPlant(env);clock=SimulationClock()
         backend=PhysxBackend(plant,joint_offsets=args.plant_joint_offsets_rad,metal_gap_offset_mm=.008,event=event)
         source_clock=clock_spec('fake',source_clock_id=backend.source_clock_id)
+        robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
         plant_fixture=dict(source_clock_id=backend.source_clock_id,joint_offsets_rad=list(backend.offsets),metal_gap_offset_mm=backend.gap_offset)
         save(args.output/'plant-fixture.json',plant_fixture)
         from robot_workbench.resident_collection import NativeTaskObserver,CollectionPreparation
@@ -323,24 +341,16 @@ def run(args, base, nominal):
             events.put_nowait(dict(kind='_native_task_receipt',owner=owner,receipt=receipt,runner=owner.runner))
         task_observer=NativeTaskObserver(env._m2_runtime,backend,plant_fixture,task_receipt)
         intrinsics=camera_intrinsics(env.cfg.d405_rig)
-        def recording_guard(lease):
-            owner=backend.owner
-            recording=getattr(owner,'recording',None) if owner else None
-            return recording is not None and recording.lease_active(lease)
-        producer=CameraProducer(intrinsics,args.camera_spool_root,recording_guard=recording_guard)
+        producer=CameraProducer(intrinsics,args.camera_spool_root,ros_plane=plane,device_id=robot_id)
         ports=producer.start_servers(dict(zip(CAMERAS,args.camera_ports)))
-        from robot_workbench.recording_process import ProcessRecordingSession
+        from robot_workbench.recording_process import capture_control
         recording_root=args.output/'collection-raw'
         recording_root.mkdir(exist_ok=False)
         def recording_factory(payload,on_fault):
-            return ProcessRecordingSession(recording_root/secrets.token_hex(16)/'raw',
-                plan_ref=payload['plan_ref'],camera_channels=producer.channels,storage_format='segments',
-                execution_timeline=payload.get('execution_timeline'),environment='fake',
-                execution_owner=payload.get('execution_owner'),on_fault=on_fault,
-                resident_deadline_wall_ns=resident_deadline_wall_ns,persistent_service=args.persistent,
-                max_wall_time_seconds=min(args.collection_spec['resources']['max_wall_time_minutes']*60,7200) if args.persistent else None,
-                **payload.get('recording_preparation',{}))
+            return capture_control(recording_root,payload,cameras=lambda:producer.common,environment='fake',clock=source_clock,
+                source_time=backend.owner.control_time,on_fault=on_fault,ros_runtime=owner_device.runtime)
         recording_factory.supports_deferred_preparation=True
+        recording_factory.recording_backend='capture_session_v1'
         token_files={};tokens={}
         for business in ('calibration','collection'):
             path=args.output/(business+'-gateway-token')
@@ -357,10 +367,8 @@ def run(args, base, nominal):
                         raise TimeoutError('PhysX main thread did not acquire the controller')
             if 'error' in request:raise RuntimeError(request['error'])
             return request['runtime']
-        robot_id=args.resume_source['origin_robot_id'] if args.resume_source else 'fake-physx-'+args.output.name
-        from robot_workbench.device_bootstrap import create_device,install_business_workflows
-        device=create_device(robot_id,'fake',runtime_factory=factory,label='A1 PhysX · 同源三相机',
-                      drive=lambda runtime,closed:closed.wait())
+        from robot_workbench.device_bootstrap import install_business_workflows
+        owner_device,owner_service,device=control_devices(robot_id,args.output,factory)
         device.camera_service=producer.common
         device.camera_restart=producer.restart
         device.camera_start=producer.start
@@ -371,6 +379,7 @@ def run(args, base, nominal):
             from robot_workbench.calibration_profile import diagnostic_metadata
             device.label='A1 PhysX · 复用标定诊断（非空库验收）'
             device.diagnostic_calibration=diagnostic_metadata(args.diagnostic_source)
+        device.configure_capture_results(recording_root)
         application=Application({'fake':device,
             'physical':Device('physical-unconfigured','physical',None,label='真机 · 未配置')})
         application.operations_managed=True
@@ -452,7 +461,7 @@ def run(args, base, nominal):
                 endpoint,model_token=inference_setup['model_endpoint'],inference_setup['model_token_file']
             inference=InferenceWorkflow(device,args.output/'inference',camera_service=producer.common,
                 model_endpoint=endpoint,model_token_file=model_token,
-                **inference_options(inference_setup),
+                **dict(inference_options(inference_setup),ros_plane=plane,action_chunks=True),
                 profile_provider=inference_profile_provider(args.output,calibration,
                     args.collection_spec['collection_setup']['profile_template'],diagnostic_source=args.diagnostic_source),
                 support_provider=lambda now,feedback:deepcopy(support_sample),event=lambda name,data:event(name,**data))
@@ -464,6 +473,7 @@ def run(args, base, nominal):
             source_clock_id=backend.source_clock_id,ui_port=ui.server_port,gateway_port=gateway.server_port,
             browser_ports=args.browser_ports,allowed_hosts=sorted(ui.allowed_hosts),
             camera_ports=ports,camera_directories=producer.directories,gateway_token_files=token_files,
+            data_plane=plane,control_owner_descriptor=str(owner_service.descriptor_path),
             calibration_config=str(args.output/'calibration-config.json'),
             calibration_output=str(args.output/'calibration-workbench'),
             collection_binding=str(args.output/'collection-binding.json'),
@@ -484,7 +494,7 @@ def run(args, base, nominal):
             def tick(self):return True
         idle=Idle();last_status=0.
         def actor():
-            runtime=device.runtime
+            runtime=owner_device.runtime
             if runtime is None or not backend.is_connected:
                 return dict(owner_available=False,owner_pid=None,command_epoch=None,runtime_nonce=None)
             owner=runtime.owner
@@ -518,11 +528,13 @@ def run(args, base, nominal):
                             if request['cancelled']:continue
                             request['result']=scene.snapshot() if request.get('scene_read_only') else scene.apply(request['scene_payload'])
                         continue
+                    def control_event(name,**fields):
+                        event(name,**fields);owner_service.event(name,**fields)
                     runtime=Runtime(ref,FakeSafety,lambda:backend,device_id=device.id,environment='fake',
-                        lock_root=args.output/'owner-lock',control_clock=clock,event=event,
+                        lock_root=args.output/'owner-lock',control_clock=clock,event=control_event,
                         jaw_mapping_file=nominal['jaw_mapping_file'],
                         hardware_binding=args.output/'collection-binding.json',execution_root=args.output,
-                        recording_factory=recording_factory,
+                        recording_factory=recording_factory,data_plane=plane,
                         initialize_backend=lambda value:value.set_damping_hold(manual=True))
                     backend.owner=runtime.owner
                     settings_source=maintenance.get('execution_settings_source')
@@ -545,7 +557,7 @@ def run(args, base, nominal):
                         release(runtime);backend.is_connected=True;backend.owner=None
                 except Exception as error:request['error']=str(error)
                 finally:request['ready'].set()
-            current=device.runtime
+            current=owner_device.runtime
             if current:current.owner.evidence_logging_healthy=not logging_failed.is_set()
             owner=current.owner if current else None
             if owner:observe('before_advance',owner)
@@ -559,8 +571,9 @@ def run(args, base, nominal):
                 except Exception as error:
                     support_sample=dict(error=str(error),evidence_source='physx_support_unavailable')
             if current and not backend.is_connected:
-                current.close();device.closed.set()
-                device.runtime=None;device.credentials={}
+                current.close();owner_device.closed.set()
+                if owner_device.thread is not None:owner_device.thread.join(2)
+                owner_device.runtime=None;owner_device.credentials={}
                 backend.is_connected=True;backend.owner=None
                 backend.active=deepcopy(backend.actual);backend.applied_sequences=dict(left=None,right=None)
             if clock.index % 5==0 and env._sim_step_counter % env.cfg.sim.render_interval==0:
@@ -573,10 +586,12 @@ def run(args, base, nominal):
                 last_status=time.monotonic()
             if preview_service and clock.index%120==0:
                 from arx_env.joint_head_jaw_mapping import feedback_gaps
-                feedback=backend.read_calibration_state();q=feedback['qpos']
-                preview_service.mirror_feedback(dict(q=q[:6]+q[7:13],jaw_gap_mm=feedback_gaps(q),
-                    source_id=backend.source_clock_id,sequence=backend.physics_step,
-                    source_age_s=max(0.,(time.time_ns()-feedback['sample_wall_ns'])/1e9)))
+                client=device.runtime;view=getattr(client,'ros_state',None)
+                if view is not None and view.inputs is not None:
+                    reference,feedback=view.inputs.latest('state');q=feedback['qpos']
+                    preview_service.mirror_feedback(dict(q=q[:6]+q[7:13],jaw_gap_mm=feedback_gaps(q),
+                        source_id=reference.source_clock_id,sequence=reference.sequence,
+                        source_age_s=max(0.,(time.time_ns()-feedback['sample_wall_ns'])/1e9)))
         save(args.output/'final.json',dict(status='bounded-service-ended',clock=source_clock,
             physics_step=backend.physics_step,cameras=producer.snapshot(),full_pipeline_qualified=False,
             physical_hardware_connected=False,teardown_verified=False))
@@ -588,15 +603,17 @@ def run(args, base, nominal):
         from isaac_lane import close_runtime
         done.set()
         if ui:ui.shutdown();ui.server_close()
-        if device and device.runtime:
+        if owner_device and owner_device.runtime:
             try:
-                runtime=device.runtime
+                runtime=owner_device.runtime
                 if runtime.release_receipt and not runtime.release_receipt.get('sdk_close_returned'):
                     raise RuntimeError('previous SDK release is unconfirmed; teardown will not retry it')
                 runtime.owner.submit(dict(action='stop'));runtime.tick()
                 if task_observer:task_observer.after_advance(runtime.owner,physics_advanced=False)
                 runtime.owner.submit(dict(action='release',confirmation='ARMS_SUPPORTED_RELEASE'));runtime.tick()
-                runtime.close();device.closed.set()
+                runtime.close();owner_device.closed.set()
+                if owner_device.thread is not None:owner_device.thread.join(2)
+                owner_device.runtime=None;owner_device.credentials={}
             except Exception as error:event('teardown_error',error=str(error))
         if collection_preparation:
             try:collection_preparation.close(lifecycle_admission=lambda action: action.startswith('stop:'))
@@ -605,12 +622,17 @@ def run(args, base, nominal):
             try:preview_service.close()
             except Exception as error:event('teardown_error',error=str(error))
         if device:
+            if device.runtime is not None:device.runtime.detach();device.closed.set()
+            if device.capture_results is not None:device.capture_results.close()
             for workflow in list(device.workflows.values()):
                 try:workflow.cancel()
                 except Exception as error:event('teardown_error',error=str(error))
                 if callable(getattr(workflow,'close',None)):workflow.close()
                 elif hasattr(workflow,'closed'):workflow.closed.set()
             for media in device.media.values():media.closed.set()
+        if owner_service:
+            try:owner_service.close()
+            except Exception as error:event('teardown_error',error=str(error))
         if gateway:gateway.shutdown();gateway.server_close()
         if model_process and model_process.poll() is None:
             model_process.terminate()
@@ -677,9 +699,12 @@ def main():
     if (nominal['asset_seal_sha256']!=binding['a1_sha256'] or
             nominal['asset_geometry_id']!=binding['geometry_id']):
         raise ValueError('nominal estimator assets differ from this frozen plant A1 identity')
+    from robot_workbench.ros_data import plane_config
+    args.data_plane=plane_config((args.collection_spec or {}).get('data_plane'))
     checked=preflight(base)
     checked['plant_joint_offsets_rad']=list(args.plant_joint_offsets_rad)
     checked.update(browser_ports=args.browser_ports,browser_hosts=sorted(browser_hosts),
+        data_plane=args.data_plane,
         camera_spool_root=str(args.camera_spool_root),
         camera_spool_retention='same-process bounded memory RGB-D; committed segments persist, no per-frame disk spool')
     if args.collection_spec:
@@ -689,7 +714,10 @@ def main():
             checked['retained_inference']=dict(root=retained_inference['root'],files=len(retained_inference['files']),
                 scope='historical settings/playback only; no new execution')
         if args.collection_spec.get('inference_setup'):
-            inference_options(args.collection_spec['inference_setup'])  # Validate before importing Isaac or model runtimes.
+            setup=args.collection_spec['inference_setup']
+            options=inference_options(setup)  # Validate before importing Isaac or model runtimes.
+            if setup.get('action_chunks',True)is not True or options.get('recording_backend')!='capture_session_v1':
+                raise ValueError('ROS fake Infer requires action chunks and the resident recorder')
         from detector_adapter.preflight_release import preflight_release
         checked['detector_release_preflight']=preflight_release(base['pipeline_config'],
             args.collection_spec['collection_setup']['detection_runtime_root'])

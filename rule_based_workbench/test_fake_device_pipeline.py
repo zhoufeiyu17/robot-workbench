@@ -60,10 +60,11 @@ class FakePlaygroundEntryTest(entry.PlaygroundMotionGenEntryTest):
 
 class FakeDeviceContractTest(unittest.TestCase):
     def test_long_replay_has_no_accumulated_concat_timestamp_rounding(self):
-        from decimal import Decimal
+        from fractions import Fraction
+        import re
         from test_real_recording import png
         # Exercise the export loop; sealed-raw validation and the codec are
-        # fixtures. Model concat's integer microseconds, then its 1 ms PTS grid.
+        # fixtures. Check the absolute microsecond PTS and final display interval.
         for variable,count in ((False,3681),(True,4097)):
             with self.subTest(variable=variable),TemporaryDirectory() as folder:
                 root=Path(folder).resolve();raw=root/'raw';raw.mkdir()
@@ -89,17 +90,16 @@ class FakeDeviceContractTest(unittest.TestCase):
                 def encoder(argv,**kwargs):
                     destination=Path(argv[-1])
                     if argv[0]=='ffprobe':return SimpleNamespace(stdout=json.dumps({'streams':[probes[str(destination)]]}))
-                    concat=Path(argv[argv.index('-i')+1]).read_text().splitlines()
-                    durations=[Decimal(line.split()[1]) for line in concat if line.startswith('duration ')]
-                    pts_us=[0]
-                    for value in durations[:-1]:pts_us.append(pts_us[-1]+int(value*1_000_000))
-                    pts_ns=[(value+500)//1000*1_000_000 for value in pts_us]
+                    filters=Path(argv[argv.index('-filter_script:v')+1]).read_text()
+                    expression=filters.split("setpts='",1)[1].rsplit("'",1)[0]
+                    leaves=re.sub(r'if\(lt\(N,\d+\),','',expression).replace(')','').split(',')
+                    pts_ns=[int(value)*1000 for value in leaves]
                     self.assertEqual(len(pts_ns),count)
-                    self.assertLessEqual(max(abs(actual-(stamp-stamps[0])) for actual,stamp in zip(pts_ns,stamps)),1_000_000)
+                    self.assertLessEqual(max(abs(actual-(stamp-stamps[0])) for actual,stamp in zip(pts_ns,stamps)),1000)
                     self.assertTrue(all(b>a for a,b in zip(pts_ns,pts_ns[1:])))
-                    self.assertEqual(argv[argv.index('-enc_time_base')+1],'1:1000')
+                    self.assertEqual(argv[argv.index('-enc_time_base')+1],'1:1000000')
                     destination.write_bytes(b'codec fixture')
-                    duration=(pts_ns[-1]+int(durations[-1]*1000)*1_000_000)/1e9
+                    duration=float(Fraction(pts_ns[-1],10**9)+1/Fraction(argv[argv.index('-r')+1]))
                     probes[str(destination)]=dict(codec_name='h264',pix_fmt='yuv420p',nb_read_frames=str(count),duration=str(duration))
                     return SimpleNamespace(stdout='')
                 def verified(root,*,environment,_consume_rgbd):

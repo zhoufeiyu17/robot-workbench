@@ -69,6 +69,11 @@ def run(profile_path, root):
     for role,name in CAMERAS.items():
         if intrinsics[name]['serial']!=profile['cameras'][role]['serial']:
             raise ValueError('camera serial differs from configured intrinsics: '+role)
+    ros_mode=profile.get('data_plane')is not None
+    if ros_mode:
+        from robot_workbench.ros_data import plane_config,require_runtime
+        plane_config(profile['data_plane']);require_runtime()
+        if profile.get('environment')!='physical':raise ValueError('physical ROS camera profile required')
     output=root/('session-'+str(time.time_ns()));output.mkdir()
     state=root/'state.json';stopped=threading.Event();service=None;processes=[]
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stopped.set())
@@ -77,12 +82,15 @@ def run(profile_path, root):
         atomic(state,dict(phase=phase,error=error,camera_failures=failures,output=str(output),pid=os.getpid(),wall_ns=time.time_ns()))
     status('starting')
     try:
-        service=CommonCameraService.start(intrinsics,output/'camera-service','physical')
+        if ros_mode:
+            from robot_workbench.ros_inputs import RosCameraView
+            service=RosCameraView(profile['data_plane'],profile['robot_id'],intrinsics,'physical')
+        else:service=CommonCameraService.start(intrinsics,output/'camera-service','physical')
         service.start_servers()
         atomic(root/'current.json',service.descriptor)
         processes=start_capture_sources(profile,service,output)
         while not stopped.wait(.5):
-            if service.process.poll() is not None:
+            if not ros_mode and service.process.poll() is not None:
                 raise RuntimeError('共享 RGB-D 进程退出，请查看相机日志')
             new_failures={}
             for role,process in zip(profile['cameras'],processes):
@@ -95,9 +103,14 @@ def run(profile_path, root):
             if failures and len(failures)==len(processes):raise RuntimeError('; '.join(k+': '+v for k,v in failures.items()))
             for role,error in new_failures.items():
                 name=CAMERAS[role]
-                service.frames[name].publish(status=dict(ready=False,phase='capture_failed',error=error,serial=profile['cameras'][role]['serial']))
-                token=service.channels[name].token()
-                if token:service.channels[name].fail(error,sampled_token=token)
+                if ros_mode:
+                    frame=service.frames[name]
+                    with frame.lock:frame.pixels=None;frame.cached=None
+                    frame.frames.publish(status=dict(ready=False,phase='capture_failed',error=error,serial=profile['cameras'][role]['serial']))
+                else:
+                    service.frames[name].publish(status=dict(ready=False,phase='capture_failed',error=error,serial=profile['cameras'][role]['serial']))
+                    token=service.channels[name].token()
+                    if token:service.channels[name].fail(error,sampled_token=token)
             status('degraded'if failures else 'running' if all(service.frames[name].snapshot(formats=[])['status'].get('ready') for name in intrinsics) else 'starting',
                 '; '.join(k+': '+v for k,v in failures.items())or None)
         status('stopped')
@@ -120,4 +133,6 @@ if __name__=='__main__':
     parser.add_argument('--reset-role',choices=tuple(CAMERAS),help='one device-only USB reset; camera source must be stopped')
     args=parser.parse_args()
     if args.reset_role:print(json.dumps(reset_camera(args.profile,args.root,args.reset_role),allow_nan=False))
-    else:run(args.profile,args.root)
+    else:
+        if not json.loads(args.profile.read_text()).get('data_plane'):parser.error('production camera source requires explicit ROS data_plane')
+        run(args.profile,args.root)

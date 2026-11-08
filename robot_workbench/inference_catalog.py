@@ -7,6 +7,7 @@ Core validate_bundle(verify_files=True) remains the load-time content gate.
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -178,6 +179,142 @@ def scan_catalog(catalog_root, family_template):
 
 
 list_checkpoints = scan_catalog
+
+
+class RegisteredCatalog:
+    """Discover existing registered model packages without opening model weights."""
+    def __init__(self, root):
+        self.root = Path(root)
+        if not self.root.is_absolute() or '..' in self.root.parts or self.root.is_symlink():
+            raise ValueError('absolute trusted catalog_root required')
+        if not self.root.is_dir():
+            raise ValueError('catalog_root must be an existing directory')
+        self.root = self.root.resolve()
+
+    def _entry(self, manifest):
+        from . import wam, mixed366
+        info = manifest.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or manifest.resolve().parent != manifest.parent):
+            raise ValueError('private owned manifest.json required, without directory links')
+        raw = _small(manifest)
+        registry = _json(raw)
+        identity, backend = registry.get('model_id'), manifest.parent.name
+        if registry.get('backend', 'torch') != backend:
+            raise ValueError('manifest backend differs from its directory')
+        root = Path(registry['root'])
+        if not root.is_absolute() or not root.is_dir():
+            raise ValueError('absolute existing model asset root required')
+        root = root.resolve()
+        files = registry['files']
+        if not isinstance(files, list) or not files:
+            raise ValueError('registered artifact list required')
+        paths = set()
+        for item in files:
+            relative = Path(item['path'])
+            if (relative.is_absolute() or '..' in relative.parts or str(relative) in paths
+                    or type(item.get('bytes')) is not int or item['bytes'] < 0
+                    or not _SHA.fullmatch(str(item.get('sha256')))):
+                raise ValueError('invalid or duplicate registered artifact path/size/hash')
+            paths.add(str(relative))
+            path = (root / relative).resolve(strict=True)
+            if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size != item['bytes']:
+                raise ValueError('missing, incomplete or out-of-root artifact: ' + str(relative))
+        if wam.is_model_id(identity):
+            canonical = json.dumps(sorted(files, key=lambda row: row['path']), sort_keys=True,
+                                   separators=(',', ':')).encode()
+            if hashlib.sha256(canonical).hexdigest() != registry['bundle_sha256']:
+                raise ValueError('WAM bundle manifest checksum differs')
+            bundles = wam.variants(registry)
+        elif identity in model.NOHISTORY_MODELS and backend in ('torch', 'triton'):
+            deployment = None
+            if backend == 'triton':
+                receipt_path = root / 'triton/deployment.json'
+                receipt_bytes = _small(receipt_path)
+                receipt = _json(receipt_bytes)
+                packed = (root / receipt['packed']).resolve(strict=True)
+                if (receipt.get('status') != 'READY' or receipt.get('bundle_sha256') != registry['bundle_sha256']
+                        or not packed.is_relative_to(root) or not packed.is_file()):
+                    raise ValueError('qualified Triton deployment required')
+                deployment = hashlib.sha256(receipt_bytes).hexdigest()
+            bundles = [mixed366.descriptor(registry, backend, deployment)]
+        else:
+            raise ValueError('unsupported model family or backend')
+        if _small(manifest) != raw:
+            raise ValueError('manifest changed during discovery; refresh required')
+        return [dict(model_id=identity, backend=backend, selectable=True, status='ready',
+                     reason='加载时核验完整资产', manifest=bundle, registry=registry,
+                     manifest_path=str(manifest)) for bundle in bundles]
+
+    def rows(self):
+        rows = []
+        for checkpoint in sorted(self.root.iterdir()):
+            if not checkpoint.is_dir():
+                continue
+            if checkpoint.is_symlink():
+                rows.append(dict(model_id=checkpoint.name, label=checkpoint.name, backend=None,
+                                 status='incompatible', selectable=False, reason='linked checkpoint directory'))
+                continue
+            directories = [path for path in sorted(checkpoint.iterdir()) if path.is_dir()]
+            if not directories:
+                rows.append(dict(model_id=checkpoint.name, label=checkpoint.name, backend=None,
+                                 status='missing_assets', selectable=False, reason='missing backend/manifest.json'))
+            for directory in directories:
+                manifest = directory / 'manifest.json'
+                try:
+                    rows.extend(self._entry(manifest))
+                except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+                    reason = (f'{error.strerror}: {Path(error.filename).name}'
+                              if isinstance(error, OSError) and error.filename else str(error))
+                    rows.append(dict(model_id=checkpoint.name, backend=directory.name, label=checkpoint.name,
+                                     status='incompatible', selectable=False, reason=reason))
+        locations = {}
+        for row in rows:
+            if row['selectable']:
+                locations.setdefault((row['model_id'], row['backend']), set()).add(row['manifest_path'])
+        for row in rows:
+            if len(locations.get((row['model_id'], row['backend']), ())) > 1:
+                row.update(selectable=False, status='incompatible', reason='duplicate checkpoint/backend manifests')
+        return rows
+
+    def catalog(self):
+        return {model.model_bundle_digest(row['model_id'], row['manifest']): row['manifest']
+                for row in self.rows() if row['selectable']}
+
+    def initial_client(self, selection):
+        choices = []
+        for row in self.rows():
+            if (not row['selectable'] or row['model_id'] != selection.get('model_id')
+                    or row['backend'] != selection.get('backend', 'torch')):
+                continue
+            bundle = row['manifest']
+            options = selection.get('selected_inference_options')
+            if options is None and 'inference_capabilities' in bundle:
+                options = dict(denoise_steps=bundle['inference_capabilities']['denoise_steps']['default'])
+            if bundle.get('inference_options') == options:
+                choices.append(bundle)
+        if len(choices) != 1:
+            raise ValueError('configured initial model/backend is absent, incompatible or ambiguous in catalog_root')
+        return self.client(choices[0])
+
+    def client(self, bundle, *, current=None):
+        from . import wam, mixed366
+        matches = [row for row in self.rows() if row['selectable'] and row['manifest'] == bundle]
+        if len(matches) != 1:
+            raise ValueError('catalog selection is absent, ambiguous or changed before preparation')
+        registry = matches[0]['registry']
+        if current is not None and getattr(current, 'registry', None) == registry and current.bundle == bundle:
+            return current
+        if wam.is_model_id(bundle['model_id']):
+            return wam.Client(registry, bundle)
+        packed = None
+        if bundle['backend'] == 'triton':
+            root = Path(registry['root'])
+            packed = str(root / _json(_small(root / 'triton/deployment.json'))['packed'])
+        return mixed366.Client(registry, bundle, packed)
+
+    def refresh_client(self, client):
+        return self.client(client.bundle, current=client)
 
 
 def catalog_manifests(catalog_root, family_template):

@@ -98,6 +98,10 @@ class ControlPlanTests(unittest.TestCase):
                 self.assertEqual(runner.status,'STOPPED')
         finally:connection.close();done.set();ticker.join(2)
         self.assertEqual(errors,[])
+        self.assertIs(runner.frozen.guard,self.runtime.owner.control_guard)
+        decisions=runner.frozen.snapshot()['guard_decisions']
+        self.assertTrue(decisions)
+        self.assertEqual({row['policy_hash']for row in decisions},{self.runtime.execution_calibration['control_policy']['policy_hash']})
         self.assertNotEqual(payload['plan_ref']['validation_worker_pid'],os.getpid())
         self.assertEqual(payload['plan_ref']['origin']['runtime_nonce'],self.runtime.nonce)
         self.assertEqual(control_plan.load_artifact(payload['plan_ref']['plan']),json.loads(raw)['plan'])

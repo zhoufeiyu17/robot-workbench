@@ -21,6 +21,221 @@ def data(value):
 def sha(value):return hashlib.sha256(value).hexdigest()
 
 
+class RegisteredCatalogTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.catalog_root = self.root / 'catalog'
+        self.catalog_root.mkdir()
+
+    def register(self, identity='wam-fixture-step42', backend='torch'):
+        assets = self.root / (identity + '-' + backend)
+        assets.mkdir(exist_ok=True)
+        files = []
+        pins = {}
+        for kind in ('checkpoint', 'stats', 'context', 'model_config', 'engine'):
+            content = ((ROOT / 'tests/fixtures/wam-e03-normalization.json').read_bytes()
+                       if kind == 'stats' else (kind + identity + backend).encode())
+            path = assets / kind
+            path.write_bytes(content)
+            pins[kind] = sha(content)
+            files.append(dict(path=kind, bytes=len(content), sha256=pins[kind]))
+        registry = dict(model_id=identity, step=int(identity.rsplit('step', 1)[1]), backend=backend,
+            root=str(assets), files=files, bundle_sha256=sha(data(sorted(files, key=lambda row: row['path']))),
+            engine_sha256=pins.pop('engine'), artifacts=pins,
+            inference_capabilities={'denoise_steps': {'minimum': 1, 'maximum': 3, 'default': 2}})
+        manifest = self.catalog_root / identity / backend / 'manifest.json'
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(json.dumps(registry))
+        manifest.chmod(0o600)
+        return manifest, registry
+
+    def test_directory_discovery_refreshes_and_preserves_loaded_identity_over_http(self):
+        import threading
+        from robot_workbench import wam
+        from robot_workbench.inference_transport import RemoteBaseClient, serve_model, PROTOCOL
+        manifest, registry = self.register()
+        closed = []
+
+        class Worker:
+            def __init__(self, registry, bundle):
+                self.registry = deepcopy(registry)
+                self.bundle = deepcopy(bundle)
+                self.model_id = bundle['model_id']
+            def prepare(self):
+                return wam.worker_identity(self.bundle)
+            def infer(self, request):
+                import numpy as np
+                return dict(action14=np.zeros((32, 14), np.float32))
+            def close(self):
+                closed.append(self.bundle)
+
+        with patch('robot_workbench.wam.Client', Worker):
+            service = wam.model_service(dict(registry, catalog_root=str(self.catalog_root)))
+            token = self.root / 'token'
+            token.write_text('cpu-test-' + 'x'*40)
+            server = serve_model(service, token_file=token)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(service.close)
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            bundle = deepcopy(service.model_bundle)
+            client = RemoteBaseClient('http://127.0.0.1:' + str(server.server_port),
+                token_file=token, model_id=bundle['model_id'], model_bundle=bundle,
+                adapter=None, conversion_identity={'cpu': 'directory-catalog'})
+            initial_root = self.root / 'moved-before-first-prepare'
+            Path(registry['root']).rename(initial_root)
+            registry['root'] = str(initial_root)
+            manifest.write_text(json.dumps(registry))
+            client.prepare()
+            self.assertEqual(service.client.registry['root'], str(initial_root))
+            closed.clear()
+            original = service.client
+            self.assertEqual(len(client.models()), 3)
+            added, _ = self.register('wam-new-training-step77', 'anyinfer')
+            rows = client.models()
+            self.assertEqual(len(rows), 6)
+            self.assertIn('wam-new-training-step77', {r['model_id'] for r in rows})
+            self.assertIs(service.client, original)
+            added.unlink()
+            rows = client.models()
+            self.assertEqual(sum(r['selectable'] for r in rows), 3)
+            self.assertTrue(any('manifest' in r.get('reason', '') for r in rows))
+            replacement = deepcopy(registry)
+            replacement['inference_capabilities']['denoise_steps']['maximum'] = 2
+            manifest.write_text(json.dumps(replacement))
+            self.assertEqual(sum(r['selectable'] for r in client.models()), 2)
+            with self.assertRaisesRegex((ValueError, RuntimeError), 'absent|changed'):
+                client.prepare()
+            self.assertIs(service.client, original)
+            self.assertEqual(service.model_bundle, bundle)
+            self.assertEqual(closed, [])
+            relocated = self.root / 'relocated-assets'
+            Path(registry['root']).rename(relocated)
+            registry['root'] = str(relocated)
+            manifest.write_text(json.dumps(registry))
+            client.prepare()
+            self.assertIs(service.client, original)
+            service.unload(dict(protocol=PROTOCOL, model_id=client.model_id,
+                conversion_id=client.conversion_id, expected_bundle_digest=client.bundle_digest,
+                backend=bundle['backend']))
+            client.prepare()
+            self.assertEqual(service.client.registry['root'], str(relocated))
+            self.assertIsNot(service.client, original)
+
+    def test_scans_only_metadata_and_exposes_invalid_assets_and_duplicates(self):
+        manifest, registry = self.register()
+        directory = catalog.RegisteredCatalog(self.catalog_root)
+        original_open = Path.open
+        def metadata_only(path, *args, **kwargs):
+            self.assertIn(path.name, ('manifest.json', 'stats'))
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, 'open', metadata_only):
+            self.assertEqual(len(directory.catalog()), 3)
+        (Path(registry['root']) / 'checkpoint').unlink()
+        rows = directory.rows()
+        self.assertFalse(any(r['selectable'] for r in rows))
+        self.assertIn('checkpoint', rows[0]['reason'])
+        self.register()
+        duplicate = self.catalog_root / 'duplicate' / 'torch' / 'manifest.json'
+        duplicate.parent.mkdir(parents=True)
+        duplicate.write_bytes(manifest.read_bytes())
+        duplicate.chmod(0o600)
+        self.assertTrue(all(not r['selectable'] for r in directory.rows()))
+        self.assertTrue(all('duplicate' in r['reason'] for r in directory.rows()))
+        duplicate.write_text('{')
+        self.assertEqual(sum(r['selectable'] for r in directory.rows()), 3)
+        registry['files'][0]['path'] = '../outside'
+        manifest.write_text(json.dumps(registry))
+        self.assertFalse(any(r['selectable'] for r in directory.rows()))
+
+    def test_startup_reads_assets_and_configuration_only_from_the_catalog_manifest(self):
+        from robot_workbench import wam
+        manifest, registry = self.register()
+        moved = self.root / 'relocated-before-service-start'
+        Path(registry['root']).rename(moved)
+        registry['root'] = str(moved)
+        manifest.write_text(json.dumps(registry))
+        selection = dict(model_id=registry['model_id'], backend='torch',
+                         catalog_root=str(self.catalog_root), selected_inference_options={'denoise_steps': 3})
+        service = wam.model_service(selection)
+        self.addCleanup(service.close)
+        self.assertEqual(service.client.registry['root'], str(moved))
+        self.assertEqual(service.model_bundle['inference_options']['denoise_steps'], 3)
+        self.assertIsNone(service.client.process)
+        with self.assertRaisesRegex(ValueError, 'initial model'):
+            wam.model_service(dict(selection, model_id='wam-missing-step1'))
+
+    def test_pi_and_wam_share_the_directory_and_use_their_existing_loaders(self):
+        from robot_workbench import mixed366, wam
+        self.register()
+        assets = self.root / 'pi'
+        assets.mkdir()
+        content = b'CPU artifact fixture'
+        (assets / 'artifact').write_bytes(content)
+        registry = dict(model_id=model.MIXED366_ID, root=str(assets), backend='torch',
+            files=[dict(path='artifact', bytes=len(content), sha256=sha(content))],
+            bundle_sha256='a'*64, source_manifest_sha256='b'*64, runtime_sha256='c'*64)
+        manifest = self.catalog_root / registry['model_id'] / 'torch' / 'manifest.json'
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps(registry));manifest.chmod(0o600)
+        service = mixed366.Service(dict(registry, catalog_root=str(self.catalog_root)))
+        self.addCleanup(service.close)
+        rows = service.models()
+        self.assertEqual({row['model_id'] for row in rows}, {model.MIXED366_ID, 'wam-fixture-step42'})
+        self.assertIsInstance(service.client, mixed366.Client)
+        bundle = next(row['model_descriptor'] for row in rows if row['model_id'].startswith('wam-'))
+        self.assertIsInstance(service.client_factory(bundle), wam.Client)
+        packed = assets / 'triton/packed.pt'
+        packed.parent.mkdir();packed.write_bytes(b'CPU packed fixture')
+        (packed.parent / 'deployment.json').write_text(json.dumps(dict(status='READY',
+            packed='triton/packed.pt', packed_sha256=sha(packed.read_bytes()), bundle_sha256='a'*64)))
+        triton = self.catalog_root / registry['model_id'] / 'triton' / 'manifest.json'
+        triton.parent.mkdir();triton.write_text(json.dumps(dict(registry, backend='triton')));triton.chmod(0o600)
+        rows = service.models()
+        bundle = next(row['model_descriptor'] for row in rows if row['backend'] == 'triton')
+        self.assertEqual(service.client_factory(bundle).packed, str(packed))
+        self.assertTrue(any(row['id'].startswith('triton-') for row in service.tool_catalog()['models']))
+
+    def test_unsafe_and_unfinished_directories_are_visible_and_unselectable(self):
+        manifest, registry = self.register()
+        directory = catalog.RegisteredCatalog(self.catalog_root)
+        manifest.chmod(0o644)
+        self.assertFalse(directory.rows()[0]['selectable'])
+        manifest.chmod(0o600)
+        (self.catalog_root / 'empty').mkdir()
+        (self.catalog_root / 'linked').symlink_to(manifest.parent.parent)
+        rows = directory.rows()
+        self.assertEqual(sum(row['selectable'] for row in rows), 3)
+        self.assertEqual(sum(not row['selectable'] for row in rows), 2)
+        registry['backend'] = 'triton'
+        manifest.write_text(json.dumps(registry))
+        self.assertFalse(any(row['selectable'] for row in directory.rows()))
+
+    def test_same_size_asset_corruption_is_rejected_by_load_time_content_verification(self):
+        from robot_workbench import mixed366, wam
+        manifest, registry = self.register()
+        assets = Path(registry['root'])
+        for name in ('phoenix_encoder.pt', 'csvae.pt', 'Wan2.2_VAE.safetensors'):
+            content = ('CPU fixture ' + name).encode()
+            (assets / name).write_bytes(content)
+            registry['files'].append(dict(path=name, bytes=len(content), sha256=sha(content)))
+        registry.update(machine_id_sha256='d'*64, gpu_uuid='GPU-cpu-fixture',
+            bundle_sha256=sha(data(sorted(registry['files'], key=lambda row: row['path']))))
+        manifest.write_text(json.dumps(registry))
+        original_sha = mixed366.sha
+        with patch.object(mixed366, 'sha', side_effect=lambda path:
+                          'd'*64 if str(path) == '/etc/machine-id' else original_sha(path)):
+            wam.verify_registry(registry)
+            checkpoint = assets / 'checkpoint'
+            checkpoint.write_bytes(b'x' * checkpoint.stat().st_size)
+            self.assertTrue(all(row['selectable'] for row in catalog.RegisteredCatalog(self.catalog_root).rows()))
+            with self.assertRaisesRegex(ValueError, 'artifact changed: checkpoint'):
+                wam.verify_registry(registry)
+
+
 class InferenceCatalogTests(unittest.TestCase):
     def setUp(self):
         temporary=TemporaryDirectory();self.addCleanup(temporary.cleanup)

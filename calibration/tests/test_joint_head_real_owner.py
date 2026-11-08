@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'infra'))
 from examples.scripts.debug.joint_head_real_owner import Owner, SimulatedBackend, handler, hardware_backend
 from arx_env.joint_head_real_motion import feedback_to_command
+from robot_workbench.execution_settings import DEFAULT_JOINT_TOLERANCE_RAD, PHYSICAL_FEEDBACK_MARGIN_RAD
 
 class Safety:
     class TakeoverState(str, Enum):
@@ -92,8 +93,8 @@ class OwnerTest(unittest.TestCase):
     def test_owner_passes_joint_tolerances_and_exposes_ordered_vector(self):
         from arx_env.joint_head_real_motion import make_plan
         state=self.owner.snapshot()
-        self.assertEqual(state['arm_arrival_tolerance_rad'],.01)
-        self.assertEqual(state['arm_arrival_tolerances_rad'],[.01]*12)
+        self.assertEqual(state['arm_arrival_tolerance_rad'],DEFAULT_JOINT_TOLERANCE_RAD)
+        self.assertEqual(state['arm_arrival_tolerances_rad'],[DEFAULT_JOINT_TOLERANCE_RAD]*12)
         self.owner.arm_tolerances=[.005+.003*i for i in range(12)]
         self.advance(.04)
         state=self.owner.snapshot()
@@ -345,7 +346,7 @@ class OwnerTest(unittest.TestCase):
         self.capture_sequence();self.wait_capture('sample-0')
         with patch.object(self.owner.stationary_window,'update',return_value=False):self.advance(.01)
         self.assertIsNotNone(self.owner.capture_recovery_deadline)
-        self.owner.backend.q[0]+=.011
+        self.owner.backend.q[0]+=self.owner.runner.arm_tolerances[0]+.001
         self.advance(.01)
         self.assertIn('target_outside_arrival_tolerance',self.owner.runner.reason)
         self.assertEqual(self.owner.control.state,Safety.TakeoverState.FAULT)
@@ -398,7 +399,7 @@ class OwnerTest(unittest.TestCase):
     def test_capture_ack_does_not_override_new_pose_drift(self):
         self.capture_sequence();self.wait_capture('sample-0')
         begin=sum(e[0]=='begin' for e in self.owner.backend.events)
-        self.capture_ack();self.owner.backend.q[0]+=.03
+        self.capture_ack();self.owner.backend.q[0]+=self.owner.runner.arm_tolerances[0]+.001
         self.advance(.04)
         self.assertEqual(self.owner.snapshot()['motion']['status'],'FAULT')
         self.assertFalse(self.owner.sequence_remaining)
@@ -677,7 +678,7 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(b._controllers['left'].calls[-2][1].pos()[0],3.)
         self.assertEqual(b.last_begin_position_boundary['corrections'][0]['original_rad'],3.009)
         with self.assertRaisesRegex(ValueError,'invalid single-arm target'):b.send('left',noisy)
-        noisy[0]=3.04;b._controllers['left'].state.p[0]=3.04
+        noisy[0]=3.+PHYSICAL_FEEDBACK_MARGIN_RAD+.001;b._controllers['left'].state.p[0]=noisy[0]
         with self.assertRaisesRegex(ValueError,'position-boundary'):b.begin('left',noisy)
         b.set_damping_hold(manual=True)
         for controller in b._controllers.values():

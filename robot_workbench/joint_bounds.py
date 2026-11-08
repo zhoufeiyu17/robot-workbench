@@ -1,5 +1,6 @@
 """Position-boundary noise only; never a tracking, settling or collision policy."""
 import math
+from .execution_settings import PHYSICAL_FEEDBACK_MARGIN_RAD
 
 
 class JointPositionBoundaryError(ValueError):
@@ -26,7 +27,7 @@ def project_joint_positions(values, limits, *, environment):
 
 def feedback_position_margin_rad(environment):
     """Observation validity only; never expands the legal command interval."""
-    return math.radians(2.) if environment=='physical' else position_noise_rad(environment)
+    return PHYSICAL_FEEDBACK_MARGIN_RAD if environment=='physical' else position_noise_rad(environment)
 
 
 def inspect_joint_feedback(values,limits,*,environment):

@@ -2,6 +2,7 @@
 from copy import deepcopy
 import errno
 import io
+import json
 from pathlib import Path
 import socket
 import struct
@@ -18,14 +19,45 @@ from real_rgbd import pair_metadata
 
 
 class SharedCameraTest(unittest.TestCase):
-    def service(self,environment='fake',budget=1024**3,camera_serials=None):
+    def test_stalled_rgb_recording_bridge_never_blocks_latest_input_or_grows_its_queue(self):
+        import threading
+        from types import SimpleNamespace
+        from robot_workbench.prometheus_rgb import RGBRecordingBridge,RGBClient,write_frame
+        entered=threading.Event();release=threading.Event()
+        def lease():entered.set();release.wait(2);return None
+        service=SimpleNamespace(channels={'base_0':SimpleNamespace(current_lease=lease)},publish=MagicMock())
+        bridge=RGBRecordingBridge(service);rgb=b'\x12'*(640*480*3);stamp=time.time_ns()
+        meta=dict(camera='base_0',serial='1',capture_instance_id='publisher',host_receive_ns=stamp,
+            frame_number=stamp,pixel_format='rgb8',environment='physical')
+        try:
+            self.assertTrue(bridge.submit('base_0',meta,rgb));self.assertTrue(entered.wait(1))
+            for index in range(3):self.assertTrue(bridge.submit('base_0',dict(meta,host_receive_ns=stamp+index+1),rgb))
+            self.assertFalse(bridge.submit('base_0',dict(meta,host_receive_ns=stamp+4),rgb))
+            self.assertEqual(bridge.frames.qsize(),3);self.assertTrue(bridge.errors)
+            with tempfile.TemporaryDirectory()as folder:
+                write_frame(Path(folder)/'base_0.rgb',meta,rgb)
+                with patch('robot_workbench.camera_owner.read_owner',return_value=dict(instance='publisher',profile={'cameras':{'base_0':'1'}})):
+                    latest=RGBClient(folder,'/cpu/owner').latest_rgb('base_0')
+                self.assertEqual(latest['rgb'],rgb);self.assertEqual(latest['metadata']['host_receive_ns'],stamp)
+                old=stamp-750_000_000;write_frame(Path(folder)/'base_0.rgb',dict(meta,host_receive_ns=old),rgb)
+                with patch('robot_workbench.camera_owner.read_owner',return_value=dict(instance='publisher',profile={'cameras':{'base_0':'1'}})):
+                    self.assertEqual(RGBClient(folder,'/cpu/owner').latest_rgb('base_0')['metadata']['host_receive_ns'],old)
+                from robot_workbench.execution_settings import Guard,control_parameters,defaults
+                decision=Guard.evaluate(dict(rule_id='G02',signal_id='native-rgb',observed=.75,source_time=old/1e9,
+                    checked_time=stamp/1e9),'input',dict(revision=None,policy_hash=None,parameters=control_parameters(defaults('inference'),business='inference')))
+                self.assertEqual(decision['verdict'],'reject','freshness is judged by shared G02, never by restamping the source')
+            self.assertFalse(service.publish.called,'recording IPC is still stalled while latest input completed')
+        finally:release.set();bridge.close()
+
+    def service(self,environment='fake',budget=1024**3,camera_serials=None,pixel_format='rgb8-depth16le'):
         temp=tempfile.TemporaryDirectory(prefix='rgbd-');self.addCleanup(temp.cleanup)
         self.k={name:dict(serial=str(index+1),width=2,height=2,fx=100.,fy=100.,cx=1.,cy=1.,
                          coefficients=[0.]*5,distortion_model='none',rectified=False)
                 for index,name in enumerate(CAMERAS.values())}
         if camera_serials:
             for role,name in CAMERAS.items():self.k[name]['serial']=camera_serials[role]
-        service=CommonCameraService.start(self.k,Path(temp.name)/'camera',environment,budget_bytes=budget)
+        service=CommonCameraService.start(self.k,Path(temp.name)/'camera',environment,budget_bytes=budget,
+            pixel_formats=dict.fromkeys(self.k,pixel_format))
         self.addCleanup(service.close)
         self.owner=dict(owner_pid=1234,command_epoch=3,runtime_nonce='test-owner')
         self.environment=environment
@@ -59,7 +91,27 @@ class SharedCameraTest(unittest.TestCase):
         return meta
 
     def publish(self,service,camera,index,token):
-        return service.publish(camera,self.metadata(camera,index),*self.pixels(index),width=2,height=2,sampled_token=token)
+        meta=self.metadata(camera,index);rgb,depth=self.pixels(index)
+        if service.descriptor['pixel_formats'][camera]=='rgb8':meta=self.rgb_metadata(meta);depth=None
+        return service.publish(camera,meta,rgb,depth,width=2,height=2,sampled_token=token)
+
+    @staticmethod
+    def rgb_metadata(meta):
+        return dict({k:v for k,v in meta.items()if not k.startswith('depth')and k!='rgbd_paired'},pixel_format='rgb8')
+
+    def test_rgb_only_is_explicit_has_no_depth_and_preserves_original_pixels(self):
+        service=self.service(pixel_format='rgb8');token=self.lease(service)
+        self.publish(service,'base_0',0,token);frame=service.channels['base_0'].pop(token)
+        self.assertIsNone(frame['depth']);self.assertEqual(frame['rgb'],self.pixels()[0])
+        self.assertEqual(frame['pixel_format'],'rgb8');self.assertNotIn('depth_scale_m',frame['metadata'])
+        preview=service.frames['base_0'].snapshot();self.assertIn('color_png',preview);self.assertNotIn('depth_png',preview)
+        with self.assertRaisesRegex(ValueError,'unavailable'):service.frames['base_0'].snapshot(['depth_png'])
+        with self.assertRaisesRegex(ValueError,'absent depth'):
+            service.publish('base_0',self.rgb_metadata(self.metadata('base_0',1)),*self.pixels(1),width=2,height=2,sampled_token=token)
+        with tempfile.TemporaryDirectory()as folder:
+            changed=dict(service.descriptor,pixel_formats=dict.fromkeys(service.channels,'rgb8-depth16le'))
+            path=Path(folder)/'changed.json';path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError,'pixel format'):CommonCameraService.connect(path)
 
     def test_both_ingress_modes_use_same_raw_channel_and_preview_codec(self):
         from PIL import Image
@@ -108,6 +160,35 @@ class SharedCameraTest(unittest.TestCase):
         meta=self.metadata('base_0',0);meta['capture_instance_id']='replacement-camera'
         self.assertFalse(service.publish('base_0',meta,*self.pixels(),width=2,height=2,sampled_token=None)['recorded'])
         self.assertEqual(service.latest_rgbd('base_0')['metadata']['capture_instance_id'],'replacement-camera')
+
+    def test_recording_run_scope_keeps_new_epoch_but_rejects_foreign_identity_and_token(self):
+        service=self.service();camera='base_0';channel=service.channels[camera];token=self.lease(service)
+        self.assertIn('recording_run_lease_v1',service.call('identity')['capabilities'])
+        changed=dict(self.metadata(camera,0),command_epoch=self.owner['command_epoch']+1)
+        self.assertFalse(service.publish(camera,changed,*self.pixels(),width=2,height=2,sampled_token=token)['recorded'])
+        for ch in service.channels.values():ch.end(token)
+        now=time.time_ns()
+        lease=dict(run_id=token,start_wall_ns=now-1,deadline_wall_ns=now+60_000_000_000,
+            execution_instance_id='ipc-test',execution_owner=self.owner,environment='fake',identity_scope='recording_run')
+        with self.assertRaisesRegex(ValueError,'scope'):channel.begin(dict(lease,identity_scope='unknown'))
+        channel.end(token)  # A failed begin still needs explicit resolution of the client lease.
+        channel.begin(lease)
+        for index,fields,sampled,accepted in [
+                (1,{'command_epoch':4},token,True),
+                (2,{'command_epoch':2},token,False),
+                (3,{'command_epoch':4,'owner_pid':4321},token,False),
+                (4,{'command_epoch':4,'runtime_nonce':'replacement'},token,False),
+                (5,{'command_epoch':4},'b'*32,False)]:
+            meta=dict(self.metadata(camera,index),**fields)
+            result=service.publish(camera,meta,*self.pixels(index),width=2,height=2,sampled_token=sampled)
+            self.assertEqual(result['recorded'],accepted)
+        frame=channel.pop(token)
+        self.assertEqual(frame['metadata']['command_epoch'],4)
+        self.assertEqual(frame['metadata']['recording_execution_owner'],self.owner)
+        self.assertEqual(frame['metadata']['recording_identity_scope'],'recording_run')
+        self.assertIsNone(channel.peek(token))
+        with self.assertRaisesRegex(ValueError,'leased'):channel.begin(dict(lease,run_id='b'*32))
+        self.assertFalse(channel.end('b'*32));channel.end(token)
 
     def test_ipc_frame_bound_shared_budget_and_disconnect(self):
         service=self.service(budget=5000);token=self.lease(service)

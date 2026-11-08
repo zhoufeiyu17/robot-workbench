@@ -140,7 +140,7 @@ class RealMotionTest(unittest.TestCase):
         inside = raw[:];inside[8] = -math.radians(1.5)
         self.assertEqual(feedback_to_command(inside,bounds)[8],0.)
         self.assertLess(inside[8],0.,'raw feedback must not be clipped')
-        too_far = raw[:];too_far[8] = -math.radians(2.)-.000001
+        too_far = raw[:];too_far[8] = -math.radians(5.)-.000001
         with self.assertRaisesRegex(ValueError, 'position-boundary'):
             make_workbench_plans(too_far, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds)
         with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
@@ -166,7 +166,7 @@ class RealMotionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'canonical contents'):
                 MotionRunner(replace(plan,requested_q_target=tuple(altered)),begin=lambda q:q,send=lambda q:None,stop=lambda reason:None)
             beyond=raw[:];beyond[0]=-tolerance-.000001
-            beyond_feedback=raw[:];beyond_feedback[0]=-(math.radians(2.)if environment=='physical'else tolerance)-.000001
+            beyond_feedback=raw[:];beyond_feedback[0]=-(math.radians(5.)if environment=='physical'else tolerance)-.000001
             with self.assertRaisesRegex(ValueError,'position-boundary'):
                 make_plan('both',beyond_feedback,requested,bounds,kind='workbench',environment=environment)
             with self.assertRaisesRegex(ValueError,'position-boundary'):
@@ -366,7 +366,7 @@ class RealMotionTest(unittest.TestCase):
         self.assertEqual(calls[0][1], tuple(measured))
         self.assertEqual(calls[1][1], feedback_to_command(measured))
         runner, calls, start, _ = self.setup_runner()
-        measured = start.copy(); measured[7] += .011
+        measured = start.copy(); measured[7] += math.radians(2.01)
         runner.start(8500., feedback(8500., measured))
         self.assertEqual(runner.status, 'FAULT')
         self.assertEqual([c[0] for c in calls], ['stop'])
@@ -377,7 +377,7 @@ class RealMotionTest(unittest.TestCase):
         self.start_running(runner, measured)
         self.assertEqual(calls[1][1], feedback_to_command(measured))
         runner, calls, start, _ = self.setup_runner()
-        measured = start.copy(); measured[7] += .04
+        measured = start.copy(); measured[7] += math.radians(1.99)
         self.assertEqual(runner.start(8500., feedback(8500., measured), reviewed_deadline=8530.), 'VERIFYING')
         self.tick_until(runner,8500.31,measured)
         self.assertEqual(runner.status,'RUNNING')
@@ -456,11 +456,11 @@ class RealMotionTest(unittest.TestCase):
                 state["sdk_timestamps"][0] = 500.
                 expected = "SDK feedback clock regressed"
             elif kind == "inactive":
-                state["qpos"][0] += .011
+                state["qpos"][0] += math.radians(2.01)
             elif kind == "jaw":
                 state["qpos"][13] += .003
             else:
-                state["qpos"][7] = 2.+math.radians(2.)+.00001
+                state["qpos"][7] = 2.+math.radians(5.)+.00001
                 expected = "position-boundary"
             self.assertEqual(runner.tick(8500.35, state), "FAULT")
             self.assertIn(expected, runner.reason)
@@ -483,7 +483,7 @@ class RealMotionTest(unittest.TestCase):
         self.assertEqual(runner.status, "SETTLING")
         v = [0.] * 14; v[7] = .07
         # Stationarity intentionally uses measured position, not noisy SDK qvel.
-        moving = target.copy(); moving[7] += .006
+        moving = target.copy(); moving[7] += math.radians(2.01)
         self.tick_until(runner, runner.previous + .04, moving, v=v)
         self.assertIsNone(runner.settled_since)
         self.tick_until(runner, runner.previous + .45, target)
@@ -494,7 +494,7 @@ class RealMotionTest(unittest.TestCase):
         self.tick_until(runner, runner.previous + .2, target)
         self.assertEqual(runner.status, "READY")
         self.assertEqual(len(calls), sends)
-        drift = target.copy(); drift[7] += .02
+        drift = target.copy(); drift[7] += math.radians(2.01)
         self.tick_until(runner, runner.previous + .04, drift)
         self.assertEqual(runner.status, "HOLD_UNSETTLED")
         self.assertEqual(len(calls), sends)
@@ -514,7 +514,7 @@ class RealMotionTest(unittest.TestCase):
         self.tick_until(runner, runner.started + runner.plan.duration_s + 3.1, outside, v=v)
         self.assertEqual(runner.status, "FAULT")
         self.assertIn("settle deadline", runner.reason)
-        self.assertIn("arrival_tolerance=0.050000 rad", runner.reason)
+        self.assertIn(f"arrival_tolerance={math.radians(2.):.6f} rad", runner.reason)
         self.assertIn("not joint position limit", runner.reason)
         self.assertEqual(runner.target_error['arrival_deadline']['failure_kind'],'target_tolerance_exceeded')
         runner, _, start, target = self.setup_runner()
@@ -563,7 +563,7 @@ class RealMotionTest(unittest.TestCase):
         self.assertEqual(runner.status, "READY")
         window = StationaryWindow()
         for n in range(8):
-            q = start.copy(); q[7] += .01 * n / 6
+            q = start.copy(); q[7] += math.radians(2.1) * n / 6
             self.assertFalse(window.update(8500. + .05 * n, q, noisy))
 
     def test_stationary_diagnostic_preserves_failure_evidence_and_units(self):
@@ -585,14 +585,14 @@ class RealMotionTest(unittest.TestCase):
         self.assertFalse(window.update(.41, q, v))
         self.assertEqual(window.last_diagnostic['reason'], 'nonmonotonic')
         self.assertEqual(window.last_diagnostic['sample_gap_s'], 0.)
-        moved = q.copy(); moved[3] = math.radians(.301); moved[6] = .0021
+        moved = q.copy(); moved[3] = math.radians(2.01); moved[6] = .0021
         self.assertFalse(window.update(.45, moved, v))
         d = window.last_diagnostic
         self.assertEqual(d['reason'], 'position_span')
         self.assertEqual(d['position_exceeded_indices'], [3, 6])
         self.assertEqual(d['sample_count'], 2)
         self.assertEqual(len(window.samples), 1)
-        self.assertAlmostEqual(d['position_span'][3], math.radians(.301))
+        self.assertAlmostEqual(d['position_span'][3], math.radians(2.01))
         self.assertAlmostEqual(d['position_span'][6], abs(feedback_gaps(moved)[0] - feedback_gaps(q)[0]))
         self.assertEqual(d['position_units'][6], 'mm')
         self.assertEqual(d['raw_qpos_units'][6], 'SDK_units')
@@ -610,16 +610,16 @@ class RealMotionTest(unittest.TestCase):
         window.reset()
         self.assertIs(window.last_diagnostic, d)
 
-    def test_stationary_position_span_point_three_degree_boundary(self):
+    def test_stationary_position_span_two_degree_boundary(self):
         for axis in (*range(6), *range(7,13)):
-            for span, expected in ((.0034332275390625, True), (math.radians(.3), True), (math.radians(.3001), False)):
+            for span, expected in ((.0034332275390625, True), (math.radians(2.), True), (math.radians(2.0001), False)):
                 window = StationaryWindow()
                 for n in range(7):
                     q = [0.] * 14
                     q[axis] = span if n == 6 else 0.
                     ready = window.update(n * .05, q, [0.] * 14)
                 self.assertEqual(ready, expected)
-                self.assertEqual(window.last_diagnostic['position_thresholds'][axis], math.radians(.3))
+                self.assertEqual(window.last_diagnostic['position_thresholds'][axis], math.radians(2.))
 
     def test_stationary_window_gaps_jaws_and_velocity_is_diagnostic(self):
         q = [0.] * 14

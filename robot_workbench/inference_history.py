@@ -7,6 +7,7 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+import re
 
 DATABASE = 'history.sqlite3'
 PAGE_RUNS = 12
@@ -88,7 +89,9 @@ def checked_entry(entry):
     relative = entry.get('path')
     if relative is not None and (not isinstance(relative, str) or not relative or len(relative) > 4096
             or '\\' in relative or Path(relative).is_absolute() or '..' in Path(relative).parts
-            or Path(relative).as_posix() != relative or Path(relative).suffix != '.mp4'):
+            or Path(relative).as_posix() != relative or (Path(relative).suffix != '.mp4'
+                and not (result.get('kind')=='inference_debug' and Path(relative).name=='debug-receipt.json')
+                and not (result.get('kind')=='control_recording'and re.fullmatch(r'receipt-r\d{6}\.json',Path(relative).name)))):
         raise ValueError('inference history media path escapes output or is not an MP4')
     raw = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
     size = len(raw.encode())
@@ -141,13 +144,15 @@ def entries(root):
 
 
 class InferenceHistory:
-    def __init__(self, root):
-        self.root = Path(root); self.path = self.root / DATABASE
+    def __init__(self, root, *, database=DATABASE):
+        if not isinstance(database,str)or not re.fullmatch(r'[A-Za-z0-9_-]+\.sqlite3',database):raise ValueError('bounded index filename required')
+        self.root = Path(root); self.path = self.root / database
         self.root.mkdir(parents=True, exist_ok=True)
         with closing(_connect(self.path)) as db, db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version == SCHEMA:
-                _check_legacy(db, self.root); return
+                if database==DATABASE:_check_legacy(db, self.root)
+                return
             if version != 0:raise ValueError('unknown inference history database version')
             # DELETE journals make an idle, closed index one independently
             # pinnable file for the existing maintenance preservation protocol.
@@ -160,9 +165,9 @@ class InferenceHistory:
             db.execute('CREATE INDEX IF NOT EXISTS results_run ON results(run, seq)')
             db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
             legacy = self.root / 'history.json'
-            legacy_pin = _legacy_pin(self.root)
-            if legacy.exists() or legacy.is_symlink():self._append(db, legacy_entries(legacy))
-            if _legacy_pin(self.root) != legacy_pin:raise ValueError('legacy inference history changed during import')
+            legacy_pin = _legacy_pin(self.root)if database==DATABASE else None
+            if database==DATABASE and (legacy.exists() or legacy.is_symlink()):self._append(db, legacy_entries(legacy))
+            if database==DATABASE and _legacy_pin(self.root) != legacy_pin:raise ValueError('legacy inference history changed during import')
             db.execute('INSERT INTO metadata(key,value) VALUES (?,?)', ('legacy', json.dumps(legacy_pin)))
             db.execute('PRAGMA user_version=1')
 
@@ -181,6 +186,44 @@ class InferenceHistory:
         with closing(_connect(self.path)) as db, db:
             self._append(db, (dict(result=row, path=str(path.relative_to(self.root)) if path is not None else None)
                               for row, path in rows))
+
+    def result(self,identity):
+        with closing(_connect(self.path,readonly=True))as db:
+            row=db.execute('SELECT result FROM results WHERE id=?',(identity,)).fetchone()
+        return json.loads(row[0])if row else None
+
+    def replace_capture_run(self,rows,*,preserve_other_results=False):
+        """One atomic latest-seal projection; immutable prior artifacts stay on disk."""
+        entries=[dict(result=row,path=str(path.relative_to(self.root))if path is not None else None)for row,path in rows]
+        checked=[checked_entry(entry)for entry in entries]
+        runs={row[1]for row in checked};revisions={entry['result']['details']['seal_revision']for entry in entries}
+        if len(runs)!=1 or len(revisions)!=1 or not entries:raise ValueError('one sealed capture revision required')
+        run=next(iter(runs));revision=next(iter(revisions))
+        if type(revision)is not int or revision<0:raise ValueError('nonnegative seal revision required')
+        with closing(_connect(self.path))as db,db:
+            db.execute('BEGIN IMMEDIATE')
+            existing=db.execute('SELECT seq FROM runs WHERE id=?',(run,)).fetchone()
+            if existing:
+                old=[json.loads(row[0])for row in db.execute('SELECT result FROM results WHERE run=?',(existing[0],))]
+                if preserve_other_results:
+                    old=[row for row in old if row['id'].startswith('capture-'+run+'-')]
+                if any(row.get('kind')not in('control_recording','replay')or 'seal_revision'not in row.get('details',{})for row in old):
+                    raise ValueError('cannot replace another result kind')
+                previous=max((row['details']['seal_revision']for row in old),default=-1)
+                if revision<previous:return False
+                if revision==previous:
+                    if {row['id']:row for row in old}!={entry['result']['id']:entry['result']for entry in entries}:
+                        raise ValueError('same sealed revision changed')
+                    return False
+                if preserve_other_results:
+                    db.executemany('DELETE FROM results WHERE id=?',[(row['id'],)for row in old])
+                    size,count=db.execute('SELECT COALESCE(SUM(LENGTH(CAST(result AS BLOB))),0),COUNT(*)FROM results WHERE run=?',(existing[0],)).fetchone()
+                    db.execute('UPDATE runs SET bytes=?,count=? WHERE seq=?',(size,count,existing[0]))
+                else:
+                    db.execute('DELETE FROM results WHERE run=?',(existing[0],))
+                    db.execute('UPDATE runs SET bytes=0,count=0 WHERE seq=?',(existing[0],))
+            self._append(db,entries)
+        return True
 
     def page(self, *, before=None, after=None):
         if (before is not None and after is not None or any(type(v) is not int or not 0 < v < 2**63

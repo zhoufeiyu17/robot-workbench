@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from joint_head_workbench import Workbench
+from robot_workbench.joint_bounds import feedback_position_margin_rad
 
 
 class SupportControlTest(unittest.TestCase):
@@ -112,7 +113,8 @@ class SupportControlTest(unittest.TestCase):
             for endpoint in ('q_start','q_target'):
                 with self.subTest(environment=environment,endpoint=endpoint):
                     plans=[{'q_start':[0.]*14,'q_target':[0.]*14}]
-                    plans[0][endpoint][1]=-.035 if environment=='physical' and endpoint=='q_start' else value;before=deepcopy(plans)
+                    plans[0][endpoint][1]=-(feedback_position_margin_rad(environment)+.001) if endpoint=='q_start' else value
+                    before=deepcopy(plans)
                     app=self.app(plans,lambda *args,**kwargs:self.fail('over-noise endpoint reached sphere check'))
                     app.config.update(environment=environment,simulation_only=environment=='fake')
                     app.geometry.limits[1]=[0.,2.]

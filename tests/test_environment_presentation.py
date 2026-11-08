@@ -26,6 +26,15 @@ class EnvironmentPresentationTests(unittest.TestCase):
                     'reservation':{'status':'declared','record':'existing-record'}}))
     def render(self):return describe(self.config,self.view,self.profiles)
 
+    def test_resident_recording_health_is_separate_from_per_run_readiness(self):
+        self.view['health']['services']['recording']={'state':'running'}
+        self.view['health']['recording_service']={'ready':True,'pid':123,'active_sessions':[]}
+        dependency=next(row for row in self.render()['dependencies']if row['id']=='recording')
+        self.assertEqual(dependency['status'],'ready');self.assertIn('每个Run另行',dependency['expected'])
+        self.view['health']['recording_service']={'ready':False,'status':'unknown','error':'IPC unavailable'}
+        dependency=next(row for row in self.render()['dependencies']if row['id']=='recording')
+        self.assertEqual(dependency['status'],'unknown');self.assertEqual(dependency['reason'],'IPC unavailable')
+
     def test_dead_or_unknown_worker_cannot_be_overridden_by_cached_binding(self):
         self.view['health']['services']['model']={'state':'running'}
         base=dict(model_id='fixture-checkpoint',loaded=True,status='ready',warmup={'completed':True})

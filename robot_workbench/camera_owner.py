@@ -87,7 +87,24 @@ def run_owner(state, args):
         if key != 'enable_ir':
             command.extend(['--' + key, str(getattr(args, key))])
     command.extend(['--enable_ir' if args.enable_ir else '--no-enable_ir', '--ready_file', str(ready)])
-    child = None
+    child = None;ros=None;source_publishers={}
+    if getattr(args,'ros_namespace',None):
+        from robot_workbench.ros_data import RosNode
+        if not getattr(args,'device_id',None):raise ValueError('ROS camera source requires explicit device_id')
+        ros=RosNode('camera_sources',namespace=args.ros_namespace,
+            domain_id=int(os.environ.get('ROS_DOMAIN_ID','0')),localhost_only=False)
+    def publish_sources(available):
+        if ros is None:return
+        from robot_workbench.ros_data import descriptor_message
+        for camera,serial in value['profile']['cameras'].items():
+            if camera not in source_publishers:
+                source_publishers[camera]=ros.publisher('sources/'+camera,ros.types.SourceDescriptor,retained=True,depth=1)
+            source_publishers[camera].publish(descriptor_message(ros,dict(device_id=args.device_id,stream_id=camera,
+                source_instance_id=value['instance'],source_clock_id='host_wall',
+                topic=args.topic_prefix+'/'+camera+'_rgb/image_raw',message_type='sensor_msgs/msg/Image',
+                kind='image',units='rgb8',coordinate_frame=camera,nominal_hz=float(args.fps),available=available,
+                metadata=dict(serial=serial,width=args.width,height=args.height,environment='physical',
+                    timestamp_basis='publisher_host_after_capture'))))
     try:
         atomic(state, dict(value, heartbeat=time.monotonic()))
         child = subprocess.Popen(command, env=dict(os.environ, ROBOT_WORKBENCH_CAMERA_OWNER='1'), start_new_session=True)
@@ -95,6 +112,7 @@ def run_owner(state, args):
         while not stopped and child.poll() is None:
             value['state'] = 'running' if ready.is_file() else 'starting'
             atomic(state, dict(value, heartbeat=time.monotonic()))
+            publish_sources(value['state']=='running')
             time.sleep(.5)
         if not stopped:
             value.update(state='error', error='原相机发布进程退出，代码 ' + str(child.returncode))
@@ -113,7 +131,43 @@ def run_owner(state, args):
             value['state'] = 'stopped'
         atomic(state, dict(value, heartbeat=time.monotonic()))
         ready.unlink(missing_ok=True)
+        if ros is not None:publish_sources(False);ros.close()
+        lock.close()
     return 0 if stopped else 1
+
+
+def observe_owner(state, args):
+    """Register the existing raw ROS publisher without owning its hardware lifecycle."""
+    from robot_workbench.ros_data import RosNode, descriptor_message
+    if not args.ros_namespace or not args.device_id:
+        raise ValueError('existing source registration requires namespace and device ID')
+    expected=profile(args);source=read_owner(state,expected);publishers={};stopped=False
+    ros=RosNode('existing_camera_sources',namespace=args.ros_namespace,
+        domain_id=int(expected['ros_domain']),localhost_only=False)
+    def declare(available):
+        for camera,serial in expected['cameras'].items():
+            if camera not in publishers:
+                publishers[camera]=ros.publisher('sources/'+camera,ros.types.SourceDescriptor,retained=True,depth=1)
+            publishers[camera].publish(descriptor_message(ros,dict(device_id=args.device_id,stream_id=camera,
+                source_instance_id=source['instance'],source_clock_id='host_wall',
+                topic=expected['topic_prefix']+'/'+camera+'_rgb/image_raw',message_type='sensor_msgs/msg/Image',
+                kind='image',units='rgb8',coordinate_frame=camera,nominal_hz=float(expected['fps']),available=available,
+                metadata=dict(serial=serial,width=expected['width'],height=expected['height'],environment='physical',
+                    timestamp_basis='publisher_host_after_capture'))))
+    def stop(*_):
+        nonlocal stopped
+        stopped=True
+    for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,stop)
+    try:
+        while not stopped:
+            current=read_owner(state,expected)
+            if current['instance']!=source['instance']:
+                raise ValueError('shared camera publisher changed; explicitly rebind the source')
+            declare(current['state']=='running')
+            time.sleep(.5)
+    finally:
+        declare(False);ros.close()
+    return 0
 
 
 if __name__ == '__main__':
@@ -121,8 +175,11 @@ if __name__ == '__main__':
     parser.add_argument('--state', required=True)
     parser.add_argument('--cameras', required=True)
     parser.add_argument('--topic_prefix', default='/prometheus/sensors/cameras')
+    parser.add_argument('--ros-namespace',dest='ros_namespace')
+    parser.add_argument('--device-id',dest='device_id')
+    parser.add_argument('--observe-existing',action='store_true',help='register existing raw ROS images; never opens or stops cameras')
     for key, default in dict(width=640, height=480, ir_width=640, ir_height=480, fps=30, qos_depth=10).items():
         parser.add_argument('--' + key, type=int, default=default)
     parser.add_argument('--enable_ir', action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
-    raise SystemExit(run_owner(args.state, args))
+    raise SystemExit((observe_owner if args.observe_existing else run_owner)(args.state, args))

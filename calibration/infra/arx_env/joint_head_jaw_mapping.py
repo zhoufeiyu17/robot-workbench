@@ -29,7 +29,7 @@ def configure_mapping(path):
     data = json.loads(raw)
     if isinstance(data,dict) and data.get('schema_version')=='native_gripper_mapping.v1':
         from robot_workbench.sdk_quiesce import load_gripper_calibration
-        if data.get('robot_id')!='arx13':raise ValueError('native jaw mapping requires its physical device identity')
+        if data.get('robot_id')not in ('arx6','arx13'):raise ValueError('native jaw mapping requires its physical device identity')
         value=load_gripper_calibration(data.get('native_gripper_calibration'),robot_id=data.get('robot_id'))
         if value is None or set(data)!={'schema_version','robot_id','native_gripper_calibration'}:
             raise ValueError('exact native gripper mapping binding required')

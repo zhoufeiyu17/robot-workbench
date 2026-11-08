@@ -10,6 +10,83 @@ from scripts import workbench_deploy
 
 
 class EnvironmentExitTest(unittest.TestCase):
+    def test_exit_verification_keeps_released_and_wrong_collector_facts_separate(self):
+        m=self.manager(False)
+        m.refresh=Mock(return_value={'services':{name:dict(state='stopped',running=False)for name in m.services}})
+        with patch.object(workbench_deploy,'verify_unit',return_value=dict(ActiveState='active',MainPID='7')),\
+                patch.object(workbench_deploy,'http_json',return_value=dict(robot_vin='another-device',orphan_alive=False)):
+            proof=WorkbenchManager.verify(m,dict(action='exit_environment',sdk_was_disconnected=True))
+        self.assertFalse(proof['ok']);self.assertTrue(proof['environment_exited']);self.assertTrue(proof['sdk_release_verified'])
+        self.assertFalse(proof['collection_web_ready']);self.assertFalse(proof['collection_web']['ready'])
+
+    def test_default_home_uses_actual_calibration_run_and_fixed_recording_policy(self):
+        from test_shared_target_routes import SharedTargetRoutesTest
+        h=SharedTargetRoutesTest();h.setUp();self.addCleanup(h.doCleanups);h.create();made=h.capture_factory()
+        factory=h.runtime.owner.recording_factory
+        def ready(payload,on_fault):
+            recording=factory(payload,on_fault);recording.prepared.set();recording.ready.set();return recording
+        ready.recording_backend='capture_session_v1';ready.supports_deferred_preparation=True
+        h.runtime.owner.recording_factory=ready
+        m=object.__new__(WorkbenchManager);m.environment='physical';m.port=18878;m.config={}
+        m.timeouts={'state':.1,'operation':5.};m.target=lambda:{'backend_instance':'cpu'}
+        m.health_cache={'runtime':{'runtime_nonce':h.runtime.nonce}};m._request_control_stop=Mock()
+        review=None;executed=False
+        def transport(port,path,body=None,**kwargs):
+            nonlocal review,executed
+            if body is None:
+                h.advance(5);runtime=h.runtime.fact_snapshot();runner=h.runtime.owner.runner
+                state=dict(server_instance_id='cpu',csrf='fixture',runtime=runtime,workflow={},manual=dict(
+                    jaw_gaps_mm=[0.,0.],jaw_command_ranges_mm=[[0,80],[0,80]],positions=[*h.raw.q[:6],*h.raw.q[7:13]]))
+                if review is not None:state['workflow']['review']=dict(id='review',request_job_id='prep')
+                if executed:state['manual']['execution']=dict(id='review',status='completed'if runner and runner.status=='READY'else'failed'if runner and runner.status=='FAULT'else'running')
+                return state
+            self.assertEqual(body['business'],'calibration')
+            if path.endswith('/manual_preview'):
+                review=h.runtime.submit(h.creds['calibration'],dict(action='preview_workbench',waypoints=[dict(
+                    q12=body['q12'],speeds12=body['speeds12'],jaw_gap_mm=body['jaw_gap_mm'],jaw_speed_mm_s=body['jaw_speed_mm_s'])]))
+                return {'job_id':'prep'}
+            if path.endswith('/manual_execute'):h.confirm('calibration',review);executed=True;return {}
+            raise AssertionError(path)
+        with patch('robot_workbench.management.json_request',side_effect=transport):result=m.home_for_exit({'request_id':'home'},Mock())
+        self.assertTrue(result['completed']);self.assertEqual(result['speed_rad_s'],.1);self.assertTrue(made)
+        self.assertEqual(made[-1].context['business_kind'],'calibration')
+        policy=made[-1].context['control_policy'];self.assertEqual(policy['parameters']['recording']['purpose_profile'],'data_required')
+        self.assertEqual(policy['policy_hash'],h.runtime.execution_calibration['control_policy']['policy_hash'])
+        self.assertTrue(made[-1].done.is_set());m._request_control_stop.assert_not_called()
+
+    def test_arm_only_home_keeps_jaw_targets_out_of_the_waypoints(self):
+        m=object.__new__(WorkbenchManager);m.port=18878;m.environment='physical'
+        m.config={'exit_home_keep_jaws':True};m.timeouts={'state':.1,'operation':.5}
+        m.target=lambda:dict(backend_instance='backend');m.health_cache={'runtime':{'runtime_nonce':'cpu'}}
+        m._request_control_stop=Mock(return_value={'status':'accepted','receipt':{'stop':{'barrier_epoch':10}}})
+        runtime=dict(connected=True,feedback_healthy=True,stationary=True,automatic_enabled=False,
+            state='READY',runtime_nonce='cpu',command_epoch=2,holder='inference')
+        state=dict(server_instance_id='backend',csrf='fixture',runtime=runtime,workflow={},manual=dict(positions=[.01]*12))
+        sides=[]
+        def transport(port,path,body=None,**kwargs):
+            if body is None:
+                if sides:
+                    runtime.update(state='STOPPED_DAMPING_HOLD',stop_receipt=dict(barrier_epoch=10,prior_calls_complete=True,stop_hold_return_confirmed=True))
+                return deepcopy(state)
+            self.assertEqual(body['business'],'calibration')
+            if path.endswith('/handoff'):runtime['holder']='calibration';return {}
+            if path.endswith('/manual_preview'):
+                sides.append(body['active_arm']);self.assertNotIn('jaw_gap_mm',body)
+                start=0 if body['active_arm']=='left'else 6
+                self.assertEqual(body['q12'][start:start+6],[0.]*6)
+                self.assertEqual(body['speeds12'],[.1]*12)
+                state['workflow']['review']=dict(id='review-'+sides[-1],request_job_id=sides[-1])
+                return {'job_id':sides[-1]}
+            if path.endswith('/manual_execute'):
+                state['manual']['execution']=dict(id=body['review_id'],status='completed')
+                return {}
+            raise AssertionError(path)
+        with patch('robot_workbench.management.json_request',side_effect=transport):
+            result=m.home_for_exit({'request_id':'home'},Mock())
+        self.assertEqual(sides,['left','right']);self.assertTrue(result['completed'])
+        m._request_control_stop.assert_called_once_with('home-between-arms',expected_nonce='cpu')
+        self.assertIn('retain_native_begin_command',result['jaw_policy'])
+
     def test_home_uses_new_review_native_manual_path_and_bounded_jaws(self):
         m=object.__new__(WorkbenchManager);m.port=18878;m.environment='physical';m.timeouts={'state':.1,'operation':.3}
         m.target=lambda:dict(backend_instance='backend');m.health_cache={'runtime':{'runtime_nonce':'cpu'}};m._request_control_stop=Mock()
@@ -19,7 +96,8 @@ class EnvironmentExitTest(unittest.TestCase):
         def transport(port,path,body=None,**kw):
             if body is None:return deepcopy(state)
             requests.append((path,body))
-            if path.endswith('/handoff'):runtime['holder']='research';return {}
+            self.assertEqual(body['business'],'calibration')
+            if path.endswith('/handoff'):runtime['holder']='calibration';return {}
             if path.endswith('/manual_preview'):
                 self.assertEqual(body['q12'],[0.]*12);self.assertEqual(body['speeds12'],[.1]*12);self.assertEqual(body['jaw_gap_mm'],[80,89])
                 state['workflow']['review']=dict(id='new-review',request_job_id='prep');return {'job_id':'prep'}
@@ -29,6 +107,40 @@ class EnvironmentExitTest(unittest.TestCase):
         with patch('robot_workbench.management.json_request',side_effect=transport):result=m.home_for_exit({'request_id':'test'},lambda *a,**k:None)
         self.assertTrue(result['completed']);m._request_control_stop.assert_not_called()
         self.assertEqual([x[0].split('/')[-1]for x in requests],['handoff','manual_preview','manual_execute'])
+
+    def test_home_waits_for_recording_seal_and_timeout_never_reports_completion(self):
+        for finishes in (True,False):
+            with self.subTest(finishes=finishes):
+                m=object.__new__(WorkbenchManager);m.port=18878;m.environment='physical'
+                m.timeouts={'state':.1,'operation':.4 if finishes else .01}
+                m.target=lambda:dict(backend_instance='backend')
+                m.health_cache={'runtime':{'runtime_nonce':'cpu'}};m._request_control_stop=Mock()
+                runtime=dict(connected=True,feedback_healthy=True,stationary=True,automatic_enabled=False,
+                    state='READY',runtime_nonce='cpu',command_epoch=2,holder='calibration')
+                state=dict(server_instance_id='backend',csrf='fixture',runtime=runtime,workflow={},
+                    manual=dict(jaw_gaps_mm=[30.,30.],jaw_command_ranges_mm=[[0,80],[0,80]],positions=[0.]*12))
+                polls=[];actions=[]
+                def transport(port,path,body=None,**kwargs):
+                    if body is None:
+                        if 'execution'in state['manual']:
+                            polls.append(True);runtime['recording']['done']=finishes and len(polls)>=3
+                        return deepcopy(state)
+                    actions.append(path.rsplit('/',1)[-1])
+                    if path.endswith('/manual_preview'):
+                        state['workflow']['review']=dict(id='review',request_job_id='prep');return {'job_id':'prep'}
+                    if path.endswith('/manual_execute'):
+                        state['manual']['execution']=dict(id='review',status='completed')
+                        runtime['recording']=dict(done=False);return {}
+                    raise AssertionError(path)
+                with patch('robot_workbench.management.json_request',side_effect=transport):
+                    if finishes:
+                        self.assertTrue(m.home_for_exit({'request_id':'home'},Mock())['completed'])
+                        self.assertGreaterEqual(len(polls),3);m._request_control_stop.assert_not_called()
+                    else:
+                        with self.assertRaises(OperationError)as caught:m.home_for_exit({'request_id':'home'},Mock())
+                        self.assertEqual(caught.exception.code,'home_unconfirmed')
+                        m._request_control_stop.assert_called_once_with('home-home-failed-stop',expected_nonce='cpu')
+                self.assertEqual(actions,['manual_preview','manual_execute'])
 
     def manager(self,connected=True):
         m=object.__new__(WorkbenchManager);m.environment='physical';m.port=18878;m.stop_generation=0

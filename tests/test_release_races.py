@@ -114,10 +114,10 @@ class ReleaseRaceTests(unittest.TestCase):
         run=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='run')
         release=next(node for node in ast.walk(run) if isinstance(node,ast.FunctionDef) and node.name=='release')
         final=next(node for node in ast.walk(run) if isinstance(node,ast.Try)
-                   and any(isinstance(row,ast.If) and ast.unparse(row.test)=='device and device.runtime'
+                   and any(isinstance(row,ast.If) and ast.unparse(row.test)=='owner_device and owner_device.runtime'
                            for row in node.finalbody))
         cleanup=next(row for row in final.finalbody if isinstance(row,ast.If)
-                     and ast.unparse(row.test)=='device and device.runtime')
+                     and ast.unparse(row.test)=='owner_device and owner_device.runtime')
         for entry in ('resident_finally','cancelled_connection'):
             with self.subTest(entry=entry):
                 runtime,device=self.create()
@@ -128,7 +128,7 @@ class ReleaseRaceTests(unittest.TestCase):
                     calls.append(True);original_close()
                     if len(calls)==1:raise OSError('fixture disconnected then raised')
                 events=[]
-                scope=dict(device=device,task_observer=None,
+                scope=dict(owner_device=device,task_observer=None,
                            event=lambda *args,**kwargs:events.append((args,kwargs)))
                 with patch.object(backend,'close',partial_close):
                     runtime.request_release(device.credentials['calibration'])

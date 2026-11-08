@@ -11,7 +11,7 @@ sys.path[:0] = [str(ROOT), str(ROOT/'rule_based_workbench')]
 from execution_timeline import initialize, prepare, validate
 from frozen_executor import FrozenExecutor
 from integration import _digest
-from robot_workbench.execution_settings import defaults
+from robot_workbench.execution_settings import defaults, DEFAULT_JOINT_TOLERANCE_RAD
 from test_frozen_executor import fixture
 
 
@@ -197,7 +197,7 @@ class DisabledGripperTests(unittest.TestCase):
             self.assertIsNone(owner.runner.frozen.arrival_error['jaw_mm'][1])
             self.assertEqual(owner.runner.runtime['initialization']['held_arms'],['right'])
             self.assertTrue(all(row['target']['right_arm_joints']==[.2]*6 for row in owner.runner.frozen.ticks))
-            backend.q[7]+=.011
+            backend.q[7]+=DEFAULT_JOINT_TOLERANCE_RAD+.001
             with self.assertRaisesRegex(ValueError,'reobserve and replan'):
                 owner.runner._check_start_drift(backend.q)
 

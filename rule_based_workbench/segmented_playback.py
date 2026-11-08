@@ -15,6 +15,7 @@ from rgbd_segments import _safe, verify_segment
 from robot_workbench.sample_clock import clock_for_source, sample_stamp, assert_progress
 
 CAMERAS = ('base_0', 'left_wrist_0', 'right_wrist_0')
+_EXPORT_WORKERS = 2
 
 
 def _setpts(offsets):
@@ -187,11 +188,13 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
             filters.write_text(trim+"settb=1/1000000,setpts='" + _setpts(offsets_us) + "'\n")
             destination = output / f'source-{camera}.mp4'
             before = time.monotonic()
+            # The input rate supplies the final packet duration; setpts restores
+            # every source timestamp. Output -r conflicts with VFR in FFmpeg 8.
             runner(['ffmpeg', '-nostdin', '-v', 'error', '-n', '-threads', '1', '-filter_threads', '1',
-                    '-f', 'concat', '-safe', '0', '-i', str(concat), '-filter_script:v', str(filters), '-an',
+                    '-f', 'concat', '-safe', '0', '-r', f'1000000/{tail_us}', '-i', str(concat), '-filter_script:v', str(filters), '-an',
                     '-c:v', 'libx264', '-threads', '1', '-preset', 'fast', '-crf', '24', '-pix_fmt', 'yuv420p',
-                    '-bf', '0', '-bsf:v', f'setts=duration=if(eq(N\\,{len(rows)-1})\\,{tail_us}/1000000/TB\\,DURATION)',
-                    '-fps_mode', 'vfr', '-enc_time_base', '1:1000000', '-video_track_timescale', '1000000',
+                    '-bf', '0',
+                    '-vsync', 'vfr', '-enc_time_base', '1:1000000', '-video_track_timescale', '1000000',
                     '-movflags', '+faststart', str(destination)], check=True, timeout=300)
             detail['encode_wall_s'] = time.monotonic() - before
             before = time.monotonic()
@@ -209,7 +212,7 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
             return camera, destination.name, pin, camera_timing, detail
         # Each camera owns separate files and bounded codec processes. Join all
         # workers before cleanup; publish no manifest unless every check passes.
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix='rgbd-export') as workers:
+        with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS, thread_name_prefix='rgbd-export') as workers:
             for camera, name, pin, camera_timing, detail in workers.map(export_camera, CAMERAS):
                 files[name], timing[camera], diagnostics['cameras'][camera] = pin, camera_timing, detail
         for name, path in (target_paths or {}).items():
@@ -237,3 +240,79 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
     diagnostics['total_wall_s'] = time.monotonic() - started
     (output / 'export-timings.json').write_text(json.dumps(diagnostics, allow_nan=False, indent=2) + '\n')
     return manifest
+
+
+def export_capture(root, manifest, output):
+    """Reuse source-time replay checks for the generic CaptureSession format."""
+    root,output=Path(root),Path(output)
+    output.mkdir(exist_ok=False)
+    ffmpeg,ffprobe=shutil.which('ffmpeg'),shutil.which('ffprobe')
+    if not ffmpeg or not ffprobe:raise ValueError('CPU replay codecs unavailable')
+    files={};streams={}
+    spec=json.loads(_pinned(root,manifest,'capture.json').read_text())
+    descriptors={row['stream_id']:row for row in spec['source_descriptors']}
+    segment_pins={row['segment']:{key:row[key] for key in ('size_bytes','sha256')}
+                  for row in _rows(_pinned(root,manifest,manifest['segments_ref']))}
+    def run(arguments,**kwargs):
+        arguments=[ffprobe if arguments[0]=='ffprobe' else arguments[0],*arguments[1:]]
+        return subprocess.run(arguments,**kwargs)
+    with tempfile.TemporaryDirectory(dir=output) as tmp:
+        temporary=Path(tmp)
+        def export_camera(item):
+            identity,state=item
+            descriptor=descriptors[identity]
+            if not state.get('committed') or descriptor['kind']!='video' or 'source_ref' not in descriptor:return None
+            rows=[]
+            with _pinned(root,manifest,identity+'.jsonl').open('rb') as source:
+                for _ in range(state['committed']):
+                    rows.append(json.loads(source.readline()))
+            if not rows:return None
+            paths=[];previous=None;metadata_rows=None;active_segment=None;frame_index=0
+            for row in rows:
+                ref=row['payload']['frame_ref'];meta=row['payload']['metadata'];segment=ref['segment']
+                if segment!=active_segment:
+                    if metadata_rows is not None and frame_index!=len(metadata_rows):
+                        raise ValueError('capture replay skipped segment frames')
+                    if segment!=f'camera/{identity}/{len(paths):06d}.commit.json':
+                        raise ValueError('capture replay requires ordered segment prefix')
+                    commit=_pinned(root,{'files':segment_pins},segment)
+                    verified=verify_segment(root/'camera',str(commit.relative_to(root/'camera')),ffprobe=ffprobe)
+                    metadata_rows=list(_rows(_safe(root/'camera',verified['files']['frames']['path'])))
+                    paths.append(_safe(root/'camera',verified['files']['rgb']['path']))
+                    active_segment=segment;frame_index=0
+                if ref['frame']!=frame_index or frame_index>=len(metadata_rows) or meta!=metadata_rows[frame_index]:
+                    raise ValueError('capture replay metadata or frame order differs')
+                clock=dict(environment=meta['environment'],clock_domain=meta.get('clock_domain'),source_clock_id=meta.get('source_clock_id'))
+                stamp=(meta['source_time_ns'],None)if meta.get('schema')=='workbench.ros-image.v1'else sample_stamp(meta,clock)
+                if (meta.get('capture_instance_id')!=descriptor['source_instance_id']
+                        or (clock['source_clock_id'] or clock['clock_domain'])!=descriptor['source_clock_id']
+                        or row['source_time']!=stamp[0]/1e9):
+                    raise ValueError('capture replay source identity or timestamp differs')
+                previous=assert_progress(previous,stamp);frame_index+=1
+            stamps=[row['source_time'] for row in rows]
+            offsets=[round((stamp-stamps[0])*1e6) for stamp in stamps]
+            periods=[b-a for a,b in zip(stamps,stamps[1:])]
+            tail=max(1,round((statistics.median(periods) if periods else 1/30)*1e6))
+            concat=temporary/(identity+'.concat');filters=temporary/(identity+'.filter')
+            concat.write_text('ffconcat version 1.0\n'+''.join("file '"+str(path).replace("'","'\\''")+"'\n" for path in paths))
+            filters.write_text("settb=1/1000000,setpts='"+_setpts(offsets)+"'\n")
+            destination=output/(identity+'.mp4')
+            # Same source-PTS/final-duration contract as legacy replay above.
+            run([ffmpeg,'-nostdin','-v','error','-n','-threads','1','-filter_threads','1','-f','concat','-safe','0',
+                 '-r',f'1000000/{tail}','-i',str(concat),'-filter_script:v',str(filters),'-frames:v',str(len(rows)),'-an','-c:v','libx264','-threads','1','-preset','fast',
+                 '-crf','24','-pix_fmt','yuv420p','-bf','0',
+                 '-vsync','vfr','-enc_time_base','1:1000000','-video_track_timescale','1000000','-movflags','+faststart',
+                 str(destination)],check=True,timeout=300)
+            probe=_probe_video(destination,run,offsets,offsets[-1]+tail)
+            relative=str(destination.relative_to(root))
+            pin=dict(size_bytes=destination.stat().st_size,sha256=sha256(destination),probe=probe)
+            timing=dict(path=relative,frame_count=len(rows),first_source_time=stamps[0],
+                                   frame_offsets_s=[value/1e6 for value in offsets],duration_s=(offsets[-1]+tail)/1e6)
+            return identity,relative,pin,timing
+        with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS,thread_name_prefix='capture-export')as workers:
+            for result in workers.map(export_camera,manifest['streams'].items()):
+                if result is not None:
+                    identity,relative,pin,timing=result
+                    files[relative]=pin;streams[identity]=timing
+    return dict(schema='workbench.capture-playback.v1',files=files,streams=streams,
+                timing='original source frame intervals; microsecond container time base')

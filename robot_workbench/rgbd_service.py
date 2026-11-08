@@ -21,12 +21,22 @@ from robot_workbench.sample_clock import clock_spec, sample_stamp, assert_progre
 CAMERAS={'head':'base_0','left':'left_wrist_0','right':'right_wrist_0'}
 MAX_HEADER=64*1024
 MAX_BODY=32*1024**2
+CAPABILITIES=('recording_run_lease_v1','rgb8_capture_v1')
 
 
 def start_capture_sources(profile, service, output):
     """Reuse the physical raw ingress; never construct an arm controller."""
     root=Path(__file__).resolve().parents[1];output=Path(output)
-    descriptor=Path(service.directories['base_0']).parent/'camera-service.json'
+    if profile.get('data_plane')is not None:
+        from .ros_data import plane_config
+        if plane_config(profile['data_plane'])!=plane_config(service.descriptor.get('data_plane')):
+            raise ValueError('camera source and preview ROS bindings differ')
+        selected={key:profile[key]for key in ('environment','robot_id','data_plane','cameras')}
+        descriptor=output/'ros-camera-profile.json'
+        with descriptor.open('x')as stream:json.dump(selected,stream,allow_nan=False)
+        source_argument='--profile'
+    else:
+        descriptor=Path(service.directories['base_0']).parent/'camera-service.json';source_argument='--service-descriptor'
     env=dict(os.environ,PYTHONPATH=os.pathsep.join([str(root),str(root/'rule_based_workbench'),
         str(root/'calibration/infra'),os.environ.get('PYTHONPATH','')]))
     processes=[]
@@ -34,7 +44,7 @@ def start_capture_sources(profile, service, output):
         for role,row in profile['cameras'].items():
             with (output/('capture-'+role+'.log')).open('xb') as log:
                 processes.append(subprocess.Popen([sys.executable,'-B',str(root/'rule_based_workbench/real_rgbd.py'),
-                    '--serial',row['serial'],'--camera-name',role,'--service-descriptor',str(descriptor),
+                    '--serial',row['serial'],'--camera-name',role,source_argument,str(descriptor),
                     '--output',str(output/('capture-'+role))],env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT))
         return processes
     except BaseException:
@@ -133,17 +143,24 @@ class CommonCameraService:
         path=Path(descriptor_path).absolute()
         descriptor=json.loads(path.read_text())
         instance=cls(descriptor)
-        if instance.call('identity')['instance_id']!=descriptor['instance_id']:
+        actual=instance.call('identity')
+        if actual['instance_id']!=descriptor['instance_id']:
             raise ValueError('camera service instance changed')
+        formats=descriptor.get('pixel_formats',dict.fromkeys(descriptor['intrinsics'],'rgb8-depth16le'))
+        if ('pixel_formats'in actual or 'rgb8'in formats.values())and actual.get('pixel_formats')!=formats:
+            raise ValueError('camera service pixel format binding changed')
         instance.descriptor_path=path
         instance.call('snapshot')
         return instance
 
     @classmethod
-    def start(cls,intrinsics,root,environment,*,budget_bytes=1024**3):
+    def start(cls,intrinsics,root,environment,*,budget_bytes=1024**3,pixel_formats=None):
         from launch_environment import clean_environment
         if environment not in ('fake','physical') or set(intrinsics)!=set(CAMERAS.values()):
             raise ValueError('explicit environment and three configured camera identities required')
+        formats=dict.fromkeys(intrinsics,'rgb8-depth16le')if pixel_formats is None else dict(pixel_formats)
+        if set(formats)!=set(intrinsics)or any(v not in('rgb8','rgb8-depth16le')for v in formats.values()):
+            raise ValueError('one declared pixel format per camera required')
         if (any(not isinstance(k,dict) or not isinstance(k.get('serial'),str) or not k['serial']
                 or any(type(k.get(axis)) is not int or k[axis]<=0 for axis in ('width','height'))
                 or k['width']*k['height']*3>16*1024**2 for k in intrinsics.values())
@@ -155,7 +172,7 @@ class CommonCameraService:
         if len(endpoint.encode())>=104:raise ValueError('camera IPC path must be shorter than 104 bytes')
         descriptor=dict(schema='shared_rgbd_service.v1',instance_id=instance,secret=secrets.token_urlsafe(32),
             endpoint=endpoint,environment=environment,intrinsics=intrinsics,budget_bytes=budget_bytes,
-            parent_pid=os.getpid(),directories={camera:str(root/camera) for camera in intrinsics})
+            parent_pid=os.getpid(),directories={camera:str(root/camera) for camera in intrinsics},capabilities=list(CAPABILITIES),pixel_formats=formats)
         path=root/'camera-service.json'
         with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
             json.dump(descriptor,stream,allow_nan=False)
@@ -373,6 +390,22 @@ class CommonCameraService:
         """Atomic pair for inference; pixel arrays are unannotated and unrectified."""
         return self.call('latest',camera=camera,max_age_s=max_age_s)
 
+    def capture_sources(self):
+        """Describe existing raw sources; no lease, camera start or SDK action."""
+        path=self.descriptor_path or Path(next(iter(self.directories.values()))).parent/'camera-service.json'
+        state=self.snapshot();rows=[]
+        for camera in CAMERAS.values():
+            meta=self.latest_rgbd(camera)['metadata']
+            clock=clock_spec(meta['environment'],clock_domain=meta.get('clock_domain'),source_clock_id=meta.get('source_clock_id'))
+            if meta['capture_instance_id']!=state['capture_instances'].get(camera):
+                raise ValueError('camera source changed while describing recording streams')
+            rows.append(dict(stream_id='video-'+camera,kind='video',source_instance_id=meta['capture_instance_id'],
+                source_clock_id=clock['source_clock_id'] or clock['clock_domain'],units='rgb8'if self.descriptor.get('pixel_formats',{}).get(camera)=='rgb8'else'rgb8+depth16le',
+                coordinate_frame=camera,nominal_hz=meta['capture_fps'],required=True,
+                source_ref=dict(kind='common_camera',descriptor_path=str(path),camera=camera,
+                                service_instance_id=state['instance_id'])))
+        return rows
+
     def rebind_camera(self,camera,expected_capture_instance_id):
         return self.call('rebind',camera=camera,expected_capture_instance_id=expected_capture_instance_id)
 
@@ -400,15 +433,16 @@ class _Preview:
         self.frames.publish(status=value['metadata'])
     def snapshot(self,formats=None):
         from PIL import Image
-        formats=('jpeg','color_png','depth_png') if formats is None else tuple(formats)
-        if not set(formats)<={'jpeg','color_png','depth_png'}:raise ValueError('known camera image formats required')
         with self.encoder_lock:
             with self.lock:value,cached=self.pixels,self.cached
             if value is None:return self.frames.snapshot()
+            available={'jpeg','color_png'}|({'depth_png'}if value.get('depth')is not None else set())
+            formats=tuple(available)if formats is None else tuple(formats)
+            if not set(formats)<=available:raise ValueError('requested camera image format unavailable')
             cached=dict(cached or {})
             if not set(formats)<=set(cached):
                 size=(value['width'],value['height'])
-                rgb=Image.frombytes('RGB',size,value['rgb']);depth=Image.frombytes('I;16',size,value['depth'])
+                rgb=Image.frombytes('RGB',size,value['rgb']);depth=Image.frombytes('I;16',size,value['depth'])if value.get('depth')is not None else None
                 out={}
                 for key,image,fmt,kwargs in [('jpeg',rgb,'JPEG',dict(quality=95,subsampling=0)),
                         ('color_png',rgb,'PNG',dict(compress_level=1)),('depth_png',depth,'PNG',dict(compress_level=1))]:
@@ -417,9 +451,15 @@ class _Preview:
                 cached.update(out)
                 with self.lock:
                     if self.pixels is value:self.cached=cached
-            status=dict(value['metadata']);age=(time.time_ns()-int(status['host_receive_ns']))/1e9
-            status['source_age_s']=max(0.,age)
-            if age>2:status.update(ready=False,error='camera frame stale')
+            status=dict(value['metadata']);now=time.time_ns();source_stamp=status.get('host_receive_ns')
+            source_age=(now-int(source_stamp))/1e9 if source_stamp is not None else None
+            if 'preview_receive_ns'in status:
+                age=(now-status['preview_receive_ns'])/1e9
+                status['preview_age_s']=age
+                status['source_age_s']=source_age
+            else:age=source_age;status['source_age_s']=max(0.,age)
+            if age<0 or age>2 or source_age is not None and not 0<=source_age<=2:
+                status.update(ready=False,error='camera frame stale or clock inconsistent')
             return dict(status=status,**{key:cached[key] for key in formats})
 
 
@@ -437,7 +477,8 @@ class _Backend:
         if request.pop('expected_instance_id',self.config['instance_id'])!=self.config['instance_id']:
             raise ValueError('camera service instance changed')
         action=request.pop('action');camera=request.get('camera')
-        if action=='identity':return dict(instance_id=self.config['instance_id'],service_pid=os.getpid())
+        if action=='identity':return dict(instance_id=self.config['instance_id'],service_pid=os.getpid(),capabilities=list(CAPABILITIES),
+            pixel_formats=self.config.get('pixel_formats',dict.fromkeys(self.channels,'rgb8-depth16le')))
         if action=='close':self.closed.set();return dict(closed=True)
         if action=='snapshot':return dict(instance_id=self.config['instance_id'],service_pid=os.getpid(),environment=self.config['environment'],
             recording_budget=self.budget.snapshot(),recording_channels={k:v.snapshot() for k,v in self.channels.items()},
@@ -494,6 +535,8 @@ class _Backend:
         if action!='publish':raise ValueError('unknown camera IPC action')
         with self.camera_locks[camera]:
             meta=deepcopy(request['metadata']);k=self.config['intrinsics'][camera]
+            pixel_format=self.config.get('pixel_formats',{}).get(camera,'rgb8-depth16le')
+            rgb_only=pixel_format=='rgb8'
             intr=meta.get('intrinsics',{})
             if (meta.get('environment')!=self.config['environment'] or meta.get('serial')!=k['serial']
                     or (intr.get('width'),intr.get('height'))!=(k['width'],k['height'])
@@ -503,16 +546,23 @@ class _Backend:
             if camera in self.observed_intrinsics and self.observed_intrinsics[camera]!=intr:
                 raise ValueError('camera intrinsics changed inside one capture stream')
             if (meta.get('ready') is not True or meta.get('raw') is not True or meta.get('annotated') is not False
-                    or meta.get('rgbd_paired') is not True or meta.get('depth_aligned_to')!='color'):
+                    or (meta.get('pixel_format')!='rgb8'if rgb_only else
+                        meta.get('rgbd_paired') is not True or meta.get('depth_aligned_to')!='color')):
                 raise ValueError('raw unannotated aligned RGB-D pair required')
             if any(key in k and (type(intr.get(key)) not in (int,float) or abs(intr[key]-k[key])>1e-6)
                    for key in ('fx','fy','cx','cy')):
                 raise ValueError('camera intrinsics differ from configured capture identity')
-            from real_rgbd import pair_metadata
-            pair_metadata(serial=meta['serial'],camera_name=meta['camera_name'],color_number=meta['frame_number'],
-                depth_number=meta['depth_frame_number'],color_ms=meta['device_timestamp_ms'],depth_ms=meta['depth_device_timestamp_ms'],
-                color_domain=meta['timestamp_domain'],depth_domain=meta['timestamp_domain'],host_receive_ns=int(meta['host_receive_ns']),
-                depth_scale_m=meta['depth_scale_m'],intrinsics=intr,fps=meta['capture_fps'])
+            if rgb_only:
+                if (request.get('depth')is not None or type(meta.get('frame_number'))is not int
+                        or meta['frame_number']<0 or type(meta.get('capture_fps'))not in(int,float)
+                        or not 0<meta['capture_fps']<=240 or not isinstance(meta.get('pair_id'),str)or not meta['pair_id']):
+                    raise ValueError('declared RGB-only frame identity, rate and absent depth required')
+            else:
+                from real_rgbd import pair_metadata
+                pair_metadata(serial=meta['serial'],camera_name=meta['camera_name'],color_number=meta['frame_number'],
+                    depth_number=meta['depth_frame_number'],color_ms=meta['device_timestamp_ms'],depth_ms=meta['depth_device_timestamp_ms'],
+                    color_domain=meta['timestamp_domain'],depth_domain=meta['timestamp_domain'],host_receive_ns=int(meta['host_receive_ns']),
+                    depth_scale_m=meta['depth_scale_m'],intrinsics=intr,fps=meta['capture_fps'])
             identity=meta['capture_instance_id']
             if camera in self.stream_ids and self.stream_ids[camera]!=identity:
                 raise ValueError('camera capture instance changed; explicit service rebind required')
@@ -522,20 +572,21 @@ class _Backend:
                 raise ValueError('camera timestamps exceed bounded nanosecond domain')
             assert_progress(self.progress.get(camera),stamp)
             rgb,depth=request['rgb'],request['depth'];width,height=request['width'],request['height']
-            if (not isinstance(rgb,bytes) or not isinstance(depth,bytes) or len(rgb)!=width*height*3
-                    or len(depth)!=width*height*2 or max(len(rgb),len(depth))>16*1024**2):
+            if (not isinstance(rgb,bytes) or len(rgb)!=width*height*3 or
+                    (depth is not None if rgb_only else not isinstance(depth,bytes)or len(depth)!=width*height*2)
+                    or max(len(rgb),len(depth)if isinstance(depth,bytes)else 0)>16*1024**2):
                 raise ValueError('raw RGB8/depth16le payload size differs from configured camera')
             if meta['environment']=='fake':
                 with self.identity_lock:
                     if self.source_clock_id not in (None,clock['source_clock_id']):raise ValueError('cameras belong to different simulation source clocks')
                     self.source_clock_id=clock['source_clock_id']
             self.stream_ids[camera]=identity;self.progress[camera]=stamp;self.observed_intrinsics[camera]=intr
-            meta['rgbd_ingress_format']='rgb8-depth16le'
+            meta['rgbd_ingress_format']=pixel_format
             source_valid=meta.get('data_valid',True)
             accepted=channel.write_pixels(meta,rgb,depth,width=width,height=height,sampled_token=request['sampled_token'])
             # A recording overflow does not invalidate the current sensor image
             # used by preview/inference; its recording_error remains visible.
-            preview.publish(dict(metadata=dict(meta,data_valid=source_valid),rgb=rgb,depth=depth,width=width,height=height,pixel_format='rgb8-depth16le'))
+            preview.publish(dict(metadata=dict(meta,data_valid=source_valid),rgb=rgb,depth=depth,width=width,height=height,pixel_format=pixel_format))
             return dict(recorded=accepted,status=meta,channel=channel.snapshot())
 
 

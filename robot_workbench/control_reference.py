@@ -1,6 +1,7 @@
 """Explicit prepared-reference review for control studies, using the common runner."""
 from dataclasses import asdict
 from copy import deepcopy
+from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD
 import hashlib
 import io
 import json
@@ -187,7 +188,7 @@ def check_initial_tracking(owner, reference, measured):
     """Optional frozen-reference study allowance; require continuous commanded hold."""
     start=reference.sample([0.])[0][0]
     error=float(np.max(abs(np.asarray(measured)[list(JOINTS)]-start[list(JOINTS)])))
-    if error<=.01:return dict(maximum_error_rad=error,limit_rad=.01,command_continuity_required=False)
+    if error<=DEFAULT_JOINT_TOLERANCE_RAD:return dict(maximum_error_rad=error,limit_rad=DEFAULT_JOINT_TOLERANCE_RAD,command_continuity_required=False)
     policy=getattr(owner.backend,'reference_start_allowance',None)
     if not policy or policy['reference_id']!=reference.metadata['reference_id'] or error>policy['maximum_error_rad']:
         raise ValueError('control reference start differs from fresh feedback; align first')
@@ -215,12 +216,14 @@ def check_initial_tracking(owner, reference, measured):
         parent_reference_id=prior.reference.metadata['reference_id'],native_output_matched=True)
 
 
-def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allowance=False):
-    if set(command) not in ({'action', 'reference_artifact'}, {'action', 'reference_artifact','feedforward_artifact'}) or command['action'] != 'preview_workbench':
+def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allowance=False,prepared_reference=None):
+    expected=({'action','sampled_trajectory'},)if prepared_reference is not None else(
+        {'action', 'reference_artifact'}, {'action', 'reference_artifact','feedforward_artifact'})
+    if set(command) not in expected or command['action'] != 'preview_workbench':
         raise ValueError('prepared reference review accepts only its immutable artifact')
     if owner.shared_target_profile is None:
         raise ValueError('prepared reference requires the common target interpreter')
-    reference = load(command['reference_artifact'], owner.cache['joint_limits'])
+    reference = prepared_reference if prepared_reference is not None else load(command['reference_artifact'], owner.cache['joint_limits'])
     from .target_interpreter import native_period_s
     node_hz=round(1./native_period_s(reference.metadata,owner.shared_target_profile))
     feedforward=None
@@ -249,7 +252,8 @@ def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allo
     end = reference.sample([reference.duration_s])[0][0]
     from arx_env.joint_head_jaw_mapping import command_gap_mm
     from arx_env.joint_head_real_motion import make_plan
-    waypoint = dict(q12=end[list(JOINTS)].tolist(), speeds12=[2.]*12,
+    maximum_velocity=reference.metadata['velocity_limit_rad_s']if prepared_reference is not None else 2.
+    waypoint = dict(q12=end[list(JOINTS)].tolist(), speeds12=[maximum_velocity]*12,
                     jaw_gap_mm=[command_gap_mm(s, float(end[i])) for s, i in (('left', 6), ('right', 13))],
                     jaw_speed_mm_s=40.)
     # Reuse the ordinary fresh-feedback, stationary, pedal and pending-plan gates.
@@ -257,7 +261,7 @@ def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allo
     token = review['token']
     plans, epoch, press, pid, samples = owner.pending[token]
     previous = plans[0]
-    if not allow_start_allowance and np.max(abs(np.asarray(previous.q_start)[list(JOINTS)]-start[list(JOINTS)]))>.01:
+    if not allow_start_allowance and np.max(abs(np.asarray(previous.q_start)[list(JOINTS)]-start[list(JOINTS)]))>DEFAULT_JOINT_TOLERANCE_RAD:
         raise ValueError('control reference start differs from fresh feedback; align first')
     initial_tracking=check_initial_tracking(owner,reference,previous.q_start)
     for side, slot in (('left', 6), ('right', 13)):
@@ -266,7 +270,7 @@ def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allo
             if abs(feedback_gaps(previous.q_start)[0 if side=='left' else 1]-command_gap_mm(side, float(start[slot]))) > 2.:
                 raise ValueError('control reference initial jaw differs from fresh feedback')
     plan = make_plan('both', previous.q_start, end.tolist(), previous.joint_limits,
-                     duration_s=reference.duration_s, max_velocity=2., kind='workbench',
+                     duration_s=reference.duration_s, max_velocity=maximum_velocity, kind='workbench',
                      jaw_speed_mm_s=40., created_at_s=previous.created_at_s, environment=owner.environment)
     owner.pending[token] = ((plan,), epoch, press, pid, samples)
     owner.reference_payloads = {plan.sha256: (reference,feedforward)}
@@ -278,6 +282,9 @@ def preview(ref, owner, command,*,allow_j3_integral_pause=False,allow_start_allo
                   prepared_feedforward_sha256=None if feedforward is None else feedforward['sha256'],
                   prepared_j3_integral_pause_s=None if feedforward is None else feedforward.get('j3_integral_pause_s'),
                   purpose='control precision study; not perception collection or training data')
+    if prepared_reference is not None:
+        review.update(purpose='bounded Raw replay through the shared executor',raw_replay=deepcopy(reference.metadata['raw_replay']),
+            reference_dynamics={k:reference.metadata[k]for k in('max_velocity_rad_s','max_acceleration_rad_s2','max_jaw_velocity_mm_s')})
     return review
 
 

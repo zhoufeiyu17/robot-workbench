@@ -128,6 +128,29 @@ class ManagedServiceTests(unittest.TestCase):
             self.assertEqual(self.service.start()['state'], 'unknown')
             command.assert_not_called()
 
+    def test_relative_python_script_uses_verified_process_cwd_and_missing_file_is_unknown(self):
+        proc = self.root/'relative-proc'
+        (proc/'self').mkdir(parents=True)
+        (proc/'self/stat').write_text('fixture only')
+        (proc/'sys/kernel/random').mkdir(parents=True)
+        (proc/'sys/kernel/random/boot_id').write_text('fixture-boot')
+        process = proc/'12345'
+        process.mkdir()
+        fields = ['S','1','12345','12345']+['0']*15+['987654']
+        (process/'stat').write_text('12345 (fixture) '+' '.join(fields))
+        (process/'cwd').symlink_to(self.root, target_is_directory=True)
+        (process/'cmdline').write_bytes(b'/usr/bin/python3\0-B\0worker.py\0')
+        with patch(MODULE+'PROC_ROOT', proc):
+            identity = process_identity(12345)
+            self.assertEqual(identity['script'], str(self.script.resolve(strict=True)))
+            self.assertEqual(identity['start_ticks'], '987654')
+            (process/'cmdline').write_bytes(b'/usr/bin/python3\0-c\0worker.py\0')
+            self.assertIsNone(process_identity(12345)['script'])
+            (process/'cmdline').write_bytes(b'/usr/bin/python3\0-B\0missing.py\0')
+            with self.assertRaises(FileNotFoundError):process_identity(12345)
+            (process/'cmdline').write_bytes(b'/usr/bin/python3\0-B\0.\0')
+            with self.assertRaisesRegex(OSError, 'regular file'):process_identity(12345)
+
     def test_pid_reuse_and_wrong_script_are_unknown_and_never_signalled(self):
         recorded = self.identity()
         self.service._save('running', recorded)

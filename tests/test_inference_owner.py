@@ -20,6 +20,47 @@ from test_owner_clock import ClockBackend, Safety, calibration, jaw
 
 
 class InferenceOwnerTests(unittest.TestCase):
+    def test_optional_clock_mapping_rejects_boot_change_and_clock_step(self):
+        from robot_workbench.inference_owner import map_recording_cutoff
+        first=dict(host_id='host',boot_id='boot',mapping_id='episode-clock',wall_ns=1000,
+            monotonic_before_ns=100,monotonic_after_ns=102)
+        now=dict(first,wall_ns=1100,monotonic_before_ns=200,monotonic_after_ns=202)
+        value=map_recording_cutoff(1000,first,now,max_uncertainty_ns=4)
+        self.assertEqual((value['earliest_ns'],value['latest_ns']),(100,102))
+        for bad in [dict(now,boot_id='reboot'),dict(now,wall_ns=2100),
+                    dict(now,monotonic_after_ns=220),dict(now,monotonic_before_ns=100)]:
+            with self.assertRaises(ValueError):map_recording_cutoff(1000,first,bad,max_uncertainty_ns=4)
+        with self.assertRaises(ValueError):map_recording_cutoff(999,first,now,max_uncertainty_ns=4)
+
+    def test_normal_mode_admission_requires_gate_and_explicit_teach_hold_model(self):
+        from robot_workbench.inference_owner import validate_mode_request
+        identity=dict(session_id='episode',runtime_nonce='owner',epoch=4)
+        request=dict(identity,request_id='pause',mode='HOLD')
+        options=dict(identity=identity,current_mode='MODEL',clock_id='source-clock',now_ns=200,recorder_ids=['robot','rgb'])
+        with self.assertRaisesRegex(ValueError,'closed Raw gate'):validate_mode_request(request,**options)
+        self.assertEqual(validate_mode_request(request,**dict(options,recorder_ids=[],recording_required=False))['recording_policy'],
+            'explicit_no_recording_consumers')
+        with self.assertRaisesRegex(ValueError,'hide active'):
+            validate_mode_request(request,**dict(options,recording_required=False))
+        gate=dict(identity,request_id='pause',closed=True,clock_id='source-clock',cutoff_ns=150,gate_generation=2,
+            recorders=[dict(record_id=name,closed=True,clock_id='source-clock',cutoff_ns=150,generation=2)for name in('robot','rgb')])
+        request['recording_gate']=gate
+        accepted=validate_mode_request(request,**options);self.assertEqual(accepted['raw_cutoff_ns'],150)
+        for bad_gate in [dict(gate,request_id='old'),dict(gate,epoch=3),dict(gate,clock_id='wall-clock'),
+                         dict(gate,cutoff_ns=201),dict(gate,recorders=gate['recorders'][:1]),
+                         dict(gate,recorders=[gate['recorders'][0]]*2),dict(gate,closed=False)]:
+            with self.subTest(gate=bad_gate),self.assertRaises(ValueError):
+                validate_mode_request(dict(request,recording_gate=bad_gate),**options)
+        with self.assertRaisesRegex(ValueError,'explicit HOLD'):
+            validate_mode_request(dict(request,mode='MODEL'),**dict(options,current_mode='TEACH'))
+        with self.assertRaisesRegex(ValueError,'never queued'):
+            validate_mode_request(dict(request,mode='MODEL'),**dict(options,current_mode='BRAKE'))
+        self.assertTrue(validate_mode_request(dict(request,request_id='new-model',mode='MODEL'),
+            **dict(options,current_mode='HOLD'))['requires_new_observation_and_epoch'])
+        self.assertTrue(validate_mode_request(dict(request,mode='TEACH'),
+            **dict(options,current_mode='TEACH'))['no_op'])
+        with self.assertRaises(ValueError):validate_mode_request(dict(request,epoch=True),**options)
+
     def setUp(self):
         jaw.configure_mapping(None)
         self.directory=TemporaryDirectory();self.addCleanup(self.directory.cleanup)
@@ -477,6 +518,37 @@ class InferenceOwnerTests(unittest.TestCase):
         self.assertEqual(runner.status,'FAULT')
         self.assertIn('disabled-gripper',runner.reason)
         self.assertEqual(runner.actual_submission_count,count)
+
+
+class CommonCapturePolicyTests(unittest.TestCase):
+    def test_recording_fault_uses_frozen_purpose_and_does_not_weaken_motion_guards(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        for purpose in ('infer_debug','data_required'):
+            runner=object.__new__(InferenceRunner);runner.common_capture=True;runner.recording_error=None
+            runner.execution_instance_id='run';runner.owner=SimpleNamespace(control_time=lambda:1.,event=Mock(),recording_failed=Mock())
+            parameters=control_parameters(defaults('inference'),business='inference');parameters['recording']['purpose_profile']=purpose
+            runner.control_policy=dict(revision=1,policy_hash=policy_hash(parameters),parameters=parameters)
+            runner._recording_failure('writer unavailable')
+            self.assertEqual(runner.owner.recording_failed.call_count,0 if purpose=='infer_debug' else 1)
+            decision=runner.owner.event.call_args.kwargs['decision']
+            self.assertEqual(decision['policy_hash'],runner.control_policy['policy_hash'])
+            self.assertEqual(decision['action'],'CONTINUE' if purpose=='infer_debug' else 'BRAKE_TO_HOLD')
+
+    def test_concurrent_capture_records_have_one_ordered_sequence(self):
+        import queue
+        from types import SimpleNamespace
+        runner=object.__new__(InferenceRunner);runner.common_capture=True;runner.bounded_live=False
+        runner.record=None;runner.recording_error=None;runner._data_finish_requested=False
+        runner.data_queue=queue.Queue();runner.capture_lock=threading.Lock();runner.capture_sequence=0
+        runner.owner=SimpleNamespace(control_time=time.monotonic)
+        threads=[threading.Thread(target=lambda:[runner._record('event',{'value':i}) for i in range(100)]) for _ in range(4)]
+        for thread in threads:thread.start()
+        for thread in threads:thread.join()
+        values=[runner.data_queue.get_nowait()[1] for _ in range(400)]
+        self.assertEqual([v['capture_sequence'] for v in values],list(range(1,401)))
+        self.assertEqual([v['capture_source_time'] for v in values],sorted(v['capture_source_time'] for v in values))
 
 
 if __name__=='__main__':unittest.main()

@@ -20,6 +20,45 @@ from test_owner_clock import ClockBackend,Safety,calibration,jaw
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_production_profile_requires_ros_without_legacy_live_sources(self):
+        with self.assertRaisesRegex(ValueError,'explicit ROS'):read_profile(self.path,require_ros=True)
+        plane=dict(schema='workbench.ros-data-plane.v1',namespace='/workbench/cpu',domain_id=126)
+        value=dict(self.profile,data_plane=plane)
+        self.path.write_text(json.dumps(value))
+        self.assertEqual(read_profile(self.path,require_ros=True)['data_plane'],plane)
+        for change in (dict(recording_backend=None),dict(inference={'native_rgb':{'directory':'/old'}})):
+            self.path.write_text(json.dumps(dict(value,**change)))
+            with self.assertRaises(ValueError):read_profile(self.path,require_ros=True)
+    def test_explicit_initial_hold_and_maintenance_finish_options_preserve_defaults(self):
+        from robot_workbench.device_bootstrap import _inference_options
+        profile=dict(self.profile,disabled_grippers=[],inference={})
+        self.assertNotIn('normal_initial_mode',_inference_options(profile))
+        self.assertNotIn('normal_finish_policy',_inference_options(profile))
+        profile['preserve_begin_jaws']=True
+        profile['inference']=dict(action_chunks=True,recording_enabled=False,normal_modes={'recording_required':False},
+            normal_initial_mode='HOLD',normal_finish_kind='maintenance_home_v1',normal_finish_policy={'cpu':'Owner validates the real policy'})
+        options=_inference_options(profile)
+        self.assertEqual(options['normal_initial_mode'],'HOLD')
+        self.assertEqual(options['normal_finish_kind'],'maintenance_home_v1')
+        options['normal_finish_policy']['cpu']='changed copy'
+        self.assertNotEqual(options['normal_finish_policy'],profile['inference']['normal_finish_policy'])
+        for fields in ({'normal_initial_mode':'TEACH'},{'normal_finish_kind':'dagger_reset_v1'},
+                       {'normal_finish_policy':None},{'recording_context_policy':'per_episode_review'}):
+            with self.subTest(fields=fields),self.assertRaises(ValueError):_inference_options(dict(profile,inference=dict(profile['inference'],**fields)))
+
+    def test_module_consumer_options_are_explicit_and_do_not_enable_raw_gate_by_default(self):
+        from robot_workbench.device_bootstrap import _inference_options
+        profile=dict(self.profile,disabled_grippers=[],inference={})
+        self.assertNotIn('action_chunks',_inference_options(profile))
+        self.assertNotIn('normal_modes',_inference_options(profile))
+        profile['inference']=dict(action_chunks=True,recording_enabled=False,normal_modes={'recording_required':False})
+        with self.assertRaisesRegex(ValueError,'preserved begin'):_inference_options(profile)
+        profile['preserve_begin_jaws']=True
+        value=_inference_options(profile)
+        self.assertTrue(value['action_chunks']);self.assertIs(value['normal_modes']['recording_required'],False)
+        profile['inference']['recording_enabled']=True
+        with self.assertRaisesRegex(ValueError,'recording disabled'):_inference_options(profile)
+
     def test_machine_pedal_mapping_reaches_listener_and_keeps_legacy_default(self):
         from types import ModuleType
         for key in (None,46):
@@ -42,14 +81,16 @@ class BootstrapTests(unittest.TestCase):
     def test_initial_hold_mode_reaches_existing_stop_without_motion(self):
         from types import ModuleType
         module=ModuleType('arx_env.pedal_stop');module.PedalStopListener=Mock
-        for mode,manual in [('manual_gravity',True),('retained_hold',False)]:
+        for mode,manual,strict in [('manual_gravity',True,False),('retained_hold',False,False),('retained_hold',False,True)]:
             backend=Mock();runtime=NS(owner=NS(backend=backend))
-            value=dict(self.profile,initial_hold_mode=mode)
+            value=dict(self.profile,initial_hold_mode=mode,preserve_begin_jaws=strict)
             with patch.dict(sys.modules,{'arx_env.pedal_stop':module}),patch('real_control.controller_conflicts',return_value=[]),patch(
                     'robot_workbench.device_bootstrap.preflight',return_value={'configuration_ready':True}),patch(
                     'examples.scripts.debug.joint_head_real_owner.legacy_modules',return_value=NS()),patch(
-                    'robot_workbench.runtime.Runtime',return_value=runtime):
+                    'robot_workbench.runtime.Runtime',return_value=runtime) as factory:
                 self.assertIs(physical_runtime_factory(value)(),runtime)
+            if strict:self.assertIs(factory.call_args.kwargs['preserve_begin_jaws'],True)
+            else:self.assertNotIn('preserve_begin_jaws',factory.call_args.kwargs)
             backend.connect.assert_called_once_with()
             backend.set_damping_hold.assert_called_once_with(manual=manual)
             backend.send.assert_not_called()
@@ -106,6 +147,19 @@ class BootstrapTests(unittest.TestCase):
         value['inference']['prepared_reference_execution']=True
         value['prepared_reference_enabled']=1;self.path.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError,'boolean'):read_profile(self.path)
+
+    def test_reference_planning_is_explicit_copied_profile_input_not_audit_limits(self):
+        from robot_workbench.device_bootstrap import _inference_options
+        policy=dict(schema='workbench.infer-reference-policy.v1',curve='cubic_c2_quintic_ends',
+            velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
+            boundary_scope='complete_prepared_segment')
+        profile=dict(self.profile,disabled_grippers=[],inference=dict(action_chunks=True,reference_planning=policy))
+        result=_inference_options(profile)
+        self.assertEqual(result['reference_planning'],policy)
+        policy['velocity_limit_rad_s']=2.
+        self.assertEqual(result['reference_planning']['velocity_limit_rad_s'],1.)
+        profile['inference']['action_chunks']=False
+        with self.assertRaisesRegex(ValueError,'action chunks'):_inference_options(profile)
 
     def test_single_motion_gain_profile_is_exact_and_inert(self):
         for gain,jaws in [(60,['right']),(80,['right']),(30,['right']),(True,['right']),(float('inf'),['right']),(60,[]),(80,[]),(80.1,['right'])]:
@@ -282,6 +336,41 @@ class BootstrapTests(unittest.TestCase):
                 deployment.device.connect.assert_not_called();deployment.device.submit.assert_not_called()
             finally:close_deployment(deployment)
 
+    def test_wam_profile_provider_binds_deployment_without_installed_extrinsics(self):
+        from test_wam import WamInputWorkflowTests
+        profile=self.inference_profile();config=profile['inference']
+        bundle=WamInputWorkflowTests().descriptor()
+        config.update(model_id=bundle['model_id'],model_bundle=bundle)
+        for key in ('profile_path','binding_path','control_mapping_pending'):config.pop(key,None)
+        expected=({'native':'WAM profile'},{'native':'WAM binding'})
+        with patch('robot_workbench.wam.native_binding',return_value=expected)as load:
+            deployment=build_physical_application(profile,output=self.root/'wam-native-provider')
+            try:
+                self.assertEqual(deployment.inference.profile_provider(),expected)
+                self.assertEqual(load.call_args.args,(profile,))
+                self.assertIsNone(deployment.device.runtime)
+            finally:close_deployment(deployment)
+
+    def test_pedal_double_press_window_is_explicit_before_binding_the_source(self):
+        from robot_workbench.service import Application
+        for index,window in enumerate((None,False,0.,float('nan'),1.1,.5)):
+            profile=self.inference_profile()
+            controls=dict(home_velocity_rad_s=.1,timeout_s=20.,focus_timeout_s=8.,
+                pedal_source_descriptor=str(self.root/'pedal-source.json'),event_max_age_s=1.)
+            if window is not None:controls['double_press_window_s']=window
+            profile['inference']['operator_controls']=controls
+            with self.subTest(window=window),patch.object(Application,'install_operator_pedal')as install:
+                if window==.5:
+                    deployment=build_physical_application(profile,output=self.root/f'pedal-window-{index}')
+                    try:
+                        self.assertEqual(deployment.inference.operator_controls['double_press_window_s'],.5)
+                        install.assert_called_once();self.assertIsNone(deployment.device.runtime)
+                    finally:close_deployment(deployment)
+                else:
+                    with self.assertRaisesRegex(ValueError,'double-press window'):
+                        build_physical_application(profile,output=self.root/f'pedal-window-{index}')
+                    install.assert_not_called()
+
     def test_physical_inference_record_event_adapts_real_cli_kwargs_signature(self):
         recorded=[]
         def event(name,**fields):recorded.append((name,fields))
@@ -311,6 +400,19 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(second.inference.results(),[result])
             self.assertIsNone(second.device.runtime)
         finally:close_deployment(second)
+
+    def test_native_profile_provider_uses_deployment_not_legacy_local_profile(self):
+        profile=self.inference_profile();config=profile['inference']
+        config.update(native_binding={'path':'/cpu/native.json','sha256':'a'*64},task='coffee')
+        for key in ('profile_path','binding_path','control_mapping_pending'):config.pop(key,None)
+        expected=({'native':'profile'},{'native':'binding'})
+        with patch('robot_workbench.mixed366_control.load_binding',return_value=expected)as load:
+            deployment=build_physical_application(profile,output=self.root/'native-provider')
+            try:
+                self.assertEqual(deployment.inference.profile_provider(),expected)
+                self.assertEqual(load.call_args.args,(config['native_binding'],profile))
+                self.assertIsNone(deployment.device.runtime)
+            finally:close_deployment(deployment)
 
     def test_first_physical_acquire_checks_execution_storage_before_sdk_or_owner(self):
         execution=Path(self.profile['storage_root'])/'execution'
@@ -344,7 +446,7 @@ class BootstrapTests(unittest.TestCase):
         from playground_pipeline import execution_runtime
         from test_recording_wall_clock import plan_fixture
         output=self.root/'path-contract-attempt'
-        profile=dict(self.profile,collection_setup={'cpu_assembly_only':True})
+        profile=dict(self.profile,collection_setup={'cpu_assembly_only':True},recording_backend=None)
         with patch('robot_workbench.device_bootstrap._attach_physical_businesses'),\
                 patch('robot_workbench.device_bootstrap.physical_runtime_factory',wraps=physical_runtime_factory) as factory:
             deployment=build_physical_application(profile,output=output)

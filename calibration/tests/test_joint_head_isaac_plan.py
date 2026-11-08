@@ -30,7 +30,7 @@ class IsaacPlanTest(unittest.TestCase):
             np.testing.assert_allclose(points[-1], target)
             consumed = set()
             with self.assertRaisesRegex(ValueError, 'drifted'):
-                authorize_plan(plan, urdf, identity, current + .002, plan['hash'], consumed)
+                authorize_plan(plan, urdf, identity, current + .04, plan['hash'], consumed)
             self.assertFalse(consumed)
             authorized = authorize_plan(plan, urdf, identity, current, plan['hash'], consumed)
             self.assertIsNot(authorized, plan)

@@ -17,9 +17,9 @@ from test_frozen_executor import fixture
 
 
 class PositionBoundsTests(unittest.TestCase):
-    def test_two_degree_feedback_allowance_never_expands_command_projection(self):
+    def test_five_degree_feedback_allowance_never_expands_command_projection(self):
         import math
-        margin=math.radians(2.)
+        margin=math.radians(5.)
         raw=[-margin,1+margin]
         bounded,changes=inspect_joint_feedback(raw,[(0,1)]*2,environment='physical')
         self.assertEqual(bounded,[0,1]);self.assertEqual(len(changes),2);self.assertEqual(raw,[-margin,1+margin])

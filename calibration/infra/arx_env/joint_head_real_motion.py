@@ -12,6 +12,10 @@ import time
 
 from .joint_head_jaw_mapping import COMMAND, GAP_MM, command_sdk, feedback_gaps, hold_command_sdk, interpolate,command_max_mm
 from robot_workbench.joint_bounds import position_noise_rad, project_joint_positions, inspect_joint_feedback, JointPositionBoundaryError
+from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash,STATIONARY_PROFILE,DEFAULT_JOINT_TOLERANCE_RAD
+
+_stationary_parameters=control_parameters(defaults())
+_stationary_guard=Guard.bind(dict(revision=None,policy_hash=policy_hash(_stationary_parameters),parameters=_stationary_parameters),{})
 
 
 class ControlTickGapError(ValueError):
@@ -31,7 +35,7 @@ JAW_INDICES = (6, 13)
 def active_indices(side):
     return tuple(i for a, (start, end) in ARM_SLICES.items() if side in (a, "both") for i in range(start, end))
 
-def arrival_tolerances(arm_tolerance=.05, arm_tolerances=None):
+def arrival_tolerances(arm_tolerance=DEFAULT_JOINT_TOLERANCE_RAD, arm_tolerances=None):
     """Left J1..J6 then right J1..J6, radians; never includes jaw slots."""
     values = tuple(arm_tolerances) if arm_tolerances is not None else (arm_tolerance,) * 12
     if len(values) != 12 or any(type(v) not in (int, float) or not math.isfinite(v) or not 0 < v <= .05 for v in values):
@@ -42,7 +46,7 @@ def arrival_tolerances(arm_tolerance=.05, arm_tolerances=None):
 def active_jaws(side):
     return tuple(end for a, (_, end) in ARM_SLICES.items() if side in (a, "both"))
 DEFAULT_VELOCITY = 0.2
-START_DRIFT = 0.01
+START_DRIFT = DEFAULT_JOINT_TOLERANCE_RAD
 JAW_DRIFT_MM = 2.0
 MOVING_JAW_KINDS = ("home", "both_home", "jaw_target", "workbench")
 
@@ -114,8 +118,13 @@ class StationaryWindow:
     No sample gap may exceed 0.1 s. Range violations restart the window.
     """
     def __init__(self):
+        self.guard=_stationary_guard
         self.samples = deque()
         self.last_diagnostic = None
+
+    def _decision(self,observed,phase,sample_time):
+        return self.guard.evaluate(dict(rule_id='G27',signal_id='stationary',observed=observed,
+            source_time=sample_time,checked_time=time.monotonic()),phase)
 
     def reset(self):
         self.samples.clear()
@@ -144,15 +153,18 @@ class StationaryWindow:
             'position_units': ['mm' if i in JAW_INDICES else 'rad' for i in range(14)],
             'velocity_units': ['SDK_units/s' if i in JAW_INDICES else 'rad/s' for i in range(14)],
             'raw_qpos_units': ['SDK_units' if i in JAW_INDICES else 'rad' for i in range(14)],
-            'position_thresholds': [2.0 if i in JAW_INDICES else math.radians(.3) for i in range(14)],
+            'position_thresholds': [STATIONARY_PROFILE['jaw_span_mm'] if i in JAW_INDICES else STATIONARY_PROFILE['joint_span_rad'] for i in range(14)],
             'velocity_thresholds': [.005 if i in JAW_INDICES else .06 for i in range(14)],
             'velocity_guard_enabled': False,
-            'max_sample_gap_s': .1, 'required_window_duration_s': .3,
+            'max_sample_gap_s': STATIONARY_PROFILE['max_sample_gap_s'], 'required_window_duration_s': STATIONARY_PROFILE['window_s'],
             'position_exceeded_indices': [], 'velocity_exceeded_indices': [],
             'reasons': [], 'stationary': False,
         }
         self.last_diagnostic = diagnostic
-        if gap is not None and not 0 < gap <= .1:
+        diagnostic['guard_decisions']=[]
+        if gap is not None:
+            diagnostic['guard_decisions'].append(self._decision(gap,'stationary_gap',sample_time_s))
+        if gap is not None and diagnostic['guard_decisions'][-1]['verdict']=='reject':
             diagnostic['reasons'].append('nonmonotonic' if gap <= 0 else 'sample_gap')
             diagnostic['reset_window'] = self._window_diagnostic()
             self.reset()
@@ -161,17 +173,21 @@ class StationaryWindow:
         for i, gap in zip(JAW_INDICES, feedback_gaps(q)):
             q[i] = gap
         self.samples.append((sample_time_s, q))
-        while len(self.samples) > 1 and self.samples[1][0] <= sample_time_s - .3:
+        while len(self.samples) > 1 and self.samples[1][0] <= sample_time_s - STATIONARY_PROFILE['window_s']:
             self.samples.popleft()
         diagnostic.update(self._window_diagnostic())
         diagnostic['position_exceeded_indices'] = [i for i in range(14) if diagnostic['position_span'][i] > diagnostic['position_thresholds'][i]]
-        if diagnostic['position_exceeded_indices']:
+        span=self._decision(diagnostic['position_span'],'stationary_span',sample_time_s)
+        diagnostic['guard_decisions'].append(span)
+        if span['verdict']=='reject':
             diagnostic['reasons'].append('position_span')
             diagnostic['reason'] = diagnostic['reasons'][0]
             self.reset()
             self.samples.append((sample_time_s, q))
             return False
-        stationary = sample_time_s - self.samples[0][0] >= .3 - 1e-9
+        window=self._decision(sample_time_s-self.samples[0][0],'stationary_window',sample_time_s)
+        diagnostic['guard_decisions'].append(window)
+        stationary = window['verdict']=='pass'
         diagnostic['stationary'] = stationary
         diagnostic['reasons'].append('stationary' if stationary else 'window_not_ready')
         diagnostic['reason'] = diagnostic['reasons'][0]
@@ -369,8 +385,10 @@ class MotionRunner:
     The owner must retain ``consumed`` for its session and invalidate plans on
     restart. Neither this module nor its hash certifies collision clearance.
     """
-    def __init__(self, plan, *, begin, send, stop, consumed=None, arm_tolerance=.05, arm_tolerances=None,environment=None,
-                 execution_settings=None, disabled_grippers=(), interpreter_factory=None,command_start_factory=None):
+    def __init__(self, plan, *, begin, send, stop, consumed=None, arm_tolerance=DEFAULT_JOINT_TOLERANCE_RAD, arm_tolerances=None,environment=None,
+                 execution_settings=None, disabled_grippers=(), interpreter_factory=None,command_start_factory=None,guard=None,record_event=None):
+        if record_event is not None and not callable(record_event):raise ValueError('optional bounded recording callback required')
+        self.record_event=record_event
         if not isinstance(plan, MotionPlan):
             raise TypeError("plan must be MotionPlan")
         self.environment=plan.environment if environment is None else environment
@@ -386,6 +404,11 @@ class MotionRunner:
         self.configured_error_policy = execution_settings is not None
         self.error_settings = validate(execution_settings if execution_settings is not None else
             defaults('calibration', arrival_tolerances(arm_tolerance, arm_tolerances)), environment=self.environment)
+        if guard is None:
+            from robot_workbench.execution_settings import Guard,control_parameters,policy_hash,FEEDBACK_TIMEOUT_S
+            parameters=control_parameters(self.error_settings,business='calibration')
+            guard=Guard.bind(dict(revision=None,policy_hash=policy_hash(parameters),parameters=parameters),dict(environment=self.environment,feedback_timeout_s=FEEDBACK_TIMEOUT_S))
+        self.guard=guard
         self.arm_tolerances = tuple(self.error_settings['arrival_tolerances_rad'])
         self.disabled_grippers = tuple(disabled_grippers)
         if any(side not in ARM_SLICES for side in self.disabled_grippers):
@@ -407,6 +430,7 @@ class MotionRunner:
         self.execution_start = None
         self.execution_target = None
         self.stationary = StationaryWindow()
+        self.stationary.guard=self.guard
         self.target_error = None
         self.continuation = False
         self.feedback_position_corrections=[];self.execution_start_corrections=[]
@@ -460,7 +484,10 @@ class MotionRunner:
         q, v, sample, sdk = _state(state)
         if not isinstance(now, (int, float)) or isinstance(now, bool) or not math.isfinite(now):
             raise ValueError("now must be finite")
-        if sample > now or now - sample > 0.1:
+        decision=self.guard.evaluate(dict(rule_id='G28',signal_id=self.plan.sha256,observed=now-sample,
+            source_time=sample,checked_time=now),'feedback')
+        self.last_feedback_guard=decision
+        if decision['verdict']=='reject':
             raise ValueError("host feedback is older than 0.1 s")
         if self.last_sample is not None and sample < self.last_sample:
             raise ValueError("host feedback clock regressed")
@@ -471,7 +498,9 @@ class MotionRunner:
                 if new > old:
                     self.sdk_progress[arm] = now
                     self.sdk_advanced[arm] = True
-                if now - self.sdk_progress[arm] > 0.1:
+                sdk_decision=self.guard.evaluate(dict(rule_id='G28',signal_id='sdk_'+str(arm),observed=now-self.sdk_progress[arm],
+                    source_time=self.sdk_progress[arm],checked_time=now),'feedback')
+                if sdk_decision['verdict']=='reject':
                     raise ValueError(f"{('left', 'right')[arm]} SDK feedback stopped advancing for 0.1 s")
         else:
             self.sdk_progress = [now, now]
@@ -480,7 +509,7 @@ class MotionRunner:
                     corrections=self.feedback_position_corrections)
         for arm, (a, b) in ARM_SLICES.items():
             if not self.configured_error_policy and self.plan.active_arm not in (arm, "both") and any(abs(q[i] - self.plan.q_start[i]) > START_DRIFT for i in range(a, b)):
-                raise ValueError("inactive arm drift exceeds 0.01 rad")
+                raise ValueError(f"inactive arm drift exceeds {START_DRIFT:g} rad")
         fixed_jaws = [i for i in self.enabled_jaws if i not in moving_jaw_indices(self.plan)]
         if not self.configured_error_policy and any(abs(feedback_gaps(q)[JAW_INDICES.index(i)] - self._start_gaps()[JAW_INDICES.index(i)]) > JAW_DRIFT_MM for i in fixed_jaws):
             raise ValueError("jaw drift exceeds 2 mm")
@@ -523,6 +552,9 @@ class MotionRunner:
             q, v = self._feedback(now, state)
             self._check_start_drift(q)
             self.stationary.update(self.last_sample, q, v)
+            if self.record_event is not None:self.record_event('execution_binding',dict(plan_sha256=self.plan.sha256,
+                active_arm=self.plan.active_arm,q_start_sdk14=list(self.plan.q_start),q_target_sdk14=list(self.plan.q_target),
+                duration_s=self.plan.duration_s,source_created_at_s=self.plan.created_at_s))
             self.verify_started = self.previous = now
             self.status = "VERIFYING"
             return self.status
@@ -580,12 +612,18 @@ class MotionRunner:
                             for n, (side, i) in enumerate(zip(("left", "right"), JAW_INDICES)) if i in jaws and i in self.enabled_jaws}
             jaw_errors = {side: error/1000 for side, error in jaw_errors_mm.items()}
             self.target_error = dict(arm_rad=arm_errors, jaw_m=jaw_errors, jaw_mm=jaw_errors_mm,
-                                     disabled_grippers=list(self.disabled_grippers), stationary=stationary)
+                                     disabled_grippers=list(self.disabled_grippers), stationary=stationary,
+                                     feedback_guard=self.last_feedback_guard)
+            arrival=self.guard.evaluate(dict(rule_id='G26',signal_id=self.plan.sha256,
+                observed=dict(joint_errors_rad=[q[i]-self.execution_target[i]if i in indices else 0. for i in active_indices('both')],
+                              jaw_errors_mm=[jaw_errors_mm.get(side,0.)for side in ('left','right')]),
+                source_time=self.last_sample,checked_time=now),'arrival')
+            self.target_error['arrival_guard']=arrival
             if self.error_settings['arrival_enabled'] and self.ready_since is None and elapsed > self.execution_duration_s + 3.0:
                 worst = max(arm_errors, key=lambda j: abs(arm_errors[j]))
                 tolerance = self.arm_tolerances[active_indices('both').index(indices[list(arm_errors).index(worst)])]
-                joints_ok=all(abs(q[i]-self.execution_target[i])<=self.arm_tolerances[i if i<6 else i-1] for i in indices)
-                jaws_ok=all(abs(value)<=self.error_settings['arrival_jaw_mm'] for value in jaw_errors_mm.values())
+                joints_ok=not arrival['observed']['exceeded_joint_indices']
+                jaws_ok=not arrival['observed']['exceeded_jaw_indices']
                 confirmation_s=0. if self.settled_since is None else max(0.,now-self.settled_since)
                 failure_kind=('target_tolerance_exceeded' if not joints_ok or not jaws_ok else
                     'not_stationary_before_deadline' if not stationary else 'arrival_not_confirmed_before_deadline')
@@ -612,16 +650,21 @@ class MotionRunner:
                                for n, (side, i) in enumerate(zip(("left", "right"), JAW_INDICES)) if i in self.enabled_jaws), default=0.)
             self.maximum_tracking_error['joint_rad'] = max(self.maximum_tracking_error['joint_rad'], error)
             self.maximum_tracking_error['jaw_mm'] = max(self.maximum_tracking_error['jaw_mm'], jaw_error_mm)
-            if error > self.error_settings['tracking_joint_rad'] or jaw_error_mm > self.error_settings['tracking_jaw_mm']:
+            tracking=self.guard.evaluate(dict(rule_id='G25',signal_id=self.plan.sha256,
+                observed=dict(joint_errors_rad=[q[i]-desired[i]for i in active_indices('both')],
+                    jaw_errors_mm=[measured_gaps[n]-command_gap(side,desired[i])if i in self.enabled_jaws else 0.
+                                   for n,(side,i)in enumerate(zip(('left','right'),JAW_INDICES))],
+                    exceeded_for_s=0. if self.bad_tracking_since is None else now-self.bad_tracking_since),
+                source_time=self.last_sample,checked_time=now),'tracking')
+            if tracking['observed']['exceeded']:
                 self.tracking_exceeded_samples += 1
                 if self.bad_tracking_since is None:
                     self.bad_tracking_since = now
             else:
                 self.bad_tracking_since = None
             self.target_error['tracking'] = dict(joint_rad=error, jaw_mm=jaw_error_mm,
-                exceeded_samples=self.tracking_exceeded_samples, maximum=dict(self.maximum_tracking_error))
-            if (self.error_settings['tracking_enabled'] and self.bad_tracking_since is not None
-                    and now - self.bad_tracking_since >= self.error_settings['tracking_duration_s']):
+                exceeded_samples=self.tracking_exceeded_samples, maximum=dict(self.maximum_tracking_error),guard_decision=tracking)
+            if tracking['verdict']=='reject':
                 raise MotionTrackingError(f"tracking error exceeded arm {self.error_settings['tracking_joint_rad']} rad or jaw "
                     f"{self.error_settings['tracking_jaw_mm']} mm for {self.error_settings['tracking_duration_s']} s"
                     f"; measured arm={error:.6f} rad, jaw={jaw_error_mm:.3f} mm")
@@ -638,7 +681,14 @@ class MotionRunner:
                         self.ready_since = now
                 self.previous = now
                 return self.status
-            stable = all(abs(q[i]-desired[i]) <= self.arm_tolerances[i if i < 6 else i-1] for i in indices) and jaw_error_mm <= self.error_settings['arrival_jaw_mm'] and stationary
+            # During motion arrival follows the current reference; at the
+            # endpoint the current reference equals the final target above.
+            current_arrival=self.guard.evaluate(dict(rule_id='G26',signal_id=self.plan.sha256,
+                observed=dict(joint_errors_rad=[q[i]-desired[i]if i in indices else 0. for i in active_indices('both')],
+                              jaw_errors_mm=[measured_gaps[n]-command_gap(side,desired[i])if i in jaws and i in self.enabled_jaws else 0.
+                                             for n,(side,i)in enumerate(zip(('left','right'),JAW_INDICES))]),
+                source_time=self.last_sample,checked_time=now),'arrival')
+            stable = current_arrival['verdict']=='pass' and stationary
             if self.ready_since is not None:
                 if self.target_interpreter is not None:self.send_reference(desired,now,state)
                 if not stable:

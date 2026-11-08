@@ -113,6 +113,7 @@ class RetainedInferenceTest(unittest.TestCase):
 
 
 class ResidentConfigurationTest(unittest.TestCase):
+    plane=dict(schema='workbench.ros-data-plane.v1',namespace='/fake_test',domain_id=126)
     def test_both_approved_compute_targets_pass_fake_dry_run_without_isaac(self):
         from local_execution import TARGET,PHYSICAL_TARGET
         with tempfile.TemporaryDirectory() as temp:
@@ -122,6 +123,7 @@ class ResidentConfigurationTest(unittest.TestCase):
                 'calibration_binding':{'a1_sha256':'seal','geometry_id':'geometry'}}}}})))
             for target in (TARGET,PHYSICAL_TARGET):
                 contract=dict(schema_version='anyverse.dsw-codex-experiment.v1',
+                    data_plane=self.plane,
                     identity=dict(session_id='cpu-dry-run',dsw_instance_id=target['instance_id']),
                     resources=dict(gpu_index=target['gpu_index'],gpu_uuid=target['gpu_uuid'],
                         cuda_visible_devices=[target['gpu_index']],max_workers=4,max_cpu_threads=4,
@@ -146,11 +148,12 @@ class ResidentConfigurationTest(unittest.TestCase):
         setup=dict(model_id=BASE566_ID,model_bundle=bundle,catalog_root='/approved/catalog',recording_enabled=False)
         with patch('subprocess.Popen',side_effect=AssertionError('CPU configuration must not start models')):
             options=serve_physx_device.inference_options(setup)
-        self.assertEqual(options,dict(setup,disabled_grippers=[],control_mapping_pending=None))
+        self.assertEqual(options,dict(setup,disabled_grippers=[],control_mapping_pending=None,recording_backend='capture_session_v1'))
+        self.assertIsNone(serve_physx_device.inference_options(dict(setup,recording_backend=None))['recording_backend'])
         self.assertEqual(serve_physx_device.inference_options({})['model_id'],BASE379_ID)
         self.assertIsNot(options['model_bundle'],bundle)
         for change in ({'recording_enabled':'false'},{'catalog_root':'relative'},
-                       {'model_bundle':'path'},{'model_id':'unknown'}):
+                       {'model_bundle':'path'},{'model_id':'unknown'},{'recording_backend':'unknown'}):
             with self.assertRaises(ValueError):serve_physx_device.inference_options(dict(setup,**change))
 
     def test_frozen_browser_ports_reach_dry_run_and_runtime_args_without_gpu(self):
@@ -162,6 +165,7 @@ class ResidentConfigurationTest(unittest.TestCase):
                 'calibration_binding':{'a1_sha256':'seal','geometry_id':'geometry'}}}}})))
             nominal={'asset_seal_sha256':'seal','asset_geometry_id':'geometry'}
             contract=dict(schema_version='anyverse.dsw-codex-experiment.v1',identity={'session_id':'browser-fixture','instance':TARGET['instance_id']},
+                data_plane=self.plane,
                 filesystem={'writable_roots':[str(root)]},resources=dict(gpu_uuid=TARGET['gpu_uuid'],gpu_index=1,cuda_visible_devices=[1],
                     max_workers=4,max_cpu_threads=4,service_lifetime_seconds=600,max_wall_time_minutes=11),
                 collection_setup=dict(profile_template=str(template),detection_runtime_root=str(runtime),plant_max_memory_mib=12288,min_free_memory_mib=16384),
@@ -184,6 +188,10 @@ class ResidentConfigurationTest(unittest.TestCase):
                         patch('detector_adapter.preflight_release.preflight_release',return_value={'fixture':True}), \
                         patch.object(serve_physx_device,'run') as run:
                     stdout=io.StringIO()
+                    if not configured:
+                        with patch.object(sys,'argv',argv+['--dry-run']),self.assertRaisesRegex(ValueError,'ROS data-plane'):
+                            serve_physx_device.main()
+                        run.assert_not_called();self.assertFalse(output.exists());continue
                     with patch.object(sys,'argv',argv+['--dry-run']),redirect_stdout(stdout):serve_physx_device.main()
                     report=json.loads(stdout.getvalue())
                     self.assertEqual(report['browser_ports'],[18867] if configured else [])
@@ -204,7 +212,7 @@ class ResidentConfigurationTest(unittest.TestCase):
             base.write_text(json.dumps(dict(pipeline_config={},lanes={'source':{'configuration':{'cameras':{
                 'calibration_binding':{'a1_sha256':'seal','geometry_id':'geometry'}}}}})))
             nominal.write_text('{}')
-            contract={'resources':{'persistent_service':True,'service_lifetime_seconds':None,'max_wall_time_minutes':120},
+            contract={'data_plane':self.plane,'resources':{'persistent_service':True,'service_lifetime_seconds':None,'max_wall_time_minutes':120},
                 'collection_setup':{'detection_runtime_root':'/fixture'}}
             retained=(root/'previous-inference').resolve();retained.mkdir()
             (retained/'execution-settings.json').write_text(json.dumps(dict(execute_steps=45,revision=9)))

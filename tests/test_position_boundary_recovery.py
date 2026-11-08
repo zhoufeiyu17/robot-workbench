@@ -14,7 +14,7 @@ class PositionBoundaryRecoveryTest(unittest.TestCase):
         owner=self.owner;owner.position_environment='physical'
         limits=owner.backend.get_bimanual_joint_position_limits();limits[5]=[-2.,2.]
         owner.backend.get_bimanual_joint_position_limits=lambda:limits
-        owner.backend.q[5]=2.036126136779785;self.advance(.01)
+        owner.backend.q[5]=2.+math.radians(5.1);self.advance(.01)
         self.assertEqual(owner.control.state,owner.states.FAULT)
         self.assertEqual(owner.last_fault_diagnostic['reasons'],['joint_position_boundary'])
         self.assertEqual(owner.position_boundary_fault['joint'],'left_J6')
@@ -22,7 +22,7 @@ class PositionBoundaryRecoveryTest(unittest.TestCase):
         return owner
 
     def test_exact_boundary_and_command_margin_do_not_change(self):
-        limits=[[-2.,2.]]*12;values=[0.]*12;values[5]=2.+math.radians(2.)
+        limits=[[-2.,2.]]*12;values=[0.]*12;values[5]=2.+math.radians(5.)
         self.assertEqual(inspect_joint_feedback(values,limits,environment='physical')[0][5],2.)
         values[5]+=.000001
         with self.assertRaises(JointPositionBoundaryError)as e:inspect_joint_feedback(values,limits,environment='physical')
@@ -34,7 +34,7 @@ class PositionBoundaryRecoveryTest(unittest.TestCase):
 
     def test_must_return_inside_feedback_envelope_and_acknowledge_without_motion(self):
         owner=self.fault();self.assertFalse(owner.recovery_ready())
-        for q in(2.04,2.035):
+        for q in(2.+math.radians(5.2),2.+math.radians(5.1)):
             owner.backend.q[5]=q
             for _ in range(50):self.advance(.01)
             self.assertFalse(owner.recovery_ready(),'feedback beyond the expanded envelope is still invalid')

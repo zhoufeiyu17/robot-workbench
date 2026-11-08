@@ -51,7 +51,9 @@ def main():
     except ValueError:parser.error('--listen must be one literal private or loopback IPv4')
     if not listen.is_loopback and not any(listen in network for network in NETWORKS):
         parser.error('--listen must be one explicit private robot-host IPv4')
-    profile=read_profile(args.profile)
+    profile=read_profile(args.profile,require_ros=True)
+    from robot_workbench.ros_data import require_runtime
+    require_runtime()
     report=preflight(profile)
     if args.preflight:
         if args.start_cameras:parser.error('--preflight cannot start cameras')

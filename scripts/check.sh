@@ -7,11 +7,19 @@ export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$ROOT:$ROOT/calibration:$ROOT/calibration/infra:$ROOT/calibration/examples/scripts/debug:$ROOT/rule_based_workbench${PYTHONPATH:+:$PYTHONPATH}"
 sh calibration/scripts/check.sh
 python tests/test_owner_clock.py
+python tests/test_ros_data.py
+python tests/test_ros_inputs.py
+python tests/test_ros_inference.py
+python tests/test_ros_recording.py
+python tests/test_ros_driver.py
+python tests/test_ros_run.py
 python tests/test_joint_bounds.py
 python tests/test_manual_self_collision.py
 python tests/test_arx13_manual_limits.py
 python tests/test_workbench_deploy.py
 python tests/test_registered_model_startup.py
+python tests/test_mixed366.py
+python tests/test_model_session.py
 python tests/test_docker_model_service.py
 python tests/test_environment_exit.py
 python tests/test_reclaim_control.py
@@ -52,6 +60,16 @@ python tests/test_native_model_runtime.py
 python tests/test_triton_control.py
 python tests/test_triton_preview.py
 python tests/test_inference_workflow.py
+python tests/test_inference_trace.py
+python tests/test_inference_input_io.py
+python tests/test_bounded_observation_age.py
+python tests/test_paired_feedback_wait.py
+python tests/test_normal_modes.py
+python tests/test_normal_complete_segment.py
+python tests/test_user_duration_infer.py
+python tests/test_variable_inference_steps.py
+python tests/test_infer_curve_policy.py
+python tests/test_strict_initial_hold.py
 python tests/test_inference_timing.py
 python tests/test_inference_reference.py
 python tests/test_inference_catalog.py
@@ -80,7 +98,7 @@ python rule_based_workbench/test_physical_parent_replay.py
 python tests/test_managed_services.py
 python tests/test_backend_launcher.py
 python tests/test_control_plan.py
-python tests/test_fake_pipeline_spawn.py
+python rule_based_workbench/test_playground_execution_process.py --environment fake
 python rule_based_workbench/test_shared_model_gpu.py
 python tests/test_management.py
 python tests/test_environment_manager.py
@@ -187,10 +205,14 @@ for name in test_playground_motiongen_entry test_real_pipeline test_playground_p
 done
 python rule_based_workbench/test_real_control.py "$ROOT/calibration"
 if command -v node >/dev/null 2>&1; then
+    node scripts/check_architecture.mjs
+    node scripts/check_development_map.mjs
+    node scripts/check_traceability.mjs
     node calibration/tests/test_joint_head_workbench_ui.js
     node tests/test_web_ui.mjs
     node tests/test_operations_ui.mjs
     node tests/test_triton_ui.mjs
+    node tests/test_model_probe_ui.mjs
     node tests/test_session_ui.mjs
     node tests/test_physical_endpoint_ui.mjs
     node tests/test_target_viewer_fk.mjs tests/fixtures/target-model.json tests/fixtures/target-native-fk.json

@@ -41,6 +41,24 @@ class StopEpochRaceTest(unittest.TestCase):
     def test_concurrent_real_native_error_still_faults(self):self.exercise('native',True)
     def test_unrequested_epoch_change_still_faults(self):self.exercise('feedback',unexpected_epoch=True)
 
+    def test_later_fault_hold_cannot_rewrite_old_operator_stop_receipt(self):
+        self.create();self.runtime.request_stop();self.advance(2)
+        receipt=deepcopy(self.runtime.stop_receipt)
+        self.assertTrue(receipt['stop_hold_return_confirmed'])
+        self.runtime.owner.motion_fault(ValueError('independent later fault'))
+        self.advance(2)
+        self.assertGreater(self.runtime.hold_returns['left']['epoch'],receipt['barrier_epoch']+1)
+        self.assertEqual(self.runtime.stop_receipt,receipt)
+
+    def test_missing_stop_return_cannot_be_filled_by_later_epoch(self):
+        self.create();self.runtime.request_stop();self.advance(2)
+        self.runtime.stop_receipt['stop_hold_return_confirmed']=False
+        self.runtime.stop_receipt.pop('sdk_hold_returns',None)
+        self.runtime.owner.motion_fault(ValueError('independent later fault'))
+        self.advance(2)
+        self.assertFalse(self.runtime.stop_receipt['stop_hold_return_confirmed'])
+        self.assertNotIn('sdk_hold_returns',self.runtime.stop_receipt)
+
     def test_inference_stop_during_native_admission_is_not_data_failure(self):
         import numpy as np
         from robot_workbench.motion_reference import prepare_reference

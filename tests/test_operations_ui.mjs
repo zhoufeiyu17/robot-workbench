@@ -27,19 +27,61 @@ const fixture=(environment='physical',manager='manager-v1')=>({schema:'robot_wor
  const value=fixture();value.recent_jobs=[{request:{action:'exit_environment'},status:'succeeded',verification:{ok:true}}];
  value.services=Object.fromEntries(['workbench','control_owner','cameras','model'].map(name=>[name,{state:'stopped',running:false}]));
  assert.equal(operationsGuidance(value).title,'工作台环境已退出');
+ const shared=structuredClone(value);
+ shared.recent_jobs[0].verification.consumer_detached=true;
+ for(const role of ['control_owner','cameras','model'])shared.services[role]={state:'running',running:true};
+ assert.equal(operationsGuidance(shared).title,'已退出本工作台');
+ assert.match(operationsGuidance(shared).message,/没有启动原数采/);
+ shared.services.workbench={state:'running',running:true};
+ assert.notEqual(operationsGuidance(shared).title,'已退出本工作台');
  value.services.model={state:'running',running:true};assert.notEqual(operationsGuidance(value).title,'工作台环境已退出','historical exit cannot override a currently running resource');
 }
 function harness({environment='physical',standalone=false,query='',crypto={randomUUID:()=> 'request-fixed'}}={}){
   const nodes=[],container=new Element('section'),select=new Element('select'),entry=new Element('a'),back=new Element('a');select.value=environment;
   if(standalone)container.dataset.operationsStandalone='true';
   const doc={getElementById:id=>id==='environment'?select:id==='operations-link'?entry:id==='operations-return'?back:null,querySelector:()=>container,createElement:tag=>{const node=new Element(tag);nodes.push(node);return node;}};
-  const requests=[];
-  const api=createOperations({document:doc,container,location:{search:query},crypto,pollMs:0,deploymentVersion:'a'.repeat(64),
+  const requests=[],navigations=[];
+  const api=createOperations({document:doc,container,location:{search:query,assign:url=>navigations.push(url)},crypto,pollMs:0,deploymentVersion:'a'.repeat(64),
     fetch:(url,options={})=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}))});
   const reply=(index,value,ok=true)=>requests[index].resolve({ok,status:ok?200:409,json:async()=>value});
   const button=name=>api.elements.buttons.get(name);
   const last=()=>requests.length-1;
-  return {api,container,select,entry,back,nodes,requests,reply,button,last,doc};
+  return {api,container,select,entry,back,nodes,requests,reply,button,last,doc,navigations};
+}
+
+for(const mode of ['verified','lan-http','unknown','manager-changed','runtime-changed','formal','formal-unreleased']){
+  const verified=mode==='verified'||mode==='lan-http'||mode==='formal';
+  const destination=mode.startsWith('formal')?'http://10.17.32.5:8080/':'http://10.17.32.5:18080/';
+  const h=harness(mode==='lan-http'?{crypto:{getRandomValues:array=>array.fill(7)}}:{}),initial=fixture();
+  initial.operations.exit_environment={label:'切换到数采工作台',impact:'归还本工作台控制后打开数采',allowed:true};
+  h.reply(0,initial);await settle();
+  h.button('exit_environment').fire('click');h.api.elements.confirm.fire('click');
+  const posted=JSON.parse(h.requests[h.last()].options.body);
+  h.reply(h.last(),{job_id:'switch-job',status:'queued',request:posted});await settle();
+  const finished=structuredClone(initial);
+  finished.target.backend_instance=null;finished.target.command_epoch=9;
+  if(mode==='manager-changed')finished.target.manager_instance='replacement';
+  finished.services={workbench:{state:'stopped',running:false}};
+  finished.recent_jobs=[{job_id:'switch-job',request:posted,status:mode==='unknown'?'unknown':'succeeded',
+    verification:{ok:mode!=='unknown',consumer_detached:true,independent_services_preserved:true,shared_runtime_preserved:mode!=='runtime-changed'},
+    result:{next_url:destination}}];
+  if(mode.startsWith('formal'))finished.recent_jobs[0].verification={ok:true,environment_exited:true,collection_web_ready:true,sdk_release_verified:mode==='formal'};
+  h.reply(h.last(),finished);await settle();
+  assert.deepEqual(h.navigations,verified?[destination]:[]);
+  const refresh=h.api.refresh();h.reply(h.last(),finished);await refresh;
+  assert.equal(h.navigations.length,verified?1:0,'a verified user handoff navigates at most once');
+  h.api.destroy();
+  const reopened=harness();reopened.reply(0,finished);await settle();
+  assert.equal(reopened.navigations.length,0,'historical success must never redirect a newly opened page');
+  reopened.api.destroy();
+}
+
+{
+  const returned=fixture();
+  returned.services={workbench:{state:'stopped',running:false},control_owner:{state:'running',lifecycle:'external'}};
+  returned.operations.connect_control={allowed:true};
+  returned.recent_jobs=[{request:{action:'exit_environment'},status:'succeeded',verification:{ok:true,consumer_detached:true}}];
+  assert.equal(operationsGuidance(returned).action,'connect_control','a returned user can attach instead of following a historical exit back to collection');
 }
 
 {
@@ -276,11 +318,25 @@ assert(html.includes('data-workbench-operations'));assert(html.includes('/web/op
   h.reply(0,state);await settle();assert.equal(h.api.elements.groups.length,4);
   assert.match(h.api.elements.capabilityRows.textContent,/已核验就绪.*条件未满足.*状态未知.*能力受限/s);
   assert.match(h.api.elements.dependencyRows.textContent,/预置条件.*SDK 安装.*可通过运维准备.*规划运行时.*现场条件.*首帧超时/s);
-  const planner=h.api.elements.dependencyRows.children.find(node=>node.children[0].textContent==='可通过运维准备').children.find(node=>node.tag==='article');
+  const sections=h.api.elements.dependencyRows.children;
+  const planner=sections.find(node=>node.children[0].textContent==='可通过运维准备').children[1].children.find(node=>node.tag==='article');
   assert.match(planner.children[2].textContent,/状态：starting.*阶段：warming.*说明：正在初始化规划.*PID：321.*模型初始化：false/s);
   assert(!planner.children[2].textContent.includes('allowed_read_roots'),'large runtime evidence must not expand the main condition summary');
   const raw=planner.children.find(node=>node.tag==='details');assert.equal(raw.open,false);assert.equal(raw.children[1].textContent,JSON.stringify(state.dependencies[1].actual,null,2));
   assert.match(h.api.elements.controlFacts.textContent,/SDK close 未确认/);assert.match(h.api.elements.guidance.textContent,/等待现场处理.*USB 线/s);
+  assert.equal(sections[0].open,false);assert.equal(sections[1].open,true);assert.equal(sections[2].open,true);
+  sections[0].open=true;sections[2].open=false;raw.open=true;
+  state.dependencies[1].actual.stage='ready';
+  const refresh=h.api.refresh();h.reply(h.last(),state);await refresh;
+  assert.equal(h.api.elements.dependencyRows.children[0],sections[0],'polling preserves the disclosure DOM node');
+  assert.equal(sections[0].open,true,'polling keeps user-expanded preconditions open');
+  assert.equal(sections[2].open,false,'polling keeps user-collapsed conditions closed');
+  const updatedRaw=sections[1].children[1].children[0].children.find(node=>node.tag==='details');
+  assert.equal(updatedRaw,raw);assert.equal(updatedRaw.open,true);
+  assert.equal(updatedRaw.children[1].textContent,JSON.stringify(state.dependencies[1].actual,null,2),'open evidence still refreshes');
+  sections[0].open=false;raw.open=false;
+  const failedRefresh=h.api.refresh();h.reply(h.last(),{},false);await failedRefresh;
+  assert.equal(sections[0].open,false);assert.equal(raw.open,false,'a failed refresh cannot reset disclosure state');
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'dependency rendering is observational');h.api.destroy();
 }
 {
@@ -376,4 +432,13 @@ console.log('PASS operations UI: fake/physical routing, explicit impact/support 
  assert.match(current.textContent,/控制已断开/);assert.doesNotMatch(current.textContent,/当前心跳异常/);
  assert.equal(current.children.find(row=>row.tag==='a').href,'#'+recover.id);
  assert.equal(warnings.children.length,1,'confirmed process exit retains the historical warning');
+}
+
+{
+ const h=harness(),value=fixture();
+ value.active_job={job_id:'trace',request:{request_id:'trace'},label:'退出',status:'unknown',phase:'waiting_exit_home',detail:{step_refs:['UC09-S02','<script>']}};
+ h.reply(0,value);await settle();
+ const links=h.nodes.filter(node=>node.tag==='a'&&node.textContent.includes('架构步骤'));
+ assert.equal(links.length,1);assert.match(links[0].href,/#trace\?uc=UC09&step=UC09-S02$/);
+ assert.match(links[0].textContent,/不代表已通过/);h.api.destroy();
 }

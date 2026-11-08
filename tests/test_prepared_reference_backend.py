@@ -10,6 +10,8 @@ import numpy as np
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'calibration'),str(ROOT/'calibration/infra')]
 from examples.scripts.debug.joint_head_real_owner import hardware_backend
+# Keep patch targets in sys.modules before any fixture snapshots that dictionary.
+from robot_workbench import arx_output_guard,sdk_quiesce
 
 
 class State:
@@ -47,6 +49,172 @@ class Base:
 
 
 class PreparedBackendTests(unittest.TestCase):
+    def test_future_curve_origin_replaces_retained_hold_before_jaw_motion(self):
+        from copy import deepcopy
+        from robot_workbench.target_interpreter import TargetInterpreter
+        backend=self.context_backend();clock=[1000.01]
+        backend.bind_execution_context(dict(controller_profile='normal_X5',jaw_calibration_id='c'*64,
+            limits=dict(velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.)))
+        initial=np.zeros(14);initial[[6,13]]=.07
+        window=dict(host_times_s=[1000.,1000.014,1000.024,1000.034,1000.044,1000.2],
+            q_sdk14=np.tile(initial,(6,1)).tolist(),dq_sdk14=np.zeros((6,14)).tolist())
+        def native(field):
+            return [float(np.interp(clock[0],window['host_times_s'],np.asarray(window[field])[:,j]))for j in range(14)]
+        backend.read_execution_output=lambda:dict(q_sdk14=native('q_sdk14'),dq_sdk14=native('dq_sdk14'),
+            observations={side:dict(sample_monotonic_ns=round(clock[0]*1e9))for side in ('left','right')})
+        admit=backend.queue_reference
+        def queue(packet):
+            result=admit(packet)
+            # The native append API retains existing knots before the first
+            # new knot, including a HOLD knot later than the curve origin.
+            keep=[i for i,t in enumerate(window['host_times_s'])if clock[0]<t<packet['host_times_s'][0]]
+            merged={'host_times_s':[clock[0]]+[window['host_times_s'][i]for i in keep]+packet['host_times_s']}
+            for field in ('q_sdk14','dq_sdk14'):
+                merged[field]=[native(field)]+[window[field][i]for i in keep]+deepcopy(packet[field])
+            window.update(merged)
+            return result
+        backend.queue_reference=queue
+        def sample(times):
+            times=np.clip(np.asarray(times),0.,1.)
+            q=np.tile(initial,(len(times),1));q[:,[6,13]]-=.035*times[:,None]
+            return q,np.zeros_like(q),np.zeros_like(q)
+        reference=NS(metadata=dict(schema='prepared_motion_reference.v1',reference_id='a'*64,
+            kind='online_prediction_chunk',native_grid='reference_origin_100Hz',
+            planning_policy={'boundary_scope':'complete_prepared_segment'}),
+            duration_s=1.,breaks=np.array([0.,.1,1.]),sample=sample)
+        interpreter=TargetInterpreter(backend,reference,active_arm='both',start_s=1000.02,epoch=1,
+            current_epoch=lambda:1,gate=lambda:None,clock=lambda:clock[0])
+        with patch('time.monotonic',side_effect=lambda:clock[0]):
+            first=interpreter.tick(clock[0],dict(sample_time_s=clock[0],qpos=initial.tolist()))
+            clock[0]=1000.027
+            second=interpreter.tick(clock[0],dict(sample_time_s=clock[0],qpos=initial.tolist()),force=True)
+        self.assertAlmostEqual(first['packet']['host_times_s'][0],interpreter.start_s)
+        np.testing.assert_allclose(first['packet']['q_sdk14'][0],initial)
+        self.assertIsNotNone(second)
+
+    def context_backend(self):
+        calibration=dict(identity='c'*64,sdk_width_m=.082,
+                         sides={side:dict(width_m=.083) for side in ('left','right')})
+        module=ModuleType('arx_env.backends.arx5_backend')
+        module.Arx5Backend=Base;module.Arx5BackendConfig=lambda **kw:NS(**kw)
+        with patch.dict(sys.modules,{'arx_env.backends.arx5_backend':module}):
+            backend=hardware_backend(prepared_reference_enabled=True,target_interpreter_profile='normal_X5',
+                native_reference_api='preserve_reference_v1',gripper_calibration=calibration)
+        backend.command_guard=lambda:None
+        backend._robot_configs={side:NS(joint_vel_max=[5.]*6,gripper_vel_max=.3) for side in ('left','right')}
+        backend.read_execution_output=lambda:dict(q_sdk14=[0.]*14,dq_sdk14=[0.]*14,
+            observations={side:dict(sample_monotonic_ns=1_000_000_000_000) for side in ('left','right')})
+        for controller in backend._controllers.values():controller.set_joint_reference=controller.set_joint_traj
+        backend._arx5.ReferenceAdmissionRejected=type('NativeRejected',(RuntimeError,),{})
+        return backend
+
+    def test_bound_minimal_window_uses_current_limits_and_calibrated_jaw_units(self):
+        from robot_workbench.sdk_process import ReferenceWindowRejected
+        backend=self.context_backend()
+        context=dict(controller_profile='normal_X5',jaw_calibration_id='c'*64,
+            limits=dict(velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.))
+        self.assertTrue(backend.bind_execution_context(context)['bound'])
+        q=np.zeros((2,14));dq=np.zeros((2,14));q[:,0]=[.001,.004];dq[1,0]=.3
+        packet=dict(reference_id='a'*64,active_arm='both',host_times_s=[1000.03,1000.05],q_sdk14=q.tolist(),dq_sdk14=dq.tolist())
+        with patch('time.monotonic',return_value=1000.):
+            receipt=backend.queue_reference(packet)
+            self.assertEqual(receipt['reference_id'],'a'*64)
+            self.assertEqual(len(backend._controllers['left'].future),2)
+            dq[1,0]=1.1
+            with self.assertRaises(ReferenceWindowRejected):backend.queue_reference(dict(packet,dq_sdk14=dq.tolist()))
+            dq[1,0]=.3;q[:,6]=[0.,.002]
+            with self.assertRaisesRegex(ReferenceWindowRejected,'jaw step'):backend.queue_reference(dict(packet,q_sdk14=q.tolist()))
+            q[:,6]=0.;q[:,0]=[.04,.043]
+            with self.assertRaisesRegex(ReferenceWindowRejected,'current-output'):backend.queue_reference(dict(packet,q_sdk14=q.tolist()))
+        with self.assertRaisesRegex(ReferenceWindowRejected,'configuration'):
+            backend.bind_execution_context(dict(context,jaw_calibration_id='d'*64))
+        oversized=dict(context,limits=dict(context['limits'],velocity_limit_rad_s=6.))
+        with self.assertRaisesRegex(ReferenceWindowRejected,'native velocity'):backend.bind_execution_context(oversized)
+
+    def test_raw_feedback_uses_same_sample_for_fk_and_preserves_optional_gaps(self):
+        module=ModuleType('arx_env.backends.arx5_backend')
+        module.Arx5Backend=Base;module.Arx5BackendConfig=lambda **kw:NS(**kw)
+        with patch.dict(sys.modules,{'arx_env.backends.arx5_backend':module}):
+            backend=hardware_backend(raw_state_enabled=True)
+            with self.assertRaises(ValueError):hardware_backend(raw_state_enabled=1)
+        backend.output_guard=NS(call=lambda action:dict(heartbeat_monotonic_s=time.monotonic()))
+        backend._telemetry_time=time.monotonic();backend._controller_telemetry=dict(status='cached')
+        samples={};calls={side:0 for side in backend.sides}
+        for index,side in enumerate(backend.sides):
+            state=State(6);state.p[:]=index*.01;state.timestamp=10.+index
+            state.gripper_vel=0.;state.t[0]=float('nan');samples[side]=state
+            def read(side=side):calls[side]+=1;return samples[side]
+            backend._controllers[side].get_joint_state=read
+            def fk(q,side=side):
+                np.testing.assert_array_equal(q,samples[side].p)
+                return [float(q[0]),0.,0.,0.,0.,0.]
+            backend._controllers[side].forward_kinematics=fk
+        backend.set_damping_hold(manual=False)
+        result=backend.read_calibration_state()
+        self.assertEqual(result['sdk_timestamps'],[10.,11.])
+        self.assertEqual(result['gripper_torque'],[None,None])
+        self.assertEqual(calls,dict(left=1,right=1))  # Cached diagnostics and FK reuse this one recorded sample.
+        for side,arm in result['raw_state']['arms'].items():
+            self.assertTrue(arm['validity']['eef'])
+            self.assertIsNone(arm['effort'][0]);self.assertIsNone(arm['effort'][6])
+            self.assertEqual(arm['eef_wxyz'][0],samples[side].p[0])
+            self.assertLessEqual(*arm['host_read_monotonic_ns'])
+        backend._controllers['left'].forward_kinematics=lambda q:(_ for _ in ()).throw(ValueError('FK unavailable'))
+        self.assertEqual(backend.read_calibration_state()['raw_state']['status'],'degraded')
+        samples['left'].p[0]=float('nan')
+        with self.assertRaisesRegex(ValueError,'nonfinite calibration feedback'):backend.read_calibration_state()
+
+    def test_normal_teach_gain_write_preserves_jaws_and_refuses_invalid_values(self):
+        from copy import deepcopy
+        from robot_workbench.target_interpreter import gains
+        from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRevoked
+        module=ModuleType('arx_env.backends.arx5_backend');module.Arx5Backend=Base;module.Arx5BackendConfig=lambda **kw:NS(**kw)
+        with patch.dict(sys.modules,{'arx_env.backends.arx5_backend':module}):
+            b=hardware_backend(prepared_reference_enabled=True,target_interpreter_profile='normal_X5',native_reference_api='preserve_reference_v1')
+        current={s:dict(kp=gains('normal_X5',s)[0],kd=gains('normal_X5',s)[1],gripper_kp=5.,gripper_kd=.2)for s in('left','right')}
+        b.read_execution_output=lambda:dict(gains=deepcopy(current));b.command_guard=lambda:None
+        written={}
+        for side,c in b._controllers.items():
+            c.set_gain=lambda g,side=side:written.__setitem__(side,dict(kp=g.kp().tolist(),kd=g.kd().tolist(),gripper_kp=getattr(g,'gripper_kp',0.),gripper_kd=getattr(g,'gripper_kd',0.)))
+        target=deepcopy(current)
+        for row in target.values():row['kp']=[0.]*6;row['kd']=[x*.1 for x in row['kd']]
+        self.assertTrue(b.set_execution_gains(target)['returned']);self.assertEqual(written,target)
+        for bad in (dict(target['left'],gripper_kp=0.),dict(target['left'],kp=[1000.]*6),
+                    dict(target['left'],kp=['bad']*6),dict(target['left'],kd=[True]*6)):
+            written.clear()
+            with self.assertRaises(ReferenceWindowRejected):b.set_execution_gains(dict(target,left=bad))
+            self.assertEqual(written,{})
+        b.command_guard=lambda:(_ for _ in()).throw(SDKCommandRevoked('epoch changed'))
+        with self.assertRaises(SDKCommandRevoked):b.set_execution_gains(target)
+        self.assertEqual(b.reference_cancel_sequence,1)
+
+    def test_analytic_brake_reaches_actual_adapter_native_reference_api(self):
+        from robot_workbench.motion_reference import prepare_brake
+        from robot_workbench.target_interpreter import TargetInterpreter
+        b=self.backend(profile='normal_X5',native_api='preserve_reference_v1')
+        b._arx5.ReferenceAdmissionRejected=type('NativeRejected',(Exception,),{})
+        for controller in b._controllers.values():
+            controller.set_joint_reference=lambda frames,c=controller:setattr(c,'future',frames)
+            controller.set_joint_traj=lambda _:self.fail('no legacy trajectory fallback')
+        q=np.zeros(14);v=q.copy();v[0]=.2;v[7]=-.1
+        limits=np.asarray([[-3.,3.]]*14);limits[[6,13]]=[0.,.082]
+        ref=prepare_brake(q,v,q,limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.,source_sha256='c'*64)
+        now=[1000.]
+        executor=TargetInterpreter(b,ref,active_arm='both',start_s=1000.,epoch=2,current_epoch=lambda:2,
+            gate=lambda:None,clock=lambda:now[0])
+        for elapsed in np.arange(0.,.71,.05):
+            now[0]=1000.+float(elapsed);pos,vel,_=ref.sample([elapsed])
+            with patch('time.monotonic',side_effect=lambda:now[0]):
+                result=executor.tick(now[0],dict(qpos=pos[0].tolist(),qvel=vel[0].tolist(),sample_time_s=now[0]))
+            if result is None:continue
+            self.assertFalse(result['admission']['firmware_ack'])
+            self.assertEqual(result['admission']['native_reference_api'],'preserve_reference_v1')
+            for side,indices in [('left',slice(0,6)),('right',slice(7,13))]:
+                for i,frame in enumerate(b._controllers[side].future):
+                    np.testing.assert_allclose(frame.pos(),result['packet']['q_sdk14'][i][indices])
+                    np.testing.assert_allclose(frame.vel(),result['packet']['dq_sdk14'][i][indices])
+                    self.assertAlmostEqual(frame.timestamp,result['packet']['host_times_s'][i]-100.)
+
     def test_arx13_roles_reach_backend_without_renaming_host_interfaces(self):
         module=ModuleType('arx_env.backends.arx5_backend')
         module.Arx5Backend=Base;module.Arx5BackendConfig=lambda **kw:NS(**kw)

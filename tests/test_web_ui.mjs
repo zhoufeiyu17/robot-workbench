@@ -66,6 +66,16 @@ function harness({audit=false,physical=false,business,view,storage,sessionMonito
   return {app,document,requests,intervals,revoked,blobs,timeouts,advance:ms=>now+=ms,get:id=>document.getElementById(id),reply(index,value,headers){requests[index].resolve(response(value,headers));},fireTimer,nextFrame:()=>fireTimer(ms=>ms!==2500),paint(){const ready=[...rafs.values()];rafs.clear();for(const fn of ready)fn(now);}};
 }
 
+{
+  const h=harness({physical:true,business:'inference',view:'operations'});
+  h.app.start();
+  assert.equal(h.app.context.business,'inference');
+  assert.equal(h.get('operations-panel').hidden,false);
+  assert.equal(h.get('work-pane').hidden,true);
+  assert.equal(h.requests.filter(row=>row.options?.method==='POST').length,0);
+  h.app.destroy();
+}
+
 assert.equal(countedProgress({current:4,total:null}),null);
 assert.equal(countedProgress({current:12,total:10}),null);
 assert.equal(countedProgress({current:0,total:10}).current,0);
@@ -114,6 +124,39 @@ async function guidanceFixture(business,update,environment='fake'){
   update?.(value);h.reply(h.requests.length-1,value);await settle();return {h,value};
 }
 const htmlIds=new Set([...html.matchAll(/id="([^"]+)"/g)].map(match=>match[1]));
+assert(htmlIds.has('inference-family'),'model family must precede backend selection');
+
+{
+  const h=harness({business:'inference'});h.app.start();
+  const wam='wam-e03-step003190';
+  const rows=[{id:'pi-fixture',backend:'torch',bundle_digest:'a'.repeat(64),selectable:true},
+    {id:'pi-triton',backend:'triton',bundle_digest:'b'.repeat(64),selectable:true},
+    {id:wam,runtime_schema:'workbench.wam-e03.v1',backend:'torch',bundle_digest:'c'.repeat(64),selectable:true},
+    {id:wam,runtime_schema:'workbench.wam-e03.v1',backend:'anyinfer',bundle_digest:'d'.repeat(64),selectable:true}];
+  const value=snapshot();value.runtime.holder='inference';value.runtime.allowed_operations.inference_run={allowed:true};
+  value.workflow.inference={selected_model_id:wam,backend:'anyinfer',bundle_digest:'d'.repeat(64),model_ready:true,
+    model:{id:wam,backend:'anyinfer',loaded:true,status:'ready'},models:rows};
+  h.reply(0,value);await settle();
+  const choices=()=>h.get('inference-checkpoint').children.map(row=>row.value);
+  assert.equal(h.get('inference-family').value,'wam');
+  assert.equal(h.get('inference-backend').value,'anyinfer');
+  assert.deepEqual(h.get('inference-backend').children.map(row=>[row.value,row.textContent]),[['torch','Torch'],['anyinfer','SO 算子加速']]);
+  assert.deepEqual(choices(),['d'.repeat(64)]);
+  h.get('inference-family').value='pi';h.get('inference-family').events.change();
+  assert.equal(h.get('inference-backend').value,'torch');assert(choices().includes('pi-fixture'));
+  assert(!choices().some(choice=>['c'.repeat(64),'d'.repeat(64)].includes(choice)));
+  h.get('inference-backend').value='triton';h.get('inference-backend').events.change();
+  h.get('inference-family').value='wam';h.get('inference-family').events.change();assert.equal(h.get('inference-backend').value,'anyinfer','returning to a family selects its loaded backend');
+  h.get('inference-family').value='pi';h.get('inference-family').events.change();
+  // The same backend name cannot make a different model family executable.
+  h.app.poll();const next=structuredClone(value);next.revision=2;next.workflow.inference.backend='torch';next.workflow.inference.model.backend='torch';next.workflow.inference.bundle_digest='c'.repeat(64);
+  h.reply(1,next);await settle();assert.equal(h.get('inference-run').disabled,true);
+  h.get('inference-backend').value='triton';h.get('inference-backend').events.change();assert(choices().includes('pi-triton'));
+  h.get('inference-family').value='wam';h.get('inference-family').events.change();
+  assert.equal(h.get('inference-backend').value,'torch');assert.deepEqual(choices(),['c'.repeat(64)]);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'family/backend intent never starts a model or robot');
+  h.app.destroy();
+}
 for(const target of ['operations-link','diagnostics-pane','task-panel','manual-tools','primary','collection-execute','return-cup',
   'inference-run','inference-checkpoint','environment-connect','collection-prepare','collection-plan'])
   assert(htmlIds.has(target),'guidance navigation target must exist in actual index.html: '+target);
@@ -1672,7 +1715,7 @@ for(const unavailable of ['disconnected','old-backend','not-holder']){
   const inputs=()=>h.get('arrival-tolerance-inputs').querySelectorAll('input');
   assert.deepEqual(inputs().map(node=>node.value),value.runtime.execution_settings.settings.arrival_tolerances_rad);
   assert.match(h.get('execution-settings-effective').textContent,/当前生效.*版本 2.*标定.*超差保护/);
-  assert.match(h.get('execution-settings-effective').textContent,/原被动轴保护（0.01 rad \/ 2 mm）；应用后所有轴按本页跟踪设置执行/);
+  assert.match(h.get('execution-settings-effective').textContent,/原被动轴保护（2° \/ 2 mm）；应用后所有轴按本页跟踪设置执行/);
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
   h.get('arrival-observe-only').checked=true;h.get('arrival-observe-only').events.input();
   h.get('tracking-observe-only').checked=true;h.get('tracking-observe-only').events.input();
@@ -1733,6 +1776,21 @@ for(const unavailable of ['disconnected','old-backend','not-holder']){
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'saving does not run or connect');
   h.app.destroy();
 }
+{
+  const h=harness({business:'inference'}),value=snapshot();
+  value.inference_execution={execute_steps:15,revision:0,allowed:true,action_horizon:32,control_hz:30};
+  value.runtime.allowed_operations.inference_execution_settings={allowed:true};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-execute-steps').max,'32');
+  assert.match(h.get('inference-steps-effective').textContent,/15 \/ 32/);
+  h.get('inference-execute-steps').value='33';h.get('inference-execute-steps').events.input();
+  assert.equal(h.get('inference-steps-apply').disabled,true);
+  h.get('inference-execute-steps').value='32';h.get('inference-execute-steps').events.input();
+  assert.equal(h.get('inference-steps-apply').disabled,false);
+  h.get('inference-steps-apply').events.click();
+  assert.equal(JSON.parse(h.requests.find(row=>row.options.method==='POST').options.body).execute_steps,32);
+  h.app.destroy();
+}
 function inferenceSnapshot(){
   const value=snapshot();value.runtime.holder='inference';value.runtime.allowed_operations.inference_prepare={allowed:true};value.runtime.allowed_operations.inference_preview={allowed:true};value.runtime.allowed_operations.execute={allowed:true};
   value.workflow={id:'inference-round-1',revision:1,status:'ready',busy:false,stage_id:'inference.idle',message:'推理环境就绪',primary_action:{id:'inference_preview',label:'准备本轮推理',allowed:true},outcomes:{},
@@ -1761,6 +1819,45 @@ function oneRunSnapshot(){
       {id:'pending',label:'epoch008',selectable:false,status:'downloading',reason:'下载中'}],
     model:{id,label:'Base566 epoch007',loaded:true,bundle_digest:digest}});
   return value;
+}
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  info.selected_model_id='wam-fixture-step42';info.backend='torch';info.model.id=info.selected_model_id;
+  info.normal_modes_enabled=true;info.reference_planning={};info.wam_stall_recovery={enabled:false};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-stall-enabled').checked,false);
+  assert.equal(h.get('inference-stall-tools').hidden,false);
+  h.get('inference-stall-enabled').checked=true;h.get('inference-stall-enabled').events.change();
+  h.get('inference-run').events.click();
+  assert.match(h.get('inference-run-summary').textContent,/已启用WAM静止恢复/);
+  h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();
+  h.get('inference-run-confirm').events.click();
+  assert.equal(JSON.parse(h.requests.find(row=>row.options.method==='POST').options.body).wam_stall_recovery,true);
+  info.operator_session={wam_stall_recovery:true};value.revision++;
+  h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-stall-enabled').checked,true);
+  assert.equal(h.get('inference-stall-enabled').disabled,true);
+  h.app.destroy();
+}
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  value.workflow.inference.models.push({id:'wam-new-step77',backend:'unsupported',selectable:false,
+    label:'New checkpoint',reason:'unsupported model family or backend'});
+  h.app.start();h.reply(0,value);await settle();
+  assert.match(h.get('inference-catalog-status').textContent,/目录自动刷新/);
+  assert.match(h.get('inference-catalog-status').textContent,/New checkpoint.*unsupported model family or backend/);
+  const original=value.workflow.inference.selected_model_id;
+  value.workflow.inference.models.push({id:'base566-epoch009-step70000',backend:'torch',selectable:true,
+    label:'newly discovered checkpoint',bundle_digest:'d'.repeat(64)});
+  value.revision++;h.app.poll();h.reply(1,value);await settle();
+  assert.ok(h.get('inference-checkpoint').children.some(row=>row.textContent==='newly discovered checkpoint'));
+  assert.equal(h.get('inference-checkpoint').value,original);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  value.workflow.inference.models=[];
+  value.revision++;h.app.poll();h.reply(2,value);await settle();
+  assert.match(h.get('inference-catalog-status').textContent,/当前已加载配置保留/);
+  assert.equal(h.get('inference-run').disabled,false);
+  h.app.destroy();
 }
 {
   const calls=[];let listener=()=>{},allowed=true,finish;
@@ -1974,4 +2071,302 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
   h.get('scene-asset-apply').events.click();await settle();
   assert.deepEqual(calls,[{action:'prepare_collection',parameters:{asset_pair_id:'machine-lid',expected_catalog_digest:'a'.repeat(64)}}]);
   assert.equal(h.requests.length,requests);h.app.destroy();
+}
+
+{
+  const h=harness();h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('inference');
+  const value=oneRunSnapshot(),info=value.workflow.inference;
+  info.finite_chunk_count=3;info.reference_planning={max_execution_duration_s:2};
+  info.finite_chunks={completed_count:1,completed_execution_s:.69,active_execution_s:.2,waiting_elapsed_s:.1,total_waiting_s:.35,
+    current:{waiting_s:.25},completed:[{execution_duration_s:.69}]};
+  info.input_evidence={pending:2,completed:4,error:null};
+  info.observation_pairing={camera_span_ns:12000000};
+  h.reply(1,value);await settle();
+  assert.equal(h.get('inference-duration').value,'0.5');
+  assert.equal(h.get('inference-duration').disabled,true);
+  assert.match(h.get('inference-duration-help').textContent,/完整执行可减速至2秒/);
+  assert.match(h.get('inference-duration-help').textContent,/共3轮/);
+  h.get('inference-run').events.click();
+  assert.match(h.get('inference-run-summary').textContent,/连续3轮/);
+  assert.match(h.get('inference-run-summary').textContent,/每轮完整执行15步/);
+  assert.match(h.get('inference-run-summary').textContent,/最多2秒/);
+  const text=h.get('inference-metrics').children.flatMap(row=>row.children.map(node=>node.textContent)).join(' ');
+  assert.match(text,/1 \/ 3 轮/);assert.match(text,/当前段推理等待/);
+  assert.match(text,/累计推理等待/);
+  assert.doesNotMatch(text,/剩余/,'finite source horizon must not masquerade as the wall/execution budget');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  h.app.destroy();
+}
+
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  info.normal_modes_enabled=true;info.reference_planning={max_execution_duration_s:2};
+  info.finite_chunk_count=null;info.execute_steps=15;
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-duration').value,'120');
+  assert.equal(h.get('inference-duration').disabled,false);
+  assert.match(h.get('inference-duration-help').textContent,/本轮最长运行时长.*观测.*推理.*等待/);
+  h.get('inference-duration').value='40';h.get('inference-duration').events.change();
+  h.get('inference-run').events.click();
+  assert.match(h.get('inference-run-summary').textContent,/最长运行 40 秒/);
+  assert.match(h.get('inference-run-summary').textContent,/每段完整15点/);
+  assert.doesNotMatch(h.get('inference-run-summary').textContent,/共4轮|连续4轮/);
+  h.app.destroy();
+}
+
+{
+  const h=harness(),value=snapshot();value.runtime.allowed_operations.control_policy={allowed:true};
+  const policy={revision:4,policy_hash:'a'.repeat(64),update_allowed:true,origins:{},
+    editable_paths:['measured.limit_rad_s','execution.execute_steps'],
+    parameters:{measured:{limit_rad_s:1},execution:{execute_steps:15}}};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.requests.filter(row=>row.url.startsWith('/api/control-policy')).length,0,'policy reads are explicit');
+  h.get('control-policy-load').events.click();let read=h.requests.findIndex(row=>row.url.startsWith('/api/control-policy'));
+  h.reply(read,policy);await settle();
+  assert.match(h.get('control-policy-status').textContent,/版本 4/);
+  const input=h.get('control-policy-fields').children[0].children[0];
+  input.value='1.1';input.events.input();assert.equal(h.get('control-policy-save').disabled,false);
+  h.get('control-policy-save').events.click();
+  const write=h.requests.findIndex(row=>row.url==='/api/actions/control_policy');
+  const body=JSON.parse(h.requests[write].options.body);
+  assert.equal(body.expected_revision,4);assert.deepEqual(body.changes,{'measured.limit_rad_s':1.1});
+  assert.equal(h.get('control-policy-save').disabled,true,'save cannot overlap another request');
+  h.reply(write,{control_policy:{...policy,revision:5,parameters:{...policy.parameters,measured:{limit_rad_s:1.1}}}});await settle();
+  assert.match(h.get('control-policy-status').textContent,/版本 5/);
+  assert.equal(h.get('control-policy-save').disabled,true);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'parameter editing never starts a control Run');
+  h.app.destroy();
+}
+
+{
+  const h=harness(),value=snapshot();value.runtime.allowed_operations.control_policy={allowed:true};
+  h.app.start();h.reply(0,value);await settle();h.get('control-policy-load').events.click();
+  const read=h.requests.findIndex(row=>row.url.startsWith('/api/control-policy'));
+  h.reply(read,{revision:4,policy_hash:'a'.repeat(64),update_allowed:true,origins:{},
+    editable_paths:['measured.limit_rad_s'],parameters:{measured:{limit_rad_s:1}}});await settle();
+  const input=h.get('control-policy-fields').children[0].children[0];input.value='1.1';input.events.input();
+  h.get('control-policy-save').events.click();
+  const write=h.requests.find(row=>row.url==='/api/actions/control_policy');
+  write.resolve({...response({message:'control policy revision changed'}),ok:false,status:409});await settle();
+  assert.equal(input.value,'1.1','revision conflict must preserve the draft');
+  assert.match(h.get('request-status').textContent,/revision changed/);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'conflict must never retry automatically');
+  h.app.destroy();
+}
+{
+  const h=harness(),value=snapshot();value.runtime.allowed_operations.control_policy={allowed:true};
+  h.app.start();h.reply(0,value);await settle();h.get('control-policy-load').events.click();
+  const read=h.requests.findIndex(row=>row.url.startsWith('/api/control-policy'));
+  h.app.switchContext({environment:'fake',business:'inference'});
+  h.reply(read,{revision:4,policy_hash:'a'.repeat(64),update_allowed:true,origins:{},
+    editable_paths:['measured.limit_rad_s'],parameters:{measured:{limit_rad_s:1}}});await settle();
+  assert.equal(h.get('control-policy-fields').children.length,0,'a retired business reply must not populate the new editor');
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  h.app.destroy();
+}
+
+{
+ const h=harness();h.app.start();const value=snapshot();
+ value.results_page={run_ids:['control-run'],total_runs:1,total_results:2,older_cursor:null,newer_cursor:null};
+ value.results=[{id:'legacy-head',kind:'head',label:'已保留的标定候选',status:'valid'},
+  {id:'capture-control-receipt',run_id:'control-run',kind:'control_recording',label:'本次控制封存',status:'completed',details:{seal_revision:1},download_url:'/api/result-media?result_id=capture-control-receipt'}];
+ h.reply(0,value);await settle();
+ assert.equal(h.get('collection-history-run').value,'control-run');
+ const text=node=>[node.textContent,...node.children.map(text)].join(' '),rendered=text(h.get('results-list'));
+ assert.match(rendered,/本次控制封存/);assert.match(rendered,/已保留的标定候选/);
+ assert.match(rendered,/下载本次 Run 封存回执/);h.app.destroy();
+}
+
+{
+  const calls=[],access={state:{model:{ready:true,model_ready:true}},permission:()=>({allowed:true}),
+    prepare:(action,parameters)=>calls.push({action,parameters}),subscribe(){},setEnvironment(){},destroy(){}};
+  const h=harness({business:'inference',environmentAccess:access}),value=oneRunSnapshot(),info=value.workflow.inference;
+  const id='wam-fixture-step42',capabilities={denoise_steps:{minimum:1,maximum:10,default:2}},digest=n=>String(n).padStart(64,'0');
+  info.models=[1,2,10].map(n=>({id,backend:'anyinfer',runtime_schema:'workbench.wam.v2',selectable:true,status:'ready',
+    label:`WAM · ${n}步去噪`,bundle_digest:digest(n),inference_options:{denoise_steps:n},inference_capabilities:capabilities}));
+  Object.assign(info,{selected_model_id:id,backend:'anyinfer',bundle_digest:digest(2),inference_options:{denoise_steps:2},
+    inference_capabilities:capabilities,finite_chunk_count:null,normal_modes_enabled:true,reference_planning:{max_execution_duration_s:2}});
+  Object.assign(info.model,{id,backend:'anyinfer',bundle_digest:digest(2)});
+  value.inference_execution={execute_steps:15,revision:2,action_horizon:32,allowed:true,control_hz:30};
+  value.runtime.allowed_operations.inference_execution_settings={allowed:true};
+  access.state.model={ready:true,selected_model_id:id,backend:'anyinfer',bundle_digest:digest(2)};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-execute-steps').disabled,false);assert.equal(h.get('inference-execute-steps').max,'32');
+  assert.equal(h.get('inference-duration').disabled,false);assert.equal(h.get('inference-duration').value,'120');
+  assert.equal(h.get('inference-denoise-tools').hidden,false);assert.equal(h.get('inference-denoise-steps').value,'2');
+  assert.equal(h.get('inference-denoise-steps').min,'1');assert.equal(h.get('inference-denoise-steps').max,'10');
+  assert.equal(h.get('inference-checkpoint').children.length,1,'runtime variants do not duplicate the checkpoint menu');
+  h.get('inference-denoise-steps').value='10';h.get('inference-denoise-steps').events.input();
+  assert.equal(h.get('inference-run').disabled,true,'unapplied denoise draft cannot run the old configuration');
+  assert.equal(h.get('inference-denoise-apply').disabled,false);h.get('inference-denoise-apply').events.click();await settle();
+  assert.deepEqual(calls,[{action:'prepare_model',parameters:{model_id:id,expected_bundle_digest:digest(10)}}]);
+  assert.equal(h.get('inference-denoise-steps').value,'10');
+  value.revision++;info.bundle_digest=digest(10);info.model.bundle_digest=digest(10);info.inference_options={denoise_steps:10};
+  access.state.model.bundle_digest=digest(10);h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-denoise-apply').disabled,true);assert.equal(h.get('inference-run').disabled,false);
+  for(const invalid of ['0','11','1.5']){
+    h.get('inference-denoise-steps').value=invalid;h.get('inference-denoise-steps').events.input();
+    assert.equal(h.get('inference-denoise-apply').disabled,true);
+  }
+  assert.equal(calls.length,1,'invalid values and polling never prepare a model');h.app.destroy();
+}
+
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  Object.assign(value.runtime,{runtime_nonce:'operator-owner',command_epoch:7});
+  Object.assign(value.runtime.allowed_operations,{inference_hold:{allowed:true},inference_home:{allowed:true}});
+  value.workflow.inference.operator_controls={home_velocity_rad_s:.1,timeout_s:60,focus_timeout_s:8};
+  h.app.start();h.reply(0,value);await settle();
+  h.get('inference-home').events.click();assert.equal(h.get('inference-home-dialog').open,true);
+  assert.equal(h.get('inference-home-confirm').disabled,true);
+  h.get('inference-home-clearance').checked=true;h.get('inference-home-clearance').events.change();
+  assert.equal(h.get('inference-home-confirm').disabled,false);
+  value.revision++;value.runtime.command_epoch++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-home-confirm').disabled,true,'an old Home confirmation must not adopt a new epoch');
+  h.get('inference-home-confirm').events.click();assert.equal(h.requests.filter(r=>r.options.method==='POST').length,0);
+  h.get('inference-home-cancel').events.click();h.get('inference-hold').events.click();
+  const hold=h.requests.find(r=>r.url==='/api/actions/inference_hold');assert(hold);
+  assert.equal(JSON.parse(hold.options.body).epoch,8);assert.equal(JSON.parse(hold.options.body).runtime_nonce,'operator-owner');
+  h.app.destroy();
+}
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  value.workflow.inference.operator_session={run_id:'prepared'};
+  value.workflow.inference.operator_controls={double_press_window_s:.5};
+  h.app.start();h.reply(0,value);await settle();
+  assert.match(h.get('inference-operator-status').textContent,/0.5秒内双踩踏板1/);
+  assert.equal(h.get('inference-run-dialog').open,false);
+  const running=oneRunSnapshot();running.workflow.inference.normal_mode={mode:'MODEL'};
+  running.revision=value.revision+1;h.app.poll();h.reply(h.requests.length-1,running);await settle();
+  assert.match(h.get('inference-teach').textContent,/停止推理并位置保持/);
+  assert.match(h.get('inference-operator-status').textContent,/第二脚忽略/);
+  assert.equal(h.get('inference-run-dialog').open,false,'pedal-driven state updates must not open a web confirmation');
+  h.app.destroy();
+}
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  Object.assign(value.runtime,{runtime_nonce:'pedal-owner',command_epoch:2});
+  value.workflow.inference.operator_controls={pedal_source_descriptor:'/registered/source.json'};
+  h.app.start();h.reply(0,value);await settle();
+  for(const interval of h.intervals)interval();
+  const focus=h.requests.find(r=>r.url==='/api/actions/inference_focus');assert(focus);
+  assert.equal(JSON.parse(focus.options.body).active,true);
+  h.document.hidden=true;h.document.events.visibilitychange();
+  focus.resolve(response({active:true}));await settle();
+  const leases=h.requests.filter(r=>r.url==='/api/actions/inference_focus');assert.equal(leases.length,2);
+  assert.equal(JSON.parse(leases[1].options.body).active,false,'blur during an in-flight focus must revoke when it returns');
+  assert.equal(JSON.parse(leases[1].options.body).client_id,JSON.parse(focus.options.body).client_id);
+  h.app.destroy();
+}
+
+{
+  assert.match(html,/<input id="inference-duration" type="number"[^>]*step="any"/);
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  Object.assign(value.workflow.inference,{normal_modes_enabled:true,reference_planning:{max_execution_duration_s:2}});
+  h.app.start();h.reply(0,value);await settle();
+  for(const duration of ['5','5.125']){
+    h.get('inference-duration').value=duration;h.get('inference-duration').events.change();
+    assert.equal(h.get('inference-run').disabled,false);h.get('inference-run').events.click();
+    assert.match(h.get('inference-run-summary').textContent,new RegExp('最长运行 '+duration+' 秒'));
+    h.get('inference-run-cancel').events.click();
+  }
+  for(const duration of ['', '0', '-1','Infinity','NaN']){
+    h.get('inference-duration').value=duration;h.get('inference-duration').events.change();
+    assert.equal(h.get('inference-run').disabled,true);
+  }
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
+
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  Object.assign(value.runtime,{runtime_nonce:'teach-owner',command_epoch:7});
+  value.runtime.allowed_operations.inference_teach={allowed:true};
+  value.runtime.allowed_operations.inference_run={allowed:false,reason:'请先完成当前位置保持'};
+  value.workflow.busy=true;
+  value.workflow.inference.operator_task={request_id:'manual-start',kind:'teach',status:'running',phase:'teaching'};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-teach').disabled,false);
+  assert.match(h.get('inference-teach').textContent,/完成拖动并位置保持/);
+  assert.match(h.get('inference-operator-status').textContent,/可人工拖动/);
+  assert.equal(h.get('inference-run').disabled,true);
+  h.get('inference-teach').events.click();
+  const request=h.requests.find(row=>row.url==='/api/actions/inference_teach');assert(request);
+  const body=JSON.parse(request.options.body);assert.equal(body.runtime_nonce,'teach-owner');assert.equal(body.epoch,7);
+  assert.equal(h.requests.filter(row=>row.url==='/api/actions/inference_run').length,0);
+  h.app.destroy();
+}
+
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  h.app.start();h.reply(0,value);await settle();
+  h.get('inference-arm').events.click();
+  assert.equal(h.get('inference-run-confirm').textContent,'确认并准备');
+  assert.match(h.get('inference-run-details').textContent,/等待后续 Run 或双踩踏板1/);
+  assert.equal(h.get('inference-run-dialog').open,true);
+  assert.match(h.get('inference-run-title').textContent,/准备控制与踏板/);
+  h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();
+  h.get('inference-run-confirm').events.click();
+  const request=h.requests.find(row=>row.url==='/api/actions/inference_run');assert(request);
+  assert.equal(JSON.parse(request.options.body).prepare_only,true);
+  h.app.destroy();
+}
+
+for(const change of ['steps','duration','denoise','stop']){
+  const value=oneRunSnapshot(),info=value.workflow.inference,old='prepared-old',digest='a'.repeat(64),nextDigest='b'.repeat(64);
+  Object.assign(value.runtime,{runtime_nonce:'connected-owner',stationary:true,stop_receipt:{accepted_monotonic_s:1}});
+  value.workflow.id=old;value.workflow.busy=true;
+  value.inference_execution={execute_steps:15,revision:2,action_horizon:32,allowed:false};
+  value.runtime.allowed_operations.inference_execution_settings={allowed:false,reason:'Run active'};
+  Object.assign(info,{selected_model_id:'wam-fixture-step42',backend:'torch',normal_modes_enabled:true,reference_planning:{},
+    operator_controls:{timeout_s:30},normal_mode:{mode:'HOLD',runner_status:'RUNNING'},
+    operator_session:{run_id:old,duration_s:120,seed:0,model_id:'wam-fixture-step42',expected_bundle_digest:digest},
+    inference_options:{denoise_steps:2},inference_capabilities:{denoise_steps:{minimum:1,maximum:10,default:2}},
+    models:[2,10].map(n=>({id:'wam-fixture-step42',backend:'torch',selectable:true,status:'ready',bundle_digest:n===2?digest:nextDigest,
+      inference_options:{denoise_steps:n},inference_capabilities:{denoise_steps:{minimum:1,maximum:10,default:2}}}))});
+  Object.assign(info.model,{id:info.selected_model_id,backend:'torch'});
+  let closed=false,renewed=false,modelApplied=false;const posts=[];
+  const access={state:{active_job:null,recent_jobs:[]},permission:()=>({allowed:closed}),subscribe(){},setEnvironment(){},destroy(){},refresh:async()=>{},
+    prepare(action,parameters){assert(closed);assert.equal(action,'prepare_model');assert.equal(parameters.expected_bundle_digest,nextDigest);
+      modelApplied=true;info.bundle_digest=info.model.bundle_digest=nextDigest;info.inference_options={denoise_steps:10};return {job:{id:'model-update'}};}};
+  const h=harness({business:'inference',environmentAccess:access});h.app.start();h.reply(0,structuredClone(value));await settle();
+  assert.equal(h.get('inference-execute-steps').disabled,false);assert.equal(h.get('inference-duration').disabled,false);
+  assert.equal(h.get('inference-seed').disabled,true,'prepared seed stays frozen; only the requested controls renew the Run');
+  assert.equal(h.get('inference-denoise-steps').disabled,false);
+  if(change==='steps'){h.get('inference-execute-steps').value='32';h.get('inference-execute-steps').events.input();h.get('inference-steps-apply').events.click();}
+  else if(change==='denoise'){h.get('inference-denoise-steps').value='10';h.get('inference-denoise-steps').events.input();h.get('inference-denoise-apply').events.click();}
+  else{h.get('inference-duration').value='5';h.get('inference-duration').events.change();}
+  if(change==='stop')void h.app.send('stop');
+  let cursor=1;
+  for(let turn=0;turn<80;turn++){
+    while(cursor<h.requests.length){
+      const index=cursor++,request=h.requests[index];
+      if(request.options.method==='POST'){
+        const action=request.url.split('/').at(-1),body=JSON.parse(request.options.body);posts.push(action);
+        if(action==='cancel'){
+          closed=true;value.workflow.busy=false;info.operator_session=null;info.recording_ingress_closed=true;
+          info.normal_mode={mode:'HOLD',runner_status:'STOPPED'};value.runtime.stop_receipt={accepted_monotonic_s:2};
+          value.runtime.allowed_operations.inference_execution_settings={allowed:true};value.inference_execution.allowed=true;
+          info.background_recordings=[{run_id:old,ingress_closed:true,state:'sealing'}];
+        }else if(action==='inference_execution_settings'){
+          assert(closed);assert.equal(body.expected_revision,2);assert.equal(body.execute_steps,32);
+          value.inference_execution.execute_steps=32;value.inference_execution.revision=3;
+        }else if(action==='inference_run'){
+          assert(closed);assert.equal(body.prepare_only,true);assert.equal(body.duration_s,change==='duration'?5:120);
+          assert.equal(body.expected_bundle_digest,change==='denoise'?nextDigest:digest);
+          renewed=true;value.workflow.id='prepared-new';value.workflow.busy=true;
+          info.operator_session={run_id:'prepared-new',duration_s:body.duration_s,seed:body.seed,expected_bundle_digest:body.expected_bundle_digest};
+          info.normal_mode={mode:'HOLD',runner_status:'RUNNING'};
+        }
+        h.reply(index,{message:'accepted',job_id:'renewal'});
+      }else{value.revision++;h.reply(index,structuredClone(value));}
+    }
+    await settle();
+    const timer=[...h.timeouts.entries()].find(([,t])=>t.ms===100);
+    if(timer){h.timeouts.delete(timer[0]);h.advance(100);timer[1].fn();await settle();}
+  }
+  assert.equal(posts[0],'cancel');assert.equal(renewed,change!=='stop',h.get('request-status').textContent);
+  assert.equal(modelApplied,change==='denoise');assert.equal(h.get('inference-run-dialog').open,false);
+  assert.match(h.get('inference-recording-status').textContent,/prepared-old.*后台/);
+  if(change==='stop')assert(!posts.includes('inference_execution_settings'));
+  h.app.destroy();
 }

@@ -251,6 +251,133 @@ class CpuProcessService:
 
 
 class ManagementTests(unittest.TestCase):
+    def test_actual_business_manager_and_page_environment_client(self):
+        from robot_workbench.service import Application, protocol_fake, serve as serve_business
+        device=protocol_fake(Path(self.directory.name)/'actual-business')
+        backend=serve_business(Application({'fake':device}),port=0)
+        thread=threading.Thread(target=backend.serve_forever,daemon=True);thread.start()
+        try:
+            h=self.harness('fake',services=self.h['services'],config_overrides={
+                'device_id':device.id,'backend_port':backend.server_port})
+            query='/api/environment?environment=fake&view=summary'
+            raw=HTTPConnection('127.0.0.1',backend.server_port,timeout=3)
+            try:
+                raw.request('GET',query);response=raw.getresponse();response.read()
+                self.assertEqual(response.status,409,'the business projection is not the public manager endpoint')
+            finally:raw.close()
+            code,state,_=self.request(query,h=h)
+            self.assertEqual(code,200,state)
+            self.assertEqual(state['projection'],'manager_environment_summary')
+            self.assertEqual(state['target']['device_id'],device.id)
+            self.assertFalse(state['runtime']['connected'])
+            self.assertTrue(state['operations']['status_check']['allowed'])
+            # Execute the real served JS client against the actual HTTP producer.
+            program="""
+                import assert from 'node:assert/strict';
+                const origin=process.argv[1];
+                const source=await (await fetch(origin+'/web/operations.js')).text();
+                const {createOperationClient}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+                const client=createOperationClient({fetch:(url,options)=>{
+                    assert(!options?.method||options.method==='GET');return fetch(new URL(url,origin),options);
+                }});
+                const state=await client.read('fake');
+                assert.equal(client.compatible(state),true);
+                assert.equal(state.runtime.connected,false);
+                assert.equal(state.target.environment,'fake');
+                assert(state.operations.status_check.allowed);
+            """
+            result=subprocess.run(['node','--input-type=module','-e',program,
+                'http://127.0.0.1:'+str(h['port'])],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr[-2000:])
+            code,_,headers=self.request('/?business=inference',h=h)
+            self.assertEqual(code,303)
+            self.assertEqual(headers['Location'],'/?business=inference&environment=fake')
+            self.assertIsNone(device.runtime,'opening the complete page path must never connect hardware')
+        finally:
+            device.closed.set();backend.shutdown();backend.server_close();thread.join(1)
+
+    def test_recovery_scope_accepts_registered_recorder_and_rejects_unknown_service(self):
+        m=object.__new__(WorkbenchManager);m.services={name:object()for name in ('workbench','recording','cameras','model')}
+        m.window={'affected_services':['workbench','recording']};m.unresolved=lambda:[];m.operations=SimpleNamespace(jobs={})
+        self.assertEqual(m.maintenance_services({}),{'workbench','recording'})
+        m.window={'affected_services':['workbench','foreign']}
+        with self.assertRaisesRegex(ValueError,'作用域'):m.maintenance_services({})
+
+    def test_recording_shutdown_refusal_precedes_any_process_stop(self):
+        m=object.__new__(WorkbenchManager);m.config={};m.window=None;m.timeouts={'state':.1}
+        service=Mock();service.snapshot.return_value=dict(running=True,state='running');m.services={'recording':service}
+        with patch.dict(os.environ,WORKBENCH_RECORDING_SERVICE='/registered/service.json'),patch(
+                'robot_workbench.recording_process.recording_call',side_effect=ValueError('sessions must seal')):
+            with self.assertRaisesRegex(ValueError,'must seal'):m.service_action('recording','stop',lambda *a:None)
+        service.stop.assert_not_called()
+
+    def test_physical_source_wait_and_model_prepare_overlap_but_maintenance_rpc_does_not(self):
+        from robot_workbench.operations import OperationError
+        for failure in (None,'camera','model'):
+            with self.subTest(failure=failure):
+                m=object.__new__(WorkbenchManager);m.config={};events=[]
+                source_started=threading.Event();model_finished=threading.Event()
+                def camera(action,token,progress,*,bind):
+                    self.assertFalse(bind);source_started.set()
+                    self.assertTrue(model_finished.wait(1))
+                    if failure=='camera':raise OperationError('camera_start_failed','CPU source failure')
+                    events.append('source_ready');return dict(service={'pid':42})
+                def model(*args,**kwargs):
+                    self.assertTrue(source_started.wait(1),'source wait did not overlap model preparation')
+                    events.append('model_finished');model_finished.set()
+                    if failure=='model':raise OperationError('model_prepare_failed','CPU model failure')
+                    return dict(prepared={'control_ready':False})
+                def post(*args,**kwargs):
+                    self.assertEqual(events,['model_finished','source_ready']);return {'bound':True}
+                m.camera_action=camera;m.prepare_model=model;m.post=Mock(side_effect=post)
+                if failure:
+                    with self.assertRaises(OperationError):m._prepare_observation_and_model('cpu',Mock(),{'pid':41})
+                    m.post.assert_not_called()
+                else:
+                    result=m._prepare_observation_and_model('cpu',Mock(),{'pid':41})
+                    self.assertEqual(result['cameras']['binding'],{'bound':True})
+                    m.post.assert_called_once_with('ops_rebind_cameras',token='cpu',timeout=15)
+
+    def test_environment_model_process_starts_before_camera_wait_without_retry_or_early_warmup(self):
+        from robot_workbench.operations import OperationError
+        for case in ('ready','camera_failure','model_exit','stop'):
+            with self.subTest(case=case):
+                h=self.harness('fake');m=h['manager'];model=h['services']['model']
+                model.stop();m.refresh();starts=model.starts;seen=[]
+                def camera(*args,**kwargs):
+                    self.assertTrue(model.snapshot()['running'],'camera wait began before independent model startup')
+                    self.assertFalse(json_request(model.port,'/fixture')['loaded'],'model warmed before camera binding')
+                    seen.append(True)
+                    if case=='camera_failure':raise OperationError('camera_start_failed','CPU camera not ready')
+                    if case=='model_exit':model.stop()
+                    if case=='stop':m.stop_generation+=1
+                    return dict(already_running=True,cameras={})
+                request=dict(request_id='parallel-prepare',expected_target=m.target(),parameters={'capabilities':['observe','inference']})
+                with patch.object(m,'camera_action',side_effect=camera),patch.object(m,'service_action',wraps=m.service_action)as actions:
+                    if case!='ready':
+                        with self.assertRaises(OperationError)as caught:m.run('prepare_environment',request,Mock())
+                        self.assertEqual(caught.exception.code,dict(camera_failure='camera_start_failed',
+                            model_exit='model_start_failed',stop='operator_stop')[case])
+                    else:
+                        result=m.run('prepare_environment',request,Mock())
+                        self.assertTrue(result['model']['prepared']['model_ready'])
+                self.assertEqual(seen,[True]);self.assertEqual(model.starts,starts+1)
+                self.assertEqual([(call.args[0],call.args[1])for call in actions.call_args_list],[('model','start')])
+                self.assertEqual(model.snapshot()['running'],case!='model_exit','partial software preparation must retain its real state')
+                state=json_request(h['services']['workbench'].port,'/fixture')
+                self.assertFalse(state['connected']);self.assertEqual(state['loaded'],case=='ready')
+
+    def test_unverified_environment_process_and_owner_states_remain_unknown(self):
+        from robot_workbench.operations import OperationError
+        manager=object.__new__(WorkbenchManager)
+        manager.health_lock=threading.Lock();manager.config=dict(control_lifecycle='external')
+        healthy=dict(deployment=dict(files_unchanged=True),checked_wall_ns=time.time_ns(),services={'workbench':{'state':'running'}})
+        for health,code in [(dict(healthy,checked_wall_ns=0),'environment_state_unknown'),
+                (dict(healthy,services={'workbench':{'state':'unknown'}}),'process_identity_unknown'),
+                (dict(healthy,control_owner_reachable=False),'owner_state_unknown')]:
+            manager.health_cache=health
+            with self.assertRaises(OperationError)as caught:manager.check('connect_control')
+            self.assertTrue(caught.exception.unknown);self.assertEqual(caught.exception.code,code)
     def test_recover_nonrecoverable_fault_requires_verified_release_before_reconnect(self):
         for unconfirmed in (False,True):
             with self.subTest(release_unconfirmed=unconfirmed):
@@ -447,7 +574,7 @@ class ManagementTests(unittest.TestCase):
 
     def test_independent_ui_and_operations_survive_backend_exit(self):
         self.h['services']['workbench'].stop();self.h['manager'].refresh()
-        for path in ('/','/operations','/web/operations.js','/api/operations?environment=fake'):
+        for path in ('/?environment=fake','/operations?environment=fake','/web/operations.js','/api/operations?environment=fake'):
             self.assertEqual(self.request(path)[0],200,path)
         self.assertEqual(self.request('/api/state?environment=fake')[0],503)
         status,job,_=self.start('restart_workbench');self.assertEqual(status,200,job)
@@ -730,6 +857,45 @@ class ManagementTests(unittest.TestCase):
         self.assertTrue(h['manager'].snapshot()['health']['runtime']['connected'])
         self.assertNotIn('private-fixture',json.dumps(result))
         self.assertEqual(set(result['verification']['evidence']['cameras']),{'head','left','right'})
+
+    def test_ros_camera_profile_admits_complete_connect_and_reset_without_legacy_descriptor(self):
+        h,cameras,_=self.camera_reset_fixture();manager=h['manager']
+        path=Path(cameras.spec.command[cameras.spec.command.index('--profile')+1])
+        profile=json.loads(path.read_text())
+        profile['data_plane']=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu',domain_id=126)
+        for role,item in profile['cameras'].items():
+            intrinsic=path.parent/(role+'-intrinsics.json')
+            intrinsic.write_text(json.dumps(dict(serial=item['serial'],width=2,height=2)))
+            item['intrinsics']=str(intrinsic)
+        path.write_text(json.dumps(profile))
+        manager.config.pop('camera_descriptor')
+        manager.config['publication_files']={'physical_profile':str(path)}
+        self.configure(h=h,connected=False)
+        view=Mock()
+        with patch('robot_workbench.ros_inputs.RosCameraView',return_value=view),\
+                patch('robot_workbench.rgbd_service.CommonCameraService.connect',side_effect=AssertionError('legacy IPC used')):
+            status,job,_=self.start('connect_control',h=h,support=True)
+            self.assertEqual(status,200,job)
+            result=self.wait_job(job,h);self.assertEqual(result['status'],'succeeded',result)
+            self.assertTrue(manager.snapshot()['health']['runtime']['connected'])
+            reply=dict(status='enumerated',role='left',serial='101',reset_calls=1,disappearance_observed=True)
+            with patch.dict(os.environ,WORKBENCH_RECORDING_SERVICE='/cpu/recording.json'),\
+                    patch('robot_workbench.recording_process.recording_call',return_value={'can_stop':True}),\
+                    patch('robot_workbench.management.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps(reply),stderr='')):
+                status,job,_=self.start('reset_camera_left',h=h)
+                self.assertEqual(status,200,job)
+                result=self.wait_job(job,h);self.assertEqual(result['status'],'succeeded',result)
+            self.configure(h=h,connected=False)
+            status,job,_=self.start('recover_control',h=h,support=True)
+            self.assertEqual(status,200,job)
+            result=self.wait_job(job,h);self.assertEqual(result['status'],'succeeded',result)
+        self.assertEqual(cameras.stops,1)
+        self.assertEqual(view.close.call_count,3)
+        profile['robot_id']='another-device';path.write_text(json.dumps(profile))
+        self.configure(h=h,connected=False)
+        starts=cameras.starts
+        status,_,_=self.start('connect_control',h=h,support=True)
+        self.assertEqual(status,409);self.assertEqual(cameras.starts,starts)
 
     def test_camera_owned_exit_reports_source_error_without_waiting_or_retrying(self):
         h,cameras,_=self.camera_reset_fixture();manager=h['manager'];started=cameras.snapshot()
@@ -1206,6 +1372,42 @@ class ManagementTests(unittest.TestCase):
                 self.assertEqual(h['services']['model'].stops,0)
                 self.configure(h=h,reset_state=True)
                 self.assertEqual(self.start(action,h=h)[0],409,'unknown live backend is never replaced')
+
+
+class CameraSourceStopTest(unittest.TestCase):
+    def test_source_stop_does_not_claim_the_plant_process_exited(self):
+        from robot_workbench.management import _camera_stop_verified
+        source=dict(stopped=True,exit_verified=False,source_available=False,process_preserved=True)
+        self.assertTrue(_camera_stop_verified(source))
+        self.assertTrue(_camera_stop_verified(dict(stopped=True,exit_verified=True)))
+        for changed in ({'source_available':True},{'process_preserved':False},{'stopped':False},{'exit_verified':None}):
+            self.assertFalse(_camera_stop_verified(dict(source,**changed)))
+
+
+class RosCameraManagementTest(unittest.TestCase):
+    def test_readiness_uses_registered_profile_ros_and_closes_only_its_subscriber(self):
+        with TemporaryDirectory()as temp:
+            root=Path(temp);profile=dict(environment='physical',robot_id='cpu',
+                data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu',domain_id=126),cameras={})
+            for i,role in enumerate(('head','left','right')):
+                path=root/(role+'.json');path.write_text(json.dumps(dict(serial=str(i),width=2,height=2)))
+                profile['cameras'][role]=dict(serial=str(i),intrinsics=str(path))
+            path=root/'profile.json';path.write_text(json.dumps(profile))
+            manager=object.__new__(WorkbenchManager);manager.environment='physical';manager.timeouts={'camera':.1}
+            manager.config=dict(device_id='cpu',publication_files={'physical_profile':str(path)},native_rgb={'directory':'unused'})
+            manager.services={'cameras':Mock()};manager.service_action=Mock(return_value={'state':'running'})
+            manager.post=Mock(return_value={'reconnected':True});view=Mock()
+            with patch('robot_workbench.ros_inputs.RosCameraView',return_value=view)as create,\
+                    patch('robot_workbench.rgbd_service.CommonCameraService.connect',side_effect=AssertionError('no IPC')),\
+                    patch('robot_workbench.prometheus_rgb.RGBClient',side_effect=AssertionError('no raw files')):
+                result=manager.camera_action('start','token',lambda *a,**k:None)
+            self.assertTrue(result['binding']['reconnected']);view.close.assert_called_once()
+            self.assertEqual(view.latest_rgbd.call_count,3);self.assertEqual(create.call_args.args[0],profile['data_plane'])
+            manager.service_action.reset_mock()
+            profile['robot_id']='another-device';path.write_text(json.dumps(profile))
+            with self.assertRaisesRegex(ValueError,'another device'):
+                manager.camera_action('start','token',lambda *a,**k:None)
+            manager.service_action.assert_not_called()
 
 
 if __name__=='__main__':

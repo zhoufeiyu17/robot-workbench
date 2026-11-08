@@ -1,0 +1,10 @@
+string<=200 request_id
+string<=200 run_id
+uint64 epoch
+string<=200 session_id
+Observation observation
+int64 valid_until_source_time_ns
+uint64 seed
+string<=4096 task
+float64[<=840] applied_history
+string<=524288 binding_json

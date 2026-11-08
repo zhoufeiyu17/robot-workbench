@@ -1,0 +1,10 @@
+StreamRef reference
+string<=200 request_id
+string<=200 run_id
+uint64 epoch
+float64[<=840] actions
+uint32 rows
+uint32 columns
+string<=524288 envelope_json
+string<=524288 audit_json
+string<=4096 error

@@ -4,7 +4,7 @@ Only atomic *.commit.json files publish segments. A stopped writer leaves its
 partial files for diagnosis; recovery exposes the committed prefix, not a
 complete episode. Callers supply RGB8/depth16 PNGs or immutable RGB8/depth16le pixels.
 """
-from collections import deque
+from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import hashlib
 import io
@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import struct
 import subprocess
 import threading
@@ -22,6 +23,13 @@ import zlib
 
 _LIMIT = 16 * 1024 * 1024
 _SCHEMA = 'rgbd-segment-v1'
+_RGB_SCHEMA = 'rgb-segment-v1'
+# Encoding reaches the source rate with two workers; decoding needs four for
+# this FFV1 slice grid. Avoid oversubscribing both stages during segment overlap.
+_DEPTH_ENCODE_THREADS = 2
+_DEPTH_DECODE_THREADS = 4
+_PROBE_CACHE = OrderedDict()
+_PROBE_LOCK = threading.Lock()
 
 
 def _shape(blob, depth=False):
@@ -73,6 +81,7 @@ class _Child:
     """Own exactly one codec process; bound its stderr, IO waits and lifetime."""
     def __init__(self, argv, timeout_s):
         from launch_environment import clean_environment
+        argv=[shutil.which(argv[0])or argv[0],*argv[1:]]
         self.timeout_s = timeout_s
         self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         bufsize=0, close_fds=True, env=clean_environment())
@@ -152,7 +161,15 @@ class _Child:
 
 
 def _probe(path, ffprobe, timeout_s, *, factory=_Child, release=lambda child: None):
-    child = factory([ffprobe, '-v', 'error', '-threads', '1', '-count_frames', '-select_streams', 'v:0', '-show_entries',
+    # Always reread the bytes. Only the expensive decode/count is reusable;
+    # stat/mtime alone cannot authorize a previously verified segment.
+    pin=_digest(Path(path));tool=str(Path(shutil.which(ffprobe)or ffprobe).resolve())
+    key=(tool,pin['size_bytes'],pin['sha256'])
+    with _PROBE_LOCK:
+        cached=_PROBE_CACHE.get(key)
+        if cached is not None:
+            _PROBE_CACHE.move_to_end(key);return dict(cached)
+    child = factory([ffprobe, '-v', 'error', '-threads', str(_DEPTH_DECODE_THREADS if Path(path).suffix=='.mkv'else 1), '-count_frames', '-select_streams', 'v:0', '-show_entries',
                     'stream=width,height,nb_read_frames,codec_name,pix_fmt', '-of', 'json', str(path)], timeout_s)
     try:
         child.process.stdin.close()
@@ -165,6 +182,10 @@ def _probe(path, ffprobe, timeout_s, *, factory=_Child, release=lambda child: No
         streams = json.loads(output)['streams']
         if len(streams) != 1:
             raise ValueError('one video stream required')
+        if _digest(Path(path))!=pin:raise ValueError('segment changed during codec verification')
+        with _PROBE_LOCK:
+            _PROBE_CACHE[key]=dict(streams[0]);_PROBE_CACHE.move_to_end(key)
+            while len(_PROBE_CACHE)>128:_PROBE_CACHE.popitem(last=False)
         return streams[0]
     finally:
         child.abort()
@@ -182,13 +203,16 @@ def _check_probe(path, manifest, kind, ffprobe, timeout_s, **kwargs):
 
 class SegmentWriter:
     def __init__(self, root, camera, segment_frames=120, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s=30,
-                 commit_executor=None):
+                 commit_executor=None, pixel_format='rgb8-depth16le'):
         started = time.monotonic()
         if not isinstance(camera, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', camera):
             raise ValueError('safe camera name required')
         if type(segment_frames) is not int or not 1 <= segment_frames <= 120 or not 0 < timeout_s <= 300:
             raise ValueError('bounded segment size / timeout required')
         self.root, self.camera = Path(root), camera
+        if pixel_format not in ('rgb8','rgb8-depth16le'):raise ValueError('declared segment pixel format required')
+        self.kinds=('rgb',) if pixel_format=='rgb8' else ('rgb','depth')
+        self.schema=_RGB_SCHEMA if pixel_format=='rgb8' else _SCHEMA
         self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink():
             raise ValueError('symlink segment root rejected')
@@ -200,7 +224,7 @@ class SegmentWriter:
         self.closed = self.aborted = False
         self.count = self.issued_index = 0
         self.shape = None
-        self.pending = self.pending_segment = None
+        self._pending = deque()
         self._lock = threading.RLock()
         self._owned_children = set()
         self._owns_executor = commit_executor is None
@@ -227,17 +251,17 @@ class SegmentWriter:
 
     def _start(self, shape):
         self.shape, self.count = shape, 0
-        self.pixel_hashes = {kind: hashlib.sha256() for kind in ('rgb', 'depth')}
+        self.pixel_hashes = {kind: hashlib.sha256() for kind in self.kinds}
         self.stem = f'{self.issued_index:06d}'
         self.issued_index += 1
         self.paths = {kind: self.directory / f'{self.stem}.{kind}.partial.{extension}'
-                      for kind, extension in [('rgb', 'mp4'), ('depth', 'mkv'), ('frames', 'jsonl')]}
+                      for kind, extension in [('rgb', 'mp4'), ('depth', 'mkv'), ('frames', 'jsonl')] if kind in (*self.kinds,'frames')}
         detail = self.timings['first_frame'] if self.stem == '000000' else None
         started = time.monotonic()
         if detail is not None:detail['stage'] = 'metadata_open'
         self.meta = self.paths['frames'].open('xb')
         if detail is not None:detail['metadata_open_wall_s'] = time.monotonic()-started
-        for kind in ('rgb', 'depth'):
+        for kind in self.kinds:
             # Avoid FFV1's tiny-frame slice-grid row loss. FFmpeg ffv1enc.c's
             # level-3 constraint rejects one slice above 352x288 (CIF); retain
             # its automatic production grid for those larger dimensions.
@@ -248,7 +272,7 @@ class SegmentWriter:
             argv = [self.ffmpeg, '-nostdin', '-v', 'error', '-n', '-threads', '1', '-filter_threads', '1', '-f', 'rawvideo',
                     '-pixel_format', 'rgb24' if kind == 'rgb' else 'gray16le',
                     '-video_size', f'{shape[0]}x{shape[1]}', '-framerate', '30', '-i', 'pipe:0',
-                    '-an', '-threads', '1', *codec, str(self.paths[kind])]
+                    '-an', '-threads', str(_DEPTH_ENCODE_THREADS if kind=='depth'else 1), *codec, str(self.paths[kind])]
             started = time.monotonic()
             if detail is not None:detail['stage'] = kind+'_spawn'
             self.children[kind] = self._spawn(argv, self.timeout_s)
@@ -264,7 +288,7 @@ class SegmentWriter:
         except FutureTimeout:
             if future.done():
                 raise  # The commit itself failed with TimeoutError.
-            raise TimeoutError('one pending segment per camera exceeded commit wait budget') from None
+            raise TimeoutError('pending segment verification exceeded commit wait budget') from None
         finally:
             elapsed = time.monotonic() - started
             if wait:
@@ -272,13 +296,21 @@ class SegmentWriter:
                     self.timings['pending_wait_wall_s'] += elapsed
                     self.timings['pending_wait_peak_wall_s'] = max(self.timings['pending_wait_peak_wall_s'], elapsed)
         self.segments.append(manifest)
-        self.pending = self.pending_segment = None
+        self._pending.popleft()
+
+    @property
+    def pending(self):return self._pending[0][0]if self._pending else None
+
+    @property
+    def pending_segment(self):return self._pending[0][1]if self._pending else None
 
     def add(self, meta, color_png, depth_png):
         if self.closed:
             raise ValueError('segment writer closed')
         shape = _shape(color_png)
-        if _shape(depth_png, True) != shape:
+        if self.kinds==('rgb',):
+            if depth_png is not None:raise ValueError('RGB-only source cannot contain depth')
+        elif _shape(depth_png, True) != shape:
             raise ValueError('RGB and depth dimensions differ')
         return self._add_frame(meta, color_png, depth_png, shape, input_format='png')
 
@@ -286,7 +318,12 @@ class SegmentWriter:
         """Write packed RGB uint8 and aligned little-endian uint16 depth unchanged."""
         if self.closed:
             raise ValueError('segment writer closed')
-        shape = _pixel_shape(rgb_bytes, depth_u16le_bytes, width, height)
+        if self.kinds==('rgb',):
+            if (depth_u16le_bytes is not None or type(width)is not int or type(height)is not int
+                    or min(width,height)<=0 or width*height*3>_LIMIT or not isinstance(rgb_bytes,bytes)
+                    or len(rgb_bytes)!=width*height*3):raise ValueError('bounded RGB-only pixels required')
+            shape=width,height
+        else:shape = _pixel_shape(rgb_bytes, depth_u16le_bytes, width, height)
         return self._add_frame(meta, rgb_bytes, depth_u16le_bytes, shape, input_format='rgb8_depth16le')
 
     def _add_frame(self, meta, color, depth, shape, *, input_format):
@@ -308,9 +345,10 @@ class SegmentWriter:
                 import numpy as np
                 with Image.open(io.BytesIO(color)) as image:
                     color = image.tobytes()
-                with Image.open(io.BytesIO(depth)) as image:
-                    depth = np.asarray(image, dtype='<u2').tobytes()
-                _pixel_shape(color, depth, *shape)
+                if 'depth'in self.kinds:
+                    with Image.open(io.BytesIO(depth)) as image:
+                        depth = np.asarray(image, dtype='<u2').tobytes()
+                    _pixel_shape(color, depth, *shape)
                 if first:detail['png_decode_wall_s'] = time.monotonic()-started
             if not self.children:
                 self._start(shape)
@@ -321,12 +359,12 @@ class SegmentWriter:
             if first:detail['rgb_pipe_write_wall_s'] = time.monotonic()-before
             before = time.monotonic()
             if first:detail['stage'] = 'depth_pipe_write'
-            self.children['depth'].write(depth)
+            if 'depth'in self.kinds:self.children['depth'].write(depth)
             if first:detail['depth_pipe_write_wall_s'] = time.monotonic()-before
             before = time.monotonic()
             if first:detail['stage'] = 'metadata_append'
             self.pixel_hashes['rgb'].update(color)
-            self.pixel_hashes['depth'].update(depth)
+            if 'depth'in self.kinds:self.pixel_hashes['depth'].update(depth)
             self.meta.write(row)
             if first:detail['metadata_append_wall_s'] = time.monotonic()-before
             self.count += 1
@@ -345,19 +383,20 @@ class SegmentWriter:
         """Wait for the already detached segment; keep the active segment open."""
         self._check_active()
         try:
-            self._collect_pending(wait=True)
+            while self._pending:self._collect_pending(wait=True)
             return list(self.segments)
         except BaseException:
             self.abort()
             raise
 
     def _queue_commit(self):
-        # At most one queued/running commit per camera. A slower disk cannot
+        # At most two queued/running commits per camera. A slower disk cannot
         # turn closed codec instances or segment jobs into an unbounded queue.
-        self._collect_pending(wait=True)
+        self._collect_pending()
+        if len(self._pending)>=2:self._collect_pending(wait=True)
         with self._lock:
             self._check_active()
-            manifest = {'schema': _SCHEMA, 'camera': self.camera, 'segment': int(self.stem),
+            manifest = {'schema': self.schema, 'camera': self.camera, 'segment': int(self.stem),
                         'frame_count': self.count, 'width': self.shape[0], 'height': self.shape[1],
                         'metadata_time_authoritative': True, 'files': {},
                         'decoded_pixel_sha256': {kind: digest.hexdigest() for kind, digest in self.pixel_hashes.items()}}
@@ -366,8 +405,7 @@ class SegmentWriter:
             for child in self.children.values():
                 child.process.stdin.close()
             self.children, self.meta, self.count = {}, None, 0
-            self.pending_segment = snapshot
-            self.pending = self._executor.submit(self._commit, snapshot)
+            self._pending.append((self._executor.submit(self._commit, snapshot),snapshot))
 
     def _commit(self, snapshot):
         started = time.monotonic()
@@ -382,7 +420,7 @@ class SegmentWriter:
                 self._forget(child)
             detail['codec_finalize_wall_s'] = time.monotonic() - before
             before = time.monotonic()
-            for kind in ('rgb', 'depth'):
+            for kind in self.kinds:
                 self._check_active()
                 _check_probe(paths[kind], manifest, kind, self.ffprobe, self.timeout_s,
                              factory=self._spawn, release=self._forget)
@@ -438,7 +476,7 @@ class SegmentWriter:
         try:
             if self.children:
                 self._queue_commit()
-            self._collect_pending(wait=True)
+            while self._pending:self._collect_pending(wait=True)
             self.closed = True
             if self._owns_executor:
                 self._executor.shutdown(wait=True)
@@ -450,9 +488,8 @@ class SegmentWriter:
     def abort(self):
         with self._lock:
             self.closed = self.aborted = True
-            future, snapshot = self.pending, self.pending_segment
-            if future is not None:
-                future.cancel()
+            pending=tuple(self._pending)
+            for future,_ in pending:future.cancel()
             children = tuple(self._owned_children)
         for child in children:
             child.abort()
@@ -460,17 +497,14 @@ class SegmentWriter:
         if self.meta is not None and not self.meta.closed:
             self.meta.close()
         # Do not close the worker's metadata stream underneath a running write.
-        if snapshot is not None and (future is None or future.cancelled()):
-            if not snapshot['meta'].closed:
-                snapshot['meta'].close()
-        if future is not None and not future.cancelled():
-            try:
-                future.result(timeout=self.timeout_s)
-            except FutureTimeout:
-                if not future.done():
-                    raise TimeoutError('segment commit cleanup timed out; retained incomplete files') from None
-            except BaseException:
-                pass  # The caller records its original error; no commit is promoted.
+        for future,snapshot in pending:
+            if future.cancelled():
+                if not snapshot['meta'].closed:snapshot['meta'].close()
+            else:
+                try:future.result(timeout=self.timeout_s)
+                except FutureTimeout:
+                    if not future.done():raise TimeoutError('segment commit cleanup timed out; retained incomplete files') from None
+                except BaseException:pass  # Preserve the caller's original error.
         if self._owns_executor:
             self._executor.shutdown(wait=False, cancel_futures=True)
 
@@ -480,11 +514,12 @@ def verify_segment(root, segment, *, ffprobe='ffprobe', timeout_s=30):
     if not re.fullmatch(r'[A-Za-z0-9_-]+/[0-9]{6}\.commit\.json', segment) or path.stat().st_size > 64 * 1024:
         raise ValueError('bounded committed segment manifest required')
     manifest = json.loads(path.read_bytes())
-    if (manifest.get('schema') != _SCHEMA or type(manifest.get('frame_count')) is not int
-            or not 1 <= manifest['frame_count'] <= 120 or set(manifest.get('files', {})) != {'rgb', 'depth', 'frames'}
+    kinds={'rgb'}if manifest.get('schema')==_RGB_SCHEMA else {'rgb','depth'}
+    if (manifest.get('schema') not in (_SCHEMA,_RGB_SCHEMA) or type(manifest.get('frame_count')) is not int
+            or not 1 <= manifest['frame_count'] <= 120 or set(manifest.get('files', {})) != kinds|{'frames'}
             or manifest.get('metadata_time_authoritative') is not True
             or not isinstance(manifest.get('decoded_pixel_sha256'), dict)
-            or set(manifest['decoded_pixel_sha256']) != {'rgb', 'depth'}
+            or set(manifest['decoded_pixel_sha256']) != kinds
             or any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
                    for value in manifest['decoded_pixel_sha256'].values())
             or type(manifest.get('segment')) is not int or manifest['segment'] < 0
@@ -530,11 +565,13 @@ def iter_segment(root, segment, *, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s
     """Verify once, then decode one paired frame at a time (never whole video)."""
     manifest = verify_segment(root, segment, ffprobe=ffprobe, timeout_s=timeout_s)
     children = {}
-    pixel_hashes = {kind: hashlib.sha256() for kind in ('rgb', 'depth')}
+    kinds=('rgb',)if manifest['schema']==_RGB_SCHEMA else ('rgb','depth')
+    pixel_hashes = {kind: hashlib.sha256() for kind in kinds}
     try:
         for kind, pixel_format in [('rgb', 'rgb24'), ('depth', 'gray16le')]:
+            if kind not in kinds:continue
             path = _safe(root, manifest['files'][kind]['path'])
-            children[kind] = _Child([ffmpeg, '-nostdin', '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', str(path),
+            children[kind] = _Child([ffmpeg, '-nostdin', '-v', 'error', '-threads', str(_DEPTH_DECODE_THREADS if kind=='depth'else 1), '-filter_threads', '1', '-i', str(path),
                                      '-an', '-threads', '1', '-f', 'rawvideo', '-pix_fmt', pixel_format,
                                      'pipe:1'], timeout_s)
             children[kind].process.stdin.close()
@@ -543,10 +580,10 @@ def iter_segment(root, segment, *, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s
             for _ in range(manifest['frame_count']):
                 meta = json.loads(metadata.readline(64 * 1024 + 1))
                 color = children['rgb'].read(width * height * 3)
-                depth = children['depth'].read(width * height * 2)
+                depth = children['depth'].read(width * height * 2)if 'depth'in children else None
                 pixel_hashes['rgb'].update(color)
-                pixel_hashes['depth'].update(depth)
-                yield meta, _png(color, width, height, False) if png else color, _png(depth, width, height, True) if png else depth
+                if depth is not None:pixel_hashes['depth'].update(depth)
+                yield meta, _png(color, width, height, False) if png else color, _png(depth, width, height, True) if png and depth is not None else depth
         for child in children.values():
             if child.read(1, eof=True):
                 raise ValueError('segment contains unexpected extra frames')

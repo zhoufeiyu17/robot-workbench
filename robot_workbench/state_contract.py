@@ -1,5 +1,6 @@
 """Shared interpretation of published facts; no IO or control side effects."""
 from copy import deepcopy
+from .execution_settings import FEEDBACK_TIMEOUT_S
 
 
 CONTROL_STATES = {'READY', 'STOPPED_DAMPING_HOLD', 'MANUAL_TAKEOVER'}
@@ -10,7 +11,7 @@ def control_healthy(value):
     age = value.get('sample_age_s')
     return (value.get('connected') is True and value.get('feedback_healthy') is True
         and value.get('stationary') is True and value.get('automatic_enabled') is False
-        and type(age) in (int, float) and 0 <= age <= .1 and bool(value.get('runtime_nonce'))
+        and type(age) in (int, float) and 0 <= age <= FEEDBACK_TIMEOUT_S and bool(value.get('runtime_nonce'))
         and value.get('control_coherence', {}).get('consistent', True) is True
         and str(value.get('state', '')).upper() in CONTROL_STATES)
 

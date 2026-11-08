@@ -69,7 +69,7 @@ def main():
     args.ready_file.parent.mkdir(parents=True,exist_ok=True)
     with args.ready_file.open('x')as stream:json.dump(receipt,stream)
     try:server.serve_forever()
-    finally:server.server_close();service.close()
+    finally:server.server_close();server.model_service.close()
 
 
 if __name__=='__main__':main()

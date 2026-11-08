@@ -11,6 +11,17 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'rule_based_workbench')]
 
 
+def _bind_sdk_import(profile):
+    contract=profile.get('sdk_quiesce')
+    if contract:
+        # The validated deployment pin must take precedence over an installed SDK.
+        sys.path.insert(0,str(Path(contract['module']['path']).resolve().parent))
+        loaded=sys.modules.get('arx5_interface')
+        if loaded is not None:
+            from robot_workbench.sdk_quiesce import verify_module
+            verify_module(loaded,contract)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile',type=Path,required=True)
@@ -29,6 +40,7 @@ def main():
                          record_path=args.record,inherited_fds=(args.fd,args.epoch_fd))
         return 0 if result==0 else 1
     bind_child()
+    _bind_sdk_import(profile)
     connection=socket.socket(fileno=args.fd);os.set_inheritable(args.fd,False)
     from examples.scripts.debug import joint_head_real_owner as ref
     from robot_workbench.sdk_quiesce import dm_joint_velocity_wire_scale,dm_torque_units,ec_torque_units,load_gripper_calibration
@@ -39,6 +51,7 @@ def main():
         configure_mapping(profile['jaw_mapping_file'])
     ref.legacy_modules(profile['legacy_source'])
     backend=ref.hardware_backend(disabled_grippers=profile.get('disabled_grippers',[]),
+        raw_state_enabled=profile.get('raw_state_enabled',False),
         can_interfaces=profile['can_interfaces'],
         right_j4_diagnostic_kp=profile.get('right_j4_diagnostic_kp'),
         right_j4_diagnostic_kd=profile.get('right_j4_diagnostic_kd'),

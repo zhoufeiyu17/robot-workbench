@@ -5,17 +5,18 @@ import json
 from pathlib import Path
 import re
 import shutil
+import os
 from urllib.parse import urlencode
 
 CAMERAS=('base_0','left_wrist_0','right_wrist_0')
 SCHEMA='collection_history_source.v1'
 
 
-def _file(root,value):
+def _file(root,value,*,allow_empty=False):
     path=Path(value)
     if not path.is_absolute():path=root/path
     if ('..' in path.parts or any(part.is_symlink() for part in (path,*path.parents))
-            or not path.resolve().is_relative_to(root) or not path.is_file() or path.stat().st_size<=0):
+            or not path.resolve().is_relative_to(root) or not path.is_file() or not allow_empty and path.stat().st_size<=0):
         raise ValueError('history file must be a nonempty regular file within its declared run: '+str(path))
     return path
 
@@ -367,3 +368,145 @@ def load_history(root,*,environment,robot_id):
     if any(row['details']['robot_id']!=robot_id for row in history.results()):
         raise ValueError('retained history belongs to another virtual robot')
     return history
+
+
+class CaptureResults:
+    """Business-side, bounded-page projection of sealed common-control Runs."""
+    BUSINESSES=('calibration','collection','research')
+
+    def __init__(self,root,*,environment,device_id,inference_history=None):
+        import queue
+        import threading
+        from .inference_history import InferenceHistory
+        raw=Path(root)
+        if not raw.is_absolute()or raw.is_symlink()or environment not in('fake','physical')or not device_id:
+            raise ValueError('declared device/environment capture root required')
+        self.root=raw.resolve();self.root.mkdir(parents=True,exist_ok=True)
+        self.environment,self.device_id=environment,device_id
+        import fcntl
+        from .inference_trace import write_json
+        identity=dict(environment=environment,device_id=device_id)
+        with (self.root/'capture-index.lock').open('a')as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            source=self.root/'capture-index-identity.json'
+            if source.exists():
+                if self._read(_file(self.root,source))!=identity:raise ValueError('capture index belongs to another device/environment')
+            else:write_json(source,identity)
+        self.histories=({'inference':inference_history} if inference_history is not None else
+            {business:InferenceHistory(self.root,database='capture-'+business+'.sqlite3')for business in self.BUSINESSES})
+        self.queue=queue.Queue(maxsize=64);self.closed=threading.Event();self.rescan=threading.Event();self.rescan.set()
+        self.error=None;self.thread=threading.Thread(target=self._run,daemon=True,name='capture-result-index');self.thread.start()
+
+    def notify(self,value=None):
+        import queue
+        if self.closed.is_set():return
+        if value is None:self.rescan.set();return
+        try:self.queue.put_nowait(deepcopy(value))
+        except queue.Full:self.rescan.set();self.error='capture result index queue full; sealed files retained for reconciliation'
+
+    def _read(self,path):
+        if path.stat().st_size>8*1024**2:raise ValueError('bounded capture receipt/manifest required')
+        return json.loads(path.read_text())
+
+    def _checked_ref(self,ref):
+        if not isinstance(ref,dict)or set(ref)!={'path','size_bytes','sha256'}:raise ValueError('sealed artifact pin required')
+        path=_file(self.root,ref['path'])
+        if _pin(path)!={key:ref[key]for key in('size_bytes','sha256')}:raise ValueError('sealed artifact changed')
+        return path
+
+    def register(self,event):
+        required={'execution_instance_id','business_kind','seal_revision','receipt_ref','manifest_ref'}
+        if not isinstance(event,dict)or set(event)!=required:raise ValueError('declared seal notification required')
+        run,business,revision=(event[k]for k in('execution_instance_id','business_kind','seal_revision'))
+        if (not isinstance(run,str)or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',run)or business not in self.histories
+                or type(revision)is not int or revision<0):raise ValueError('known capture Run/revision required')
+        path=self._checked_ref(event['receipt_ref'])
+        run_root=self.root/(('inference-'if business=='inference'else'')+run)
+        if path!=run_root/f'receipt-r{revision:06d}.json':raise ValueError('receipt belongs to another Run/revision')
+        history=self.histories[business];identity='capture-'+run+'-receipt';known=history.result(identity)
+        if known and known['details']['seal_revision']>revision:return False
+        checked_manifest=self._checked_ref(event['manifest_ref'])if event['manifest_ref']is not None else None
+        if known and known['details']['seal_revision']==revision and known['details']['receipt_pin']==_pin(path):
+            if known['details']['manifest_pin']!=(_pin(checked_manifest)if checked_manifest else None):raise ValueError('same sealed manifest changed')
+            return False
+        receipt=self._read(path);context=receipt.get('execution_context')or{}
+        if (receipt.get('schema')!='workbench.capture-run.v1'or receipt.get('execution_instance_id')!=run
+                or receipt.get('business_kind')!=business or receipt.get('seal_revision')!=revision
+                or context.get('device_id')!=self.device_id or context.get('environment')!=self.environment):
+            raise ValueError('capture result belongs to another device, environment, business or revision')
+        policy=receipt['control_policy']['policy_hash']
+        if known and known['details']['policy_hash']!=policy:raise ValueError('capture Run policy changed')
+        manifest={};manifest_path=None
+        if event['manifest_ref']is not None:
+            manifest_path=checked_manifest;manifest=self._read(manifest_path)
+            if (manifest.get('schema')!='workbench.capture-manifest.v1'or manifest.get('capture_session_id')!=run
+                    or manifest_path.name!=f'manifest-r{revision:06d}.json'or not manifest_path.is_relative_to(run_root)
+                    or manifest.get('seal_revision')!=revision or (manifest.get('binding')or{}).get('run_id')!=run
+                    or manifest['binding'].get('business_kind')!=business or manifest['binding'].get('policy_hash')!=policy):
+                raise ValueError('capture manifest identity changed')
+            for relative,pin in manifest.get('files',{}).items():
+                if _pin(_file(manifest_path.parent,relative,allow_empty=True))!=pin:raise ValueError('capture member changed')
+        elif revision!=0:raise ValueError('sealed capture manifest missing')
+        pin=_pin(path);outcome=(receipt.get('recording')or{}).get('recording_outcome','incomplete')
+        controller=receipt.get('controller')or{};base=dict(seal_revision=revision,policy_hash=policy,
+            device_id=self.device_id,environment=self.environment,
+            recording_outcome=outcome,controller_outcome=controller.get('status'),receipt_pin=pin,
+            manifest_pin=_pin(manifest_path)if manifest_path else None)
+        url=lambda ident:'/api/result-media?'+urlencode(dict(environment=self.environment,business=business,result_id=ident))
+        row=dict(id=identity,run_id=run,kind='control_recording',label=f'控制录制 · {business} · {outcome}',
+            status=controller.get('status','unknown'),download_url=url(identity),details=dict(base,file_pin=pin))
+        rows=[(row,path)]
+        playback=manifest.get('playback')or{}
+        for stream,video in playback.get('streams',{}).items():
+            video_path=_file(manifest_path.parent,video['path']);video_pin=manifest['files'].get(video['path'])
+            if not video_pin or _pin(video_path)!=video_pin:raise ValueError('capture playback changed')
+            ident='capture-'+run+'-'+stream
+            rows.append((dict(id=ident,run_id=run,kind='replay',label=stream,status=outcome,
+                details=dict(base,file_pin=video_pin),media=dict(id=ident,run_id=run,kind='replay',role='source',
+                    camera=stream.removeprefix('video-'),ready=True,mime_type='video/mp4',url=url(ident))),video_path))
+        if _pin(path)!={k:event['receipt_ref'][k]for k in('size_bytes','sha256')}:raise ValueError('receipt changed during registration')
+        if manifest_path and _pin(manifest_path)!={k:event['manifest_ref'][k]for k in('size_bytes','sha256')}:raise ValueError('manifest changed during registration')
+        return False if self.closed.is_set()else history.replace_capture_run(rows,preserve_other_results=business=='inference')
+
+    def _scan(self):
+        def receipts():
+            with os.scandir(self.root)as directories:
+                for directory in directories:
+                    if not directory.is_dir(follow_symlinks=False):continue
+                    with os.scandir(directory.path)as entries:
+                        for entry in entries:
+                            if re.fullmatch(r'receipt-r\d{6}\.json',entry.name)and entry.is_file(follow_symlinks=False):yield Path(entry.path)
+        for path in receipts():
+            if self.closed.is_set():break
+            try:
+                receipt=self._read(_file(self.root,path));manifest=(receipt.get('recording')or{}).get('directory')
+                revision=receipt.get('seal_revision',0);mp=Path(manifest)/f'manifest-r{revision:06d}.json'if manifest else None
+                self.register(dict(execution_instance_id=receipt['execution_instance_id'],business_kind=receipt['business_kind'],
+                    seal_revision=revision,receipt_ref=dict(path=str(path),**_pin(path)),
+                    manifest_ref=dict(path=str(mp),**_pin(_file(self.root,mp)))if mp and mp.is_file()else None))
+            except (OSError,ValueError,KeyError,TypeError)as error:self.error=str(error)
+
+    def _run(self):
+        import queue
+        while not self.closed.is_set():
+            try:
+                if self.rescan.is_set():self.rescan.clear();self._scan()
+                try:value=self.queue.get(timeout=.1)
+                except queue.Empty:continue
+                try:self.register(value)
+                finally:self.queue.task_done()
+            except Exception as error:self.error=str(error)
+
+    def page(self,business,*,before=None,after=None):return self.histories[business].page(before=before,after=after)
+
+    def media(self,business,identity):
+        row=self.histories[business].result(identity)
+        if row is None:return None
+        path=self.histories[business].media(identity)
+        if path is None or _pin(_file(self.root,path))!=row['details']['file_pin']:raise ValueError('indexed capture media changed')
+        return path
+
+    def close(self):
+        # ponytail: bounded shutdown; an interrupted derived index is rebuilt
+        # from immutable sealed receipts on the next business-service start.
+        self.closed.set();self.thread.join(1)

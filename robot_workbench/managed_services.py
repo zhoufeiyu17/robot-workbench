@@ -119,6 +119,17 @@ def process_identity(pid):
     try:
         before = _stat(pid)
         argv = [os.fsdecode(part) for part in (PROC_ROOT/str(pid)/'cmdline').read_bytes().split(b'\0') if part]
+        script = _script_argument(argv)
+        if (script is not None and not Path(script).is_absolute()
+                and re.fullmatch(r'python(?:\d+(?:\.\d+)*)?', Path(argv[0]).name)):
+            cwd_link = PROC_ROOT/str(pid)/'cwd'
+            cwd = cwd_link.resolve(strict=True)
+            resolved_script = (cwd/script).resolve(strict=True)
+            if not resolved_script.is_file():
+                raise OSError('relative Python entrypoint is not a regular file')
+            if cwd_link.resolve(strict=True) != cwd:
+                raise OSError('process working directory changed during verification')
+            script = str(resolved_script)
         after = _stat(pid)
     except FileNotFoundError:
         # A command line can disappear while a process exits. Confirm the PID
@@ -128,7 +139,7 @@ def process_identity(pid):
         raise
     if any(before[key] != after[key] for key in ('start_ticks', 'pgid', 'sid', 'uid')):
         raise OSError('process identity changed during verification')
-    return dict(after, boot_id=boot, script=_script_argument(argv))
+    return dict(after, boot_id=boot, script=script)
 
 
 def _live(identity):

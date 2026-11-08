@@ -1,10 +1,12 @@
 """Exclusive service maintenance; expiry and action resumption are always explicit."""
 from copy import deepcopy
+from .execution_settings import FEEDBACK_TIMEOUT_S
 import secrets
 import time
 
 ACTIONS=('ops_maintenance_begin','ops_maintenance_end','ops_rebind_cameras',
-         'ops_restart_cameras','ops_start_cameras','ops_stop_cameras','ops_prepare_model','ops_invalidate_model','ops_prepare_collection')
+         'ops_restart_cameras','ops_start_cameras','ops_stop_cameras','ops_prepare_model','ops_invalidate_model','ops_prepare_collection',
+         'ops_detach_stopped_consumer')
 
 
 def public_state(window):
@@ -36,6 +38,7 @@ ALIASES={
     'stop_cameras':'ops_stop_cameras','invalidate_model':'ops_invalidate_model',
     'rebind_cameras':'ops_rebind_cameras','prepare_model':'ops_prepare_model',
     'prepare_collection':'ops_prepare_collection',
+    'detach_stopped_consumer':'ops_detach_stopped_consumer',
     'connect_control':'connect_control','release_control':'release_control',
     'recover_control':'recover_control','verify_hold':'verify_hold','stop':'stop','inspect':'inspect','receipt':'receipt'}
 PURPOSES={
@@ -44,10 +47,11 @@ PURPOSES={
     'verify_hold':{'verify_hold'},'prepare_collection':{'ops_prepare_collection'},
     'start_cameras':{'ops_start_cameras','ops_rebind_cameras'},
     'stop_cameras':{'ops_stop_cameras'},'stop_model':{'ops_invalidate_model'},
+    'stop_consumer':{'ops_invalidate_model','ops_detach_stopped_consumer'},
     'restart_cameras':{'ops_restart_cameras','ops_rebind_cameras'},
     'rebind_cameras':{'ops_rebind_cameras'},'prepare_model':{'ops_prepare_model'},
-    'restart_model':{'ops_prepare_model'},'restart_workbench':{'release_control','ops_prepare_model'},
-    'stop_workbench':{'release_control'},
+    'restart_model':{'ops_prepare_model'},'restart_workbench':{'release_control','ops_prepare_model','ops_invalidate_model'},
+    'stop_workbench':{'release_control','ops_invalidate_model'},
     'prepare_environment':{'ops_start_cameras','ops_rebind_cameras','ops_prepare_model','ops_prepare_collection'},
     **{name:{'ops_rebind_cameras'} for name in ('reset_camera_head','reset_camera_left','reset_camera_right')}}
 
@@ -178,6 +182,8 @@ def operate(application,device,action,body):
                     status='starting',phase='checking_idle',active_action=action,error=None,target=deepcopy(expected),
                     _runtime=device.runtime,_begin_key=key,_begin_body=deepcopy(body),_ready=False,
                     _stop_serial=getattr(device,'stop_serial',0),_cancelled=False)
+                window['_consumer_local']=(getattr(device,'control_lifecycle',None)=='external'
+                    and body['purpose'] in ('prepare_model','stop_model','stop_consumer'))
                 application.maintenance[environment]=window;device.maintenance=True
             finally:device.lock.release()
             response=dict(public_state(window),token=window['token'],target=deepcopy(window['target']))
@@ -202,7 +208,7 @@ def operate(application,device,action,body):
         if begin:
             reason=busy_reason(device)
             if reason:raise ValueError(reason)
-            if window['_runtime'] is not None:window['_runtime'].begin_maintenance()
+            if window['_runtime'] is not None and not window.get('_consumer_local'):window['_runtime'].begin_maintenance()
             claimed=True
             if flow is not None and hasattr(flow,'pause_observations'):flow.pause_observations()
             # Model lifecycle has no dependency on frozen collection geometry.
@@ -217,7 +223,7 @@ def operate(application,device,action,body):
             receipt=getattr(window['_runtime'],'release_receipt',None)
             if receipt and receipt.get('status')!='released':raise ValueError('SDK释放尚未确认，保持维护冻结')
             if flow is not None and hasattr(flow,'resume_observations'):flow.resume_observations()
-            if window['_runtime'] is not None:window['_runtime'].end_maintenance()
+            if window['_runtime'] is not None and not window.get('_consumer_local'):window['_runtime'].end_maintenance()
             with application.lock:
                 application.maintenance.pop(environment);device.maintenance=False
                 receipt=application.requests.get(window['_begin_key'])
@@ -234,7 +240,7 @@ def operate(application,device,action,body):
                     actor.require(device.runtime);facts=device.fact_snapshot()
                     feedback=facts.get('calibration_feedback') or {}
                     age=device.runtime.owner.control_time()-feedback.get('sample_time_s',-1)
-                    if facts.get('feedback_healthy') is True and facts.get('stationary') is True and 0<=age<=.1:break
+                    if facts.get('feedback_healthy') is True and facts.get('stationary') is True and 0<=age<=FEEDBACK_TIMEOUT_S:break
                     if str(facts.get('state')).upper() in ('FAULT','EMERGENCY','FAULT_STOP_UNCONFIRMED'):raise ValueError('接入后设备报告控制故障，维护保持冻结')
                     time.sleep(.01)
                 else:raise ValueError('接入后未取得新鲜健康静止反馈，维护保持冻结')
@@ -290,6 +296,15 @@ def operate(application,device,action,body):
                 callback=getattr(flow,'operations_invalidate_model',None)
                 if not callable(callback):raise ValueError('当前环境未装配运维模型失效hook')
                 result=callback(still_current=actor.current)
+            elif action=='ops_detach_stopped_consumer':
+                if (getattr(device,'control_lifecycle',None)!='external' or device.runtime is None
+                        or not window.get('_consumer_local') or window['purpose']!='stop_consumer'):
+                    raise ValueError('显式外部消费者退出窗口必需')
+                actor.require(device.runtime)
+                result=device.runtime.detach(abort_stopped=True)
+                if (result.get('ownership_retained')is not False or result.get('episode_aborted')is not True
+                        or result.get('safe_finish')is not False or result.get('sdk_released')is not False):
+                    raise ValueError('已停消费者退出回执未确认')
             elif action=='ops_prepare_model':
                 callback=getattr(flow,'operations_prepare_model',None)
                 if not callable(callback):raise ValueError('当前环境未装配运维模型准备hook')

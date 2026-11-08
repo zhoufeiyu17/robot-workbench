@@ -35,29 +35,37 @@ def camera_intrinsics(rig):
 
 class CameraProducer:
     def __init__(self, intrinsics, root, *, queue_capacity=8, min_free_bytes=2*1024**3,recording_guard=None,
-                 memory_recording=True,recording_budget_bytes=1024**3):
-        from real_rgbd import RawSpool
+                 memory_recording=True,recording_budget_bytes=1024**3,ros_plane=None,device_id=None):
         if set(intrinsics) != set(CAMERAS.values()) or type(queue_capacity) is not int or queue_capacity < 1:
             raise ValueError('three cameras and a positive bounded queue required')
         self.intrinsics = deepcopy(intrinsics)
         self.root = Path(root)
         self.frames, self.spools, self.directories, self.channels = {}, {}, {}, {}
         self.recording_guard=recording_guard;self.channel_status={}
-        if type(memory_recording) is not bool or (memory_recording and not callable(recording_guard)):
+        self.ros_plane=ros_plane;self.ros=None;self.ros_sources={};self._backend=None
+        if type(memory_recording) is not bool or (ros_plane is None and memory_recording and not callable(recording_guard)):
             raise ValueError('same-process recording requires a live Owner recording guard')
-        from robot_workbench.rgbd_service import CommonCameraService
-        self.service_owner=CommonCameraService.start(intrinsics,self.root,'fake',budget_bytes=recording_budget_bytes)
-        self.descriptor_path=self.root/'camera-service.json'
-        self.common=CommonCameraService.connect(self.descriptor_path)
-        self.publisher=self.common;self.publish_generation=0;self.ports=None
+        if ros_plane is not None:
+            from .ros_data import plane_config
+            from .ros_inputs import RosCameraView
+            self.ros_plane=plane_config(ros_plane)
+            if not isinstance(device_id,str)or not device_id:raise ValueError('ROS fake source requires its registered device identity')
+            self.device_id=device_id;self._open_ros()
+            self.common=RosCameraView(self.ros_plane,device_id,intrinsics,'fake')
+            self.service_owner=None;self.descriptor_path=None;self.publisher=self
+            self.frames=self.common.frames
+        else:
+            from real_rgbd import RawSpool
+            from robot_workbench.rgbd_service import CommonCameraService
+            self.service_owner=CommonCameraService.start(intrinsics,self.root,'fake',budget_bytes=recording_budget_bytes)
+            self.descriptor_path=self.root/'camera-service.json'
+            self.common=CommonCameraService.connect(self.descriptor_path)
+            self.publisher=self.common;self.frames,self.directories=self.common.frames,self.common.directories
+            if memory_recording:self.channels=self.common.channels
+            for name in (() if memory_recording else CAMERAS.values()):
+                self.spools[name]=RawSpool(self.root/name,min_free_bytes=min_free_bytes,lease_guard=recording_guard)
+        self.publish_generation=0;self.ports=None
         self.sampling_lock=threading.RLock();self.restart_lock=threading.Lock();self.paused=False
-        self.frames,self.directories=self.common.frames,self.common.directories
-        if memory_recording:self.channels=self.common.channels
-        for name in (() if memory_recording else CAMERAS.values()):
-            path = self.root/name
-            # Read/legacy fixture compatibility only. Encoding still uses the
-            # same raw camera service; production recording uses its channels.
-            self.spools[name] = RawSpool(path, min_free_bytes=min_free_bytes,lease_guard=recording_guard)
         self.queue = queue.Queue(maxsize=queue_capacity)
         self.closed = threading.Event()
         self.thread_id = threading.get_ident()
@@ -75,6 +83,56 @@ class CameraProducer:
         self.worker = threading.Thread(target=self._encode_loop, daemon=True, name='physx-rgbd-encoder')
         self.worker.start()
 
+    def _open_ros(self):
+        from sensor_msgs.msg import Image
+        from .ros_data import RosNode
+        self.descriptor=dict(instance_id=secrets.token_hex(16),environment='fake',data_plane=self.ros_plane)
+        self.ros=RosNode('fake_camera_'+self.descriptor['instance_id'][:12],namespace=self.ros_plane['namespace'],
+            domain_id=self.ros_plane['domain_id'],localhost_only=False)
+        self.ros_sources={}
+        self.ros_images={name:self.ros.publisher(self.ros_plane['namespace']+'/'+name,Image)
+            for camera in CAMERAS.values()for name in (camera,camera+'_depth')}
+        self.ros_declarations={name:self.ros.publisher('sources/'+name,self.ros.types.SourceDescriptor,retained=True,depth=1)
+            for name in self.ros_images}
+        self.ros_metadata={name:self.ros.publisher(self.ros_plane['namespace']+'/'+name+'/metadata',self.ros.types.DataEvent)
+            for name in CAMERAS.values()}
+
+    def _close_ros(self):
+        if self.ros is None or self.ros.closed:return
+        from .ros_data import descriptor_message
+        for name,value in self.ros_sources.items():
+            self.ros_declarations[name].publish(descriptor_message(self.ros,dict(value,available=False)))
+        self.ros.close()
+
+    def _publish_ros(self,packet,name,rgb,depth):
+        from sensor_msgs.msg import Image
+        from .ros_data import descriptor_message,StreamRef,json_text
+        stamp=packet['feedback']['source_time_ns'];k=self.intrinsics[name]
+        for stream,encoding,pixels,width in ((name,'rgb8',rgb.tobytes(),3),(name+'_depth','16UC1',depth.astype('<u2',copy=False).tobytes(),2)):
+            if stream not in self.ros_sources:
+                meta=dict(k,environment='fake',clock_domain='simulation',pixel_format='rgb8'if width==3 else'depth16le',
+                    simulation_only=True,evidence_source='fake_device_rgbd',timestamp_domain='simulation',
+                    timestamp_kind='simulation_step',camera_name=next(role for role,camera in CAMERAS.items()if camera==name))
+                if width==3:meta.update(depth_stream_id=name+'_depth',intrinsics=dict(k),
+                    metadata_topic=self.ros_plane['namespace']+'/'+name+'/metadata')
+                else:meta.update(depth_scale_m=.001,depth_aligned_to='color')
+                value=dict(device_id=self.device_id,stream_id=stream,source_instance_id=self.descriptor['instance_id'],
+                    source_clock_id=packet['feedback']['source_clock_id'],topic=self.ros_plane['namespace']+'/'+stream,
+                    message_type='sensor_msgs/msg/Image',kind='image',units=meta['pixel_format'],coordinate_frame=name,
+                    nominal_hz=30.,available=True,metadata=meta)
+                self.ros_sources[stream]=value;self.ros_declarations[stream].publish(descriptor_message(self.ros,value))
+            frame=Image(width=k['width'],height=k['height'],encoding=encoding,step=k['width']*width,data=pixels)
+            frame.header.stamp.sec=stamp//10**9;frame.header.stamp.nanosec=stamp%10**9;frame.header.frame_id=name
+            self.ros_images[stream].publish(frame)
+        actor=packet['actor']
+        metadata=dict(host_receive_ns=packet['wall_ns'],physics_step=packet['feedback']['physics_step'],
+            frame_number=packet['frame_sequence'],owner_available=actor.get('owner_available')is True,
+            owner_pid=actor.get('owner_pid'),command_epoch=actor.get('command_epoch'),runtime_nonce=actor.get('runtime_nonce'))
+        self.ros_metadata[name].publish(self.ros.types.DataEvent(
+            reference=StreamRef(name,self.descriptor['instance_id'],packet['feedback']['source_clock_id'],stamp,stamp).message(),
+            run_id='',epoch=actor.get('command_epoch')or 0,event='frame_metadata',payload_json=json_text(metadata)))
+        return dict(transport='ros',recorded=False,source_time_ns=stamp)
+
     def start_servers(self, ports=None):
         self.ports=self.common.start_servers(ports)
         return self.ports
@@ -89,6 +147,7 @@ class CameraProducer:
     def _collect(self,plant,backend,actor):
         if self.closed.is_set() or self.paused:
             return False
+        self._backend=backend
         feedback = backend.read_calibration_state()
         step = feedback['physics_step']
         if self.clock_id is not None and self.clock_id != feedback['source_clock_id']:
@@ -126,7 +185,9 @@ class CameraProducer:
                 **{key:packet['feedback'][key] for key in ('source_clock_id','source_time_ns','physics_step')},
                 last_publish=deepcopy(self.last_publish))
             self.drops.append(self.last_drop)
-        if self.common:self.common.fail_async(reason+' during recording lease',packet.get('recording_tokens',{}))
+        if self.ros_plane is not None:
+            with self.lock:self.error=reason
+        elif self.common:self.common.fail_async(reason+' during recording lease',packet.get('recording_tokens',{}))
         else:
             for name, channel in self.channels.items():
                 channel.fail(reason+' during recording lease', sampled_token=packet.get('recording_tokens', {}).get(name))
@@ -158,9 +219,11 @@ class CameraProducer:
             except Exception as error:
                 self._record_drop(packet, f'{type(error).__name__}: {error}')
                 with self.lock:self.error = f'{type(error).__name__}: {error}'
-                for frame in self.frames.values():
-                    try:frame.publish(status=dict(ready=False, data_valid=False, error=self.error))
-                    except (OSError,ConnectionError,ValueError):pass
+                if self.ros_plane is not None:self.common._unavailable(self.error)
+                else:
+                    for frame in self.frames.values():
+                        try:frame.publish(status=dict(ready=False, data_valid=False, error=self.error))
+                        except (OSError,ConnectionError,ValueError):pass
             finally:
                 elapsed=time.monotonic()-started
                 with self.lock:
@@ -195,6 +258,7 @@ class CameraProducer:
             raise ValueError('plant RGB-D shape/dtype differs from camera intrinsics')
         valid = np.isfinite(depth) & (depth > 0) & (depth <= 65.535)
         quantized = np.rint(np.where(valid,depth,0)/.001).astype(np.uint16)
+        if self.ros_plane is not None:return self._publish_ros(packet,name,rgb,quantized)
         number = packet['frame_sequence']
         ms = feedback['source_time_ns']/1e6
         status = pair_metadata(serial=k['serial'], camera_name=role, color_number=number,
@@ -269,6 +333,9 @@ class CameraProducer:
             time.sleep(.02)
 
     def start(self,progress=lambda phase, fraction=None, detail=None:None,*,timeout_s=20.):
+        if self.ros_plane is not None:
+            if self.paused or self.ros.closed:return self.restart(progress,timeout_s=timeout_s)
+            return self._ros_ready(timeout_s)
         if (self.service_owner.process.poll() is not None or self.paused or
                 self.common.descriptor['instance_id']!=self.service_owner.descriptor['instance_id']):
             return self.restart(progress,timeout_s=timeout_s)
@@ -289,6 +356,7 @@ class CameraProducer:
         Sampling stays paused after a close request, including an unknown exit.
         The encoder, plant clock and control connection remain caller-owned.
         """
+        if self.ros_plane is not None:return self._ros_maintenance(False,progress,timeout_s)
         if threading.get_ident()==self.thread_id:
             raise RuntimeError('camera stop must leave the PhysX main thread free to sample')
         if type(timeout_s) not in (int,float) or not 0<timeout_s<=120:
@@ -336,6 +404,7 @@ class CameraProducer:
         Run on the maintenance worker: the existing main loop alone samples plant
         frames after resume. Each queued packet retains its original service target.
         """
+        if self.ros_plane is not None:return self._ros_maintenance(True,progress,timeout_s)
         from robot_workbench.rgbd_service import CommonCameraService
         if threading.get_ident()==self.thread_id:
             raise RuntimeError('camera restart must leave the PhysX main thread free to sample')
@@ -401,8 +470,52 @@ class CameraProducer:
             raise
         finally:self.restart_lock.release()
 
+    def _ros_ready(self,timeout_s):
+        deadline=time.monotonic()+timeout_s
+        while time.monotonic()<deadline:
+            try:
+                cameras={name:self.common.latest_rgbd(name)for name in CAMERAS.values()}
+                if all(frame['metadata']['capture_instance_id']==self.descriptor['instance_id']for frame in cameras.values()):
+                    return dict(already_running=True,instance_id=self.descriptor['instance_id'],service_pid=os.getpid(),
+                        source_available=True,process_preserved=True,cameras={name:dict(healthy=True,
+                            capture_instance_id=frame['metadata']['capture_instance_id'])for name,frame in cameras.items()})
+            except (LookupError,ValueError):pass
+            if threading.get_ident()==self.thread_id:raise RuntimeError('camera readiness must leave the PhysX main thread free to sample')
+            time.sleep(.01)
+        raise TimeoutError('ROS camera source has no complete fresh RGB-D frame set')
+
+    def _ros_maintenance(self,restart,progress,timeout_s):
+        if threading.get_ident()==self.thread_id:raise RuntimeError('camera maintenance must leave the PhysX main thread free to sample')
+        if type(timeout_s)not in(int,float)or not 0<timeout_s<=120:raise ValueError('bounded camera drain timeout required')
+        if not self.restart_lock.acquire(blocking=False):raise ValueError('camera maintenance is already running')
+        try:
+            owner=getattr(self._backend,'owner',None);recording=getattr(owner,'recording',None)
+            if recording is not None and not recording.done.is_set():raise ValueError('cannot stop cameras while recording is active')
+            if self.closed.is_set():raise ValueError('camera producer is closed')
+            progress('pausing_camera_samples')
+            with self.sampling_lock:self.paused=True
+            deadline=time.monotonic()+timeout_s
+            with self.queue.all_tasks_done:
+                while self.queue.unfinished_tasks:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('camera publishing has not drained; source retained')
+                    self.queue.all_tasks_done.wait(remaining)
+            old=self.descriptor['instance_id'];self._close_ros()
+            if not restart:return dict(stopped=True,exit_verified=False,source_available=False,
+                process_preserved=True,service_pid=os.getpid(),instance_id=old,source_clock_id=self.clock_id)
+            progress('starting_camera_source');self._open_ros();self.publish_generation+=1
+            with self.sampling_lock:self.paused=False
+            self.common.reconnect();result=self._ros_ready(timeout_s)
+            with self.lock:self.error=None
+            return dict(result,reconnected=True,previous_instance_id=old,source_clock_id=self.clock_id,
+                plant_preserved=True,control_reconnected=False,preview_ports=self.ports)
+        finally:self.restart_lock.release()
+
     def close(self):
         self.closed.set()
         self.worker.join(timeout=5)
         self.encoders.shutdown(wait=False, cancel_futures=True)
-        self.service_owner.close()
+        if self.ros_plane is not None:
+            if self.worker.is_alive():raise TimeoutError('ROS camera source worker still draining')
+            self._close_ros();self.common.close()
+        else:self.service_owner.close()

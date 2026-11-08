@@ -35,7 +35,7 @@ class Blocked(RuntimeError):
 
 
 def service_order(manifest):
-    return ORDER[:2] + (('model',) if 'model' in manifest['services'] else ()) + ORDER[2:-1] + (('triton_control',) if 'triton_control' in manifest['services'] else ()) + ORDER[-1:]
+    return (('recording',) if 'recording' in manifest['services'] else ()) + ORDER[:2] + (('pedal',) if 'pedal' in manifest['services'] else ()) + (('model',) if 'model' in manifest['services']and manifest.get('model_lifecycle','managed')!='external' else ()) + ORDER[2:-1] + (('triton_control',) if 'triton_control' in manifest['services'] else ()) + ORDER[-1:]
 
 
 def require(ok, message):
@@ -238,12 +238,45 @@ def dependencies(path, root, files):
 def command_inputs(argv):
     """ExecStart --output names a generated receipt, not a release input."""
     skip=False
+    live_owner=any(value.endswith('/serve_prometheus_rgb.py')for value in argv)
+    live_state=any(value.endswith('/camera_owner.py')for value in argv)
     for value in argv:
         if skip:skip=False;continue
-        if value=='--output':skip=True;continue
+        if value=='--output' or live_owner and value=='--owner' or live_state and value=='--state':skip=True;continue
         if value.startswith('--output='):continue
+        if live_owner and value.startswith('--owner='):continue
+        if live_state and value.startswith('--state='):continue
         if value.startswith('/') and Path(value).is_file() and Path(value).suffix in ('.py','.json'):
             yield value
+
+
+def seal_model_service(manager, business):
+    """Seal either existing managed model adapter with the same endpoint binding."""
+    from robot_workbench.docker_model_service import DockerModelSpec,option
+    spec=manager['services']['model']
+    require(manager.get('model_port') and business.get('inference'),'model port and inference business must be registered together')
+    require(urlsplit(business['inference']['model_endpoint']).port==manager['model_port'],'model endpoint/manager port differ')
+    if spec.get('kind')=='docker_model':
+        DockerModelSpec(name='model',**spec);sealed=dict(spec);command=spec['command']
+    else:
+        from robot_workbench.managed_services import ServiceSpec
+        ServiceSpec(name='model',**spec)
+        require(spec['kind']=='user_unit','model must use a registered managed adapter')
+        sealed=dict(spec,**unit_pin(spec['unit']))
+        unit_text='\n'.join(Path(p).read_text() for p in sealed['files'])
+        commands=[shlex.split(line.split('=',1)[1]) for line in unit_text.splitlines()if line.startswith('ExecStart=')]
+        require(len(commands)==1 and spec['expected_script']in commands[0],'model unit entrypoint differs')
+        command=commands[0]
+        require(option(command,'--port')==[str(manager['model_port'])],'model unit port differs')
+    require(option(command,'--token-file')==[business['inference']['model_token_file']], 'model authorization binding differs from inference business')
+    return sealed
+
+
+def camera_descriptor(manager, business):
+    descriptor=business.get('camera_service_descriptor') or manager.get('camera_descriptor')
+    if descriptor:return descriptor
+    native=manager.get('native_rgb') or (business.get('inference')or{}).get('native_rgb')
+    return str(Path(native['directory'])/'recording-camera-service.json') if native else None
 
 
 def seal(args):
@@ -267,7 +300,7 @@ def seal(args):
     require(not physical.get('acquisition_blocked_reason'), 'device commissioning is still blocked')
     require(physical.get('motion_gain_profile') == 'normal_X5', 'declare qualified baseline motion gains explicitly')
     services = {}
-    for role in ORDER[:-1]:
+    for role in tuple(name for name in ('recording','pedal')if name in manager['services'])+ORDER[:-1]:
         spec = manager['services'][role]
         require(spec['kind'] == 'user_unit', 'startup supports installed user units only')
         services[role] = dict(spec, **unit_pin(spec['unit']))
@@ -280,6 +313,11 @@ def seal(args):
     require(script is not None, 'unexpected manager entrypoint')
     source = inside(Path(script).parent.parent, root)
     sys.path.insert(0, str(source))
+    from robot_workbench.ros_data import plane_config
+    try:
+        require(plane_config(physical.get('data_plane'))==plane_config(business.get('data_plane')),
+                'Owner/business ROS data_plane binding differs')
+    except ValueError as error:raise Blocked('explicit matching ROS data_plane required before sealing')from error
     services['manager'] = dict(kind='user_unit', expected_script=script,
                                identity_path=str(Path(args.output).with_suffix('.manager-identity.json')), **manager_pin)
     triton = manager.get('triton_preview')
@@ -301,17 +339,11 @@ def seal(args):
     else:
         require(not getattr(args,'triton_unit',None), 'Triton unit supplied without manager binding')
     if 'model' in manager['services']:
-        from robot_workbench.docker_model_service import DockerModelSpec,option
-        model_spec=manager['services']['model']
-        DockerModelSpec(name='model',**model_spec)
-        require(manager.get('model_port') and business.get('inference'),'model port and inference business must be registered together')
-        require(urlsplit(business['inference']['model_endpoint']).port==manager['model_port'],'model endpoint/manager port differ')
-        require(option(model_spec['command'],'--token-file')==[business['inference']['model_token_file']], 'model authorization binding differs from inference business')
-        services['model']=model_spec
+        services['model']=seal_model_service(manager,business)
     require(len({s['unit'] for s in services.values()if 'unit'in s}) == len([s for s in services.values()if 'unit'in s]), 'distinct component units required')
     for role, spec in services.items():
         inside(spec['expected_script'], root)
-        if role=='model':continue  # DockerModelSpec validates its immutable image/CID and isolation contract.
+        if spec['kind']=='docker_model':continue  # Its adapter validates immutable image/CID and isolation.
         unit_text = '\n'.join(Path(p).read_text() for p in spec['files'])
         isolation=('NoNewPrivileges=yes','SendSIGKILL=no','Restart=no')
         isolation+=('Environment=CUDA_VISIBLE_DEVICES=',) if role=='triton_control' else ('ProtectSystem=strict','ProtectHome=read-only','ReadWritePaths='+str(root))
@@ -376,7 +408,7 @@ def seal(args):
     require(physical.get('exclusive_idle_units',[]) == [c['unit'] for c in conflicts], 'collection handoff registry does not match Owner')
     manifest = dict(schema=SCHEMA, device_id=manager['device_id'], uid=os.getuid(), machine_id=Path('/etc/machine-id').read_text().strip(),
         root=str(root), source=str(source), url=args.url.rstrip('/'), manager_profile=str(manager_path),
-        owner_descriptor=manager['control_owner_descriptor'], camera_descriptor=business.get('camera_service_descriptor'),
+        owner_descriptor=manager['control_owner_descriptor'], camera_descriptor=camera_descriptor(manager,business),
         can_interfaces=physical['can_interfaces'], cameras=physical['cameras'], services=services, conflicts=conflicts,
         ports={'manager':[address.hostname,address.port], 'workbench':['127.0.0.1',manager['backend_port']]},
         files=files, created_wall_ns=time.time_ns(), startup_acquires_sdk=False,
@@ -386,6 +418,8 @@ def seal(args):
         manifest['ports']['triton_control']=['127.0.0.1',urlsplit(triton['endpoint']).port]
     if 'model'in services:
         manifest['model_port']=manager['model_port']
+        require(manager.get('model_lifecycle','managed')in ('managed','external'),'known model lifecycle required')
+        manifest['model_lifecycle']=manager.get('model_lifecycle','managed')
         manifest['ports']['model']=['127.0.0.1',manager['model_port']]
     output = inside(args.output, root); output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     private_write(output, manifest)
@@ -396,9 +430,14 @@ def load(path):
     p=Path(path);info=p.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid==os.getuid() and not info.st_mode&0o077, 'private owned startup manifest required')
     m=read_json(p)
+    require(read_json(m['manager_profile']).get('control_lifecycle','managed')!='external',
+        'external control consumers use the registered software launcher, not device-administrator deployment startup')
     require(m.get('schema')==SCHEMA and m.get('uid')==os.getuid() and m.get('startup_acquires_sdk') is False, 'startup contract differs')
     require(m['machine_id']==Path('/etc/machine-id').read_text().strip(), 'release belongs to a different machine')
-    require(set(m['services'])==set(ORDER)|({'triton_control'} if m.get('triton_preview') else set())|({'model'}if m.get('model_port')else set()), 'complete declared service startup required')
+    require(set(m['services'])==set(ORDER)|({name for name in ('recording','pedal')if name in read_json(m['manager_profile'])['services']})|({'triton_control'} if m.get('triton_preview') else set())|({'model'}if m.get('model_port')else set()), 'complete declared service startup required')
+    require(m.get('model_lifecycle','managed')in ('managed','external')and
+        m.get('model_lifecycle','managed')==read_json(m['manager_profile']).get('model_lifecycle','managed'),
+        'startup model lifecycle differs from the manager profile; reseal the deployment')
     return m
 
 
@@ -519,6 +558,9 @@ def warm_model(m, timeout=360, expected_model=None, expected_backend=None):
 def start(m, managed, *, handoff=False, timeout=40):
     actions=[];paused=[];handoffs=[]
     before={k:v.snapshot() for k,v in managed.items()}
+    if m.get('model_lifecycle')=='external':
+        require(before.get('model',{}).get('state')=='running'and before['model'].get('owned')is True,
+                'external model must be started by its service administrator; no consumer lifecycle action performed')
     require(all(v['state'] in ('running','stopped') for v in before.values()), 'unknown/transitioning service identity; inspect before retry')
     for role,(host,port) in m.get('ports',{}).items():
         if before[role]['state']=='stopped':
@@ -554,6 +596,16 @@ def start(m, managed, *, handoff=False, timeout=40):
         result=managed[role].start()
         actions.append('started '+role)
         require(result['state']=='running' and result.get('owned'), 'service startup not confirmed: '+role)
+        if role=='recording':
+            from robot_workbench.recording_process import recording_call
+            end=time.monotonic()+timeout
+            while time.monotonic()<end:
+                try:
+                    recorded=recording_call(os.environ['WORKBENCH_RECORDING_SERVICE'],'inspect',timeout=2)
+                    require(recorded['ready'] and recorded['pid']==result['identity']['pid'],'old recording descriptor')
+                    break
+                except (KeyError,OSError,ValueError,Blocked):time.sleep(.1)
+            else:raise Blocked('resident recording readiness not confirmed')
         if role=='control_owner':
             # The only IPC here is a read, never acquire/recover/stop/submit.
             from robot_workbench.control_owner import ControlChannel
@@ -567,7 +619,7 @@ def start(m, managed, *, handoff=False, timeout=40):
                 except (OSError,ValueError,Blocked):time.sleep(.2)
             else:raise Blocked('Owner IPC readiness not confirmed')
             require(r.get('connected') is False, 'new Owner unexpectedly acquired control')
-        if role=='cameras':
+        if role=='cameras' and m.get('camera_descriptor'):
             end=time.monotonic()+timeout
             while time.monotonic()<end:
                 try:

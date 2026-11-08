@@ -22,6 +22,29 @@ class ControlReferenceTest(unittest.TestCase):
     advance=SharedTargetRoutesTest.advance
     confirm=SharedTargetRoutesTest.confirm
 
+    def test_raw_replay_normal_entry_retains_samples_and_uses_shared_output(self):
+        from robot_workbench.inference_owner import digest
+        self.create()
+        positions=np.zeros((21,14));positions[:,0]=.02*np.sin(np.linspace(0.,np.pi,21))
+        value=dict(schema='workbench.raw-replay.v1',device_id=self.runtime.device_id,
+            source_sha256='a'*64,source_clock_id='recorded-source-clock',
+            source_timestamps_ms=np.arange(21,dtype=float).tolist(),device_targets14=positions.tolist(),
+            calibration_snapshot_id=None,jaw_mapping_digest=digest(self.runtime.owner.cache['jaw_mapping']),
+            speed_multiplier=.5,max_execution_duration_s=10.,requested_source_duration_s=2.,maximum_source_gap_s=.1)
+        value['source_timestamps_ms']=[i*100. for i in range(21)]
+        with self.assertRaises(ValueError):
+            self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+                sampled_trajectory=dict(value,jaw_mapping_digest='0'*64)))
+        self.assertFalse(self.raw.packets)
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',sampled_trajectory=value))
+        self.assertEqual(review['raw_replay']['source_steps'],21)
+        self.assertEqual(review['raw_replay']['retained_source_span_s'],2.)
+        self.confirm('calibration',review);self.advance(150)
+        self.assertTrue(self.raw.packets)
+        self.assertEqual(self.runtime.owner.runner.target_interpreter.reference.metadata['kind'],'raw_replay')
+        self.runtime.request_stop();self.advance(3)
+        self.assertIsNone(self.raw.window)
+
     def test_smooth_preparation_derivatives_bounds_identity_and_terminal_hold(self):
         from robot_workbench.control_reference import smooth
         from robot_workbench.motion_reference import PreparedReference,_extrema

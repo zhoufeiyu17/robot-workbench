@@ -10,29 +10,29 @@ sys.path.insert(0,str(ROOT))
 
 
 class OwnerRecordingCameraTest(unittest.TestCase):
-    def test_camera_restart_between_sessions_resolves_new_instance_without_reconnecting_sdk(self):
+    def test_recording_uses_current_ros_runtime_without_opening_a_legacy_camera(self):
         from scripts.serve_control_owner import main
         with TemporaryDirectory()as directory:
-            root=Path(directory);profile=root/'profile.json';descriptor=root/'camera.json'
-            profile.write_text('{}');descriptor.write_text(json.dumps(dict(instance_id='first')))
-            channels={'first':{'base_0':object()},'second':{'base_0':object()}}
-            def connect(path):return NS(channels=channels[json.loads(Path(path).read_text())['instance_id']])
+            root=Path(directory);profile=root/'profile.json';profile.write_text('{}')
             service=Mock();recorder=Mock();runtime_factory=Mock(return_value=lambda:None)
+            device=NS(runtime=None)
+            runtimes=[NS(owner=NS(control_time=lambda:1.)),NS(owner=NS(control_time=lambda:2.))]
             def serve():
                 factory=runtime_factory.call_args.kwargs['recording_factory']
-                factory(dict(plan_ref={'fixture':True}),lambda reason:None)
-                descriptor.write_text(json.dumps(dict(instance_id='second')))
-                factory(dict(plan_ref={'fixture':True}),lambda reason:None)
+                for runtime in runtimes:
+                    device.runtime=runtime;factory(dict(plan_ref={'fixture':True}),lambda reason:None)
             service.serve_forever.side_effect=serve
             with patch.object(sys,'argv',['owner','--profile',str(profile),'--root',str(root/'owner')]),patch(
-                    'robot_workbench.device_bootstrap.read_profile',return_value=dict(robot_id='cpu',camera_service_descriptor=str(descriptor))),patch(
+                    'robot_workbench.device_bootstrap.read_profile',return_value=dict(robot_id='cpu',data_plane={})),patch(
                     'robot_workbench.device_bootstrap.physical_runtime_factory',runtime_factory),patch(
+                    'robot_workbench.service.Device',return_value=device),patch(
                     'robot_workbench.control_owner.ControlOwnerService',return_value=service),patch(
-                    'robot_workbench.rgbd_service.CommonCameraService.connect',side_effect=connect),patch(
-                    'robot_workbench.recording_process.ProcessRecordingSession',recorder),patch('scripts.serve_control_owner.signal.signal'):
+                    'robot_workbench.rgbd_service.CommonCameraService.connect',side_effect=AssertionError('no legacy source')),patch(
+                    'robot_workbench.recording_process.capture_control',recorder),patch(
+                    'robot_workbench.ros_data.require_runtime'),patch('scripts.serve_control_owner.signal.signal'):
                 self.assertEqual(main(),0)
-            self.assertIs(recorder.call_args_list[0].kwargs['camera_channels'],channels['first'])
-            self.assertIs(recorder.call_args_list[1].kwargs['camera_channels'],channels['second'])
+            for call,runtime in zip(recorder.call_args_list,runtimes):
+                self.assertIs(call.kwargs['ros_runtime'],runtime);self.assertIsNone(call.kwargs['cameras'])
             self.assertEqual(runtime_factory.call_count,1)
 
 

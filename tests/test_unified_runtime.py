@@ -8,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT/'tests'), str(ROOT/'calibration'),
@@ -70,6 +70,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
         backend.is_connected=False
         backend.protection_snapshot=lambda:dict(event=dict(id='cpu-protection',reason=backend.terminal_failure),worker_exit_confirmed=True)
         disposed=[];backend.dispose=lambda:disposed.append(True)
+        runtime.ros_publisher=Mock();runtime.ros_node=Mock()
         with patch.object(backend,'close',side_effect=AssertionError('fault retirement is not normal SDK close')):
             runtime.owner.commands.put(('cpu-stale-command',runtime.owner.epoch,None))
             self.assertFalse(runtime.tick())
@@ -77,6 +78,8 @@ class UnifiedRuntimeTest(unittest.TestCase):
             runtime.begin_maintenance()
             result=runtime.retire_protected()
         self.assertIsNone(runtime.fd);self.assertEqual(disposed,[True])
+        runtime.ros_publisher.close.assert_called_once()
+        runtime.ros_node.close.assert_called_once()
         self.assertTrue(result['worker_exit_confirmed']);self.assertFalse(result['sdk_close_confirmed'])
         self.assertEqual(result['mechanical_state'],'not_verified');self.assertFalse(result['motion_resumed'])
         with self.assertRaises(PermissionError):runtime.submit(creds['calibration'],dict(action='stop'))
@@ -140,7 +143,7 @@ class UnifiedRuntimeTest(unittest.TestCase):
             source_clock_id='cpu-fake-device-clock-v1' if environment=='fake' else None),
             device_id=device, environment=environment, lock_root=self.directory.name,
             initialize_backend=(lambda b:b.set_damping_hold(manual=True)) if initialize else None,
-            control_clock=lambda:self.sim,jaw_mapping_file=mapping,hardware_binding=binding)
+            control_clock=lambda:self.sim,jaw_mapping_file=mapping,hardware_binding=binding,data_plane=getattr(self,'ros_plane',None))
         credentials = {business:runtime.register_business(business) for business in ('calibration','collection')}
         self.runtimes.append((runtime, credentials))
         self.advance(runtime, 42)

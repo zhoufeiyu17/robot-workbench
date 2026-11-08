@@ -18,6 +18,38 @@ from robot_workbench.inference_model import (BASE566_ID, BASE566_PINS, BASE566_P
     model_spec, worker_identity, validate_worker_identity)
 
 
+class ActionChunkAdmissionTests(unittest.TestCase):
+    def test_model_envelope_checks_identity_time_units_and_never_converts(self):
+        from robot_workbench.inference import validate_action_chunk
+        contract=dict(shape=[60,14],axes=[f'{s}_{a}'for s in('left','right')for a in('j1','j2','j3','j4','j5','j6','jaw')],
+            units=(['rad']*6+['m'])*2,action_type='absolute_position',normalized=False,device_mapping_applied=False,
+            coordinate_domain='recorded_native_state14',jaw_semantics='recorder_endpoint_coordinate',
+            sampling=dict(nominal_period_s=1/30,time_origin='unassigned',first_sample_offset_s=None))
+        binding=dict(session_id='session',model_binding={'instance_id':'model-instance'},conversion_id='conversion',
+            action_contract=contract,task='coffee')
+        chunk=dict(binding,schema='workbench.action-chunk.v1',request_id='request',epoch=3,
+            observation=dict(source_time=100.,clock_domain='owner-clock',frame_ids={}),
+            validity=dict(valid_until_source_time=101.,clock_domain='owner-clock'),
+            execution_authorized=False,action14=np.full((60,14),.04),audit={})
+        options=dict(binding=binding,request_id='request',epoch=3,clock_domain='owner-clock',now=100.2,
+            observation_source_time=100.,valid_until_source_time=101.,last_observation_source_time=99.)
+        result=validate_action_chunk(chunk,**options)
+        np.testing.assert_array_equal(result['action14'],chunk['action14'])
+        self.assertIsNot(result['action14'],chunk['action14'])
+        self.assertEqual(set(result),{'request_id','action14','audit'})
+        for key,value in [('epoch',True),('epoch',2),('request_id','late'),('task','lid_handoff'),
+                          ('session_id','new'),('conversion_id','new'),('execution_authorized',True),
+                          ('observation',[]),('action14',np.full((60,14),float('nan')))]:
+            with self.subTest(key=key,value=str(value)[:20]),self.assertRaises(ValueError):
+                validate_action_chunk(dict(chunk,**{key:value}),**options)
+        for key,value in [('now',101.),('now',99.9),('now',float('nan')),('clock_domain','other'),
+                          ('last_observation_source_time',100.),('valid_until_source_time',102.)]:
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                validate_action_chunk(chunk,**dict(options,**{key:value}))
+        bad=deepcopy(chunk);bad['action_contract']['units'][6]='mm'
+        with self.assertRaises(ValueError):validate_action_chunk(bad,**options)
+
+
 def observation(t=0.):
     return dict(source_time=t, device_state14=[0.]*14, images={name:np.zeros((224,224,3),np.uint8) for name in CAMS},
                 frame_ids={name:str(t) for name in CAMS}, task_success=True, cup_truth=[1,2,3])

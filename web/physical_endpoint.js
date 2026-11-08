@@ -87,7 +87,7 @@ export function mountPhysicalEndpoint({document:doc,fetch:request,location=globa
   }
   async function submit(body){
     if(busy||destroyed)return;const at=epoch;busy=true;targetError='';dismiss();message('正在提交环境操作；执行结果以后置核验为准。');gates();
-    try{const result=await client.submit(environment,body,state.csrf);if(at!==epoch||destroyed)return;lastRequest=body.request_id;uncertain=null;message('操作已受理 · '+jobText(result.job||result));}
+    try{const result=await client.submit(environment,body,state.csrf);if(at!==epoch||destroyed)return;lastRequest=body.request_id;uncertain=null;message('操作已受理 · '+jobText(result.job||result));return result;}
     catch(error){if(at===epoch&&!destroyed){if(!error.rejected){uncertain=copy(body);lastRequest=body.request_id;}message((uncertain?'提交结果未知；核对或重试将沿用同一请求编号。 ':'操作未受理：')+error.message);}}
     finally{busy=false;if(at===epoch&&!destroyed){stale=true;controlAlerts?.update(state?.control_alerts,{stale});gates();void refresh();}}
   }

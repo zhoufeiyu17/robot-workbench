@@ -205,11 +205,16 @@ class DevResumeTest(unittest.TestCase):
             'calibration_binding':{'a1_sha256':self.config['asset_seal_sha256'],'geometry_id':self.config['asset_geometry_id']}}}}}}
         warm.write(base_path,base)
         output=self.root/'cli-new';argv=['serve','--base',str(base_path),'--nominal-config',str(self.root/'nominal-config.json'),
-            '--output',str(output),'--gpu','1','--calibration-resume-source',str(spec_path),'--dry-run']
+            '--output',str(output),'--gpu','1','--calibration-resume-source',str(spec_path),'--dry-run',
+            '--collection-contract','cpu-contract.json']
         nominal={**self.config,'candidate':str(self.root/'candidate.json')};warm.write(Path(nominal['candidate']),{})
         with patch.object(serve_physx_device,'nominal_inputs',return_value=nominal),patch.object(serve_physx_device,'preflight',return_value={}), \
                 patch.object(serve_physx_device,'printed_marker_fixture',return_value=self.markers), \
                 patch('robot_workbench.calibration_profile.validate_resume_source',return_value=self.validate()) as validate, \
+                patch('robot_workbench.resident_collection.load_collection_contract',return_value=dict(
+                    data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/fake_test',domain_id=126),
+                    collection_setup=dict(detection_runtime_root='/cpu-fixture'))), \
+                patch('detector_adapter.preflight_release.preflight_release',return_value={}), \
                 patch.object(serve_physx_device,'run') as run,patch.object(sys,'argv',argv),patch('sys.stdout',new_callable=io.StringIO) as stdout:
             serve_physx_device.main();run.assert_not_called();validate.assert_called_once()
             self.assertEqual(json.loads(stdout.getvalue())['calibration_resume']['mode'],'dev_resume')

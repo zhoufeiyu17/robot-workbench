@@ -69,6 +69,108 @@ class WindowBackend(ClockBackend):
 
 class SharedTargetRoutesTest(unittest.TestCase):
     profile='normal_X5'
+    def capture_factory(self):
+        from types import SimpleNamespace
+        made=[]
+        class Recorder:
+            recording_backend='capture_session_v1'
+            def __init__(rec,payload,on_fault):
+                context=payload['recording_preparation'];rec.context=context;rec.notify=on_fault
+                rec.execution_instance_id=context['execution_instance_id'];rec.events=[];rec.diagnostics_error=None
+                rec.ready=threading.Event();rec.prepared=threading.Event();rec.done=threading.Event()
+                rec.capture=SimpleNamespace(config={},_finishing=False)
+                rec.preparation_deadline_monotonic=time.monotonic()+10
+                rec.root=Path(self.temp.name)/rec.execution_instance_id;rec.manifest=None;rec.controller_result=None
+                rec.thread=SimpleNamespace(is_alive=lambda:not rec.done.is_set())
+            @property
+            def error(rec):return rec.diagnostics_error if rec.context['control_policy']['parameters']['recording']['purpose_profile']=='data_required'else None
+            def submit(rec,kind,**fields):rec.events.append((kind,deepcopy(fields)))
+            def finish(rec,status,reason=None):
+                if rec.capture._finishing:return
+                rec.capture._finishing=True;rec.controller_result=dict(status=status,reason=reason);rec.done.set()
+            def bind_execution(rec,*args,**kwargs):pass
+            def snapshot(rec):return dict(ready=rec.ready.is_set(),done=rec.done.is_set(),error=rec.diagnostics_error)
+        def factory(payload,on_fault):
+            value=Recorder(payload,on_fault);made.append(value);return value
+        factory.recording_backend='capture_session_v1';factory.supports_deferred_preparation=True
+        self.runtime.owner.recording_factory=factory
+        return made
+
+    def test_common_capture_prepares_without_output_then_records_actual_sdk_calls(self):
+        self.create();made=self.capture_factory()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+            waypoints=[dict(q12=[.02]*12,speeds12=[.1]*12)]))
+        self.confirm('calibration',review);self.advance(20)
+        recording=made[0];self.assertEqual(self.runtime.owner.runner.status,'ARMED');self.assertEqual(self.raw.packets,[])
+        self.assertTrue(self.runtime.owner.feedback_healthy)
+        recording.prepared.set();recording.ready.set();self.advance(250)
+        self.assertEqual(self.runtime.owner.runner.status,'READY',self.runtime.owner.runner.reason)
+        self.assertTrue(recording.done.is_set());self.assertEqual(recording.controller_result['status'],'completed')
+        self.assertEqual(recording.context['control_policy']['policy_hash'],self.runtime.execution_calibration['control_policy']['policy_hash'])
+        self.assertTrue(any(kind=='feedback'and data.get('phase')=='sdk_read'for kind,data in recording.events))
+        self.assertTrue(any(kind=='command'and data.get('operation')=='queue_reference'and data['phase']=='returned'for kind,data in recording.events))
+
+    def test_stop_during_common_capture_preparation_never_starts_delayed_motion(self):
+        self.create();made=self.capture_factory()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',waypoints=[dict(q12=[.02]*12,speeds12=[.1]*12)]))
+        self.confirm('calibration',review);self.advance(3);recording=made[0]
+        self.runtime.request_stop();self.advance(2)
+        self.assertEqual(recording.controller_result['status'],'stopped')
+        recording.prepared.set();recording.ready.set();self.advance(100)
+        self.assertEqual(self.raw.packets,[]);self.assertEqual(self.runtime.owner.runner.status,'STOPPED')
+
+    def test_required_recording_failure_queues_one_stop_and_prevents_later_windows(self):
+        self.create();made=self.capture_factory()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',waypoints=[dict(q12=[.1]*12,speeds12=[.1]*12)]))
+        self.confirm('calibration',review);self.advance(1);recording=made[0]
+        recording.prepared.set();recording.ready.set();self.advance(40);self.assertTrue(self.raw.packets)
+        recording.diagnostics_error='CPU writer exited';recording.notify(recording.diagnostics_error)
+        epoch=self.runtime.owner.epoch;count=len(self.raw.packets)
+        recording.notify(recording.diagnostics_error);self.assertEqual(self.runtime.owner.epoch,epoch)
+        self.advance(5)
+        self.assertEqual(self.runtime.owner.epoch,epoch+1);self.assertEqual(len(self.raw.packets),count)
+        self.assertEqual(recording.controller_result['status'],'failed')
+
+    def test_preview_and_native_window_share_bound_position_decisions(self):
+        self.create()
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+            waypoints=[dict(q12=[.02]*12,speeds12=[.1]*12,jaw_gap_mm=[30.,30.])]))
+        prepared=[row for name,row in self.events if name=='guard_decision'and row['rule_id']=='G19']
+        self.assertTrue(prepared)
+        self.confirm('calibration',review);self.advance(100)
+        runner=self.runtime.owner.runner;frozen=self.runtime.execution_calibration['control_policy']
+        self.assertEqual({row['policy_hash']for row in prepared},{frozen['policy_hash']})
+        native=runner.target_interpreter.last_timing['guard_decisions']
+        self.assertIn('G18',{row['rule_id']for row in native})
+        self.assertEqual({row['policy_hash']for row in native},{frozen['policy_hash']})
+        boundary=self.runtime.owner.cache['calibration_feedback']['position_boundary']['guard_decision']
+        self.assertEqual((boundary['rule_id'],boundary['policy_hash']),('G20',frozen['policy_hash']))
+        with self.assertRaisesRegex(ValueError,'G18'):
+            self.runtime.owner.send('left',[99.]+[0.]*13)
+
+    def test_strict_begin_command_is_carried_into_every_home_window(self):
+        self.create();owner=self.runtime.owner;owner.preserve_begin_jaws=True
+        measured=self.raw.q[:];held=measured[:]
+        for side,slot in [('left',6),('right',13)]:
+            measured[slot]=jaw.feedback_sdk(side,31.)
+            held[slot]=jaw.command_sdk(side,30.)
+        measured[0]=held[0]=.02;self.raw.q=measured[:];self.raw.applied_command=held[:]
+        self.advance(40)
+        calls=[]
+        def begin(side,feedback,*,preserve_jaws=False):
+            self.assertTrue(preserve_jaws);calls.append(side)
+            return dict(measured_qpos14=feedback[:],command_sdk14=held[:],source_output={'firmware_ack':False})
+        self.raw.begin=begin
+        review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',
+            waypoints=[dict(q12=[0.]*12,speeds12=[.1]*12,jaw_gap_mm=[30.,30.])]))
+        self.confirm('calibration',review);self.advance(150)
+        self.assertEqual(calls,['left','right'])
+        self.assertTrue(self.raw.packets)
+        for packet in self.raw.packets:
+            for row in packet['q_sdk14']:
+                self.assertEqual([row[6],row[13]],[held[6],held[13]])
+        self.assertEqual(owner.last_begin_command['epoch'],owner.epoch)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.now=100.;self.events=[];self.instances=[];self.runtime=None
@@ -82,6 +184,7 @@ class SharedTargetRoutesTest(unittest.TestCase):
         self.runtime=Runtime(calibration,Safety,lambda:self.raw,device_id='shared-target-cpu',environment='fake',
             lock_root=self.temp.name,initialize_backend=lambda b:b.set_damping_hold(manual=True),
             control_clock=lambda:self.now,jaw_mapping_file=mapping,hardware_binding=binding,
+            data_plane=getattr(self,'ros_plane',None),
             event=lambda name,**data:self.events.append((name,data)))
         self.creds={business:self.runtime.register_business(business)for business in ('calibration','collection','inference')}
         self.advance(42)
@@ -340,6 +443,37 @@ class SharedTargetRoutesTest(unittest.TestCase):
         self.assertEqual(runner.target_interpreter.reference.metadata['kind'],'online_prediction_chunk')
         self.assertTrue(any(name=='inference_prepared_chunk'for name,_ in self.events))
         self.assert_stop_cancels()
+
+    def test_half_second_live_infer_stops_both_arms_and_revokes_future_windows(self):
+        from types import SimpleNamespace
+        from robot_workbench.inference_owner import InferenceRunner,device_state
+        from robot_workbench.inference_model import MIXED366_ID
+        self.create();self.runtime.handoff(self.creds['calibration'],'inference')
+        requests=[]
+        def predict(request):
+            requests.append(request);rows=np.zeros((60,14));rows[:,0]=np.arange(1,61)*.0001;rows[:,7]=-np.arange(1,61)*.0001
+            return dict(request_id=request['request_id'],action14=rows)
+        def factory(owner,proxy,feedback,config):
+            adapter=SimpleNamespace(device_to_model=lambda q:q,decode=lambda q,held:dict(final_device14=q.tolist()))
+            return InferenceRunner(owner,proxy,feedback,config,predict=predict,adapter=adapter,
+                observe=lambda now,fb:dict(source_time=now,device_state14=device_state(fb['qpos']),images={}))
+        config=dict(model_id=MIXED366_ID,task='coffee',duration_s=.5,execute_steps=15,
+            bounded_live_prediction=True,target_execution='shared_reference_windows',maximum_observation_age_s=.5)
+        self.runtime.configure_inference(config,factory)
+        self.confirm('inference',self.runtime.submit(self.creds['inference'],dict(action='preview_inference',duration_s=.5)))
+        for _ in range(100):
+            self.advance()
+            if self.runtime.owner.runner.bounded_result is not None:break
+        runner=self.runtime.owner.runner;deadline=time.monotonic()+5
+        while runner.bounded_result.empty()and time.monotonic()<deadline:time.sleep(.005)
+        self.assertFalse(runner.bounded_result.empty());self.advance(70)
+        self.assertEqual(runner.status,'STOPPED',runner.reason);self.assertIsNone(self.raw.window)
+        self.assertEqual(len(requests),1);self.assertEqual(len(requests[0]['applied_history']),0)
+        self.assertTrue(all(p['active_arm']=='both'for p in self.raw.packets))
+        self.assertTrue(any(any(row[7]<0 for row in p['q_sdk14'])for p in self.raw.packets))
+        elapsed=[v for name,v in self.events if name=='inference_bounded_execution_elapsed']
+        self.assertEqual(len(elapsed),1);self.assertAlmostEqual(elapsed[0]['actual_interval_s'],.5,delta=.011)
+        count=len(self.raw.packets);self.advance(100);self.assertEqual(len(self.raw.packets),count)
 
     def test_fixed_prepared_infer_uses_the_identical_executor(self):
         from robot_workbench.motion_reference import prepare_reference

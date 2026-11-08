@@ -1,5 +1,6 @@
 """Resident-only C install preparation and main-thread D task observation."""
 from copy import deepcopy
+from .execution_settings import FEEDBACK_TIMEOUT_S
 import hashlib
 import json
 import math
@@ -226,7 +227,7 @@ def require_collection_control(device):
     state=device.snapshot('collection');age=state.get('sample_age_s')
     if (state.get('connected') is not True or state.get('feedback_healthy') is not True
             or state.get('stationary') is not True or state.get('automatic_enabled') is not False
-            or type(age) not in (int,float) or not 0<=age<=.1):
+            or type(age) not in (int,float) or not 0<=age<=FEEDBACK_TIMEOUT_S):
         raise ValueError('数采准备需要当前新鲜、健康、静止的控制反馈')
 
 
@@ -462,6 +463,9 @@ class CollectionPreparation:
                 except Exception as error:errors.append(str(error))
             if job is not None and job.is_alive():errors.append('collection job did not exit within cleanup budget')
             if monitor is not None and monitor.is_alive():errors.append('old collection review monitor has not exited')
+            if not errors and callable(getattr(getattr(parts,'bridge',None),'close',None)):
+                try:parts.bridge.close()
+                except Exception as error:errors.append(str(error))
             if errors:
                 self.parts=parts  # A retry must finish retiring this scope before replacing it.
                 raise RuntimeError('; '.join(errors))
@@ -640,6 +644,9 @@ class CollectionPreparation:
             control_url=self.control_url,token_file=self.token_file,producer_ports=self.ports,producer_directories=self.directories,
             trusted_binding_path=root/'collection-binding.json',local_recording_root=root/'collection-raw',
             resident_deadline_wall_ns=self.deadline_wall_ns,output=output,
+            data_plane=getattr(self.device.runtime,'data_plane',None),
+            control_owner_reference=(dict(descriptor=str(self.device.runtime.descriptor),runtime_nonce=self.device.runtime.nonce)
+                if getattr(self.device.runtime,'data_plane',None)else None),
             **({'diagnostic_source':self.diagnostic_source} if self.diagnostic_source else {}))
         budget=min(600.,(prepare_deadline-time.time_ns())/1e9-15)
         if budget<=0:raise TimeoutError('resident deadline leaves no conversion/cleanup budget')

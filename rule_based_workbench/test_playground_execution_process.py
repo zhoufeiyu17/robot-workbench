@@ -150,4 +150,9 @@ def check(artifacts=None,*,environment='physical'):
 
 
 if __name__=='__main__':
-    print(json.dumps(check(Path(sys.argv[1]) if len(sys.argv)>1 else None),indent=2))
+    import argparse
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('root',type=Path,nargs='?')
+    parser.add_argument('--environment',choices=('physical','fake'),default='physical')
+    args=parser.parse_args()
+    print(json.dumps(check(args.root,environment=args.environment),indent=2))

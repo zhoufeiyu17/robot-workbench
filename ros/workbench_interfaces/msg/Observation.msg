@@ -1,0 +1,9 @@
+string<=200 observation_id
+string<=200 run_id
+uint64 epoch
+StreamRef state
+StreamRef[<=3] frames
+string[<=3] camera_roles
+int64 source_time_ns
+string<=200 model_io_digest
+string<=524288 pairing_json

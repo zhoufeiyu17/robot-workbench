@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>工作台开发 Map</title>
+  <link rel="stylesheet" href="style.css?v=devmap1">
+  <link rel="stylesheet" href="development-map.css?v=devmap2">
+  <script>if(new URLSearchParams(location.search).get('embedded')==='1')document.documentElement.classList.add('map-embedded');</script>
+  <script type="module" src="development-map.mjs?v=wam-design1"></script>
+</head>
+<body class="devmap-page">
+  <a class="skip" href="#map-main">跳到开发图</a>
+  <header class="map-header"><div><a href="./#progress" target="_top">← 实施进度</a><h1>工作台开发 Map</h1><p>功能模块 → 职责子域 → 源码文件</p></div><div class="map-update"><span id="map-revision">读取快照…</span><small id="map-sync" role="status" aria-live="polite"></small><button id="map-refresh" class="secondary">立即刷新</button></div></header>
+  <main id="map-main">
+    <div id="map-error" role="alert" hidden></div>
+    <section class="map-toolbar panel" aria-label="图层与筛选">
+      <div class="segmented" id="map-levels" role="group" aria-label="架构层级"><button data-level="modules">功能模块</button><button data-level="domains">职责子域</button><button data-level="files">源码文件</button></div>
+      <label>模块范围<select id="map-module"><option value="">全部模块</option></select></label>
+      <label>开发状态<select id="map-status"><option value="">全部状态</option></select></label>
+      <label class="map-search">查找<input id="map-search" type="search" placeholder="职责、文件路径、下一步"></label>
+    </section>
+    <nav id="map-breadcrumb" class="map-breadcrumb" aria-label="开发图路径"></nav>
+    <p id="map-summary" class="muted"></p>
+    <div id="map-legend" class="legend"></div>
+    <div class="map-layout"><section class="panel map-diagram"><div class="panel-heading"><h2 id="map-title">开发状态图</h2><label>图缩放<select id="map-zoom"><option value="1">适合宽度</option><option value="1.25">125%</option><option value="1.5">150%</option></select></label></div><p id="map-edge-note" class="muted"></p><div id="map-graph" class="graph" aria-live="off"></div></section><aside id="map-detail" class="panel map-detail" aria-label="选中节点详情"></aside></div>
+    <section class="panel"><h2>最近开发更新</h2><div id="map-changes"></div></section>
+    <details class="panel map-maintenance"><summary>维护方式与覆盖范围</summary><p id="map-scope"></p><p>开发者在开始、阻塞、实现完成、验证完成时更新节点。每个逻辑变更结束后刷新源码快照并发布，页面每 15 秒读取已发布版本。验证记录绑定源码及已映射的传递依赖，修改后显示“待重验”。</p><p>新增源码文件需加入职责域映射。刷新时会列出扫描范围内尚未归属的文件。历史部署比对使用带时间的源码快照。</p><pre>python3 scripts/development_map.py set --kind domain --id guard-policy --state active --note '开始归并策略入口' --next '补齐策略快照契约' --publish
+python3 scripts/development_map.py refresh --publish
+python3 scripts/development_map.py set --id robot_workbench/execution_settings.py --state verified --note '策略边界回归通过' --evidence .evidence/&lt;本次回执&gt;.json --publish</pre><a href="development-map.json" download>下载当前开发快照</a></details>
+  </main>
+</body>
+</html>

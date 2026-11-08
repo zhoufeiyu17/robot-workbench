@@ -115,6 +115,37 @@ def prepare_point(plan, initial, target):
     return PointReference(_frozen(q[0]), _frozen(q[1]), duration, meta)
 
 
+def prepare_measured_hold(feedback, limits, *, now, brake_end_s, stationary_window,
+                          held_jaws_sdk, source_sha256):
+    """Bind a fixed measured joint anchor once after normal braking.
+
+    The Owner supplies jaw commands from its current-epoch output evidence,
+    never measured jaw gaps. The existing stationary detector remains the
+    evidence policy; no new physical threshold or motor ACK is inferred here.
+    """
+    sample=feedback.get('sample_time_s');check=stationary_window.last_diagnostic or{}
+    jaws=np.asarray(held_jaws_sdk,dtype=float)
+    if (any(type(t)not in(int,float)or not math.isfinite(t)for t in(now,brake_end_s,sample))
+            or not brake_end_s<=sample<=now or now-sample>.1
+            or check.get('stationary')is not True or check.get('sample_time_s')!=sample
+            or check.get('window_start_s',-math.inf)<brake_end_s
+            or check.get('raw_qpos')!=list(feedback.get('qpos',()))
+            or check.get('raw_qvel')!=list(feedback.get('qvel',()))
+            or jaws.shape!=(2,)or not np.isfinite(jaws).all()):
+        raise ValueError('fresh post-brake stationary evidence and explicit held jaw commands required')
+    target=np.asarray(feedback['qpos'],dtype=float).copy()
+    if target.shape!=(14,):raise ValueError('14 measured axes required')
+    target[[6,13]]=jaws
+    q,_=_vectors([target],limits)
+    meta=dict(schema=REFERENCE_SCHEMA,kind='normal_hold',source_sha256=source_sha256,
+        clock='host_monotonic_relative_seconds',joint_units='rad',jaw_units='SDK_m',duration_s=1.,
+        brake_end_source_s=brake_end_s,anchor_sample_source_s=sample,anchor_sdk14=q[0].tolist(),
+        anchor_policy='fixed_measured_joints_once; retained_command_jaws',
+        stationary_scope='existing_0.3s_position_span_not_motor_ACK',max_velocity_rad_s=0.,max_acceleration_rad_s2=0.)
+    meta['reference_id']=_identity(meta)
+    return PointReference(_frozen(q[0]),_frozen(q[0]),1.,meta)
+
+
 @dataclass(frozen=True)
 class SampledReference:
     times: np.ndarray
@@ -193,7 +224,9 @@ def prepare_samples(times, targets, limits, *, source_sha256, timing_policy='str
 class TargetInterpreter:
     """One execution implementation, independent of the source business."""
     def __init__(self, backend, reference, *, active_arm, start_s, epoch, current_epoch,
-                 gate, clock, profile='normal_X5', integral=False, feedforward=None,integral_gains=None):
+                 gate, clock, profile='normal_X5', integral=False, feedforward=None,integral_gains=None,guard=None,record_event=None):
+        if record_event is not None and not callable(record_event):raise ValueError('optional bounded recording callback required')
+        self.record_event=record_event
         if active_arm not in ('left', 'right', 'both') or profile not in PROFILES:
             raise ValueError('known active arm and motion profile required')
         identity=reference.metadata.get('reference_id')
@@ -207,6 +240,13 @@ class TargetInterpreter:
         self.backend, self.reference, self.active_arm = backend, reference, active_arm
         self.start_s, self.epoch, self.current_epoch = start_s, epoch, current_epoch
         self.gate, self.clock, self.profile = gate, clock, profile
+        self.position_guard=guard
+        if guard is None:
+            from .execution_settings import Guard,control_parameters,defaults,policy_hash,FEEDBACK_TIMEOUT_S,INTEGRAL_FEEDBACK_TIMEOUT_S,REFERENCE_STARVATION_MARGIN_S
+            parameters=control_parameters(defaults('inference'),business='inference')
+            guard=Guard.bind(dict(revision=None,policy_hash=policy_hash(parameters),parameters=parameters),
+                dict(feedback_timeout_s=FEEDBACK_TIMEOUT_S,integral_feedback_timeout_s=INTEGRAL_FEEDBACK_TIMEOUT_S,starvation_margin_s=REFERENCE_STARVATION_MARGIN_S))
+        self.guard=guard
         self.native_period_s = native_period_s(reference.metadata, profile)
         if integral_gains is not None:
             from .execution_settings import validate_integral_gains
@@ -240,6 +280,7 @@ class TargetInterpreter:
         self.last_timing = None
         self.cancelled = False
         self.compensation_parent=None
+        self.preserved_prefix=None
 
     def inherit_hold(self,previous,now):
         """Carry the actual bounded output; never carry a prior profile or path."""
@@ -313,14 +354,20 @@ class TargetInterpreter:
         # and the original freshness/starvation budgets.
         now=max(now,self.clock())
         sample = feedback.get('sample_time_s')
-        maximum_age=.05 if self.integrals else .1
         if type(sample) not in (int, float) or not math.isfinite(sample) or now-sample<0.:
             raise ValueError('shared reference requires a finite nonfuture feedback timestamp')
-        if now-sample>maximum_age:
-            raise ReferenceFeedbackStaleError(now-sample,maximum_age,
+        decision=self.guard.evaluate(dict(rule_id='G28',signal_id=self.reference.metadata['reference_id'],
+            observed=now-sample,source_time=sample,checked_time=now,epoch=self.epoch),
+            'feedback_integral'if self.integrals else'feedback')
+        decisions=[decision];mark('feedback_guard',guard_decisions=decisions)
+        if decision['verdict']=='reject':
+            raise ReferenceFeedbackStaleError(now-sample,decision['limit'],
                 phase='terminal_hold'if now-self.start_s>=self.reference.duration_s else'motion')
-        if self.queued_until is not None and now > self.queued_until - .015:
-            raise ValueError('shared reference starved; stop before stale nonzero tail')
+        if self.queued_until is not None:
+            decision=self.guard.evaluate(dict(rule_id='G29',signal_id=self.reference.metadata['reference_id'],
+                observed=dict(current_time=now,queued_until=self.queued_until),source_time=sample,checked_time=now,epoch=self.epoch),'submission')
+            decisions.append(decision);mark('queue_guard')
+            if decision['verdict']=='reject':raise ValueError('shared reference starved; stop before stale nonzero tail')
         if not force and self.next_upload is not None and now < self.next_upload:
             return None
         mark('command_gate')
@@ -335,6 +382,10 @@ class TargetInterpreter:
             # move the linear interpolator's corners on every replacement.
             first=math.ceil((host[0]-self.start_s)/period-1e-9)
             host=self.start_s+(first+np.arange(len(host)))*period
+        if not self.submissions and now<self.start_s<host[0]:
+            # Native append retains old knots before the first new sample.
+            # Anchor the curve origin so a later HOLD knot cannot delay motion.
+            host=np.r_[self.start_s,host]
         knots=getattr(self.reference,'event_times',getattr(self.reference,'breaks',None))
         if knots is None:knots=np.asarray([self.reference.duration_s])
         lo,hi=np.searchsorted(knots,[host[0]-self.start_s,host[-1]-self.start_s],side='left')
@@ -343,11 +394,42 @@ class TargetInterpreter:
             # Preserve declared boundaries rather than interpolating a gripper
             # event a fraction of one sampling period before its source stage.
             host=np.r_[host[np.abs(host-stamp)>1e-6],stamp]
+        prefix=self.preserved_prefix
+        if prefix is not None and host[0]>prefix['host_times_s'][-1]:
+            if not self.submissions:raise ValueError('committed prefix expired before brake installation')
+            prefix=self.preserved_prefix=None
+        if prefix is not None:
+            for stamp in prefix['host_times_s']:
+                if host[0]<=stamp<=host[-1]:host=np.r_[host[np.abs(host-stamp)>1e-6],stamp]
         host=np.sort(host)
+        if (not self.submissions and self.reference.metadata.get('planning_policy',{}).get('boundary_scope')=='complete_prepared_segment'
+                and host[0]>self.start_s+self.reference.breaks[1]):
+            raise ValueError('first target knot already passed; complete segment cannot be admitted')
+        if (not self.submissions and self.reference.metadata.get('kind')=='raw_replay'
+                and host[0]>self.start_s+self.reference.breaks[2]):
+            raise ValueError('first Raw target knot already passed; replay cannot skip its source prefix')
         if len(host)>MAX_PACKET_ROWS:raise ValueError('reference events exceed bounded native window; reprepare')
         mark('reference_sample',first_point_source_s=float(host[0]),feedback_sample_source_s=sample)
         sample_started=time.perf_counter()
         q, dq, _ = self.reference.sample(host - self.start_s)
+        if prefix is not None:
+            retained=host<=prefix['host_times_s'][-1]
+            for output,key in((q,'q_sdk14'),(dq,'dq_sdk14')):
+                values=np.asarray(prefix[key])
+                for j in range(14):output[retained,j]=np.interp(host[retained],prefix['host_times_s'],values[:,j])
+        if self.position_guard is not None:
+            bounds=self.position_guard.evaluate(dict(rule_id='G18',signal_id=self.reference.metadata['reference_id'],
+                observed=dict(minimum=q[:,JOINTS].min(axis=0).tolist(),maximum=q[:,JOINTS].max(axis=0).tolist(),active_arm=self.active_arm),
+                source_time=sample,checked_time=now,epoch=self.epoch),'submission')
+            decisions.append(bounds);mark('position_guard')
+            if bounds['verdict']=='reject':raise ValueError('G18: native command exceeds the bound joint capability')
+            from arx_env.joint_head_jaw_mapping import command_gap_mm
+            jaws=self.position_guard.evaluate(dict(rule_id='G17',signal_id=self.reference.metadata['reference_id'],
+                observed=dict(minimum=[command_gap_mm(side,float(q[:,slot].min()))for side,slot in (('left',6),('right',13))],
+                    maximum=[command_gap_mm(side,float(q[:,slot].max()))for side,slot in (('left',6),('right',13))],active_arm=self.active_arm),
+                source_time=sample,checked_time=now,epoch=self.epoch),'submission')
+            decisions.append(jaws)
+            if jaws['verdict']=='reject':raise ValueError('G17: native jaw command exceeds the bound SDK capability')
         mark('feedback_target_sample')
         target, _, _ = self.reference.sample([sample - self.start_s])
         mark('bias_allocation')
@@ -393,6 +475,8 @@ class TargetInterpreter:
             integral_and_feedforward_s=integral_times,packet_build_s=packed-packet_started,
             native_admission_s=admitted-packed,reference_through_admission_s=admitted-sample_started)
         self.next_upload, self.queued_until = now + (.02 if feedback50 else .1), float(host[-1])
+        if self.record_event is not None:self.record_event('native_window',dict(reference_id=packet['reference_id'],
+            first_source_s=float(host[0]),last_source_s=float(host[-1]),guard_decisions=decisions,admission=receipt))
         return dict(packet=packet, admission=receipt, submitted_monotonic_s=before,
                     integral_state={side:dict(bias_sdk6=value.bias.tolist(),rate_sdk6_per_s=value.rate.tolist(),
                         effective_next_rate_sdk6_per_s=value.effective_rate.tolist(),first_knot_s=value.time)

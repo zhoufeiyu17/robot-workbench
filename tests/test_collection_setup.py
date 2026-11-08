@@ -363,6 +363,25 @@ class PhysicalCollectionSetupTests(unittest.TestCase):
         self.assertEqual(self.contract,original)
         self.assertTrue(all(name not in sys.modules for name in ('isaaclab','pxr','torch')))
 
+    def test_ros_prepare_and_finalize_remove_spool_dependency(self):
+        plane=dict(schema='workbench.ros-data-plane.v1',namespace='/physical_cpu',domain_id=126)
+        descriptor=self.root/'control-owner.json'
+        write(descriptor,dict(schema='workbench.control_owner.v2',device_id=self.device.id,environment='physical'))
+        self.contract['data_plane']=plane
+        self.options.update(data_plane=plane,producer_directories={},
+            control_owner_reference=dict(descriptor=str(descriptor),runtime_nonce='cpu-owner'))
+        result=self.prepare('ros-collection');setup=read(result['setup_path'])
+        self.assertEqual(setup['producer_directories'],{})
+        self.assertEqual(setup['data_plane'],plane)
+        self.assertFalse(result['conversion']['executed'])
+        self.converted(result);configured=finalize_collection_setup(result['setup_path'])
+        self.addCleanup(lambda:Path(configured['detector_parent']).rmdir())
+        config=read(configured['collection_config'])
+        self.assertEqual(config['control_owner_descriptor'],str(descriptor))
+        self.assertEqual(config['data_plane'],plane)
+        self.assertTrue(all('recording_directory'not in row for row in config['cameras'].values()))
+        self.assertFalse(configured['task_or_gpu_qualification'])
+
     def test_739_physical_conversion_and_worker_identity_use_one_frozen_gpu_zero(self):
         self.execution.update(PHYSICAL_TARGET)
         result=self.prepare('collection739')

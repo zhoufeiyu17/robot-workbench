@@ -68,7 +68,7 @@ def main():
         if args.ready_file.exists():raise FileExistsError(args.ready_file)
         temporary.rename(args.ready_file)
     try:server.serve_forever()
-    finally:server.server_close();service.close()
+    finally:server.server_close();server.model_service.close()
 
 
 if __name__ == '__main__':main()

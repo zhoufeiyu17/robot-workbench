@@ -14,6 +14,7 @@ import math
 
 from contract import ARM_KEYS, GRIPPER_KEYS, validate_physical14, validate_physical_feedback
 from integration import DualGpuPipeline, _digest, _finite
+from robot_workbench.execution_settings import FEEDBACK_TIMEOUT_S
 
 
 def validate_plan_evidence(plan, source):
@@ -51,7 +52,7 @@ def validate_plan_evidence(plan, source):
 
 
 class FrozenExecutor:
-    def __init__(self, plan, source, *, sink, gate, stop, feedback_timeout_s=.1, source_validator=None, execution_policy='strict', execution_settings=None, disabled_grippers=()):
+    def __init__(self, plan, source, *, sink, gate, stop, feedback_timeout_s=FEEDBACK_TIMEOUT_S, source_validator=None, execution_policy='strict', execution_settings=None, disabled_grippers=(),guard=None):
         if execution_policy not in ('strict','observation'):
             raise ValueError('unknown execution policy')
         self.execution_policy=execution_policy
@@ -87,6 +88,8 @@ class FrozenExecutor:
         self.feedback_timeout_s = _finite(feedback_timeout_s, "feedback_timeout_s")
         if self.feedback_timeout_s <= 0 or not all(callable(f) for f in (sink, gate, stop)):
             raise ValueError("positive feedback timeout and sink/gate/stop callbacks required")
+        self.guard=guard;self.guard_decisions=[]
+        self._ensure_guard()
         control = plan.get("control", {})
         hz, nominal = control.get("physics_hz"), control.get("substeps")
         steps = plan.get("native_substeps")
@@ -131,6 +134,17 @@ class FrozenExecutor:
         self.runtime_timeline=None
         self.continuous_reference=None
 
+    def _ensure_guard(self):
+        if getattr(self,'guard',None) is not None:return
+        from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash
+        settings=deepcopy(self.error_settings)if self.error_settings is not None else defaults('collection')
+        if self.error_settings is None:
+            settings.update(tracking_enabled=self.execution_policy=='strict',tracking_joint_rad=self.limits['joint_rad'],
+                tracking_jaw_mm=self.limits['gripper_mm'],tracking_duration_s=0.,arrival_enabled=False)
+        parameters=control_parameters(settings,business='collection')
+        self.guard=Guard.bind(dict(revision=None,policy_hash=policy_hash(parameters),parameters=parameters),
+                              dict(feedback_timeout_s=self.feedback_timeout_s))
+
     def configure_runtime(self, timeline):
         """Bind the privately compiled preview/initialization result, without rescanning it."""
         if (self.status!='new' or self.runtime_timeline is not None
@@ -164,6 +178,7 @@ class FrozenExecutor:
                 "tracking_error": deepcopy(self.errors), "stop_invoked": self.stop_invoked,
                 "tracking_policy":self.execution_policy,"tracking_exceeded_samples":self.tracking_exceeded_samples,
                 "execution_settings":deepcopy(self.error_settings),"arrival_error":deepcopy(self.arrival_error),
+                "guard_decisions":deepcopy(self.guard_decisions),
                 "disabled_grippers":list(self.disabled_grippers),
                 "held_arms":list(self.held_arms),
                 "arrival_qualified":self.arrival_qualified,
@@ -205,7 +220,10 @@ class FrozenExecutor:
         if not isinstance(feedback, dict) or set(feedback) != {"sample_monotonic_s", "state"}:
             raise ValueError("feedback requires sample_monotonic_s and physical14 state")
         sample = _finite(feedback["sample_monotonic_s"], "feedback sample time")
-        if not 0 <= now - sample <= self.feedback_timeout_s:
+        decision=self.guard.evaluate(dict(rule_id='G28',signal_id=self.plan['timeline_digest'],observed=now-sample,
+            source_time=sample,checked_time=now),'feedback')
+        self.guard_decisions=[decision]
+        if decision['verdict']=='reject':
             raise ValueError("feedback is stale or from the future")
         if self.last_sample_s is not None and sample < self.last_sample_s:
             raise ValueError("feedback time regressed")
@@ -235,23 +253,32 @@ class FrozenExecutor:
             "gripper_mm": max(jaw_errors.values(), default=0.)}
         limits = (dict(joint_rad=self.error_settings['tracking_joint_rad'], gripper_mm=self.error_settings['tracking_jaw_mm'])
                   if self.error_settings else self.limits)
-        exceeded={key:dict(error=value,limit=limits[key]) for key,value in self.errors.items() if value>limits[key]}
+        decision=self.guard.evaluate(dict(rule_id='G25',signal_id=self.plan['timeline_digest'],
+            observed=dict(joint_errors_rad=[a-b for key in ARM_KEYS for a,b in zip(measured[key],target[key])],
+                jaw_errors_mm=[jaw_errors.get(key,0.)for key in GRIPPER_KEYS],
+                exceeded_for_s=0. if self.bad_tracking_since is None else now-self.bad_tracking_since),
+            source_time=sample,checked_time=now),'tracking_frozen')
+        self.guard_decisions.append(decision)
+        exceeded={key:dict(error=value,limit=limits[key]) for key,value in self.errors.items()
+                  if (decision['observed']['exceeded_joint_indices']if key=='joint_rad'else decision['observed']['exceeded_jaw_indices'])}
         for key,value in self.errors.items():self.maximum_errors[key]=max(self.maximum_errors[key],value)
         if exceeded:self.tracking_exceeded_samples+=1
         if exceeded:
             if self.bad_tracking_since is None:
                 self.bad_tracking_since = now
-            duration = self.error_settings['tracking_duration_s'] if self.error_settings else 0.
-            if enforce_tracking and now-self.bad_tracking_since+1e-12 >= duration:
+            if decision['verdict']=='reject':
                 raise ValueError(f"feedback tracking error exceeds the execution tolerance at tick {reference_index}: {exceeded}")
         else:
             self.bad_tracking_since = None
         endpoint = self.ticks[-1]['target']
         self.arrival_error = dict(joints_rad=[abs(a-b) for key in ARM_KEYS for a,b in zip(measured[key],endpoint[key])],
                                  jaw_mm=[abs(measured[key]-endpoint[key]) if key in self.enabled_gripper_keys else None for key in GRIPPER_KEYS])
-        self.arrival_qualified = (not self.error_settings or not self.error_settings['arrival_enabled'] or
-            all(error <= limit for error,limit in zip(self.arrival_error['joints_rad'], self.error_settings['arrival_tolerances_rad']))
-            and max((v for v in self.arrival_error['jaw_mm'] if v is not None), default=0.) <= self.error_settings['arrival_jaw_mm'])
+        arrival=self.guard.evaluate(dict(rule_id='G26',signal_id=self.plan['timeline_digest'],
+            observed=dict(joint_errors_rad=self.arrival_error['joints_rad'],
+                          jaw_errors_mm=[0. if value is None else value for value in self.arrival_error['jaw_mm']]),
+            source_time=sample,checked_time=now),'arrival')
+        self.guard_decisions.append(arrival)
+        self.arrival_qualified = not self.error_settings or not self.error_settings['arrival_enabled'] or arrival['verdict']=='pass'
         self.last_sample_s = sample
         if self.timeline_elapsed and self.arrival_qualified and sample+1e-12>=self.start_s+self.duration_s+self.scheduling_delay_s:
             self.final_feedback_qualified=True

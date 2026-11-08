@@ -1,0 +1,12 @@
+string<=200 device_id
+string<=200 stream_id
+string<=200 source_instance_id
+string<=200 source_clock_id
+string<=256 topic
+string<=128 message_type
+string<=32 kind
+string<=4096 units_json
+string<=200 coordinate_frame
+float64 nominal_hz
+bool available
+string<=524288 metadata_json

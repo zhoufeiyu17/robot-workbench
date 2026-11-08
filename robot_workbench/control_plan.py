@@ -242,7 +242,7 @@ def _worker(channel,parent_pid,operation,request,context,root,nonce):
                 base_timeline=_save(root,'base-timeline.json',base),timeline_digest=frozen.plan['timeline_digest'],
                 validation_worker_pid=os.getpid(),maintenance_replay=is_replay(payload['plan']),
                 origin=dict(owner_pid=context['owner_pid'],runtime_nonce=context['runtime_nonce'],epoch=context['epoch']))
-            omitted={'plan','ticks','times','holding_ticks','unloading_ticks','sink','gate','stop'}
+            omitted={'plan','ticks','times','holding_ticks','unloading_ticks','sink','gate','stop','guard'}
             state={key:value for key,value in vars(frozen).items() if key not in omitted}
             plan={key:payload['plan'][key] for key in ('timeline_digest','simulation','planner_id') if key in payload['plan']}
             if 'replay_derivation' in payload['plan']:plan['replay_derivation']={'method':payload['plan']['replay_derivation']['method']}
@@ -352,6 +352,7 @@ def _run(operation,request,context,root,*,current):
             return timeline
         from frozen_executor import FrozenExecutor
         frozen=object.__new__(FrozenExecutor);frozen.__dict__.update(metadata['frozen_state'])
+        frozen.guard=None;frozen._ensure_guard()
         for key in ('disabled_grippers','held_arms','enabled_gripper_keys'):setattr(frozen,key,tuple(getattr(frozen,key)))
         frozen.plan=dict(metadata['plan'],ticks=rows);frozen.ticks=rows;frozen.times=timeline['times']
         frozen.holding_ticks=timeline['holding_ticks'];frozen.unloading_ticks=timeline['unloading_ticks']

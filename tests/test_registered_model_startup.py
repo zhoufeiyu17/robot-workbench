@@ -15,7 +15,9 @@ class RegisteredModelTest(unittest.TestCase):
         def forbidden(*args):raise AssertionError('mapping refusal must precede all control/model work')
         flow=SimpleNamespace(bind_device=forbidden,preview_episode=forbidden,execute_review=forbidden,
                              snapshot=forbidden,control_mapping_pending='machine mapping not qualified')
-        self.assertEqual(Application.inference_run_reason(None,None,flow,{}),'machine mapping not qualified')
+        app=SimpleNamespace(operator_tasks={})
+        device=SimpleNamespace(environment='physical')
+        self.assertEqual(Application.inference_run_reason(app,device,flow,{}),'machine mapping not qualified')
 
     def test_host_binding_and_explicit_policy_are_required(self):
         with TemporaryDirectory()as directory:

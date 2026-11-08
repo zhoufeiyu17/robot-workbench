@@ -9,6 +9,137 @@ from robot_workbench.motion_reference import prepare_reference,ReferenceIntegral
 
 
 class MotionReferenceTests(unittest.TestCase):
+    def test_ipc_roundtrip_accepts_declared_cubic_quartic_and_quintic(self):
+        from copy import deepcopy
+        from robot_workbench.motion_reference import prepare_brake,prepare_brake_after
+        from robot_workbench.owner_inference import reference_read,reference_wire
+        source,initial,limits=self.fixture()
+        cubic=prepare_reference(source,initial,limits,source_sha256='a'*64)
+        source['kind']='online_prediction_chunk'
+        quintic=prepare_reference(source,initial,limits,source_sha256='a'*64)
+        v=np.zeros(14);v[0]=.1
+        brake=prepare_brake(initial,v,initial,limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.,source_sha256='b'*64)
+        prefix=prepare_brake_after(quintic,quintic.duration_s*.4,limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+        for ref in(cubic,brake,quintic,prefix):
+            wire=reference_wire(ref);back=reference_read(wire,limits)
+            for a,b in zip(ref.sample([0.,ref.duration_s*.4,ref.duration_s]),back.sample([0.,ref.duration_s*.4,ref.duration_s])):
+                np.testing.assert_array_equal(a,b)
+            broken=deepcopy(wire);broken['coefficients'][0][-1][0]+=.01
+            with self.assertRaisesRegex(ValueError,'digest'):reference_read(broken,limits)
+        broken=reference_wire(quintic);broken['metadata']['kind']='unknown'
+        with self.assertRaisesRegex(ValueError,'bounded'):reference_read(broken,limits)
+        with self.assertRaisesRegex(ValueError,'SDK limits'):reference_read(reference_wire(quintic),[[0,1]])
+
+    def test_reserve_is_whole_path_sufficient_bound_not_only_selected_stop(self):
+        from robot_workbench.motion_reference import check_brake_reserve,prepare_brake_after
+        source,initial,limits=self.fixture();source['kind']='online_prediction_chunk'
+        source['device_targets14']=(np.asarray(source['device_targets14'])*.01).tolist()
+        ref=prepare_reference(source,initial,limits,source_sha256='a'*64)
+        proof=check_brake_reserve(ref,limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+        self.assertEqual(proof['reference_id'],ref.metadata['reference_id'])
+        # Examples audit the sufficient bound; they are not the proof itself.
+        for t in np.linspace(.001,ref.duration_s,30):
+            prepare_brake_after(ref,float(t),limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+        narrow=limits.copy();narrow[0]=[-.00001,.00201]
+        with self.assertRaisesRegex(ValueError,'reserve'):
+            check_brake_reserve(ref,narrow,duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+
+    def test_future_brake_preserves_prefix_and_joins_qva_without_restarting(self):
+        from robot_workbench.motion_reference import prepare_brake_after
+        source,initial,limits=self.fixture();source['kind']='online_prediction_chunk'
+        reference=prepare_reference(source,initial,limits,source_sha256='a'*64)
+        boundary=reference.duration_s*.413
+        candidate=prepare_brake_after(reference,boundary,limits,duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+        self.assertEqual(candidate.metadata['parent_reference_id'],reference.metadata['reference_id'])
+        for times in np.array_split(np.linspace(0.,boundary,101),4):
+            for expected,actual in zip(reference.sample(times),candidate.sample(times)):
+                np.testing.assert_allclose(actual,expected,atol=1e-12)
+        _,v,a=candidate.sample([boundary-1e-7,boundary,boundary+1e-7])
+        np.testing.assert_allclose(v[0],v[2],atol=1e-6)
+        np.testing.assert_allclose(a[0],a[2],atol=1e-5)
+        _,v,a=candidate.sample([candidate.duration_s])
+        np.testing.assert_allclose(v,0,atol=1e-12);np.testing.assert_allclose(a,0,atol=1e-12)
+        with self.assertRaises(ValueError):prepare_brake_after(reference,31.,limits,
+            duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+
+    def test_online_joint_reference_has_consistent_derivatives_and_c2_knots(self):
+        source,initial,limits=self.fixture()
+        source.update(kind='online_prediction_chunk',active_arms=['left','right'])
+        reference=prepare_reference(source,initial,limits,source_sha256='a'*64)
+        self.assertEqual(reference.metadata['continuity'],'joint_C2')
+        for knot in reference.breaks[1:-1]:
+            h=1e-7;q,v,a=reference.sample([knot-h,knot,knot+h])
+            np.testing.assert_allclose((q[2]-q[0])/(2*h),v[1],atol=1e-7)
+            np.testing.assert_allclose((v[2]-v[0])/(2*h),a[1],atol=1e-5)
+            np.testing.assert_allclose(a[0],a[2],atol=1e-5)
+        _,v,a=reference.sample([0.,reference.duration_s])
+        np.testing.assert_allclose(v,0,atol=1e-10)
+        np.testing.assert_allclose(a,0,atol=1e-10)
+
+    def test_brake_matches_initial_qva_and_checks_whole_path(self):
+        from robot_workbench.motion_reference import prepare_brake,JOINTS
+        _,q,limits=self.fixture();v=np.zeros(14);a=np.zeros(14)
+        q[6]=.03;q[13]=.04;v[0]=.2;a[0]=.1
+        def prepare():return prepare_brake(q,v,a,limits,duration_s=.5,
+            velocity_limit=.25,acceleration_limit=1.,source_sha256='b'*64)
+        ref=prepare();actual=ref.sample([0.])
+        for value,want in zip(actual,(q,v,a)):np.testing.assert_allclose(value[0],want,atol=1e-12)
+        for t in np.linspace(.001,.499,30):
+            h=1e-6;p,d,dd=ref.sample([t-h,t,t+h])
+            np.testing.assert_allclose((p[2]-p[0])/(2*h),d[1],atol=1e-8)
+            np.testing.assert_allclose((d[2]-d[0])/(2*h),dd[1],atol=1e-8)
+        p,d,dd=ref.sample([.5,.6]);np.testing.assert_allclose(d,0,atol=1e-12)
+        np.testing.assert_allclose(dd,0,atol=1e-12)
+        np.testing.assert_allclose(p[:,[6,13]],[[.03,.04]]*2)
+        q[0]=2.99
+        with self.assertRaisesRegex(ValueError,'infeasible'):prepare()
+        q[0]=0;v[0]=.3
+        with self.assertRaisesRegex(ValueError,'infeasible'):prepare()
+        v[0]=.2;a[0]=2
+        with self.assertRaisesRegex(ValueError,'infeasible'):prepare()
+        a[0]=0;v[6]=.01
+        with self.assertRaisesRegex(ValueError,'held jaws'):prepare()
+
+    def test_brake_and_measured_fixed_hold_replay_through_same_window_executor(self):
+        from types import SimpleNamespace as NS
+        from copy import deepcopy
+        from robot_workbench.motion_reference import prepare_brake
+        from robot_workbench.target_interpreter import TargetInterpreter,prepare_measured_hold
+        from arx_env.joint_head_real_motion import StationaryWindow
+        _,q,limits=self.fixture();q[6]=.03;q[13]=.04;v=np.zeros(14);v[0]=.2
+        ref=prepare_brake(q,v,np.zeros(14),limits,duration_s=.5,velocity_limit=.25,
+            acceleration_limit=1.,source_sha256='b'*64)
+        now=[100.];epoch=[1];packets=[]
+        backend=NS(queue_reference=lambda p:packets.append(deepcopy(p))or{'firmware_ack':False})
+        def interpreter(reference):return TargetInterpreter(backend,reference,active_arm='both',
+            start_s=now[0],epoch=epoch[0],current_epoch=lambda:epoch[0],gate=lambda:None,clock=lambda:now[0])
+        motion=interpreter(ref);stationary=StationaryWindow()
+        for elapsed in np.arange(0.,.86,.01):
+            now[0]=100.+float(elapsed);pos,vel,_=ref.sample([elapsed])
+            # Actual rest differs from the planned endpoint: HOLD must use this.
+            if elapsed>=.5:pos[0,0]+=.002
+            feedback=dict(qpos=pos[0].tolist(),qvel=vel[0].tolist(),sample_time_s=now[0])
+            if elapsed>=.5:stationary.update(now[0],feedback['qpos'],feedback['qvel'])
+            motion.tick(now[0],feedback)
+        self.assertTrue(stationary.last_diagnostic['stationary'])
+        held=prepare_measured_hold(feedback,limits,now=now[0],brake_end_s=100.5,
+            stationary_window=stationary,held_jaws_sdk=[.03,.04],source_sha256=ref.metadata['reference_id'])
+        anchor=feedback['qpos'][:];motion.revoke();epoch[0]+=1;hold=interpreter(held)
+        for elapsed in np.arange(0.,.51,.01):
+            now[0]=100.85+float(elapsed);feedback['sample_time_s']=now[0]
+            feedback['qpos'][0]=anchor[0]-.01  # External displacement never reanchors HOLD.
+            out=hold.tick(now[0],feedback)
+            if out is not None:
+                np.testing.assert_allclose(out['packet']['q_sdk14'],np.tile(anchor,(len(out['packet']['q_sdk14']),1)))
+                np.testing.assert_allclose(out['packet']['dq_sdk14'],0.)
+        self.assertNotEqual(held.initial[0],ref.sample([.5])[0][0,0])
+        with self.assertRaisesRegex(ValueError,'post-brake'):
+            prepare_measured_hold(feedback,limits,now=now[0],brake_end_s=100.5,
+                stationary_window=stationary,held_jaws_sdk=[.03,.04],source_sha256='b'*64)
+        count=len(packets);epoch[0]+=1
+        with self.assertRaisesRegex(ValueError,'epoch revoked'):hold.tick(now[0],feedback)
+        self.assertEqual(len(packets),count)
+
     def test_frozen_feedforward_identity_bounds_and_total_ramp(self):
         with TemporaryDirectory()as temporary:
             value=dict(schema='reference_feedforward.v1',source_sha256='a'*64,controller_profile='normal_X5',

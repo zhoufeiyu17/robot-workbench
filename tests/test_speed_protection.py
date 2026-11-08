@@ -169,5 +169,31 @@ class SpeedProtectionTest(unittest.TestCase):
         self.assertNotEqual(self.runtime.owner.control.state,self.runtime.owner.states.FAULT)
         self.assertFalse(self.runtime.snapshot(self.creds['calibration'])['speed_protection']['enabled'])
 
+    def test_live_guard_follows_committed_business_policy_and_isolated_snapshots(self):
+        self.create()
+        sample = dict(qvel=[0.] * 14, qpos=[0.] * 14, sample_time_s=1.)
+        for business, limit in [('calibration', 1.1), ('collection', 1.3), ('inference', .9)]:
+            if business != self.runtime.holder:
+                self.runtime.handoff(self.creds[self.runtime.holder], business)
+            self.runtime.owner.check_speed_protection(sample)
+            self.assertEqual(self.runtime.owner.speed_protection_observation['limit_rad_s'], .8)
+            settings = defaults(business)
+            settings['speed_protection']['limit_rad_s'] = limit
+            self.runtime.update_execution_settings(self.creds[business], settings)
+            settings['speed_protection']['limit_rad_s'] = 99.
+            snapshot = self.runtime.execution_settings_snapshot(business)
+            snapshot['settings']['speed_protection']['limit_rad_s'] = 88.
+            self.runtime.owner.check_speed_protection(sample)
+            self.assertEqual(self.runtime.owner.speed_protection_observation['limit_rad_s'], limit)
+        self.runtime.handoff(self.creds['inference'], 'calibration')
+        self.runtime.owner.check_speed_protection(sample)
+        self.assertEqual(self.runtime.owner.speed_protection_observation['limit_rad_s'], 1.1)
+        policy=self.runtime._guard_policy('calibration')
+        with patch('robot_workbench.runtime.policy_hash',side_effect=AssertionError('no hot-path hashing')):
+            for _ in range(10):self.runtime.owner.check_speed_protection(sample)
+        decision=self.runtime.owner.speed_protection_observation['guard_decision']
+        self.assertEqual(decision['policy_hash'],policy['policy_hash'])
+        self.assertEqual(decision['revision'],self.runtime.execution_settings_revision)
+
 
 if __name__=='__main__':unittest.main()

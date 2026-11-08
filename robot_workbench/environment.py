@@ -161,6 +161,12 @@ def describe(config, view, profiles):
                 actual=dict(robot_model=(declared.get('hardware') or {}).get('robot_model'),topology=selected.get('topology')),
                 status='declared' if (declared.get('hardware') or {}).get('robot_model') else 'unknown',reason='资产身份和完整性仍需对应部署证据')])
     services = deepcopy(health.get('services') or {})
+    if 'recording' in services:
+        recorder=health.get('recording_service') or {}
+        dependencies.append(dict(id='recording',label='常驻记录服务',category='software',
+            expected='独立常驻进程就绪；每个Run另行准备并绑定录制会话',actual=deepcopy(recorder),
+            status='ready' if recorder.get('ready') is True else 'unknown',
+            reason=recorder.get('error'),recommended_action='prepare_environment'))
     for name,label in (('detector','物体检测服务'),('planner','轨迹规划服务'),('scene','场景服务')):
         row=collection_services.get(name)
         if not isinstance(row,dict):continue

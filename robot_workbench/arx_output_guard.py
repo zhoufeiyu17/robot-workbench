@@ -26,7 +26,9 @@ import time
 
 from .release_trace import ReleaseTrace, memory_file, archive_memory_file
 
-TIMEOUT = .1  # Existing feedback-loss budget, now measured from actual CAN RX.
+from .execution_settings import NATIVE_WATCHDOG_TIMEOUT_S
+
+TIMEOUT = NATIVE_WATCHDOG_TIMEOUT_S  # Measured from actual CAN RX.
 STARTUP_TIMEOUT = 10.
 RELEASE_TIMEOUT = 10.
 MOTORS = (1, 2, 4, 5, 6, 7, 8)

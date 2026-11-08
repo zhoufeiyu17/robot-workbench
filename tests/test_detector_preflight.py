@@ -28,7 +28,8 @@ class PreflightOrderingTest(unittest.TestCase):
             base.write_text(json.dumps(dict(pipeline_config=pipeline,
                 lanes={'source': {'configuration': {'cameras': {
                     'calibration_binding': dict(a1_sha256='sealed', geometry_id='A1')}}}})))
-            spec = dict(collection_setup={'detection_runtime_root': str(root/'runtime')})
+            spec = dict(collection_setup={'detection_runtime_root': str(root/'runtime')},
+                data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu_detector',domain_id=126))
             argv = ['serve', '--base', str(base), '--nominal-config', str(root/'nominal.json'),
                 '--output', str(output), '--gpu', '1', '--collection-contract', str(root/'contract.json')]
             for dry_run in (False, True):

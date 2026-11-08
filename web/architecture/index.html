@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工作台用例、架构与实施方案</title>
+  <link rel="stylesheet" href="style.css?v=trace1">
+  <script type="module" src="app.mjs?v=wam-design1"></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到正文</a>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon">W</span><div>ROBOT WORKBENCH<small>架构与控制策略</small></div></div>
+    <div class="rail-caption">DESIGN REVIEW</div>
+    <nav aria-label="架构页面导航">
+      <button data-view="usecases" class="active">目标与用户用例</button>
+      <button data-view="trace">用例与实现追溯</button>
+      <button data-view="operations">运维流程与状态</button>
+      <button data-view="recording">统一采集与保存</button>
+      <button data-view="models">模型接入 · WAM 设计</button>
+      <button data-view="overview">模块与组件图</button>
+      <button data-view="flow">全生命周期信息流</button>
+      <button data-view="rules">门槛与参数目录</button>
+      <button data-view="interfaces">接口契约</button>
+      <button data-view="parameters">参数入口设计</button>
+      <button data-view="progress">开发 Map · 实施进度</button>
+    </nav>
+    <div class="rail-note"><span class="status-dot review"></span>当前阶段 · 架构审阅<p>设计确认后进入控制链路改造。</p></div>
+  </aside>
+  <main id="main">
+    <header class="page-header"><div><div class="eyebrow">ARX6 / INFERENCE</div><h1>从用户用例到控制链路</h1><p>用户目标 → 用例与状态 → 接口契约 → 模块能力 → 验收证据</p></div><span class="badge review">设计待确认</span></header>
+    <div id="loading" role="status">正在读取架构目录…</div>
+    <div id="app" hidden>
+      <section class="snapshot-bar" aria-label="核验快照"><span id="snapshot-text"></span><span id="snapshot-time"></span></section>
+      <section id="view-usecases" class="view active">
+        <div class="notice"><strong>先冻结目标与用例，再进入实现</strong><p>每个用例明确前置条件、用户主流程、成功后的状态、异常分支和验收case。五个公共模块与运维应用层围绕这些用例提供能力。</p></div>
+        <p id="usecase-summary" class="muted"></p><div id="goals" class="goal-grid"></div>
+        <div class="panel"><h2>典型用户旅程</h2><div id="journeys"></div></div>
+        <div class="panel"><div class="panel-heading"><div><h2>用例图</h2><p>选择用例显示参与者与包含关系，点击图中用例查看具体流程。</p></div><div id="case-groups" class="segmented" role="group" aria-label="用例类别"></div></div><label class="case-picker">当前用例<select id="case-select"></select></label><div id="usecase-graph" class="graph"></div><p class="muted">实线为参与者关联，虚线标出共享行为引用；具体调用条件见步骤追溯，«extend» 表示条件触发的扩展用例。</p></div>
+        <div id="case-detail" class="panel"></div>
+        <div class="panel"><h2>从目标到基础设施</h2><div id="layers"></div></div>
+        <div class="panel"><h2>用例对模块和接口的约束</h2><div class="table-scroll"><table><thead><tr><th>模块 / 应用层</th><th>服务的用户用例</th><th>直接关联契约</th></tr></thead><tbody id="case-matrix"></tbody></table></div></div>
+      </section>
+      <section id="view-operations" class="view">
+        <div class="panel"><h2>运维应用层</h2><p>复用现有 OperationManager、Management 和 Runtime/Owner，按用例组织步骤、状态、互斥与恢复点。</p><ol id="operation-principles"></ol></div>
+        <div class="panel"><h2>操作状态与未知结果</h2><div id="operations-graph" class="graph"></div><details><summary>完整状态转移与触发条件</summary><div class="table-scroll"><table><thead><tr><th>状态转移</th><th>触发条件</th></tr></thead><tbody id="operation-transitions"></tbody></table></div></details></div>
+        <div class="panel"><h2>分开呈现的状态事实</h2><div class="table-scroll"><table><thead><tr><th>事实</th><th>含义</th><th>负责模块</th></tr></thead><tbody id="state-facts"></tbody></table></div></div>
+        <div class="panel"><h2>部分完成的操作回执示例</h2><p>退出工作台时，如果SDK已释放而正式数采网页启动失败，回执保留已完成事实和允许继续的步骤。</p><pre id="operation-receipt"></pre></div>
+      </section>
+      <section id="view-trace" class="view">
+        <div class="panel"><h2>用例步骤 → 共享子流程 → 接口 → 实现文件</h2><p id="trace-summary" class="muted"></p><div class="trace-controls"><label>用户用例<select id="trace-uc"></select></label><label>共享子流程<select id="trace-sc"></select></label></div><p id="trace-file" class="muted"></p></div>
+        <div class="trace-layout"><nav id="trace-steps" class="panel trace-steps" aria-label="主流程与异常步骤"></nav><div class="trace-content"><div id="trace-detail" class="panel"></div><div class="panel"><h2>实现追溯图</h2><p class="muted">每行保留具体行为及实现角色。点击文件进入开发 Map，回执描述对应范围的验证资格。</p><div id="trace-graph" class="graph"></div></div><div class="panel"><h2>接口角色与实现缺口</h2><div class="table-scroll"><table><thead><tr><th>接口</th><th>参与组件与职责</th><th>源码定位</th><th>实现现状</th></tr></thead><tbody id="trace-bindings"></tbody></table></div></div><div id="trace-shared" class="panel"></div><div id="trace-related" class="panel"></div></div></div>
+      </section>
+      <section id="view-recording" class="view"><div id="recording-content"></div></section>
+      <section id="view-models" class="view"><div id="model-extension-design"></div></section>
+      <section id="view-overview" class="view">
+        <div class="notice"><strong>领域模块视图</strong><p>模块边界由用户用例约束。每个模块详情都关联其服务的用例，运维编排位于应用层。</p><button data-view="usecases" class="secondary">查看目标与用例</button></div>
+        <div class="metrics" id="metrics"></div>
+        <div class="panel"><div class="panel-heading"><div><h2>组件图</h2><p>选择模块查看职责、现有实现与验收条件。</p></div><div class="segmented" role="group" aria-label="架构版本"><button id="target-mode" class="active">目标设计</button><button id="current-mode">当前实现</button></div></div><div id="component-graph" class="graph"></div><div id="legend" class="legend"></div></div>
+        <div id="component-cards" class="component-grid"></div>
+        <div id="component-detail" class="panel"></div>
+        <div class="panel"><h2>支撑组件</h2><div id="supporting" class="support-grid"></div></div>
+        <div class="panel"><h2>待确认的关键设计</h2><p class="muted">建议内容随本次架构审阅冻结。正式行为变更进入对应开发阶段。</p><div id="decisions"></div></div>
+      </section>
+      <section id="view-flow" class="view">
+        <div class="panel"><h2>信息流与检查时点</h2><p class="muted">一条 Run 从绑定、观测、预测、准备到执行，每一阶段都关联同一个策略版本。</p><div id="flow-graph" class="graph"></div></div>
+        <div class="panel"><h2>全生命周期</h2><div class="table-scroll"><table><thead><tr><th>阶段</th><th>输入信息</th><th>共同判断</th><th>异常后的动作</th></tr></thead><tbody id="lifecycle"></tbody></table></div></div>
+        <div class="panel"><h2>实时执行约束</h2><div class="principles"><article><h3>冻结 Run 策略</h3><p>Observation、ActionChunk、PreparedTrajectory 和 SDK admission 携带同一 policy_hash，参数修订会撤销尚未执行的旧审阅。</p></article><article><h3>本地完成实时判断</h3><p>Owner 中的检查消费已加载快照。原生 watchdog 根据已验证设备能力就地执行保护。</p></article><article><h3>分别返回结果</h3><p>命令已接纳、参考已完成、实际已到位、任务已成功、产物已封存，各有独立字段和证据。</p></article></div></div>
+      </section>
+      <section id="view-rules" class="view">
+        <div class="panel"><div class="panel-heading"><div><h2>规则目录</h2><p>包含当前在线 infer、SDK 兼容入口与数据质量检查。每项均列适用范围。</p></div><span id="rule-count" class="badge neutral"></span></div><div class="filters"><label>搜索<input id="rule-search" type="search" placeholder="例如 速度、配对、G14、deadline"></label><label>模块<select id="rule-module"><option value="">全部模块</option></select></label><label>类别<select id="rule-category"><option value="">全部类别</option></select></label><label>执行方式<select id="rule-enforcement"><option value="">全部</option></select></label></div><div id="rules"></div></div>
+      </section>
+      <section id="view-interfaces" class="view">
+        <div class="panel"><h2>接口契约</h2><p class="muted">当前协议与目标接口分别展示。目标字段需要后续实现及兼容性验证。</p><div id="interfaces"></div></div>
+        <div class="panel"><h2>统一裁决示例 · 设计草案</h2><pre id="decision-example"></pre></div>
+      </section>
+      <section id="view-parameters" class="view">
+        <div class="notice"><strong>参数入口设计</strong><p>这里可编辑并导出待审阅策略。实际策略提交、Run 生效回读和设备能力校验属于 P4 阶段。</p></div>
+        <div class="panel"><div class="panel-heading"><div><h2>策略草案</h2><p>初始值参考最后封存 Run，执行步数采用产品默认 15。模型调用截止时间 500ms 为待确认建议。</p></div><button id="reset-draft" class="secondary">恢复草案初始值</button></div><form id="parameter-form"></form><div class="switches"><label>跟踪误差模式<select id="tracking-enabled"><option value="disabled">disabled · 沿当前关闭状态</option><option value="observe">observe · 仅记录</option><option value="warn">warn · 告警</option><option value="enforce">enforce · 执行约定动作</option></select></label><label>实际到位模式<select id="arrival-enabled"><option value="disabled">disabled · 沿当前关闭状态</option><option value="observe">observe · 仅记录</option><option value="warn">warn · 告警</option><option value="enforce">enforce · 执行约定动作</option></select></label><label>配对门槛模式<select id="pairing-mode"><option value="observe">observe · 记录</option><option value="enforce">enforce · 拒绝超限输入</option></select></label></div><label class="case-picker">录制用途（设计）<select id="recording-purpose"></select></label><p id="recording-policy-preview" class="muted"></p><div id="draft-errors" role="status" aria-live="polite"></div><div id="derived" class="derived"></div><div class="actions"><button id="export-draft">导出策略草案 JSON</button><button disabled title="后续P4阶段实现">实际应用入口 · 待开发</button></div></div>
+        <div class="panel"><h2>计划中的生效流程</h2><ol class="process"><li>读取实际策略及 revision</li><li>编辑草案并查看差异</li><li>校验设备能力、参数关系与权限</li><li>以 expected_revision 原子提交</li><li>回读生效版本，下一 Run 冻结 policy_hash</li></ol><pre id="draft-json"></pre></div>
+      </section>
+      <section id="view-progress" class="view">
+        <div class="notice"><strong>新增模型开发任务</strong><p>WAM E03 已登记为设计候选；查看接口差异、UI草案、验收用例和任务图。</p><button data-view="models" class="secondary">打开 WAM 接入设计</button></div>
+        <div class="panel development-map-panel">
+          <div class="panel-heading"><div><h2>开发 Map</h2><p>切换功能模块、职责子域和源码文件，查看开发状态与下一步。</p></div><a href="development-map.html" target="_blank" rel="noopener">全屏打开 ↗</a></div>
+          <iframe id="development-map-frame" src="development-map.html?embedded=1" title="开发 Map · 功能模块、职责子域与源码文件" loading="lazy"></iframe>
+        </div>
+        <div class="panel"><h2>变更影响与验证范围</h2><p class="muted">日常参数操作使用UC06的字段、能力和版本校验。下表用于开发与发布变更，实施时依据实际diff复核。源码、配置和接口身份匹配的既有证据可以复用。</p><label class="case-picker">选择变更类型<select id="change-select"></select></label><div id="change-detail"></div></div>
+        <div class="panel"><h2>按用例推进的实施路径</h2><p class="muted">阶段状态包含责任人与验收条件。当前审阅完成后，再确认后续实施顺序。</p><div id="progress" class="phase-grid"></div></div>
+        <div class="panel"><h2>开发中同步维护</h2><p><code>web/architecture/catalog.json</code> 维护本页组件、规则、接口映射与状态。当前事实带源码定位和摘要，目标契约标明设计阶段。</p><ol id="maintenance"></ol><p class="muted">现有消费者协议入口为 <code>docs/WORKBENCH_INTEGRATION_INTERFACE.md</code>。接口字段变化需同步其规范、生产者、消费者及验证证据。</p></div>
+        <div class="panel"><h2>源码与实际版本</h2><div id="baseline"></div><details><summary>已核验服务快照</summary><pre id="runtime-json"></pre></details><p class="muted">开发状态来自目录与证据。运行状态是带时间的核验快照。</p></div>
+      </section>
+      <footer><span id="revision"></span><a href="catalog.json" download>下载架构目录</a><span>内部设计审阅</span></footer>
+    </div>
+  </main>
+</body>
+</html>

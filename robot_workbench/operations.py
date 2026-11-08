@@ -35,6 +35,84 @@ class OperationError(ValueError):
         super().__init__(message)
 
 
+def prepare_capture(root, *, request_id, run_id, business_kind, environment, policy,
+                    source_descriptors, still_current, execution_owner=None, execution_context=None):
+    """SC05: qualify and bind one recorder; never start control or capture sources."""
+    from .execution_settings import Guard,validate_control_parameters,policy_hash
+    from .recording_process import CaptureSession
+    if environment not in ('fake','physical') or business_kind not in ('calibration','collection','inference','research'):
+        raise OperationError('capture_context_invalid','Known business and environment required.')
+    if not isinstance(run_id,str) or not 0<len(run_id)<=200 or not callable(still_current):
+        raise OperationError('capture_context_invalid','Run identity and current-context verifier required.')
+    if (not isinstance(policy,dict) or not {'revision','policy_hash','parameters'}<=policy.keys()
+            or type(policy['revision']) is not int or policy['revision']<0):
+        raise OperationError('capture_policy_invalid','Frozen Owner policy required.')
+    policy=deepcopy(policy)
+    parameters=validate_control_parameters(policy['parameters'],environment=environment,business=business_kind)
+    if policy_hash(parameters)!=policy['policy_hash']:
+        raise OperationError('capture_policy_changed','Frozen policy contents and hash differ; refresh the Run.')
+    frozen=dict(revision=policy['revision'],policy_hash=policy['policy_hash'],parameters=parameters)
+    recording=parameters['recording']
+    if recording['purpose_profile'] is None:
+        raise OperationError('capture_purpose_required','Research Run must explicitly select its recording purpose.')
+    expected=dict(run_id=run_id,business_kind=business_kind,policy_hash=frozen['policy_hash'])
+    if execution_context is not None:expected.update(control_policy=_json(frozen),execution_context=_json(execution_context))
+    if execution_owner is not None:expected['execution_owner']=deepcopy(execution_owner)
+    def current():
+        value=still_current()
+        if type(value) is not bool:raise OperationError('capture_context_invalid','Current-context check must return a boolean.')
+        return value
+    def receipt(session, state, *, ready=False, decision=None, reason=None):
+        actual=session.snapshot() if session else {}
+        return dict(capture_session_id=session.capture_session_id if session else None,state=state,ready=ready,
+                    decision=decision,reason=reason,policy_hash=frozen['policy_hash'],
+                    binding=deepcopy(actual.get('binding')),missing_streams=list(actual.get('missing_streams',[])),
+                    degraded=bool(actual.get('degraded')))
+    if not current():return None,receipt(None,'cancelled',reason='Run context was revoked before preparation.')
+    session=CaptureSession.create(root,request_id=request_id,source_descriptors=source_descriptors,
+        purpose_profile=recording['purpose_profile'],resource_budget=recording['resource_budget'])
+    try:state=session.prepare()
+    except (OSError,ValueError,TimeoutError) as error:
+        return session,receipt(session,'unknown',reason=str(error))
+    if state.get('read_only'):
+        return session,receipt(session,'unknown',reason='Existing writer is read-only; inspect its original receipt.')
+    if all(s.get('source_ref',{}).get('kind')=='ros'for s in source_descriptors):
+        if not isinstance(state.get('health_source'),dict):
+            return session,receipt(session,'unknown',reason='Original ROS recording health binding is unavailable.')
+        expected['health_source']=deepcopy(state['health_source'])
+    if state.get('binding') not in (None,expected):
+        raise OperationError('capture_binding_changed','Request is already bound to a different Run; original capture preserved.')
+    def finish_candidate(status,reason):
+        session.finish(dict(session.last_sequence),dict(status=status,reason=reason),
+            **({'source_endpoints':{key:dict(source_clock_id=row['source_clock_id'],source_time=0.) for key,row in session.camera_sources.items()}}
+               if session.camera_sources else {}))
+    def cancelled():
+        if session.snapshot().get('state') in ('prepared','bound'):
+            finish_candidate('cancelled','Run context revoked during capture preparation')
+        return session,receipt(session,'cancelled',reason='Run context revoked during capture preparation.')
+    try:allowed=current()
+    except Exception as error:return session,receipt(session,'unknown',reason=str(error))
+    if not allowed:return cancelled()
+    failures=len(state.get('missing_streams',[]))+int(bool(state.get('error')))
+    if not state.get('ready') and not failures:failures=1
+    now=time.monotonic()
+    decision=Guard.evaluate(dict(rule_id='G35',signal_id=session.capture_session_id,observed=failures,
+        source_time=state.get('heartbeat_monotonic_s',now),checked_time=now,run_id=run_id,request_id=request_id),
+        'capture_prepare',frozen)
+    if decision['verdict']=='reject':
+        finish_candidate('rejected','Recording readiness failed')
+        return session,receipt(session,'rejected',decision=decision,reason='Required recording sources/resources are unavailable.')
+    try:bound=session.bind(**expected)
+    except (OSError,ValueError,TimeoutError) as error:
+        return session,receipt(session,'unknown',decision=decision,reason=str(error))
+    if bound.get('binding')!=expected:
+        return session,receipt(session,'unknown',decision=decision,reason='Capture binding was not confirmed.')
+    try:allowed=current()
+    except Exception as error:return session,receipt(session,'unknown',reason=str(error))
+    if not allowed:return cancelled()
+    return session,receipt(session,'bound',ready=True,decision=decision)
+
+
 @dataclass(frozen=True)
 class Operation:
     name: str
@@ -47,6 +125,7 @@ class Operation:
     cancellable: bool = False
     timeout_s: float | None = None
     parameter_keys: tuple[str, ...] = ()
+    use_case_id: str | None = None
 
     def support_required(self, request):
         value=self.requires_support(deepcopy(request))if callable(self.requires_support)else self.requires_support
@@ -70,20 +149,48 @@ def _same(left, right):
     return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
 
 
+def _receipt_fields(job):
+    """Derive the common receipt without changing legacy status or identities."""
+    status = job['status']
+    outcome = 'unknown' if status in ('unknown', 'timeout_unknown', 'interrupted_unknown') else (
+        'cancelling' if status == 'cancel_requested' else status)
+    if outcome == 'running':
+        outcome = {'preflight': 'checking', 'verify': 'verifying'}.get(job['phase'], outcome)
+    actions = ['inspect']
+    if (status in ('queued', 'running', 'timeout_unknown') and job.get('cancellable')
+            and not job.get('cancellation_requested') and job.get('finished_at_ns') is None):
+        actions.append('cancel')
+    return dict(outcome=outcome, unknown_reason=(job.get('error') or {}).get('message') if outcome == 'unknown' else None,
+                allowed_next_actions=actions)
+
+
 def job_summary(job):
     """Polling carries bounded progress; the immutable full receipt stays queryable."""
     if job is None:return None
     row={key:deepcopy(job.get(key)) for key in ('job_id','request','label','status','phase','progress',
-        'created_at_ns','updated_at_ns','finished_at_ns','timed_out','cancellation_requested','cancellable')}
+        'created_at_ns','updated_at_ns','finished_at_ns','timed_out','cancellation_requested','cancellable',
+        'use_case_id','outcome','unknown_reason','allowed_next_actions')}
     request=row['request']
     if isinstance(request.get('expected_target'),dict):
         request['expected_target']={key:value for key,value in request['expected_target'].items() if key in
             ('environment','device_id','manager_instance','backend_instance','deployment_sha256','runtime_nonce','command_epoch')}
-    row['verification']={'ok':job['verification'].get('ok')} if isinstance(job.get('verification'),dict) else None
+    row['verification'] = (
+        {key: job['verification'][key] for key in ('ok', 'consumer_detached', 'independent_services_preserved', 'shared_runtime_preserved',
+            'environment_exited', 'sdk_release_verified', 'collection_web_ready')
+         if key in job['verification']}
+        if isinstance(job.get('verification'), dict) else None
+    )
+    result = job.get('result')
+    next_url = result.get('next_url') if isinstance(result, dict) else None
+    if isinstance(next_url, str) and len(next_url) <= 2048:
+        row['result'] = {'next_url': next_url}
     if job.get('error'):
         row['error']={key:str(job['error'].get(key,''))[:1024] for key in ('code','message')}
     detail=job.get('detail')
     if detail is not None and len(json.dumps(detail,ensure_ascii=False))<=1024:row['detail']=deepcopy(detail)
+    elif isinstance(detail,dict)and isinstance(detail.get('step_refs'),list):
+        refs=[ref for ref in detail['step_refs'][:32]if isinstance(ref,str)and re.fullmatch(r'(?:UC|SC)\d{2}-S\d{2}',ref)]
+        if refs:row['detail']={'step_refs':refs}
     row['detail_url']='/api/operations/jobs/'+job['job_id']
     return row
 
@@ -100,6 +207,8 @@ class OperationService:
                     or not all(callable(fn) for fn in (row.check, row.run, row.verify))
                     or not(type(row.requires_support)is bool or callable(row.requires_support)) or type(row.cancellable) is not bool
                     or not isinstance(row.parameter_keys, tuple) or any(not isinstance(key, str) for key in row.parameter_keys)
+                    or row.use_case_id is not None and (not isinstance(row.use_case_id, str)
+                        or not re.fullmatch(r'UC[0-9]{2}', row.use_case_id))
                     or row.timeout_s is not None and (type(row.timeout_s) not in (int, float)
                         or not math.isfinite(row.timeout_s) or row.timeout_s <= 0)):
                 raise ValueError('invalid trusted operation registration')
@@ -137,9 +246,11 @@ class OperationService:
                     updated_at_ns=time.time_ns(), error=dict(code='manager_interrupted',
                     message='Manager restarted; external operation state is unknown. No automatic retry.'))
                 self._save(job)
+            job.update(_receipt_fields(job))
             self.jobs[request_id] = job
 
     def _save(self, job):
+        job.update(_receipt_fields(job))
         filename = self.directory/('job-'+job['job_id']+'.json')
         temporary = None
         try:
@@ -163,7 +274,11 @@ class OperationService:
                 temporary.unlink(missing_ok=True)
 
     def _preflight(self, operation, request):
-        if not _same(_identity(self.target()), request['expected_target']):
+        try:actual=_identity(self.target())
+        except Exception as error:
+            raise OperationError('target_unknown','Target state could not be verified; no external operation began.',
+                unknown=True,details=dict(phase='preflight',exception=type(error).__name__))from None
+        if not _same(actual, request['expected_target']):
             raise OperationError('target_changed', 'Target identity changed; refresh and review the operation.')
         if operation.support_required(request) and request['arms_supported'] is not True:
             raise OperationError('support_required', 'Confirm both arms are supported for this operation and target.')
@@ -202,6 +317,7 @@ class OperationService:
                         reason = str(exc) or type(exc).__name__
                 latest = next((row for row in recent if row['request']['action'] == name), None)
                 operations[name] = dict(name=name, label=operation.label, impact=operation.impact,
+                    use_case_id=operation.use_case_id,
                     allowed=reason is None, disabled_reason=reason, requires_support=support,
                     cancellable=operation.cancellable, latest_job=copy_job(latest))
             return dict(schema='robot_workbench.operations.v1', target=target, target_error=target_error,
@@ -238,12 +354,13 @@ class OperationService:
             self._preflight(operation, request)
             now = time.time_ns()
             job = dict(schema='robot_workbench.operation.v1', job_id=uuid.uuid4().hex,
+                use_case_id=operation.use_case_id,
                 request=request, label=operation.label, impact=operation.impact,
                 status='queued', phase='queued', progress=0., detail=None,
                 created_at_ns=now, updated_at_ns=now, finished_at_ns=None,
                 result=None, verification=None, error=None, timed_out=False,
                 cancellation_requested=False, cancellable=operation.cancellable,
-                events=[dict(phase='queued', at_ns=now)])
+                events=[dict(phase='queued', at_ns=now, monotonic_ns=time.monotonic_ns())])
             self._save(job)  # No side effect is allowed before durable request admission.
             self.jobs[request_id] = job
             self.active = request_id
@@ -256,7 +373,13 @@ class OperationService:
     def _update(self, job, **changes):
         with self.lock:
             if 'phase' in changes and changes['phase'] != job['phase']:
-                job['events'].append(dict(phase=changes['phase'], at_ns=time.time_ns()))
+                stamp = time.monotonic_ns()
+                job['events'][-1]['finished_monotonic_ns'] = stamp
+                job['events'].append(dict(phase=changes['phase'], at_ns=time.time_ns(), monotonic_ns=stamp))
+            if 'detail' in changes:
+                job['events'][-1]['detail'] = deepcopy(changes['detail'])
+            if changes.get('finished_at_ns') is not None:
+                job['events'][-1]['finished_monotonic_ns'] = time.monotonic_ns()
             job.update(changes, updated_at_ns=time.time_ns())
             self._save(job)
 
@@ -273,6 +396,7 @@ class OperationService:
 
     def _execute(self, operation, job, cancel_event):
         timer = None
+        effects_started = False
         def progress(phase, fraction=None, detail=None):
             if not isinstance(phase, str) or not phase or len(phase) > 128:
                 raise ValueError('progress phase must be nonempty text of at most 128 characters')
@@ -294,11 +418,12 @@ class OperationService:
             if cancel_event.is_set():
                 raise OperationError('cancelled_before_run', 'Cancellation acknowledged before side effects began.')
             self._update(job, phase='run')
+            effects_started = True
             result = _json(operation.run(deepcopy(job['request']), progress, cancel_event))
             self._update(job, phase='verify', result=result)
             verification = _json(operation.verify(deepcopy(job['request']), deepcopy(result)))
             if not isinstance(verification, dict) or type(verification.get('ok')) is not bool:
-                raise OperationError('invalid_verification', 'Verification must return an explicit boolean ok.')
+                raise OperationError('invalid_verification', 'Verification must return an explicit boolean ok.', unknown=True)
             self._update(job, verification=verification)
             if verification['ok'] is not True:
                 raise OperationError('verification_unknown' if verification.get('unknown') else 'verification_failed',
@@ -311,10 +436,14 @@ class OperationService:
                          progress=1., error=None, finished_at_ns=time.time_ns())
         except Exception as exc:
             code = getattr(exc, 'code', type(exc).__name__)
+            # Only an explicit operation error establishes a known failure after
+            # effects begin. Transport/parser/verification failures leave the
+            # external result unproven and must never qualify a blind retry.
+            unknown = exc.unknown if isinstance(exc, OperationError) else effects_started
             try:
                 error=dict(code=code,message=str(exc))
                 if getattr(exc,'details',None) is not None:error['details']=deepcopy(exc.details)
-                self._update(job, status='cancelled' if code == 'cancelled_before_run' else 'unknown' if getattr(exc, 'unknown', False) else 'failed',
+                self._update(job, status='cancelled' if code == 'cancelled_before_run' else 'unknown' if unknown else 'failed',
                     error=error, finished_at_ns=time.time_ns())
             except Exception:
                 # Fail closed on an unrecordable outcome; snapshot exposes the

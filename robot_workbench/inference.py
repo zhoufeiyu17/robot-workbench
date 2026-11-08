@@ -24,10 +24,78 @@ def vector14(value, name='action'):
     return result
 
 
+def native_device_to_model(value,*,clip_jaws):
+    result=vector14(value).copy();result[[6,13]]/=1000.
+    if clip_jaws:result[[6,13]]=np.clip(result[[6,13]],0.,.083)
+    return result
+
+
+def native_model_to_device(value):
+    result=vector14(value).copy();result[[6,13]]*=1000.
+    return result
+
+
+def decode_native14(prediction,current_device14,limits):
+    vector14(current_device14)
+    decoded=native_model_to_device(prediction);final=np.clip(decoded,limits[:,0],limits[:,1])
+    return dict(decoded_device14=decoded.tolist(),mapped_device14=decoded.tolist(),final_device14=final.tolist(),
+        conversions=dict(joints='native_encoder_rad_no_zero_offset',jaws='recorded_endpoint_m_to_mm',arms='both'),
+        projections=[dict(axis=int(i),requested=float(decoded[i]),final=float(final[i]),delta=float(final[i]-decoded[i]),
+            reason='device_position_boundary')for i in np.flatnonzero(decoded!=final)])
+
+
 def positive(value, name):
     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
         raise ValueError(name + ' must be finite and positive')
     return float(value)
+
+
+def action_shape(contract):
+    shape=contract.get('shape')if isinstance(contract,dict)else None
+    if not isinstance(shape,list)or len(shape)!=2 or type(shape[0])is not int or shape[0]not in(32,60)or type(shape[1])is not int or shape[1]!=14:
+        raise ValueError('model action shape differs from the bound model capability')
+    return tuple(shape)
+
+
+def validate_action_chunk(chunk, *, binding, request_id, epoch, clock_domain, now,
+                          observation_source_time, valid_until_source_time, last_observation_source_time=None):
+    """Validate A's model-domain envelope; never assign an execution timeline.
+
+    The caller freezes binding when preparing its model session and uses the
+    existing pending-request ledger to consume each result once. This function
+    does no unit conversion; the existing device adapter remains the sole mapper.
+    """
+    if (not isinstance(chunk,dict)or chunk.get('schema')!='workbench.action-chunk.v1'
+            or not isinstance(binding,dict)or set(binding)!={'session_id','model_binding','conversion_id','action_contract','task'}
+            or any(chunk.get(key)!=value for key,value in binding.items())
+            or not isinstance(request_id,str)or not request_id or chunk.get('request_id')!=request_id
+            or type(epoch)is not int or epoch<0 or type(chunk.get('epoch'))is not int or chunk['epoch']!=epoch
+            or chunk.get('execution_authorized')is not False):
+        raise ValueError('action chunk model/session/request/epoch binding differs')
+    observation=chunk.get('observation')or{};validity=chunk.get('validity')or{}
+    if not isinstance(observation,dict)or not isinstance(validity,dict):
+        raise ValueError('action chunk observation and validity objects required')
+    observed=observation.get('source_time');deadline=validity.get('valid_until_source_time')
+    if (not isinstance(clock_domain,str)or not clock_domain
+            or observation.get('clock_domain')!=clock_domain or validity.get('clock_domain')!=clock_domain
+            or any(type(t)not in(int,float)or not math.isfinite(t)
+                   for t in(now,observed,deadline,observation_source_time,valid_until_source_time))
+            or observed!=observation_source_time or deadline!=valid_until_source_time or not observed<=now<deadline
+            or last_observation_source_time is not None and (
+                type(last_observation_source_time)not in(int,float)or not math.isfinite(last_observation_source_time)
+                or observed<=last_observation_source_time)):
+        raise ValueError('action chunk observation/clock/validity is stale, future or reordered')
+    contract=chunk['action_contract']
+    shape=action_shape(contract)
+    if (not isinstance(contract,dict)
+            or contract.get('axes')!=[f'{side}_{axis}'for side in('left','right')for axis in('j1','j2','j3','j4','j5','j6','jaw')]
+            or contract.get('units')!=(['rad']*6+['m'])*2 or contract.get('action_type')!='absolute_position'
+            or contract.get('normalized')is not False or contract.get('device_mapping_applied')is not False):
+        raise ValueError('explicit unmapped absolute model action14 contract required')
+    values=np.asarray(chunk.get('action14'))
+    if values.shape!=shape or values.dtype.kind not in 'fiu'or not np.isfinite(values).all():
+        raise ValueError('finite model action14 matching the bound horizon required')
+    return dict(request_id=request_id,action14=values.copy(),audit=deepcopy(chunk.get('audit')))
 
 
 def audit_dynamics(actions, previous, *, position_limits, velocity_limits, acceleration_limits, period_s=1/30):
@@ -102,6 +170,10 @@ class StableTraySupport:
                     last_observation=deepcopy(self.latest))
 
 
+class PredictionSupplyError(RuntimeError):
+    """Prediction/CPU preparation failed before any Owner SDK admission."""
+
+
 class InferenceLoop:
     """Single Owner-thread API. predict runs in a daemon thread; all other callbacks are CPU-only.
 
@@ -112,7 +184,7 @@ class InferenceLoop:
     """
     def __init__(self, *, predict, decode, device_to_model, audit=None, event=None,
                  duration_s=40., hz=30., execute_steps=10, seed=200000,
-                 maximum_observation_age_s=2., support=None, prepare_chunk=None, prepare_response=None):
+                 maximum_observation_age_s=2., support=None, prepare_chunk=None, prepare_response=None, history_steps=60,action_horizon=60):
         self.predict, self.decode, self.device_to_model = predict, decode, device_to_model
         self.audit, self.event = audit, event or (lambda name, value: None)
         self.prepare_chunk=prepare_chunk
@@ -120,8 +192,10 @@ class InferenceLoop:
         self.duration = positive(duration_s, 'episode duration')
         self.period = 1/positive(hz, 'command rate')
         self.maximum_age = positive(maximum_observation_age_s, 'observation age')
-        if type(execute_steps) is not int or not 1 <= execute_steps <= 60:
-            raise ValueError('execute_steps must be 1..60')
+        if type(action_horizon)is not int or action_horizon not in(32,60):raise ValueError('bound32/60 action horizon required')
+        self.action_horizon=action_horizon
+        if type(execute_steps) is not int or not 1 <= execute_steps <= action_horizon:
+            raise ValueError('execute_steps must fit the bound action horizon')
         if type(seed) is not int or not 0 <= seed < 2**63:
             raise ValueError('seed must be an integer in [0, 2**63)')
         self.execute_steps, self.seed, self.support = execute_steps, seed, support
@@ -132,13 +206,15 @@ class InferenceLoop:
         self._query_pending = False
         self._commands = deque()
         self._outstanding = None
-        self.history = deque(maxlen=60)
+        if type(history_steps)is not int or history_steps not in (0,60):raise ValueError('explicit supported history length required')
+        self.history = deque(maxlen=history_steps)
         self.applied = deque(maxlen=2)
         self.episode_id = self.epoch = self.started = self.last_source_time = None
         self.predictions = self.submitted = self.completed = self.discarded = 0
         self.external_completed = set()
         self.outcome = None
         self.support_error = None
+        self.failure_phase=None
 
     def start(self, *, epoch, source_time, episode_id=None):
         if self.status == 'running':
@@ -148,9 +224,12 @@ class InferenceLoop:
         self.epoch, self.started, self.last_source_time = epoch, source_time, source_time
         self.episode_id = episode_id or uuid.uuid4().hex
         self.status, self.reason, self.outcome = 'running', '', None
+        self.failure_phase=None
         self.support_error = None
         self._commands.clear()
         self._outstanding = None
+        # Keep an old in-flight query pending until its result is discarded;
+        # epoch restart must not overlap calls to the same model.
         self.history.clear()
         self.applied.clear()
         self.predictions = self.submitted = self.completed = self.discarded = 0
@@ -188,7 +267,7 @@ class InferenceLoop:
             raise ValueError('stale or future policy observation')
         vector14(observation.get('device_state14'), 'observation state')
         # Copy only the public observation envelope: task truth/acceptance cannot leak.
-        obs = {key: deepcopy(observation[key]) for key in ('source_time', 'device_state14', 'images', 'frame_ids') if key in observation}
+        obs = {key: deepcopy(observation[key]) for key in ('source_time', 'device_state14', 'images', 'frame_ids', 'ros_observation') if key in observation}
         request = dict(request_id=uuid.uuid4().hex, seed=(self.seed+self.predictions) % 2**63,
                        observation=obs, applied_history=np.asarray(list(self.history), dtype=np.float32).reshape(-1, 14))
         generation, epoch = self.generation, self.epoch
@@ -223,12 +302,12 @@ class InferenceLoop:
                        worker_audit=deepcopy(response.get('audit', {})) if isinstance(response,dict) else {})
             return
         if error:
-            raise RuntimeError(error)
+            raise PredictionSupplyError(error)
         if not isinstance(response, dict) or response.get('request_id') != request['request_id']:
             raise ValueError('model response request identity mismatch')
         values = np.asarray(response.get('action14'))
-        if values.shape != (60, 14) or values.dtype.kind not in 'fiu' or not np.isfinite(values).all():
-            raise ValueError('model response requires finite action14 [60,14]')
+        if values.shape != (self.action_horizon, 14) or values.dtype.kind not in 'fiu' or not np.isfinite(values).all():
+            raise ValueError('model response requires finite action14 matching the bound horizon')
         age = self.last_source_time-request['observation']['source_time']
         if not 0 <= age <= self.maximum_age:
             self.discarded += 1
@@ -318,6 +397,7 @@ class InferenceLoop:
             if not self._commands and not self._query_pending and observation is not None:
                 self._launch(observation)
         except Exception as exc:
+            self.failure_phase='prediction_supply'if isinstance(exc,PredictionSupplyError)else'control'
             self.stop(f'{type(exc).__name__}: {exc}')
         return None
 

@@ -1,9 +1,12 @@
 """Camera-only lifetime: real state files and cleanup, no hardware SDK or arms."""
 import json
 import fcntl
+import multiprocessing
+import os
 from pathlib import Path
 import signal
 import sys
+import time
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -15,7 +18,79 @@ from serve_camera_sources import run,reset_camera
 from robot_workbench.rgbd_service import start_capture_sources
 
 
+def physical_source_fixture(profile_path,output):
+    """Run the actual source CLI with a synthetic SDK, in its own process."""
+    import numpy as np
+    from real_rgbd import main
+    profile=json.loads(Path(profile_path).read_text());intr=json.loads(Path(profile['cameras']['head']['intrinsics']).read_text())
+    counter=[0]
+    native=SimpleNamespace(width=2,height=2,fx=10.,fy=10.,ppx=1.,ppy=1.,model='none',coeffs=[])
+    def frame(depth):
+        return SimpleNamespace(get_frame_number=lambda:counter[0]+(10 if depth else 0),
+            get_timestamp=lambda:counter[0]*1000/30+(1 if depth else 0),get_frame_timestamp_domain=lambda:'hardware_clock',
+            profile=SimpleNamespace(as_video_stream_profile=lambda:SimpleNamespace(get_intrinsics=lambda:native)),
+            get_data=lambda:np.full((2,2),500,np.uint16)if depth else np.zeros((2,2,2),np.uint8))
+    def wait(_):
+        time.sleep(1/30);counter[0]+=1
+        return SimpleNamespace(as_frameset=lambda:SimpleNamespace(get_color_frame=lambda:frame(False),get_depth_frame=lambda:frame(True)))
+    pipeline=SimpleNamespace(start=lambda *a:SimpleNamespace(get_device=lambda:SimpleNamespace(
+        first_depth_sensor=lambda:SimpleNamespace(get_depth_scale=lambda:.001))),stop=lambda:None)
+    sdk=SimpleNamespace(pipeline=lambda:pipeline,config=lambda:SimpleNamespace(enable_device=lambda *a:None,enable_stream=lambda *a:None),
+        stream=SimpleNamespace(color=1,depth=2),format=SimpleNamespace(yuyv=1,z16=2),
+        frame_queue=lambda *a:SimpleNamespace(wait_for_frame=wait),align=lambda *a:SimpleNamespace(process=lambda p:p))
+    cv=SimpleNamespace(COLOR_YUV2RGB_YUY2=1,cvtColor=lambda *a:np.arange(12,dtype=np.uint8).reshape(2,2,3))
+    with patch.dict(sys.modules,{'pyrealsense2':sdk,'cv2':cv}),patch.object(sys,'argv',['source','--profile',str(profile_path),
+            '--serial',intr['serial'],'--camera-name','head','--output',str(output),'--duration-s','3']):main()
+
+
 class CameraSourcesTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated native ROS required')
+    def test_actual_source_cli_with_synthetic_sdk_publishes_and_exits_without_spool(self):
+        from robot_workbench.ros_data import RosNode,SourceDirectory
+        from robot_workbench.ros_inputs import RosInputs
+        with TemporaryDirectory()as temp:
+            root=Path(temp);intr=root/'intrinsics.json'
+            intr.write_text(json.dumps(dict(serial='123',width=2,height=2,fx=10.,fy=10.,cx=1.,cy=1.,coefficients=[],distortion_model='none',rectified=False)))
+            profile=root/'profile.json';profile.write_text(json.dumps(dict(environment='physical',robot_id='cpu',
+                data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/wb_native_camera',domain_id=128),
+                cameras=dict(head=dict(serial='123',intrinsics=str(intr))))))
+            process=multiprocessing.get_context('spawn').Process(target=physical_source_fixture,args=(profile,root/'source'))
+            receiver=RosNode('native_camera_reader',namespace='/wb_native_camera',domain_id=128);process.start()
+            try:
+                rows=SourceDirectory(receiver,'cpu').resolve({'base_0':dict(kind='image')},timeout=8)
+                saved=[];inputs=RosInputs(receiver,rows,include_depth=True,on_sample=lambda ref,value:saved.append((ref,value)))
+                deadline=time.monotonic()+5
+                while not saved:
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                ref,value=saved[0]
+                self.assertEqual(value['rgb'],bytes(range(12)));self.assertEqual(value['depth'],bytes([244,1])*4)
+                self.assertEqual(value['metadata']['depth_frame_number']-value['metadata']['frame_number'],10)
+                self.assertEqual(value['metadata']['host_receive_ns'],ref.source_time_ns)
+                process.join(8);self.assertEqual(process.exitcode,0)
+                deadline=time.monotonic()+3
+                while not inputs.caches['base_0'].error:
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+                self.assertFalse(list(root.rglob('*.zip')));self.assertFalse(list(root.rglob('*.rgb')))
+                self.assertEqual(json.loads((root/'source/status.json').read_text())['phase'],'stopped')
+            finally:
+                if process.is_alive():process.terminate();process.join(5)
+                receiver.close()
+
+    def test_ros_parent_uses_original_capture_processes_and_no_common_service(self):
+        with TemporaryDirectory()as temp:
+            root=Path(temp);path=self.reset_profile(root);profile=json.loads(path.read_text())
+            profile.update(robot_id='cpu',data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu',domain_id=126))
+            path.write_text(json.dumps(profile));process=Mock();process.poll.return_value=1
+            view=Mock();view.descriptor=dict(environment='physical',data_plane=profile['data_plane'])
+            def sources(profile,service,output):
+                (output/'capture-head.log').write_text('RuntimeError: original publisher failed\n');return [process]
+            with patch('serve_camera_sources.signal.signal'),patch('robot_workbench.ros_data.require_runtime'),\
+                    patch('robot_workbench.ros_inputs.RosCameraView',return_value=view),\
+                    patch('serve_camera_sources.CommonCameraService.start',side_effect=AssertionError('no legacy IPC')),\
+                    patch('serve_camera_sources.start_capture_sources',side_effect=sources):
+                with self.assertRaisesRegex(RuntimeError,'original publisher failed'):run(path,root/'owner')
+            view.close.assert_called_once();process.terminate.assert_not_called()
+
     def reset_profile(self,root,environment='physical'):
         profile=dict(environment=environment,cameras={})
         for index,role in enumerate(('head','left','right')):
@@ -81,6 +156,19 @@ class CameraSourcesTest(unittest.TestCase):
                 self.assertTrue(args[2].endswith('/real_rgbd.py'))
                 self.assertEqual(args[args.index('--service-descriptor')+1],str(root/'camera-service/camera-service.json'))
                 self.assertNotIn('--connect-hardware',args)
+
+    def test_ros_capture_launcher_uses_original_source_without_common_ingress(self):
+        with TemporaryDirectory()as temp:
+            root=Path(temp);plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu_source',domain_id=126)
+            profile=dict(environment='physical',robot_id='cpu',data_plane=plane,
+                cameras={role:dict(serial=str(n),intrinsics=str(root/(role+'.json')))for n,role in enumerate(('head','left','right'))})
+            service=SimpleNamespace(descriptor=dict(data_plane=plane))
+            with patch('robot_workbench.rgbd_service.subprocess.Popen')as launch:
+                self.assertEqual(len(start_capture_sources(profile,service,root)),3)
+            for call in launch.call_args_list:
+                args=call.args[0];self.assertNotIn('--service-descriptor',args)
+                frozen=json.loads(Path(args[args.index('--profile')+1]).read_text())
+                self.assertEqual(frozen,profile)
 
     def test_one_failed_capture_invalidates_its_lease_but_keeps_healthy_sources_live(self):
         with TemporaryDirectory()as temp:

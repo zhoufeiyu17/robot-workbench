@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 from pathlib import Path
@@ -19,8 +20,10 @@ import threading
 import time
 
 LIMIT=4*1024*1024
-SCHEMA='workbench.control_owner.v1'
-READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot'}
+SCHEMA='workbench.control_owner.v8'
+PROTOCOL_FEATURES=('action_chunk_v1','normal_modes_v1','normal_finish_v1','recording_context_v1',
+                   'infer_reference_policy_v1','finite_sync_chunks_v1','sdk_execution_context_v1','normal_complete_segment_v1','control_policy_v1','capture_session_v1','observation_policy_v1')
+READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot','control_policy_snapshot'}
 
 
 def collection_recording_root(owner_root):return Path(owner_root)/'collection-raw'
@@ -96,6 +99,16 @@ def _event_encoder_start(owner_pid):
         parent_death(owner_pid)
 
 
+def _shutdown_encoder(executor):
+    if getattr(executor, '_broken', False):
+        # CPython 3.10 can leave a large queued write blocked on the parent's
+        # unused reader after its only worker dies. Closing it releases shutdown.
+        call_queue = getattr(executor, '_call_queue', None)
+        if call_queue is not None:
+            call_queue._reader.close()
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _encode_event_response(response):
     """Runs only in the CPU child, preserving the existing event byte budget."""
     result=response['result'];rows=[];size=0
@@ -138,8 +151,9 @@ class ControlChannel:
                 or info.st_uid!=os.getuid()or info.st_mode&0o077 or info.st_size>16384):
             raise ValueError('owned control descriptor required')
         value=json.loads(path.read_text())
-        if value.get('schema')!=SCHEMA or value.get('environment')not in('physical','fake'):
-            raise ValueError('explicit control service identity required')
+        if value.get('schema')!=SCHEMA:
+            raise ValueError('control Owner protocol version mismatch; expected '+SCHEMA)
+        if value.get('environment')not in('physical','fake'):raise ValueError('explicit control service identity required')
         self.descriptor=value;self.timeout=timeout
         token_path=Path(value['token_file']);token_info=token_path.stat()
         if (token_path.is_symlink()or not stat.S_ISREG(token_info.st_mode)or token_info.st_uid!=os.getuid()
@@ -281,11 +295,37 @@ class ControlOwnerService:
 
     def inspect(self,business=None):
         state=self.device.snapshot(business)
+        features=list(PROTOCOL_FEATURES)
+        plane=getattr(self.device.runtime,'data_plane',None)
+        if plane is not None:
+            features.append('ros_data_plane_v1')
+            raw=state.pop('calibration_feedback',None)
+            state['feedback_reference']=(self.device.runtime.ros_publisher.reference('state',
+                source_time_ns=raw['source_time_ns']if raw.get('source_clock_id')==self.device.runtime.ros_publisher.clock_id
+                else round(raw['sample_time_s']*1e9))if raw else None)
+        factory=getattr(getattr(self.device.runtime,'owner',None),'recording_factory',None)
+        if callable(factory)and getattr(factory,'recording_backend',None)=='capture_session_v1':
+            features.append('control_capture_v1')
+            from .recording_process import CaptureControlSession
+            if 'rgb8'in getattr(CaptureControlSession,'pixel_formats',()):features.append('rgb8_capture_v1')
         state['control_owner']=dict(schema=SCHEMA,instance_id=self.instance,identity=self.identity,
+            protocol_features=features,
             runtime_nonce=self.device.runtime.nonce if self.device.runtime else None,profile_sha256=self.profile_sha256,
             tick_owned_by_service=True,business_lifetime_independent=True,
             event_encoding=dict(mode='spawned_cpu',pid=self.event_encoder_pid),
             read_encoding=dict(mode='spawned_cpu',pid=self.read_encoder_pid))
+        if plane is not None:state['control_owner']['data_plane']=deepcopy(plane)
+        if plane is not None and state.get('recording')is not None:
+            recording=self.device.runtime.owner.recording
+            session=getattr(getattr(recording,'capture',None),'session',None)
+            description=getattr(session,'health_source',None)or getattr(recording,'health_source',None)
+            if description is not None:
+                info=state['recording']
+                info.update(health_source=deepcopy(description),
+                    writer_identity=deepcopy(description['source']['metadata']['writer_identity']),
+                    execution_instance_id=recording.execution_instance_id)
+                if not info['done']:
+                    info.pop('ready',None);info.pop('error',None)
         return state
 
     def dispatch(self,request):
@@ -332,10 +372,17 @@ class ControlOwnerService:
         if operation=='snapshot':return self.inspect(args.get('business'))
         if operation=='inputs':
             if runtime is None:raise ValueError('control Owner not acquired')
-            return runtime.control_inputs()
+            if set(args)-{'include_feedback'}or type(args.get('include_feedback',True))is not bool:
+                raise ValueError('explicit feedback projection flag required')
+            if getattr(runtime,'data_plane',None) is not None:
+                return runtime.control_inputs(include_feedback=False)
+            return runtime.control_inputs(**args)
         if operation=='settings_snapshot':
             if runtime is None:raise ValueError('control Owner not acquired')
             return runtime.execution_settings_snapshot(args['business'])
+        if operation=='control_policy_snapshot':
+            if runtime is None:raise ValueError('control Owner not acquired')
+            return runtime.control_policy_snapshot(args['business'])
         if operation=='inference_state':
             runner=runtime.owner.runner if runtime else None
             return dict(execution_instance_id=getattr(runtime.owner,'execution_instance_id',None)if runtime else None,
@@ -353,7 +400,8 @@ class ControlOwnerService:
                 latest=self.event_sequence
             # These rows come from the bounded SDK/window interfaces. Unknown
             # or large diagnostic events travel singly, bounding parent pickling.
-            small={'control_study_feedback','control_study_native_window','sdk_call_latency','owner_inference'}
+            small={'control_study_feedback','control_study_native_window','sdk_call_latency',
+                'owner_inference','inference_guard_decision'}
             if pending and pending[0]['event']not in small:pending=pending[:1]
             else:
                 pending=pending[:next((i for i,row in enumerate(pending)if row['event']not in small),len(pending))]
@@ -383,8 +431,12 @@ class ControlOwnerService:
         if operation=='inference_configure':
             from .owner_inference import OwnerInference
             candidate=OwnerInference(self,args['configuration'],args['specification'])
-            result=runtime.configure_inference(args['configuration'],candidate.factory)
+            try:result=runtime.configure_inference(args['configuration'],candidate.factory)
+            except BaseException:
+                candidate.close();raise
+            previous=self.inference
             self.inference=candidate
+            if previous is not None:previous.close()
             return dict(result,session_id=candidate.session_id)
         if operation in('inference_observation','inference_result','inference_recording'):
             if self.inference is None or args.get('session_id')!=self.inference.session_id:
@@ -400,7 +452,10 @@ class ControlOwnerService:
         if operation=='handoff':
             return runtime.handoff(self.device.credentials[args['business']],args['target'])
         if operation=='execution_settings':
-            return runtime.update_execution_settings(self.device.credentials[args['business']],args['payload'])
+            return runtime.update_execution_settings(self.device.credentials[args['business']],args['payload'],
+                                                     expected_revision=args.get('expected_revision'))
+        if operation=='control_policy':
+            return runtime.update_control_policy(self.device.credentials[args['business']],args['payload'])
         if operation=='calibration_installed':return runtime.notify_calibration_installed(args['snapshot_id'])
         if operation=='revoke_inference':return runtime.revoke_inference()
         if operation=='maintenance_begin':
@@ -456,9 +511,10 @@ class ControlOwnerService:
 
     def close(self):
         if self.device.runtime is not None:raise ValueError('normal supported release or verified protected retirement required before Owner service exit')
+        if self.inference is not None:self.inference.close();self.inference=None
         self.server.shutdown();self.server.server_close()
-        self.event_encoder.shutdown(wait=True,cancel_futures=True)
-        self.read_encoder.shutdown(wait=True,cancel_futures=True)
+        _shutdown_encoder(self.event_encoder)
+        _shutdown_encoder(self.read_encoder)
         Path(self.server.server_address).unlink(missing_ok=True)
         token_path=self.root/'control-token'
         if not token_path.is_symlink() and token_path.is_file() and token_path.read_text()==self.token:
@@ -502,6 +558,15 @@ class OwnerFacts:
     @recording.setter
     def recording(self,value):self.client.attach_recording(value)
     def control_time(self):
+        if self.client.environment=='fake':
+            current=self.client.state['control_time_s']
+            if type(current)not in(int,float)or not math.isfinite(current)or current<0:
+                raise ValueError('current simulation source clock is unavailable')
+            view=self.client.ros_state
+            if view is not None and view.inputs is not None:
+                try:current=max(current,view.inputs.latest('state')[0].source_time_ns/1e9)
+                except LookupError:pass
+            return current
         # Physical Owner and this client share host monotonic time. This never
         # refreshes the recorded feedback timestamp or substitutes a heartbeat.
         return time.monotonic()
@@ -511,15 +576,29 @@ class OwnerFacts:
 class ControlRuntimeClient:
     """Business-side finite control API. It owns no tick thread or native SDK."""
     remote_control_owner=True
-    def __init__(self,descriptor,*,hardware_binding=None):
+    def __init__(self,descriptor,*,hardware_binding=None,recording_backend=None):
+        if recording_backend not in (None,'capture_session_v1'):raise ValueError('known control recording backend required')
+        self.control_recording_backend=recording_backend
+        self.review_action=None
         self.channel=ControlChannel(descriptor);self.lock=threading.RLock();self.state={};self.inputs={}
         self.nonce=None;self.fd=None;self.clients={};self.runners={};self.recording=None;self.recording_error=None;self.observation_error=None
         self.lease=None;self.protected_retirement=None;self.descriptor=Path(descriptor)
         self.inference_lock=threading.RLock();self.inference_session=None;self.inference_callbacks=None;self.event_cursor=0
+        self.capture_backend=False
         self.observations=OrderedDict();self.event_closed=threading.Event();self.event_thread=None
         self.device_id=self.channel.descriptor['device_id'];self.environment=self.channel.descriptor['environment']
         self.owner=OwnerFacts(self);self.hardware_binding=hardware_binding;self.closed=threading.Event()
+        self.data_plane=None;self.ros_state=None;self.recording_health=None;self.ros_control_source=None;self.ros_control_sequence=None
+        self._recording_ack=None;self._recording_health_sent=None
         self.refresh()
+        if self.nonce is not None:self._require_capture_capabilities()
+
+    def _require_capture_capabilities(self):
+        if self.control_recording_backend!='capture_session_v1':return
+        features=set(self.state['control_owner']['protocol_features'])
+        if not {'control_capture_v1','rgb8_capture_v1'}<=features:
+            self.detach()
+            raise ValueError('Owner recording capability is not configured; attachment refused before control')
 
     def _call(self,operation,**arguments):
         return self.channel.call(operation,expected_nonce=self.nonce,**arguments)
@@ -529,12 +608,49 @@ class ControlRuntimeClient:
             # Order response installation as well as reads: a slower old poll
             # must not overwrite a newer handoff/epoch in the business cache.
             value=self.channel.call('snapshot',expected_nonce=self.nonce,business=business)
+            if (value.get('control_owner')or{}).get('schema')!=SCHEMA:
+                raise ValueError('control Owner protocol version mismatch; attachment refused')
             nonce=value.get('runtime_nonce')
             if self.nonce is not None and nonce is not None and nonce!=self.nonce:raise ValueError('control Owner changed; explicit attachment required')
             if nonce is not None:self.nonce=nonce
+            plane=(value.get('control_owner')or{}).get('data_plane')
+            if plane is not None:
+                if self.data_plane is not None and self.data_plane!=plane:raise ValueError('Owner ROS data plane changed; explicit reattachment required')
+                if self.ros_state is None:
+                    from .ros_inputs import RosStateView
+                    self.data_plane=deepcopy(plane)
+                    self.ros_state=RosStateView(plane,self.device_id,nonce,self.environment)
+                self._project_feedback(value)
+                self._project_recording(value)
             self.state=value
             self.fd=1 if nonce is not None and not(value.get('release_receipt')or{}).get('status')=='released'else None
         return deepcopy(value)
+
+    def _project_feedback(self,value):
+        try:
+            value['calibration_feedback']=self.ros_state.resolve(value.get('feedback_reference'))
+            value.pop('feedback_source_error',None)
+        except (LookupError,ValueError,TimeoutError)as error:
+            value['calibration_feedback']=None;value['feedback_source_error']=str(error)
+
+    def _project_recording(self,value):
+        from .ros_data import RecordingHealth
+        info=value.get('recording')or{};description=info.get('health_source')
+        health=self.recording_health
+        if description is None or info.get('done') or info.get('ingress_closed'):
+            if health is not None:health.close();self.recording_health=None
+            return
+        if health is not None and health.description!=description:
+            health.close();health=self.recording_health=None
+        if health is None:
+            try:
+                self.recording_health=health=RecordingHealth(description,
+                    capture_session_id=description['source']['metadata']['capture_session_id'],
+                    run_id=info['execution_instance_id'],device_id=self.device_id,plane=self.data_plane,
+                    writer_identity=info['writer_identity'],ros=self.ros_state.ros)
+            except (ValueError,RuntimeError)as error:
+                info.update(ready=False,error=str(error));return
+        info.update(health.snapshot())
 
     def acquire(self):
         if not self.state.get('connected'):
@@ -542,11 +658,13 @@ class ControlRuntimeClient:
         deadline=time.monotonic()+4
         while time.monotonic()<deadline:
             self.refresh()
-            if (self.state.get('feedback_healthy')and self.state.get('stationary'))or 'FAULT'in str(self.state.get('state')):break
+            if (self.state.get('feedback_healthy')and self.state.get('stationary')
+                    and (self.ros_state is None or self.state.get('calibration_feedback')))or 'FAULT'in str(self.state.get('state')):break
             time.sleep(.02)
         if self.hardware_binding is not None and self.state.get('feedback_healthy')and self.state.get('stationary'):
             self._call('hardware_binding',path=str(self.hardware_binding))
-        self.inputs=self._call('inputs')
+        self.inputs=self.control_inputs()
+        self._require_capture_capabilities()
         return self
 
     def register_business(self,business):
@@ -575,14 +693,67 @@ class ControlRuntimeClient:
         op=self.state.get('control_operation')or{}
         return op if op.get('status')in('queued','verifying_feedback','holding','stopping')else None
 
-    def control_inputs(self):
-        value=self._call('inputs');self.inputs=value;return value
-    def configure_remote_inference(self,configuration,specification,*,created,metric,record,predict):
+    def control_inputs(self,*,include_feedback=True):
+        value=self._call('inputs',**({}if include_feedback else dict(include_feedback=False)))
+        if getattr(self,'ros_state',None) is not None and include_feedback:self._project_feedback(value)
+        self.inputs=value;return value
+
+    def set_capture_result_handler(self,callback):
+        if not callable(callback):raise ValueError('capture result callback required')
+        self.capture_result_handler=callback
+        if self.ros_state is not None:
+            self._subscribe_capture_results()
+            return
         with self.inference_lock:
+            if self.event_thread is None:
+                self.event_thread=threading.Thread(target=self._events,name='owner-business-events',daemon=True)
+                self.event_thread.start()
+
+    def _subscribe_capture_results(self):
+        if self.ros_control_source is not None:return
+        from .ros_data import SourceDirectory
+        ros=self.ros_state.ros
+        source=SourceDirectory(ros,self.device_id).resolve({'control':dict(source_instance_id=self.nonce,kind='event')})[0]
+        publishers=ros.node.get_publishers_info_by_topic(source['topic'])
+        if len(publishers)!=1:raise ValueError('one original control event publisher required')
+        self.ros_control_source=source;self.ros_control_gid=bytes(publishers[0].endpoint_gid)
+        ros.subscribe(source['topic'],ros.types.DataEvent,self._capture_result_event,depth=128)
+
+    def _capture_result_event(self,message):
+        from .ros_data import StreamRef,json_value
+        source=self.ros_control_source;reference=StreamRef.from_message(message.reference)
+        publishers=self.ros_state.ros.node.get_publishers_info_by_topic(source['topic'])
+        if (len(publishers)!=1 or bytes(publishers[0].endpoint_gid)!=self.ros_control_gid
+                or any(getattr(reference,k)!=source[k]for k in ('stream_id','source_instance_id','source_clock_id'))):
+            raise ValueError('control event source changed; result consumer reattachment required')
+        if self.ros_control_sequence is not None:
+            if reference.sequence<=self.ros_control_sequence:return
+            if reference.sequence>self.ros_control_sequence+1:self.capture_result_handler(None)
+        self.ros_control_sequence=reference.sequence
+        if message.event!='control_capture_sealed':return
+        value=json_value(message.payload_json)
+        if value.get('execution_instance_id')!=message.run_id:raise ValueError('sealed result belongs to another Run')
+        self.capture_result_handler(value)
+    def configure_remote_inference(self,configuration,specification,*,created,metric,record,predict,predict_chunk=None):
+        owner=self.state.get('control_owner')or{}
+        if owner.get('schema')!=SCHEMA:raise ValueError('control Owner protocol version mismatch; configuration refused')
+        if configuration.get('data_plane')!=owner.get('data_plane'):
+            raise ValueError('inference and Owner data plane differ; configuration refused')
+        if configuration.get('action_chunk_binding')is not None and not callable(predict_chunk):
+            raise ValueError('trusted action chunk configuration requires the context-aware model callback')
+        with self.inference_lock:
+            batch=self._call('events',after=self.event_cursor);boundary=batch['latest']
+            callback=getattr(self,'capture_result_handler',None)
+            if callback is not None:
+                for row in batch['events']:
+                    if row['event']=='control_capture_sealed':callback(row['value'])
+                if batch['incomplete']:callback(None)
             result=self._call('inference_configure',configuration=configuration,specification=specification)
+            self.event_cursor=boundary
             self.inference_session=result['session_id']
+            self.capture_backend=configuration.get('recording_backend')=='capture_session_v1'
             self.recording_error=None;self.recording=None
-            self.inference_callbacks=dict(created=created,metric=metric,record=record,predict=predict)
+            self.inference_callbacks=dict(created=created,metric=metric,record=record,predict=predict,predict_chunk=predict_chunk)
             if self.event_thread is None:
                 self.event_thread=threading.Thread(target=self._events,name='owner-business-events',daemon=True)
                 self.event_thread.start()
@@ -604,30 +775,41 @@ class ControlRuntimeClient:
                 try:
                     batch=self._call('events',after=self.event_cursor)
                     if batch['incomplete']:self.recording_error='control event cursor overflow; evidence incomplete'
+                    if batch['incomplete']and getattr(self,'capture_result_handler',None):self.capture_result_handler(None)
                     for row in batch['events']:
                         self.event_cursor=row['sequence']
                         data=row['value'];callbacks=self.inference_callbacks
+                        if row['event']=='control_capture_sealed':
+                            callback=getattr(self,'capture_result_handler',None)
+                            if callback is not None:callback(data)
+                            continue
                         if row['event']!='owner_inference'or data['session_id']!=self.inference_session or callbacks is None:continue
                         kind=data['kind']
                         if kind=='created':
                             identity=data['execution_instance_id'];runner=RemoteRunner(self,identity)
                             self.runners={identity:runner};self.refresh()
-                            callbacks['created'](self.owner,runner,data['configuration'])
+                            if getattr(self,'capture_backend',False):
+                                callbacks['created'](self.owner,runner,data['configuration'],data['control_policy'])
+                            else:callbacks['created'](self.owner,runner,data['configuration'])
                         elif kind=='metric':callbacks['metric'](data['name'],data['value'])
                         elif kind=='record':
                             callbacks['record'](data['name'],data['value'])
-                            self._recording_facts()
                         elif kind=='recording_stop':
-                            if self.recording:self.recording.finish(data['status'],data.get('reason'))
+                            if self.recording and not getattr(self,'capture_backend',False):
+                                self.recording.finish(data['status'],data.get('reason'))
                         elif kind=='query':
                             request=data['request'];identity=request['request_id'];session=self.inference_session
-                            def query(request=request,identity=identity,session=session,callbacks=callbacks):
+                            def query(request=request,identity=identity,session=session,callbacks=callbacks,context=deepcopy(data.get('consumer_context'))):
                                 try:
                                     with self.lock:observation=self.observations.get(digest(request['observation']['frame_ids']))
                                     if observation is None:raise ValueError('original observation images are no longer retained')
                                     request['observation']['images']=observation['images']
                                     request['applied_history']=__import__('numpy').asarray(request['applied_history'],dtype='float32').reshape(-1,14)
-                                    response=plain(callbacks['predict'](request));error=None
+                                    if callbacks.get('predict_chunk')is not None:
+                                        if not isinstance(context,dict):raise ValueError('Owner query context missing')
+                                        response=plain(callbacks['predict_chunk'](request,context))
+                                    else:response=plain(callbacks['predict'](request))
+                                    error=None
                                 except Exception as exc:response=None;error=str(exc)
                                 try:self._call('inference_result',session_id=session,request_id=identity,response=response,error=error)
                                 except (ValueError,ConnectionError):pass  # Revoked generation is never retried.
@@ -635,6 +817,9 @@ class ControlRuntimeClient:
                     value=self._call('inference_state');runner=self.runners.get(value['execution_instance_id'])
                     if runner is not None and value['snapshot']is not None:runner.value=value['snapshot']
                     if self.recording is not None:self._recording_facts()
+                    # Refresh state and recording health once per batch even
+                    # under continuous traffic, then drain without sleeping.
+                    if self.event_cursor<batch['latest']:continue
                 except Exception as error:self.recording_error=str(error)
             self.event_closed.wait(.02)
     def _recording_facts(self):
@@ -642,17 +827,33 @@ class ControlRuntimeClient:
         prepared=bool(recording is not None and recording.prepared.is_set())
         done=bool(recording is not None and recording.done.is_set())
         thread=getattr(recording,'thread',None)
-        self._call('inference_recording',session_id=self.inference_session,prepared=prepared,done=done,
-            alive=thread is None or thread.is_alive(),error=self.recording_error or getattr(recording,'error',None))
+        identity=({'execution_instance_id':recording.execution_instance_id} if getattr(self,'capture_backend',False) and recording is not None else {})
+        error=self.recording_error or getattr(recording,'error',None)
+        state=recording.snapshot()if getattr(self,'capture_backend',False)and recording is not None else {}
+        ros=getattr(self,'data_plane',None)is not None
+        if not ros:error=error or state.get('error')
+        elif state.get('writer_exited')and not state.get('sealed'):error=error or state.get('error')or'recording writer exited without seal'
+        fields=dict(session_id=self.inference_session,prepared=prepared,done=done,
+            alive=thread is None or thread.is_alive(),error=error,ingress_closed=state.get('ingress_closed')is True,**identity)
+        description=state.get('health_source')
+        if ros and description is not None and getattr(self,'_recording_health_sent',None)!=identity:
+            fields.update(health_source=description,writer_identity=state['writer_identity'])
+        if fields==getattr(self,'_recording_ack',None):return
+        self._call('inference_recording',**fields);self._recording_ack=fields
+        if description is not None:self._recording_health_sent=identity
     def snapshot(self,credential):return self.refresh(self._business(credential))
     def fact_snapshot(self):return self.refresh()
     def submit(self,credential,command):
         from .control_plan import RawPreview,ArtifactPreview
+        business=self._business(credential)
         if isinstance(command,(RawPreview,ArtifactPreview))and self.channel.descriptor.get('frozen_preview_transport')!=PREVIEW_FILES:
             raise ValueError('independent Owner lacks frozen-preview file transport; no motion submitted')
         wire,directory=_stage_preview(command,self.descriptor.parent)
         unknown=False
-        try:return self._call('submit',business=self._business(credential),command=wire)
+        try:
+            result=self._call('submit',business=business,command=wire)
+            if isinstance(result,dict)and isinstance(result.get('token'),str):self.review_action=(result['token'],command.get('action'))
+            return result
         except ControlCallUnknown as error:
             unknown=True
             if directory is not None:
@@ -669,9 +870,19 @@ class ControlRuntimeClient:
     def handoff(self,credential,target,*,active=None):
         if active is not None and not active():raise ValueError('handoff revoked')
         result=self._call('handoff',business=self._business(credential),target=target);self.refresh();return result
-    def update_execution_settings(self,credential,payload):
-        result=self._call('execution_settings',business=self._business(credential),payload=payload);self.refresh();return result
+    def update_execution_settings(self,credential,payload,*,expected_revision=None):
+        arguments=dict(business=self._business(credential),payload=payload)
+        if expected_revision is not None:arguments['expected_revision']=expected_revision
+        result=self._call('execution_settings',**arguments);self.refresh();return result
     def execution_settings_snapshot(self,business):return self._call('settings_snapshot',business=business)
+    def control_policy_snapshot(self,business):return self._call('control_policy_snapshot',business=business)
+    @property
+    def supports_control_policy(self):
+        return True  # Required by the exact Owner protocol at attachment.
+    def update_control_policy(self,credential,payload):
+        result=self._call('control_policy',business=self._business(credential),payload=payload)
+        self.refresh()
+        return result
     def request_release(self,credential,command=None,*,maintenance=False,actor=None):
         if command not in(None,{'action':'release','confirmation':'ARMS_SUPPORTED_RELEASE'}):raise ValueError('supported release required')
         if actor is not None:return self.control_release(actor)
@@ -712,7 +923,10 @@ class ControlRuntimeClient:
     def close(self):
         if self.state.get('connected'):raise ValueError('Owner still acquired; business detach is separate from release')
         self.detach();self.fd=None
-    def detach(self):self.closed.set();self.event_closed.set()
+    def detach(self):
+        self.closed.set();self.event_closed.set()
+        if getattr(self,'recording_health',None)is not None:self.recording_health.close();self.recording_health=None
+        if getattr(self,'ros_state',None) is not None:self.ros_state.close()
     def monitor(self,closed):
         while not closed.is_set()and not self.closed.is_set():
             try:self.refresh();self.observation_error=None

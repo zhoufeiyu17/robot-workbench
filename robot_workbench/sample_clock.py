@@ -79,7 +79,7 @@ def sample_stamp(sample, clock, *, wall_key='host_receive_ns', source_key='sourc
     if 'device_timestamp_ms' in sample or 'depth_device_timestamp_ms' in sample:
         if sample.get('timestamp_domain')!='simulation':
             raise ValueError('fake camera device timestamps must use simulation domain')
-        for key in ('device_timestamp_ms','depth_device_timestamp_ms'):
+        for key in (('device_timestamp_ms',)if sample.get('pixel_format')=='rgb8'else('device_timestamp_ms','depth_device_timestamp_ms')):
             value=sample.get(key)
             if type(value) not in (int,float) or not isfinite(value) or abs(value-stamp/1e6)>1e-6:
                 raise ValueError('RGB-D device timestamp differs from its source physics step')

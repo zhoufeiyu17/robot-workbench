@@ -19,7 +19,7 @@ class ManualLimitsTest(unittest.TestCase):
         self.assertEqual(bounded.tolist(),[-.05]*12)
         self.assertEqual(receipt['requested_q'],q)
         with self.assertRaises(JointPositionBoundaryError):app.bounded_joint_pose(q)
-        with self.assertRaises(JointPositionBoundaryError):app.bounded_joint_pose([-.05-math.radians(2.1)]*12,feedback=True)
+        with self.assertRaises(JointPositionBoundaryError):app.bounded_joint_pose([-.05-math.radians(5.1)]*12,feedback=True)
         app.config['command_joint_limits']=app.manual_joint_limits()
         app.hardware_feedback=None
         self.assertEqual(app.manual_joint_limits(),[[-.05,1.]]*12)

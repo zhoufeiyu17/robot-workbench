@@ -94,6 +94,7 @@ class IndependentPreviewTests(unittest.TestCase):
         from robot_workbench.control_plan import RawPreview
         with tempfile.TemporaryDirectory()as directory:
             root=Path(directory);client=object.__new__(ControlRuntimeClient)
+            client.control_recording_backend=None
             client.descriptor=root/'control-owner.json';client._business=lambda _: 'collection'
             client.channel=SimpleNamespace(descriptor={'frozen_preview_transport':PREVIEW_FILES})
             command=RawPreview(b'{"action":"preview_frozen","plan":{},"source":{}}')

@@ -18,8 +18,8 @@ class StartAllowanceTest(unittest.TestCase):
   ref=NS(metadata={'reference_id':'a'*64},sample=lambda t:(np.zeros((1,14)),))
   packet=dict(q_sdk14=np.zeros((3,14)).tolist(),dq_sdk14=np.zeros((3,14)).tolist())
   prior=NS(cancelled=False,epoch=4,active_arm='both',profile='p',start_s=0.,reference=NS(duration_s=1.,metadata={'reference_id':'parent'}),last_packet=packet)
-  owner=NS(backend=NS(reference_start_allowance={'reference_id':'a'*64,'maximum_error_rad':math.radians(2)}),lock=RLock(),runner=NS(status='READY',target_interpreter=prior),epoch=4,shared_target_profile='p',control_time=lambda:2.,feedback_healthy=True,cache=dict(stationary=True,calibration_feedback=dict(sample_time_s=1.99,controller_telemetry=dict(arms={s:dict(output_qpos=[0.]*6)for s in ('left','right')}))))
-  measured=np.zeros(14);measured[2]=.02
+  owner=NS(backend=NS(reference_start_allowance={'reference_id':'a'*64,'maximum_error_rad':math.radians(2.5)}),lock=RLock(),runner=NS(status='READY',target_interpreter=prior),epoch=4,shared_target_profile='p',control_time=lambda:2.,feedback_healthy=True,cache=dict(stationary=True,calibration_feedback=dict(sample_time_s=1.99,controller_telemetry=dict(arms={s:dict(output_qpos=[0.]*6)for s in ('left','right')}))))
+  measured=np.zeros(14);measured[2]=math.radians(2.1)
   self.assertTrue(check_initial_tracking(owner,ref,measured)['native_output_matched'])
   for key,value in [('cancelled',True),('epoch',3),('active_arm','left')]:
    old=getattr(prior,key);setattr(prior,key,value)
@@ -32,11 +32,11 @@ class StartAllowanceTest(unittest.TestCase):
   owner.cache['calibration_feedback']['controller_telemetry']['arms']['left']['output_qpos'][2]=.001
   with self.assertRaises(ValueError):check_initial_tracking(owner,ref,measured)
   owner.cache['calibration_feedback']['controller_telemetry']['arms']['left']['output_qpos'][2]=0.
-  measured[2]=math.radians(2.01)
+  measured[2]=math.radians(2.51)
   with self.assertRaises(ValueError):check_initial_tracking(owner,ref,measured)
-  measured[2]=.02;owner.backend.reference_start_allowance['reference_id']='b'*64
+  measured[2]=math.radians(2.1);owner.backend.reference_start_allowance['reference_id']='b'*64
   with self.assertRaises(ValueError):check_initial_tracking(owner,ref,measured)
   owner.backend.reference_start_allowance=None
   with self.assertRaises(ValueError):check_initial_tracking(owner,ref,measured)
-  measured[2]=.005;self.assertEqual(check_initial_tracking(owner,ref,measured)['limit_rad'],.01)
+  measured[2]=.005;self.assertEqual(check_initial_tracking(owner,ref,measured)['limit_rad'],math.radians(2.))
 if __name__=='__main__':unittest.main()

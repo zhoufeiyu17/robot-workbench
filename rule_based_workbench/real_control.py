@@ -158,13 +158,17 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
                              stop=owner.motion_fault, consumed=owner.consumed, arm_tolerance=owner.arm_tolerance,
                              environment=owner.environment or 'physical',
                              execution_settings=getattr(owner, 'execution_error_settings', None),
+                             guard=getattr(owner,'control_guard',None),
+                             record_event=getattr(owner,'record_control_event',None),
                              disabled_grippers=getattr(owner.backend, 'passive_jaws', ()))
             self.owner = owner
             self.payload, self.base = payload, base
-            self.recording = None
+            current=getattr(owner,'recording',None)
+            self.recording=(current if getattr(current,'recording_backend',None)=='capture_session_v1'
+                and current.execution_instance_id==getattr(owner,'execution_instance_id',None) else None)
             from cup_return_replay import is_replay
             self.maintenance_replay=(payload['plan_ref']['maintenance_replay'] if 'plan_ref' in payload else is_replay(payload['plan']))
-            self.deferred_recording=bool(owner.recording_factory is not None and not self.maintenance_replay
+            self.deferred_recording=bool(self.recording is None and owner.recording_factory is not None and not self.maintenance_replay
                 and getattr(owner.recording_factory,'supports_deferred_preparation',False))
             self.preparation_complete=not self.deferred_recording
             self.preparation_closed=False
@@ -174,7 +178,7 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
             self.managed_execution_instance=getattr(owner,'execution_instance_id',None)
             self.execution_instance_id=self.managed_execution_instance or secrets.token_hex(16)
             self.recording_owner=(owner_identity(dict(owner_pid=os.getpid(),command_epoch=owner.epoch,
-                runtime_nonce=owner.runtime_nonce)) if not self.preparation_complete else None)
+                runtime_nonce=owner.runtime_nonce)) if self.recording is not None or not self.preparation_complete else None)
             self.runtime_ready = threading.Event()
             self.recording_waits_for_endpoint=False
             self.runtime_started = False
@@ -186,6 +190,7 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
             # Preview already validated this private, single-use executor. Repeating
             # the full scan here blocks the owner feedback loop before its first tick.
             self.frozen = frozen
+            if getattr(owner,'control_guard',None) is not None:self.frozen.guard=owner.control_guard
             self.shared_reference = None
             self.frozen.sink = self.submit_target
             self.frozen.gate = self.gate
@@ -209,9 +214,10 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
         def prepare_recording(self,now):
             if self.preparation_complete:return True
             if self.preparation_thread is None:
-                self.preparation_deadline=time.monotonic()+1.
+                from robot_workbench.execution_settings import CAPTURE_PREPARATION_TIMEOUT_S
+                self.preparation_deadline=time.monotonic()+CAPTURE_PREPARATION_TIMEOUT_S
                 self.owner.event('recording_preparation_started',execution_instance_id=self.execution_instance_id,
-                    deadline_monotonic_s=self.preparation_deadline,maximum_wall_s=1.,image_readiness_gate=False)
+                    deadline_monotonic_s=self.preparation_deadline,maximum_wall_s=CAPTURE_PREPARATION_TIMEOUT_S,image_readiness_gate=False)
                 def prepare():
                     candidate=None
                     try:
@@ -328,7 +334,9 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
             self.owner.event('execution_initialized', initialization=timeline['initialization'],
                              execution_timeline_digest=timeline['timeline_digest'])
             try:
-                if self.deferred_recording:
+                if getattr(self.recording,'recording_backend',None)=='capture_session_v1':
+                    self.recording.bind_execution(timeline,execution_instance_id=self.execution_instance_id,execution_owner=self.recording_owner)
+                elif self.deferred_recording:
                     if self.recording is not None and not self.recording.error and not self.preparation_closed:
                         self.recording.bind_execution(timeline,execution_instance_id=self.execution_instance_id,
                             execution_owner=self.recording_owner)
@@ -343,12 +351,12 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
         def _check_start_drift(self, q):
             # The active arm may return to its reviewed start. The inactive arm
             # stays where this observation froze it; drifting needs a new plan.
-            from robot_workbench.joint_bounds import position_noise_rad
+            from robot_workbench.execution_settings import DEFAULT_JOINT_TOLERANCE_RAD
             measured=physical_feedback(q)
             for side in self.frozen.held_arms:
                 key=side+'_arm_joints'
                 target=self.frozen.plan['ticks'][0]['target'][key]
-                if any(abs(a-b)>position_noise_rad(self.owner.environment or 'physical')+1e-12
+                if any(abs(a-b)>DEFAULT_JOINT_TOLERANCE_RAD+1e-12
                        for a,b in zip(measured[key],target)):
                     raise ValueError('inactive right arm changed; reobserve and replan before execution')
 
@@ -748,7 +756,8 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
                 result = super().submit(command)
                 if command.get('action') in ('stop','release','simulate_pedal'):
                     self.alignment_plans.clear()
-                if command.get('action') in ('stop','release') and self.recording:
+                if (command.get('action') in ('stop','release') and self.recording
+                        and getattr(self.recording,'recording_backend',None)!='capture_session_v1'):
                     self.recording_call('finish', 'stopped','operator '+command['action'])
                 return result
             from robot_workbench.control_plan import RawPreview,ArtifactPreview
@@ -819,7 +828,7 @@ def classes(ref, *, jaw_mapping_file=None, device_id=None):
             runner = self.timing_probe.call('runner_init', Runner, self, plan, payload, frozen, base)
             with self.lock:
                 self.runner=runner
-                if runner.deferred_recording or runner.maintenance_replay:self.recording=None
+                if runner.recording is None and (runner.deferred_recording or runner.maintenance_replay):self.recording=None
             self.runner.start(self.control_time(), feedback, review_age_s=self.review_age())
 
         def cache_state(self, feedback, limits):

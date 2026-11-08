@@ -24,6 +24,30 @@ from playground_pipeline import native_stage
 from local_execution import TARGET,PHYSICAL_TARGET
 
 
+class RosConnectionConfigTests(unittest.TestCase):
+    def test_ros_binding_has_no_legacy_recording_directory(self):
+        import tempfile
+        from robot_workbench.collection_setup import _ros_connection,connection_config
+        from robot_workbench.control_owner import SCHEMA
+        with tempfile.TemporaryDirectory()as directory:
+            root=Path(directory);owner=root/'owner.json'
+            owner.write_text(json.dumps(dict(schema=SCHEMA,device_id='cpu_fake',environment='fake')))
+            plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu_fake',domain_id=126)
+            setup=dict(environment='fake',robot_id='cpu_fake',resident_root=str(root),
+                control_url='http://127.0.0.1:9',token_file=str(root/'token'),
+                trusted_binding_path=str(root/'binding'),local_recording_root=str(root/'recording'),
+                producer_ports=dict(head=10,left=11,right=12),producer_directories={},
+                camera_serials=dict(head='h',left='l',right='r'))
+            setup.update(_ros_connection(plane,dict(descriptor=str(owner)),'cpu_fake','fake'))
+            config=connection_config(setup,root/'pipeline',root/'calibration',root/'capture',root/'jobs')
+            self.assertEqual(config['data_plane'],plane)
+            self.assertEqual(config['control_owner_descriptor'],str(owner))
+            self.assertTrue(all('recording_directory'not in row for row in config['cameras'].values()))
+            with self.assertRaisesRegex(ValueError,'another device'):_ros_connection(plane,dict(descriptor=str(owner)),'other','fake')
+            owner.write_text(json.dumps(dict(schema='workbench.control_owner.v2',device_id='cpu_fake',environment='fake')))
+            with self.assertRaises(ValueError):_ros_connection(plane,dict(descriptor=str(owner)),'cpu_fake','fake')
+
+
 class RemoteCollectionSetupTests(unittest.TestCase):
     def test_standalone_owner_raw_root_is_shared_by_recorder_and_strict_finalizer(self):
         from robot_workbench.collection_setup import trusted_recording_location

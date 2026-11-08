@@ -2,6 +2,7 @@
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -30,6 +31,101 @@ class CameraPlant(LaggingPlant):
 
 
 class PhysxCameraTest(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated native ROS required')
+    def test_ros_source_preserves_rgbd_and_restarts_only_publication(self):
+        from robot_workbench.ros_data import RosNode,SourceDirectory
+        from robot_workbench.ros_inputs import RosInputs
+        plane=dict(schema='workbench.ros-data-plane.v1',namespace='/wb_physx',domain_id=126)
+        with patch('robot_workbench.rgbd_service.CommonCameraService.start',side_effect=AssertionError('legacy IPC source must not start')):
+            producer=self.producer(ros_plane=plane,device_id='cpu_fake')
+        packets={};publish=producer._publish
+        def observed(packet):
+            packets[packet['feedback']['physics_step']]=dict(wall=packet['wall_ns'],frame=packet['frame_sequence'],actor=dict(packet['actor']))
+            return publish(packet)
+        producer._publish=observed
+        receiver=RosNode('fake_model_input',namespace='/wb_physx',domain_id=126);self.addCleanup(receiver.close)
+        deadline=time.monotonic()+8
+        while True:
+            self.collect(producer);self.wait(producer)
+            try:
+                frames={name:producer.common.latest_rgbd(name)for name in CAMERAS.values()}
+                break
+            except (LookupError,ValueError):
+                self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+        rows=SourceDirectory(receiver,'cpu_fake').resolve({name:dict(kind='image')for name in CAMERAS.values()})
+        model=RosInputs(receiver,rows)
+        self.assertEqual(set(model.sources),set(CAMERAS.values()))
+        self.assertEqual(producer.channels,{})
+        self.assertEqual(producer.spools,{})
+        self.assertIsNone(producer.service_owner)
+        for name,frame in frames.items():
+            self.assertEqual(frame['rgb'],np.arange(36,dtype=np.uint8).tobytes())
+            self.assertEqual(frame['depth'],(500).to_bytes(2,'little')*12)
+            self.assertEqual(frame['metadata']['source_time_ns'],frame['metadata']['depth_reference']['source_time_ns'])
+            self.assertNotIn('frame_readback',frame['metadata'],'state must stay on its unique ROS source')
+            original_sample=packets[frame['metadata']['physics_step']]
+            self.assertEqual(frame['metadata']['host_receive_ns'],original_sample['wall'])
+            self.assertEqual(frame['metadata']['frame_number'],original_sample['frame'])
+            for key in ('owner_pid','command_epoch','runtime_nonce'):
+                self.assertEqual(frame['metadata'][key],original_sample['actor'][key])
+            self.assertEqual(producer.ros.node.count_publishers('/wb_physx/'+name),1)
+            self.assertEqual(producer.ros.node.count_publishers('/wb_physx/'+name+'_depth'),1)
+        from real_rgbd import snapshot_bundle
+        from real_observation import decode_snapshot
+        values=producer.frames['base_0'].snapshot(formats=('color_png','depth_png'))
+        encoded=snapshot_bundle(values['status'],values['color_png'],values['depth_png'])
+        decoded=decode_snapshot(encoded,self.k['base_0']['serial'],{'frames':{'environment_from_camera':
+            {'position':[0,0,0],'orientation_wxyz':[1,0,0,0]}}},environment='fake')
+        self.assertEqual(decoded[0]['host_receive_ns'],values['status']['host_receive_ns'])
+        self.assertTrue(np.all(decoded[-1]['depth_m']==.5))
+        from real_bridge import RealBridge
+        token=self.root/'bridge-token';token.write_text('test-only-'+40*'x')
+        bridge=RealBridge(dict(environment='fake',robot_id='cpu_fake',data_plane=plane,
+            control_owner_descriptor='/unused-for-camera',token_file=str(token),control_url='http://127.0.0.1:9',
+            cameras={name:dict(url='http://127.0.0.1:9',serial=self.k[name]['serial'])for name in CAMERAS.values()}))
+        self.addCleanup(bridge.close)
+        bridge.request=lambda *a,**k: self.fail('ROS input must not request HTTP camera/state payloads')
+        deadline=time.monotonic()+8
+        while True:
+            self.collect(producer);self.wait(producer)
+            try:body,kind=bridge.camera('base_0','snapshot.zip');break
+            except ValueError:
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+        self.assertEqual(kind,'application/zip')
+        observed=decode_snapshot(body,self.k['base_0']['serial'],{'frames':{'environment_from_camera':
+            {'position':[0,0,0],'orientation_wxyz':[1,0,0,0]}}},environment='fake')
+        self.assertEqual(observed[0]['source_clock_id'],self.backend.source_clock_id)
+        original=producer.descriptor['instance_id'];actual=self.plant.read();clock=self.backend.source_clock_id
+        self.backend.owner=SimpleNamespace(recording=SimpleNamespace(done=threading.Event()))
+        errors=[]
+        def blocked_stop():
+            try:producer.stop()
+            except ValueError as error:errors.append(str(error))
+        blocked=threading.Thread(target=blocked_stop);blocked.start();blocked.join(2)
+        self.assertEqual(len(errors),1);self.assertIn('recording is active',errors[0]);self.assertFalse(producer.paused)
+        self.backend.owner=None
+        def maintenance(callback,pump=False):
+            results=[];errors=[]
+            def call():
+                try:results.append(callback(timeout_s=5))
+                except Exception as error:errors.append(error)
+            worker=threading.Thread(target=call);worker.start();deadline=time.monotonic()+8
+            while worker.is_alive()and time.monotonic()<deadline:
+                if pump:self.collect(producer)
+                time.sleep(.01)
+            worker.join(.1);self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+            return results[0]
+        stopped=maintenance(producer.stop)
+        self.assertFalse(stopped['exit_verified']);self.assertTrue(stopped['process_preserved'])
+        self.assertFalse(stopped['source_available']);self.assertEqual(stopped['service_pid'],os.getpid())
+        self.assertFalse(producer.collect(self.plant,self.backend,self.actor))
+        result=maintenance(producer.start,pump=True)
+        self.assertTrue(result['reconnected']);self.assertNotEqual(original,result['instance_id'])
+        self.assertEqual(self.backend.source_clock_id,clock);self.assertEqual(self.plant.read(),actual)
+        deadline=time.monotonic()+3
+        while not model.caches['base_0'].error and time.monotonic()<deadline:time.sleep(.01)
+        with self.assertRaises(ValueError):model.latest('base_0')
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)

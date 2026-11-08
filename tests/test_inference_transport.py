@@ -29,7 +29,7 @@ class StubModel:
         self.fail = False
     def prepare(self):
         self.prepares += 1
-        return dict(epoch=10, step=29450, checkpoint_sha256=BASE379_PINS['checkpoint'], status='ready')
+        return dict(worker_identity(),status='ready')
     def infer(self, request):
         self.requests.append(deepcopy(request));self.entered.set()
         if self.release is not None:self.release.wait(1)
@@ -53,6 +53,22 @@ def request(identity='request-1', seed=7):
 
 
 class InferenceTransportTests(unittest.TestCase):
+    def test_old_http_protocol_is_refused_before_prepare_or_worker_use(self):
+        with patch.object(self.client,'_request',return_value=json.dumps({'protocol':'workbench.model-http.v1'}).encode())as call:
+            with self.assertRaisesRegex(ValueError,'protocol version mismatch'):self.client.prepare()
+        call.assert_called_once_with('/status')
+        self.assertEqual(self.model.prepares,0);self.assertEqual(self.model.requests,[])
+
+    def test_incomplete_old_worker_identity_is_never_warmed_or_bound(self):
+        with patch.object(self.model,'prepare',return_value={k:worker_identity()[k]for k in ('epoch','step','checkpoint_sha256')}):
+            with self.assertRaisesRegex(RuntimeError,'worker identity'):self.client.prepare()
+        self.assertEqual(self.model.requests,[]);self.assertIsNone(self.client.identity)
+
+    def test_prepare_requires_bundle_identity_before_worker_load(self):
+        with self.assertRaisesRegex(RuntimeError,'complete model and bundle identity'):
+            self.client._request('/prepare',json.dumps(dict(protocol=PROTOCOL,model_id=MODEL_ID,conversion_id=self.client.conversion_id)).encode())
+        self.assertEqual(self.model.prepares,0)
+
     def test_base566_catalog_switch_is_explicit_serial_and_checkpoint_bound(self):
         def bundle(name):
             spec=model_spec(name)
@@ -106,7 +122,7 @@ class InferenceTransportTests(unittest.TestCase):
         validate=transport._validate_request
         def switch_after_validation(*args):
             validate(*args)
-            self.service.prepare(dict(protocol=PROTOCOL,model_id=fifth,conversion_id=fifth_client.conversion_id))
+            self.service.prepare(dict(protocol=PROTOCOL,model_id=fifth,conversion_id=fifth_client.conversion_id,expected_bundle_digest=fifth_client.bundle_digest))
         with patch.object(transport,'_validate_request',side_effect=switch_after_validation):
             with self.assertRaisesRegex(ValueError,'identity'):self.service.infer(payload)
         self.assertEqual(made[-1].model_id,fifth);self.assertEqual(made[-1].closes,0)
@@ -228,7 +244,7 @@ class InferenceTransportTests(unittest.TestCase):
                           ['127.0.0.1:18875','127.0.0.1:18875']):
                 self.assertEqual(call(forwarded,hosts),403)
             self.assertEqual(call(forwarded,['127.0.0.1:18875'],auth=False),403)
-            body=json.dumps(dict(protocol=PROTOCOL,model_id=MODEL_ID,conversion_id=self.client.conversion_id)).encode()
+            body=json.dumps(dict(protocol=PROTOCOL,model_id=MODEL_ID,conversion_id=self.client.conversion_id,expected_bundle_digest=self.client.bundle_digest)).encode()
             self.assertEqual(call(forwarded,['127.0.0.1:18875'],auth=False,path='/prepare',body=body),403)
             self.assertEqual(self.model.prepares,0)
             self.assertEqual(call(forwarded,['127.0.0.1:18875'],path='/prepare',body=body),200)
@@ -260,7 +276,10 @@ class InferenceTransportTests(unittest.TestCase):
         self.client.prepare();self.model.release=threading.Event()
         short=RemoteBaseClient(self.url,token_file=self.token,adapter=Adapter(),conversion_identity=self.binding,inference_timeout_s=.08)
         short.prepare()
-        with self.assertRaises((TimeoutError,socket.timeout)):short.infer(request('timed-out',3))
+        with self.assertRaises((TimeoutError,socket.timeout))as caught:short.infer(request('timed-out',3))
+        self.assertEqual(caught.exception.guard_decision['rule_id'],'G09')
+        self.assertEqual(caught.exception.guard_decision['verdict'],'reject')
+        self.assertTrue(caught.exception.guard_decision['observed']['timed_out'])
         self.assertTrue(self.model.entered.is_set())
         with self.assertRaisesRegex(RuntimeError,'busy'):self.client.infer(request('concurrent',4))
         self.model.release.set()
@@ -316,7 +335,7 @@ class InferenceTransportTests(unittest.TestCase):
         model.prepare=exclusive
         service=ModelService(model)
         try:
-            service.prepare(dict(protocol=PROTOCOL,model_id=MODEL_ID,conversion_id='a'*64))
+            service.prepare(dict(protocol=PROTOCOL,model_id=MODEL_ID,conversion_id='a'*64,expected_bundle_digest=self.client.bundle_digest))
             self.assertEqual(base.read_bytes(),b'prior failed startup\n')
             self.assertNotEqual(model.log_path,str(base))
             self.assertEqual(Path(model.log_path).read_bytes(),b'new startup\n')

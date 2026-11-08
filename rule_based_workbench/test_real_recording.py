@@ -234,7 +234,7 @@ def main():
         assert recorder.seal_timings['files']==len(manifest['files'])
         assert len(replay['files'])==6 and replay['task_outcome']=='unverified'
         assert replay['source_timing']['base_0']['frame_offsets_s']==[-.01,.023,.056,.09]
-        assert all('-fps_mode' in cmd for cmd in calls if cmd[0]=='ffmpeg')
+        assert all('-vsync' in cmd and cmd[cmd.index('-vsync')+1]=='vfr' for cmd in calls if cmd[0]=='ffmpeg')
         assert replay['source_timing']['base_0']['duration_s']==.133
         # A correct frame count cannot hide a muxer that drops the final display interval.
         def truncated_tail(args,**kwargs):

@@ -14,21 +14,18 @@ def main():
     from robot_workbench.device_bootstrap import read_profile,physical_runtime_factory
     from robot_workbench.service import Device
     from robot_workbench.control_owner import ControlOwnerService,collection_recording_root
-    profile=read_profile(args.profile)
+    profile=read_profile(args.profile,require_ros=True)
+    from robot_workbench.ros_data import require_runtime
+    require_runtime()
     device=Device(profile['robot_id'],'physical',None,label=profile.get('label'))
     service=ControlOwnerService(device,args.root,profile_sha256=hashlib.sha256(args.profile.read_bytes()).hexdigest())
-    recording=None
-    if profile.get('camera_service_descriptor'):
-        from robot_workbench.rgbd_service import CommonCameraService
-        from robot_workbench.recording_process import ProcessRecordingSession
-        import secrets
-        def recording(payload,on_fault):
-            cameras=CommonCameraService.connect(profile['camera_service_descriptor'])
-            return ProcessRecordingSession(collection_recording_root(args.root)/secrets.token_hex(16),plan_ref=payload['plan_ref'],
-                camera_channels=cameras.channels,storage_format='segments',execution_timeline=payload.get('execution_timeline'),
-                environment='physical',execution_owner=payload.get('execution_owner'),on_fault=on_fault,
-                persistent_service=True,max_wall_time_seconds=7200,**payload.get('recording_preparation',{}))
-        recording.supports_deferred_preparation=True
+    from robot_workbench.recording_process import capture_control
+    from robot_workbench.sample_clock import clock_spec
+    def recording(payload,on_fault):
+        return capture_control(collection_recording_root(args.root),payload,cameras=None,environment='physical',
+            clock=clock_spec(),source_time=device.runtime.owner.control_time,on_fault=on_fault,ros_runtime=device.runtime)
+    recording.supports_deferred_preparation=True
+    recording.recording_backend='capture_session_v1'
     device.factory=physical_runtime_factory(profile,event=service.event,recording_factory=recording,
         execution_root=args.root/'execution',local_owner=True)
     def stop(*_):

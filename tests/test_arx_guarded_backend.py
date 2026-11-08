@@ -10,6 +10,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 from test_owner_clock import calibration
 from robot_workbench.release_trace import ReleaseTrace
+from robot_workbench import arx_output_guard,sdk_quiesce
 
 
 class BackendGuardTests(unittest.TestCase):
@@ -41,7 +42,8 @@ class BackendGuardTests(unittest.TestCase):
             class Controller:
                 def __del__(self):events.append(('native_closed',interface))
             return Controller()
-        sdk=NS(MotorType=NS(NONE='none'),Arx5JointController=create)
+        sdk=NS(MotorType=NS(NONE='none'),Arx5JointController=create,
+            __file__=__file__,workbench_build_id='a'*64)
         class Base:
             def __init__(self,config):self.config=config;self._controllers={};self.is_connected=False;self._robot_configs={};self._controller_configs={}
             def _import_arx5(self):return sdk
@@ -75,6 +77,38 @@ class BackendGuardTests(unittest.TestCase):
         self.assertEqual(events,[])
         with patch('robot_workbench.arx_output_guard._client',None),self.assertRaisesRegex(RuntimeError,'独立 CAN'):backend.connect()
         self.assertEqual(events,[])
+
+    def test_normal_manual_hold_preserves_each_native_jaw_write(self):
+        backend,_,_=self.fixture(False)
+        import numpy as np
+        writes=[]
+        class Gain:
+            def __init__(self,_):
+                self.p=np.zeros(6);self.d=np.zeros(6)
+                self.gripper_kp=self.gripper_kd=0.
+            def kp(self):return self.p
+            def kd(self):return self.d
+        class Controller:
+            def set_gain(self,gain):writes.append(('gain',gain.gripper_kp,gain.gripper_kd))
+            def set_joint_cmd(self,command):writes.append(('command',command.gripper_pos))
+        backend._arx5=NS(Gain=Gain)
+        backend.sides=('left','right');backend._controllers={s:Controller()for s in backend.sides}
+        backend._controller_configs={s:NS(default_kp=[80,70,70,30,30,20],default_kd=[2,2,2,1,1,.7])for s in backend.sides}
+        backend.config.gripper_width_m=.083;backend.config.teach_kd_scale=.1
+        backend.command_guard=lambda:None;backend.native_faults=lambda:{}
+        backend.read_execution_output=lambda:dict(q_sdk14=[0.]*6+[.06]+[0.]*6+[.06],
+            gains={s:dict(gripper_kp=4.,gripper_kd=.3)for s in backend.sides},
+            observations={s:dict(sample_monotonic_ns=10_000_000_000)for s in backend.sides})
+        def legacy_stop(self,**kwargs):
+            for side,controller in self._controllers.items():
+                controller.set_joint_cmd(NS(gripper_pos=self._stop_gripper_command(side,.02)))
+                gain=Gain(6);gain.gripper_kp=.25;gain.gripper_kd=.1;controller.set_gain(gain)
+        base=type(backend).__mro__[1]
+        with patch.object(base,'set_damping_hold',legacy_stop,create=True),patch.object(calibration.time,'monotonic_ns',return_value=10_000_000_000):
+            backend.set_damping_hold(manual=False,preserve_jaws=True)
+        self.assertEqual([w for w in writes if w[0]=='command'],[('command',.06)]*2)
+        self.assertTrue(all(w==('gain',4.,.3)for w in writes if w[0]=='gain'))
+        self.assertEqual(backend._retained_stop_jaws,{})
 
     def test_right_disabled_keeps_left_native_gripper_active(self):
         backend,guard,events=self.fixture(['right'])
@@ -110,12 +144,12 @@ class BackendGuardTests(unittest.TestCase):
 
     def test_candidate_quiesces_and_retires_before_resource_destructor(self):
         backend,guard,events=self.fixture(['right'])
-        guard.sdk_contract={'library_build_id':'a'*64}
+        guard.sdk_contract={'library_build_id':'a'*64,'module':{'path':__file__}}
         def call(action,**payload):
             events.append(('guard',action))
             return {'generation':'current'} if action=='begin' else {}
         guard.call=call
-        with patch('robot_workbench.arx_output_guard.require_guard',return_value=guard),patch('robot_workbench.sdk_quiesce.verify_module'):
+        with patch('robot_workbench.arx_output_guard.require_guard',return_value=guard):
             # The fixture's SDK stays inert. Add only the candidate API under test.
             original=backend._import_arx5
             def load():

@@ -25,32 +25,58 @@ BASE566_MODEL_CONFIG = dict(paligemma_variant='gemma_2b', action_expert_variant=
     dtype='bfloat16', image_keys=list(CAMS), disable_color_aug=False, use_joint_eef_mask=False,
     action_horizon=60, action_dim=32, rtc_max_delay=0)
 MANIPULATION_SCHEMA = 'workbench.manipulation_base566.v1'
+MIXED366_SCHEMA = 'workbench.mixed366_nohistory.v1'
+MIXED366_ID = 'mixed366-nohistory-epoch010-step34250'
+MIXED366_PINS = dict(checkpoint='d0da9cd4fd5baf5fea60e9e47acdd20c18546ccf0dd8dc8c4426d568e320495f',
+    metadata='c0d43d622b2124339d5a83291651d8518f61844ff3abf4d5250a7a1f2f9b24b6',
+    stats='6b51671873802e3234dd354f9a9ea9ea1117fdf21df631257e94a9f8744ce565',
+    tokenizer='8986bb4f423f07f8c7f70d0dbe3526fb2316056c17bae71b1ea975e77a168fc6',
+    io_contract='d21e5020f78b50e502ec34c1b953554ac87ee580d9de44690b1b347ce772638f',
+    model_config='a51f0b8dfc2a9cdcead1e9548868d9f10271f3e6c8ea4fc3ba84fdc81bf7f774')
+COFFEE999_ID = 'coffee999-xnorm-epoch005-step32120'
+COFFEE999_PINS = dict(MIXED366_PINS,
+    checkpoint='c66e97058a491fd9db6c409cfc03f006b0633abf7e28185e54bde240fc15db72',
+    metadata='13277fcadae10d31bcbed7702c0eeac5cf39b31f30b221df9759b87f1bfc356b',
+    stats='a1c9ba2147c28b45290cd48964476ad90b90f85379defd954d78131f3d63bb64')
+NOHISTORY_MODELS = {
+    MIXED366_ID: dict(epoch=10,step=34250,label='mixed366',pins=MIXED366_PINS,tasks=('coffee','lid_handoff')),
+    COFFEE999_ID: dict(epoch=5,step=32120,label='coffee999-xnorm',pins=COFFEE999_PINS,tasks=('coffee',)),
+}
 
 
 def native_runtime(bundle):
-    return isinstance(bundle,dict) and bundle.get('schema')==MANIPULATION_SCHEMA
+    from .wam import SCHEMA as WAM_SCHEMA
+    return isinstance(bundle,dict) and bundle.get('schema')in(MANIPULATION_SCHEMA,MIXED366_SCHEMA,WAM_SCHEMA)
 
 
 def validate_native_descriptor(bundle):
     """Public checkpoint/implementation identities; host paths stay in the adapter registry."""
+    from .wam import SCHEMA as WAM_SCHEMA,validate_descriptor
+    if isinstance(bundle,dict)and bundle.get('schema')==WAM_SCHEMA:
+        return validate_descriptor(bundle)
     required={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime'}
     if not native_runtime(bundle) or set(bundle)!=required:
         raise ValueError('explicit manipulation Base566 descriptor required')
-    match=re.fullmatch(r'base566-epoch([0-9]+)-step([1-9][0-9]*)',str(bundle['model_id']))
+    mixed=bundle['schema']==MIXED366_SCHEMA
+    match=re.fullmatch(r'(?:mixed366-nohistory|coffee999-xnorm|base566)-epoch([0-9]+)-step([1-9][0-9]*)',str(bundle['model_id']))
     if (match is None or type(bundle['epoch'])is not int or type(bundle['step'])is not int
             or [int(x)for x in match.groups()]!=[bundle['epoch'],bundle['step']]
             or bundle['backend']not in('torch','triton')):
         raise ValueError('checkpoint and backend identity differ')
+    if mixed and bundle['model_id']not in NOHISTORY_MODELS or not mixed and not bundle['model_id'].startswith('base566-'):
+        raise ValueError('model family and runtime schema differ')
     def sha(value):return isinstance(value,str)and re.fullmatch('[a-f0-9]{64}',value)is not None
     artifacts=bundle['artifacts'];runtime=bundle['runtime']
     if (not isinstance(artifacts,dict) or set(artifacts)!={'checkpoint','metadata','stats','tokenizer','io_contract','model_config'}
             or any(not isinstance(v,dict) or set(v)!={'sha256'} or not sha(v['sha256']) for v in artifacts.values())
             or not sha(bundle['model_bundle_sha256'])):
         raise ValueError('public native descriptor requires actual artifact SHA256 values, without paths')
-    if (artifacts['stats']['sha256']!=BASE566_PINS['stats'] or artifacts['tokenizer']['sha256']!=BASE566_PINS['tokenizer']):
+    if mixed and any(artifacts[k]['sha256']!=v for k,v in NOHISTORY_MODELS[bundle['model_id']]['pins'].items()):
+        raise ValueError('mixed366 checkpoint or nohistory input contract differs')
+    if not mixed and (artifacts['stats']['sha256']!=BASE566_PINS['stats'] or artifacts['tokenizer']['sha256']!=BASE566_PINS['tokenizer']):
         raise ValueError('native descriptor differs from frozen Base566 normalization/tokenizer')
     if (not isinstance(runtime,dict) or set(runtime)!={'adapter','source_manifest_sha256','frozen_model_source_sha256','triton_deployment_sha256'}
-            or runtime['adapter']!='manipulation_process_model_client.v1'
+            or runtime['adapter']!=('mixed366_process_model_client.v1'if mixed else'manipulation_process_model_client.v1')
             or not all(sha(runtime[k])for k in ('source_manifest_sha256','frozen_model_source_sha256'))
             or (not sha(runtime['triton_deployment_sha256'])if bundle['backend']=='triton' else runtime['triton_deployment_sha256']is not None)):
         raise ValueError('native implementation and qualified deployment identities required')
@@ -80,13 +106,50 @@ BASE566_PINS = dict(
 
 
 def model_family(model_id):
+    from .wam import is_model_id
+    if is_model_id(model_id):return 'wam'
     if model_id == BASE379_ID:return 'base379'
+    if model_id in NOHISTORY_MODELS:return 'mixed366'
     if isinstance(model_id, str) and re.fullmatch(r'base566-epoch[0-9]{3,}-step[1-9][0-9]*', model_id):return 'base566'
     raise ValueError('unknown model family: '+str(model_id))
 
 
+def action_contract(model_id=BASE379_ID, bundle=None):
+    """Describe existing model values; no device mapping or execution schedule."""
+    model_spec(model_id, bundle)
+    family = model_family(model_id)
+    return dict(schema='workbench.model-action14.v1', shape=[32 if family=='wam'else 60, 14],
+        axes=[f'{side}_{axis}' for side in ('left', 'right')
+              for axis in ('j1', 'j2', 'j3', 'j4', 'j5', 'j6', 'jaw')],
+        units=(['rad'] * 6 + ['m']) * 2, action_type='absolute_position',
+        coordinate_domain='recorded_native_state14' if family in ('mixed366','wam') else 'training_model_state14',
+        jaw_semantics='recorder_endpoint_coordinate' if family in ('mixed366','wam') else
+            ('continuous_sum_two_finger_travel' if family == 'base566' else 'legacy_model_jaw_coordinate'),
+        normalized=False, device_mapping_applied=False,
+        sampling=dict(nominal_period_s=1/30, time_origin='observation_source_time'if family=='wam'else'unassigned',
+            first_sample_offset_s=1/30 if family=='wam'else None,
+            basis='materialized_next_observation'if family=='wam'else'existing_workbench_nominal_grid', execution_timestamps=False),
+        history_steps=0 if family in ('mixed366','wam') else 60)
+
+
 def model_spec(model_id=BASE379_ID, bundle=None):
     """A checkpoint varies only within the frozen Base566 training/IO family."""
+    if model_family(model_id)=='wam':
+        from .wam import validate_descriptor,SCHEMA
+        value=validate_descriptor(bundle)
+        if value['model_id']!=model_id:raise ValueError('WAM descriptor model identity differs')
+        name=model_id[4:].rsplit('-step',1)[0].upper().replace('-','_')
+        return dict(id=model_id,schema=SCHEMA,epoch=None,step=value['step'],prompt='bound WAM text context',
+            pins={k:v['sha256']for k,v in value['artifacts'].items()},backend=value['backend'],
+            inference_options=value['inference_options'],inference_capabilities=value['inference_capabilities'],
+            label=f"WAM {name} · step_{value['step']:06d} · {value['inference_options']['denoise_steps']}步去噪 · 32步输出")
+    if model_id in NOHISTORY_MODELS:
+        value=validate_native_descriptor(bundle)
+        if value['model_id']!=model_id:raise ValueError('mixed366 descriptor required')
+        registered=NOHISTORY_MODELS[model_id]
+        return dict(id=model_id,schema=MIXED366_SCHEMA,epoch=registered['epoch'],step=registered['step'],prompt='coffee',tasks=registered['tasks'],
+            pins={k:v['sha256']for k,v in value['artifacts'].items()},backend=value['backend'],
+            label=f"{registered['label']} · 无history · epoch {registered['epoch']:03d} / step {registered['step']} · "+value['backend'])
     if model_id == BASE379_ID:
         return dict(id=model_id, schema='workbench.base379.v1', epoch=10, step=29450,
                     prompt=PROMPT, pins=BASE379_PINS, label='Base379 · epoch 010 / step 29450')
@@ -118,7 +181,17 @@ def model_spec(model_id=BASE379_ID, bundle=None):
 
 
 def worker_identity(model_id=BASE379_ID, bundle=None):
+    if model_family(model_id)=='wam':
+        from .wam import worker_identity as identity
+        return identity(bundle)
     spec = model_spec(model_id, bundle); pins = spec['pins']
+    if model_id in NOHISTORY_MODELS:
+        return dict(status='ready',model_id=model_id,epoch=spec['epoch'],step=spec['step'],backend=bundle['backend'],
+            strict_load=bundle['backend']=='torch',checkpoint_sha256=pins['checkpoint'],stats_sha256=pins['stats'],
+            tokenizer_sha256=pins['tokenizer'],io_contract_sha256=pins['io_contract'],
+            model_bundle_sha256=bundle['model_bundle_sha256'],runtime=deepcopy(bundle['runtime']),
+            action_horizon=60,history_steps=0,inference_steps=10,rtc_off=True,
+            input_domain='training_raw_rgb',output_domain='recorded_native_state14',command_publication=False)
     if native_runtime(bundle):
         value=dict(status='ready',model_id=model_id,epoch=spec['epoch'],step=spec['step'],backend=bundle['backend'],
             mode='abs',strict_load=bundle['backend']=='torch',checkpoint_sha256=pins['checkpoint'],
@@ -154,11 +227,8 @@ def model_bundle_digest(model_id=BASE379_ID, bundle=None):
         separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
-def validate_worker_identity(identity, model_id=BASE379_ID, *, full=False, bundle=None):
+def validate_worker_identity(identity, model_id=BASE379_ID, *, bundle=None):
     expected = worker_identity(model_id, bundle)
-    # Preserve the old service handshake while the new deployment attests its full IO identity.
-    if not full and model_id == BASE379_ID:
-        expected = {key:expected[key] for key in ('checkpoint_sha256','epoch','step')}
     if not isinstance(identity, dict) or any(identity.get(k) != v for k,v in expected.items()):
         raise ValueError('worker identity differs from pinned '+model_id)
     if native_runtime(bundle) and bundle['backend']=='triton' and not re.fullmatch('[a-f0-9]{64}',str(identity.get('packed_sha256',''))):
@@ -393,7 +463,7 @@ class FrozenBaseClient:
                                     timeout=self.timeout, env=self.env)
         try:
             identity = client.identity
-            validate_worker_identity(identity, self.model_id, full=True, bundle=bundle)
+            validate_worker_identity(identity, self.model_id, bundle=bundle)
         except BaseException:
             client.close()
             raise

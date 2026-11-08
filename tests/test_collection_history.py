@@ -135,15 +135,20 @@ class CollectionHistoryTest(unittest.TestCase):
             '--source-run',str(self.origin),'--job',str(self.job)],check=True,capture_output=True,text=True)
         spec=json.loads(printed.stdout);self.assertEqual(spec,self.spec())
         spec_path=self.root/'history-spec.json';write(spec_path,spec)
-        base=self.root/'base.json';write(base,{'lanes':{'source':{'configuration':{'cameras':{
+        base=self.root/'base.json';write(base,{'pipeline_config':{},'lanes':{'source':{'configuration':{'cameras':{
             'calibration_binding':{'a1_sha256':'seal','geometry_id':'geometry'}}}}}})
         nominal_path=self.root/'nominal.json';resume_path=self.root/'resume.json';write(nominal_path,{});write(resume_path,{})
         output=self.root/'entry';argv=['serve','--base',str(base),'--nominal-config',str(nominal_path),'--output',str(output),
-            '--gpu','1','--calibration-resume-source',str(resume_path),'--collection-history-source',str(spec_path)]
+            '--gpu','1','--calibration-resume-source',str(resume_path),'--collection-history-source',str(spec_path),
+            '--collection-contract',str(self.root/'cpu-contract.json')]
         candidate=self.root/'candidate.json';write(candidate,{})
         nominal=dict(asset_seal_sha256='seal',asset_geometry_id='geometry',candidate=str(candidate))
         resume=dict(source_run=str(self.origin),origin_robot_id=self.robot,expected_install={})
         with patch.object(serve_physx_device,'nominal_inputs',return_value=nominal),patch.object(serve_physx_device,'preflight',return_value={}), \
+                patch('robot_workbench.resident_collection.load_collection_contract',return_value=dict(
+                    data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/cpu_history',domain_id=126),
+                    collection_setup=dict(detection_runtime_root=str(self.root/'runtime')))), \
+                patch('detector_adapter.preflight_release.preflight_release',return_value={}), \
                 patch.object(serve_physx_device,'printed_marker_fixture',return_value=[]), \
                 patch('robot_workbench.calibration_profile.validate_resume_source',return_value=resume), \
                 patch.object(serve_physx_device,'run') as run:

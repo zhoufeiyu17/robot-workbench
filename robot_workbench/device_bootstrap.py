@@ -46,6 +46,38 @@ def _inference_options(profile):
     options=dict(model_id=model_id,model_bundle=deepcopy(bundle),catalog_root=catalog,
                 disabled_grippers=list(profile['disabled_grippers']),recording_enabled=config.get('recording_enabled',True),
                 control_mapping_pending=config.get('control_mapping_pending'))
+    backend=config.get('recording_backend','capture_session_v1')
+    if backend not in (None,'capture_session_v1'):raise ValueError('known recording backend required')
+    options['recording_backend']=backend
+    if profile.get('data_plane') is not None:options['ros_plane']=deepcopy(profile['data_plane'])
+    chunks=config.get('action_chunks',False);normal=config.get('normal_modes')
+    if type(chunks)is not bool:raise ValueError('action_chunks must be boolean')
+    if normal is not None and (not isinstance(normal,dict) or not chunks
+            or config.get('recording_enabled',True) or normal.get('recording_required')is not False
+            or profile.get('preserve_begin_jaws')is not True):
+        raise ValueError('normal modes require explicit chunks, preserved begin jaws and workbench recording disabled')
+    if chunks:options['action_chunks']=True
+    if config.get('reference_planning')is not None:
+        if not chunks:raise ValueError('reference planning requires explicit action chunks')
+        options['reference_planning']=deepcopy(config['reference_planning'])
+    if config.get('finite_chunk_count')is not None:options['finite_chunk_count']=config['finite_chunk_count']
+    if normal is not None:options['normal_modes']=deepcopy(normal)
+    initial=config.get('normal_initial_mode','MODEL')
+    if initial not in ('MODEL','HOLD')or initial=='HOLD'and normal is None:
+        raise ValueError('initial HOLD requires explicitly configured normal modes')
+    if 'normal_initial_mode'in config:options['normal_initial_mode']=initial
+    kind,policy=config.get('normal_finish_kind'),config.get('normal_finish_policy')
+    if kind is not None or policy is not None:
+        if normal is None or kind!='maintenance_home_v1'or not isinstance(policy,dict):
+            raise ValueError('workbench finish requires explicit maintenance_home_v1 policy and normal modes')
+        options.update(normal_finish_kind=kind,normal_finish_policy=deepcopy(policy))
+    if config.get('recording_context_policy','fixed')!='fixed':
+        raise ValueError('per-episode recording context belongs to the collector Raw-gate integration')
+    if 'task'in config:options['task']=config['task']
+    if 'native_binding'in config:
+        from .mixed366_control import load_binding
+        load_binding(config['native_binding'],profile)
+        if config.get('task')not in ('coffee','lid_handoff'):raise ValueError('native inference requires an explicit task')
     if 'reference_trajectory' in config:options['reference_trajectory']=deepcopy(config['reference_trajectory'])
     if 'prepared_reference_execution'in config:
         if type(config['prepared_reference_execution'])is not bool or config['prepared_reference_execution']and not profile.get('prepared_reference_enabled'):
@@ -58,8 +90,30 @@ def _inference_options(profile):
     return options
 
 
-def read_profile(path):
+def _pedal_input_mode(profile):
+    mode=profile.get('pedal_input_mode','legacy_stop')
+    if mode not in ('legacy_stop','external_intents'):
+        raise ValueError('pedal_input_mode must be legacy_stop or external_intents')
+    if mode=='external_intents' and 'pedal_stop_key_code' in profile:
+        raise ValueError('external_intents conflicts with pedal_stop_key_code; one pedal reader required')
+    if 'pedal_stop_key_code'in profile and (type(profile['pedal_stop_key_code'])is not int
+            or not 1<=profile['pedal_stop_key_code']<=0x2ff):
+        raise ValueError('pedal_stop_key_code must be an explicit Linux key code in 1..767')
+    return mode
+
+
+def read_profile(path,*,require_ros=False):
     value = json.loads(Path(path).read_text())
+    if not isinstance(value,dict):raise ValueError('physical-device profile must be an object')
+    if require_ros:
+        if value.get('data_plane')is None:raise ValueError('production workbench requires explicit ROS data_plane configuration')
+        if (value.get('inference')or{}).get('native_rgb')is not None:
+            raise ValueError('ROS workbench cannot retain the legacy native_rgb file source')
+        if value.get('recording_backend','capture_session_v1')!='capture_session_v1':
+            raise ValueError('ROS workbench requires the resident capture_session_v1 recorder')
+    if value.get('data_plane') is not None:
+        from .ros_data import plane_config
+        plane_config(value['data_plane'])
     if 'triton_preview' in value:
         from .triton_preview import validate_config
         validate_config(value['triton_preview'])
@@ -74,17 +128,22 @@ def read_profile(path):
     if 'acquisition_blocked_reason' in value and (not isinstance(value['acquisition_blocked_reason'],str)
             or not 1 <= len(value['acquisition_blocked_reason']) <= 1024):
         raise ValueError('nonempty bounded acquisition_blocked_reason required')
-    if 'exclusive_idle_units' in value and (value['robot_id']!='arx13'
-            or value['exclusive_idle_units']!=['prometheus-arx13-web.service']):
-        raise ValueError('reviewed ARX13 collection handoff unit required')
+    if 'exclusive_idle_units' in value and value['exclusive_idle_units']!={'arx13':['prometheus-arx13-web.service'],
+            'arx6':['prometheus-web.service']}.get(value['robot_id']):
+        raise ValueError('reviewed machine-specific collection handoff unit required')
     if value.get('initial_hold_mode','manual_gravity') not in ('manual_gravity','retained_hold'):
         raise ValueError('explicit initial hold mode required')
-    if 'pedal_stop_key_code'in value and (type(value['pedal_stop_key_code'])is not int or not 1<=value['pedal_stop_key_code']<=0x2ff):
-        raise ValueError('pedal_stop_key_code must be an explicit Linux key code in 1..767')
+    _pedal_input_mode(value)
+    if value.get('recording_backend','capture_session_v1')not in(None,'capture_session_v1'):
+        raise ValueError('known common control recording backend required')
     if value.get('disabled_grippers',[]) not in ([],['left'],['right'],['left','right']):
         raise ValueError('disabled_grippers must list left and/or right explicitly')
     if type(value.get('prepared_reference_enabled',False))is not bool:
         raise ValueError('prepared_reference_enabled must be boolean')
+    if type(value.get('raw_state_enabled',False))is not bool:
+        raise ValueError('raw_state_enabled must be boolean')
+    if type(value.get('preserve_begin_jaws',False))is not bool:
+        raise ValueError('preserve_begin_jaws must be boolean')
     from .motion_reference import NATIVE_REFERENCE_APIS
     native_api=value.get('native_reference_api','legacy_recompute')
     if native_api not in NATIVE_REFERENCE_APIS:
@@ -126,6 +185,11 @@ def read_profile(path):
     if value.get('control_owner_descriptor') is not None:
         path=Path(value['control_owner_descriptor'])
         if not path.is_absolute()or '..'in path.parts:raise ValueError('absolute private Owner descriptor required')
+    if value.get('control_lifecycle','managed') not in ('managed','external'):
+        raise ValueError('control_lifecycle must be managed or external')
+    if value.get('control_lifecycle')=='external' and (not value.get('control_owner_descriptor')
+            or not isinstance(value.get('control_consumer_id'),str) or not value['control_consumer_id']):
+        raise ValueError('external control requires a dedicated consumer descriptor and identity')
     if 'target_interpreter_profile' in value:
         from .target_interpreter import PROFILES
         if (value['target_interpreter_profile'] not in PROFILES or not value.get('prepared_reference_enabled')
@@ -224,7 +288,10 @@ def read_profile(path):
             raise ValueError('explicit bounded pending model control mapping reason required')
         if pending and {'profile_path','binding_path'}&set(inference):
             raise ValueError('pending mapping cannot also claim an installed control profile')
-        for key in (('model_token_file',) if setup is not None or pending else ('model_token_file','profile_path','binding_path')):
+        if 'native_binding'in inference and (pending or setup is not None or {'profile_path','binding_path'}&set(inference)):
+            raise ValueError('native recorder coordinates cannot be mixed with simulation calibration or pending mapping')
+        native_wam=str(inference.get('model_id','')).startswith('wam-')
+        for key in (('model_token_file',) if setup is not None or pending or 'native_binding'in inference or native_wam else ('model_token_file','profile_path','binding_path')):
             if not isinstance(inference.get(key), str) or not Path(inference[key]).is_absolute():
                 raise ValueError('absolute inference artifact path required: '+key)
     return value
@@ -356,14 +423,34 @@ def install_business_workflows(device, application, *, calibration=None, collect
     return device
 
 
+def _remote_control_client(profile,hardware_binding=None):
+    from .control_owner import ControlRuntimeClient
+    client=ControlRuntimeClient(profile['control_owner_descriptor'],hardware_binding=hardware_binding,
+        recording_backend=profile.get('recording_backend','capture_session_v1'))
+    if client.device_id!=profile['robot_id']or client.environment!='physical':
+        raise ValueError('control Owner belongs to another physical device')
+    if profile.get('control_lifecycle')=='external':
+        descriptor=client.channel.descriptor
+        if (not descriptor.get('shared_consumers') or not profile.get('control_consumer_id')
+                or descriptor.get('consumer_id')!=profile['control_consumer_id']):
+            raise ValueError('external control requires the matching dedicated consumer capability; administrator descriptor forbidden')
+    return client
+
+
 def physical_runtime_factory(profile, *, recording_factory=None, event=None, hardware_binding=None,execution_root=None,local_owner=False):
     """Returns an inert callback. Shared Device owns the arms-supported approval."""
+    pedal_mode=_pedal_input_mode(profile)
+    if local_owner and profile.get('control_lifecycle')=='external':
+        raise ValueError('an external consumer profile cannot construct the SDK Owner')
     execution_root=Path(execution_root) if execution_root is not None else Path(profile['storage_root'])/'execution'
     if profile.get('control_owner_descriptor')and not local_owner:
-        from .control_owner import ControlRuntimeClient
         def remote_acquire():
-            client=ControlRuntimeClient(profile['control_owner_descriptor'],hardware_binding=hardware_binding or profile.get('hardware_binding'))
-            if client.device_id!=profile['robot_id']or client.environment!='physical':raise ValueError('control Owner belongs to another physical device')
+            client=_remote_control_client(profile,hardware_binding or profile.get('hardware_binding'))
+            if profile.get('control_lifecycle')=='external':
+                try:
+                    client.attach();client.inputs=client.control_inputs();return client
+                except BaseException:
+                    client.detach();raise
             return client.acquire()
         return remote_acquire
     def acquire():
@@ -393,12 +480,16 @@ def physical_runtime_factory(profile, *, recording_factory=None, event=None, har
         runtime = Runtime(ref, safety, backend_factory, device_id=profile['robot_id'], environment='physical',
             lock_root=Path(profile['storage_root'])/'device-locks', jaw_mapping_file=profile['jaw_mapping_file'],
             hardware_binding=hardware_binding or profile.get('hardware_binding'), recording_factory=recording_factory,
-            execution_root=execution_root, event=event)
+            execution_root=execution_root, event=event, data_plane=profile.get('data_plane'),
+            **({'preserve_begin_jaws':True} if profile.get('preserve_begin_jaws')is True else {}))
         try:
-            from arx_env.pedal_stop import PedalStopListener
-            listener = PedalStopListener(key_code=profile.get('pedal_stop_key_code',5))
-            runtime.owner.listener = listener
-            listener.start()
+            if pedal_mode=='legacy_stop':
+                from arx_env.pedal_stop import PedalStopListener
+                listener = PedalStopListener(key_code=profile.get('pedal_stop_key_code',5))
+                runtime.owner.listener = listener
+                listener.start()
+            elif runtime.owner.listener is not None:
+                raise ValueError('external_intents requires no legacy Owner pedal listener')
             runtime.owner.backend.connect()
             runtime.owner.backend.set_damping_hold(manual=profile.get('initial_hold_mode','manual_gravity')=='manual_gravity')
         except Exception as exc:
@@ -564,8 +655,8 @@ class RemoteCollectionPreparation(CollectionPreparation):
             control_url=self.control_url,token_file=self.token_file,producer_ports=self.ports,producer_directories=self.directories,
             trusted_binding_path=getattr(self,'binding_path',self.output/'collection-binding.json'),local_recording_root=recording_root,
             output=destination,still_current=current,cancel=lambda:not current(),
-            camera_spool_root=Path(self.directories['base_0']).parent,
-            control_owner_reference=owner_reference)
+            camera_spool_root=None if getattr(runtime,'data_plane',None)else Path(self.directories['base_0']).parent,
+            control_owner_reference=owner_reference,data_plane=getattr(runtime,'data_plane',None))
         if not current():raise InterruptedError('late remote preparation was not installed')
         configured_path=Path(configured['setup_path']).parent/'configured.json'
         self._activate_configured(configured,configured_path,expected,time.time_ns()+1200_000_000_000,still_current=current)
@@ -605,11 +696,17 @@ def build_physical_application(profile, *, output, start_cameras=False, event=No
     from .service import Application, Device
     from .bridges import start_control_gateway
     from .rgbd_service import CommonCameraService
+    from .recording_process import capture_control
+    from .sample_clock import clock_spec
     output = Path(output); output.mkdir(parents=True, exist_ok=False)
     intrinsics = {name:json.loads(Path(profile['cameras'][role]['intrinsics']).read_text()) for role,name in ROLES.items()}
     shared_descriptor=profile.get('camera_service_descriptor')
-    cameras = (CommonCameraService.connect(shared_descriptor) if shared_descriptor else
-               CommonCameraService.start(intrinsics, output/'camera-service', 'physical'))
+    if profile.get('data_plane')is not None:
+        from .ros_inputs import RosCameraView
+        cameras=RosCameraView(profile['data_plane'],profile['robot_id'],intrinsics,'physical')
+    else:
+        cameras = (CommonCameraService.connect(shared_descriptor) if shared_descriptor else
+                   CommonCameraService.start(intrinsics, output/'camera-service', 'physical'))
     if cameras.descriptor['environment']!='physical' or cameras.descriptor['intrinsics']!=intrinsics:
         raise ValueError('shared physical camera identities differ from deployment profile')
     ports = cameras.start_servers()
@@ -617,17 +714,35 @@ def build_physical_application(profile, *, output, start_cameras=False, event=No
     secrets_by_business = {name:_private_token(path) for name,path in tokens.items()}
     binding_path=profile.get('hardware_binding')or(output/'collection-binding.json'if profile.get('collection_setup')else None)
     def recording(payload, on_fault):
-        from .recording_process import ProcessRecordingSession
-        return ProcessRecordingSession(output/'collection-raw'/secrets.token_hex(16),plan_ref=payload['plan_ref'],
-            camera_channels=cameras.channels, storage_format='segments', execution_timeline=payload.get('execution_timeline'),
-            environment='physical', execution_owner=payload.get('execution_owner'),on_fault=on_fault,
-            persistent_service=True,max_wall_time_seconds=7200,**payload.get('recording_preparation', {}))
+        if profile.get('data_plane')is not None:
+            return capture_control(output/'collection-raw',payload,cameras=None,environment='physical',clock=clock_spec(),
+                source_time=device.runtime.owner.control_time,on_fault=on_fault,ros_runtime=device.runtime)
+        if profile.get('recording_backend','capture_session_v1') is None:
+            from .recording_process import ProcessRecordingSession
+            return ProcessRecordingSession(output/'collection-raw'/secrets.token_hex(16),plan_ref=payload['plan_ref'],
+                camera_channels=cameras.channels,storage_format='segments',execution_timeline=payload.get('execution_timeline'),
+                environment='physical',execution_owner=payload.get('execution_owner'),on_fault=on_fault,
+                persistent_service=True,max_wall_time_seconds=7200,**payload.get('recording_preparation',{}))
+        native=(profile.get('inference')or{}).get('native_rgb')
+        if native:
+            from .prometheus_rgb import RGBClient
+            source=RGBClient(**native)
+        else:source=cameras
+        return capture_control(output/'collection-raw',payload,cameras=source,environment='physical',clock=clock_spec(),
+            source_time=device.runtime.owner.control_time,on_fault=on_fault)
     recording.supports_deferred_preparation = True
-    runtime_factory = physical_runtime_factory(profile, recording_factory=recording if binding_path else None,event=event,
+    recording.recording_backend=profile.get('recording_backend','capture_session_v1')
+    runtime_factory = physical_runtime_factory(profile, recording_factory=recording,event=event,
         hardware_binding=binding_path,execution_root=output/'execution')
     device = create_device(profile['robot_id'], 'physical', runtime_factory=runtime_factory,
                            label=profile.get('label') or 'A1 真机 · 待显式连接')
+    if profile.get('recording_backend','capture_session_v1')is not None:
+        from .control_owner import collection_recording_root
+        record_root=(collection_recording_root(Path(profile['control_owner_descriptor']).parent)
+            if profile.get('control_owner_descriptor')else output/'collection-raw')
+        device.configure_capture_results(record_root)
     device.control_owner_descriptor=profile.get('control_owner_descriptor')
+    device.control_lifecycle=profile.get('control_lifecycle','managed')
     if profile.get('triton_preview'):
         from .triton_preview import TritonPreviewClient
         device.triton_preview = TritonPreviewClient(profile['triton_preview'])
@@ -635,14 +750,16 @@ def build_physical_application(profile, *, output, start_cameras=False, event=No
         from .precision_study import PrecisionStudy
         device.precision_study=PrecisionStudy(device,profile['precision_study'])
     if profile.get('control_owner_descriptor'):
-        from .control_owner import ControlRuntimeClient
+        existing=None
         try:
-            existing=ControlRuntimeClient(profile['control_owner_descriptor'])
-            if existing.device_id!=device.id or existing.environment!='physical':raise ValueError('control Owner belongs to another physical device')
+            existing=_remote_control_client(profile)
             if existing.nonce is not None:
+                if device.control_lifecycle=='external':existing.attach()
                 existing.inputs=existing.control_inputs();device.attach_existing_owner(existing)
-        except (OSError,ValueError,ConnectionError)as error:
+        except (OSError,ValueError,ConnectionError,PermissionError)as error:
             device.error='独立Owner尚不可读；未接入或重启SDK：'+str(error)
+        finally:
+            if existing is not None and device.runtime is not existing:existing.detach()
     if profile.get('collection_history_catalogs'):
         from .collection_history import load_history,CollectionHistoryGroup
         try:
@@ -698,8 +815,11 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
         def profile_provider():
             if config.get('control_mapping_pending'):
                 raise ValueError(config['control_mapping_pending'])
+            if 'native_binding'in config:
+                from .mixed366_control import load_binding
+                return load_binding(config['native_binding'],profile)
             from .calibration_profile import load_device_profile
-            profile,binding=load_device_profile(config['profile_path'],environment='physical',robot_id=device.id)
+            installed_profile,binding=load_device_profile(config['profile_path'],environment='physical',robot_id=device.id)
             if json.loads(Path(config['binding_path']).read_text())!=binding:
                 raise ValueError('inference deployment binding differs from shared installed-profile receipt')
             if deployment.calibration is not None:
@@ -708,7 +828,7 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
                 if (current.get('verified') is not True or any(binding.get(key)!=current.get(key) for key in ('head_id','wrist_id'))
                         or binding.get('active_sha256',{}).get('manifest.json')!=hashlib.sha256(manifest.read_bytes()).hexdigest()):
                     raise ValueError('static inference profile differs from current C installation; prepare its updated shared profile')
-            return profile,binding
+            return installed_profile,binding
         if profile.get('collection_setup'):
             from .calibration_profile import installed_profile_provider
             details=profile['collection_setup']
@@ -716,9 +836,48 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
                 capture_root=deployment.calibration.output,registration=details['registration'],
                 profile_template=details['profile_template'],output=output,
                 installed_snapshot=deployment.calibration.installed_pair,environment='physical')
+        installed_provider=profile_provider
+        def selected_profile_provider():
+            from .inference_model import model_family
+            if model_family(deployment.inference.selected_model_id)=='wam':
+                from .wam import native_binding
+                return native_binding(profile)
+            return installed_provider()
         deployment.inference = InferenceWorkflow(device,Path(profile['storage_root'])/'inference',camera_service=cameras,
-            model_endpoint=config['model_endpoint'],model_token_file=config['model_token_file'],profile_provider=profile_provider,
+            model_endpoint=config['model_endpoint'],model_token_file=config['model_token_file'],profile_provider=selected_profile_provider,
             event=(lambda name,data:event(name,**data)) if event is not None else None,**_inference_options(profile))
+        controls=config.get('operator_controls')
+        if controls is not None:
+            if (not isinstance(controls,dict)or not {'home_velocity_rad_s','timeout_s','focus_timeout_s'}<=controls.keys()
+                    or any(type(controls[k])not in(int,float)or not 0<controls[k]<float('inf')
+                           for k in ('home_velocity_rad_s','timeout_s','focus_timeout_s'))):
+                raise ValueError('explicit positive operator Home/focus configuration required')
+            if controls.get('pedal_source_descriptor')and (not Path(controls['pedal_source_descriptor']).is_absolute()
+                    or type(controls.get('event_max_age_s'))not in(int,float)or not 0<controls['event_max_age_s']<float('inf')
+                    or type(controls.get('double_press_window_s'))not in(int,float)
+                    or not 0<controls['double_press_window_s']<=controls['event_max_age_s']):
+                raise ValueError('absolute pedal source, finite event age and explicit double-press window required')
+            deployment.inference.operator_controls=deepcopy(controls)
+            if controls.get('pedal_source_descriptor'):
+                application.install_operator_pedal(device,deployment.inference,controls['pedal_source_descriptor'])
+        if config.get('native_rgb')and profile.get('data_plane')is None:
+            from .prometheus_rgb import RGBClient
+            rgb=config['native_rgb']
+            if set(rgb)!={'directory','owner_path'}or any(not Path(p).is_absolute()for p in rgb.values()):
+                raise ValueError('absolute existing raw RGB subscriber paths required')
+            deployment.inference.rgb_source=RGBClient(**rgb)
+            if deployment.inference.recording_backend:deployment.inference.cameras=deployment.inference.rgb_source
+            from .bridges import CameraMedia
+            from PIL import Image
+            import io
+            for role,camera in ROLES.items():
+                old=device.media.get(role)
+                if old is not None:old.closed.set()
+                def frame(camera=camera):
+                    value=deployment.inference.rgb_source.latest_rgb(camera)
+                    buffer=io.BytesIO();Image.frombytes('RGB',(640,480),value['rgb']).save(buffer,format='JPEG',quality=85)
+                    return buffer.getvalue(),dict(value['metadata'],frame_id=str(value['metadata']['frame_number']),ready=True)
+                device.media[role]=CameraMedia(role,role,frame,environment='physical')
         install_business_workflows(device,application,inference=deployment.inference)
     if start_cameras and not profile.get('camera_service_descriptor'):
         from .rgbd_service import start_capture_sources
@@ -737,6 +896,7 @@ def close_deployment(deployment):
         runtime.detach();deployment.device.closed.set()
         if deployment.device.thread is not None:deployment.device.thread.join(1)
         deployment.device.runtime=None;deployment.device.credentials={}
+    if getattr(deployment.device,'capture_results',None)is not None:deployment.device.capture_results.close()
     for process in deployment.camera_processes:
         if process.poll() is None:
             process.terminate()

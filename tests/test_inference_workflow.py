@@ -63,6 +63,357 @@ class Runner:
 
 
 class InferenceWorkflowTests(unittest.TestCase):
+    def test_control_input_for_stall_recovery_requires_the_bound_ros_publisher(self):
+        flow=self.workflow;flow.ros_plane={'namespace':'/cpu','domain_id':126}
+        node=Mock();node.subscriptions=[];node.errors=[]
+        node.node.get_publishers_info_by_topic.return_value=[SimpleNamespace(endpoint_gid=b'owner-gid')]
+        control=dict(stream_id='control',source_instance_id=self.device.runtime.nonce,
+            source_clock_id='owner-clock',topic='/cpu/control/events')
+        images=[dict(stream_id=name,metadata={'serial':self.binding['camera_serials'][role]})for role,name in CAMERAS.items()]
+        directory=Mock();directory.resolve.side_effect=[images, [control]]
+        with patch('robot_workbench.ros_data.RosNode',return_value=node),\
+                patch('robot_workbench.ros_data.SourceDirectory',return_value=directory),\
+                patch('robot_workbench.ros_inputs.RosInputs'):
+            flow._bind_ros_sources(self.binding)
+        callback=node.node.create_subscription.call_args.args[2]
+        message=SimpleNamespace(reference=SimpleNamespace(**{k:control[k]for k in ('stream_id','source_instance_id','source_clock_id')}))
+        recovery=Mock();flow.current={'stall_recovery':recovery}
+        with patch.object(flow,'_ros_control_event')as consume:
+            node.node.get_publishers_info_by_topic.return_value=[SimpleNamespace(endpoint_gid=b'foreign-gid')]
+            callback(message)
+            consume.assert_not_called();recovery.reset.assert_called_once_with('control_source_error')
+            node.node.get_publishers_info_by_topic.return_value=[SimpleNamespace(endpoint_gid=b'owner-gid')]
+            callback(message)
+            consume.assert_called_once_with(message)
+        flow.current=None
+
+    def test_page_permission_queries_skip_unrelated_run_snapshot_copies(self):
+        from robot_workbench.service import CALIBRATION_TOOLS,COLLECTION_TOOLS,INFERENCE_TOOLS,HISTORY_ACTIONS
+        actions=('cancel','mesh','select_result','install','generate_plan','execute',
+                 *CALIBRATION_TOOLS,*COLLECTION_TOOLS,*INFERENCE_TOOLS,*HISTORY_ACTIONS)
+        flow=self.workflow
+        with patch.object(flow,'snapshot',wraps=flow.snapshot) as snapshot:
+            for action in actions:
+                before=snapshot.call_count
+                result=flow.allowed(action)
+                needs_run=action in ('select_model','inference_select_model','cancel',
+                                     'inference_prepare','inference_preview','execute')
+                self.assertEqual(snapshot.call_count-before,int(needs_run),action)
+                if not needs_run:
+                    self.assertEqual(result['allowed'],action in
+                        ('refresh_models','inference_refresh_models','select_result'),action)
+
+    def test_input_guard_preserves_active_policy_but_a_completed_run_cannot_shadow_new_settings(self):
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        flow=self.workflow;old=control_parameters(defaults('inference'),business='inference')
+        new=deepcopy(old);old['observation']['maximum_age_s']=.2;new['observation']['maximum_age_s']=.05
+        frozen=lambda revision,p:dict(revision=revision,policy_hash=policy_hash(p),parameters=p)
+        old_policy,new_policy=frozen(1,old),frozen(2,new);flow._input_policy_snapshot=new_policy
+        run=dict(id='prior-run',control_policy=old_policy,ended_wall=None)
+        with patch.object(flow,'current',run),patch.object(flow,'_sync_control_policy',side_effect=AssertionError('memory-only guard')):
+            active=flow._input_guard('G02',.1,self.now-.1,self.now,'observation',realtime=True)
+            self.assertEqual((active['verdict'],active['policy_hash'],active['run_id']),('pass',old_policy['policy_hash'],'prior-run'))
+            run['ended_wall']=time.monotonic()
+            ended=flow._input_guard('G02',.1,self.now-.1,self.now,'observation',realtime=True)
+            self.assertEqual((ended['verdict'],ended['policy_hash']),('reject',new_policy['policy_hash']))
+            self.assertNotIn('run_id',ended)
+
+    def test_control_readiness_uses_the_same_input_policy_without_polling_or_emitting_events(self):
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        self.prepare();flow=self.workflow
+        parameters=control_parameters(defaults('inference'),business='inference')
+        parameters['observation'].update(maximum_age_s=.1,state_max_age_s=.1)
+        def policy():
+            flow._input_policy_snapshot=dict(revision=9,policy_hash=policy_hash(parameters),parameters=deepcopy(parameters))
+        policy();self.now+=.2
+        with patch.object(flow,'_sync_control_policy',side_effect=AssertionError('readiness must not poll policy')),\
+                patch.object(flow,'event',side_effect=AssertionError('readiness must not publish control events')):
+            self.assertFalse(flow._control_ready())
+            parameters['observation'].update(maximum_age_s=.8,state_max_age_s=.8);policy();self.now+=.4
+            self.assertTrue(flow._control_ready(),'the former fixed500ms limit must not override the shared policy')
+            parameters['observation']['state_max_age_s']=.1;policy()
+            flow.cache['observation']['source_time']=self.now
+            self.assertFalse(flow._control_ready(),'fresh images cannot hide stale paired feedback')
+            flow.cache['observation']['feedback_sample_time_s']=self.now
+            self.assertFalse(flow._control_ready(),'fresh cached input cannot hide stale current feedback')
+            self.feedback['sample_time_s']=self.now
+            self.assertTrue(flow._control_ready())
+            self.owner.feedback_healthy=False
+            self.assertFalse(flow._control_ready(),'unhealthy feedback cannot be ready merely because it is recent')
+            self.owner.feedback_healthy=True
+            flow.cache['observation']['source_time']=float('nan')
+            self.assertFalse(flow._control_ready(),'invalid clocks must remain not ready without breaking status reads')
+            flow.cache['observation']['source_time']=self.now
+            self.owner.epoch+=1
+            self.assertFalse(flow._control_ready(),'old epoch cannot become ready again')
+
+    def test_input_guards_follow_one_policy_and_cache_consumer_never_polls_policy(self):
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        self.prepare();flow=self.workflow
+        parameters=control_parameters(defaults('inference'),business='inference')
+        parameters['observation'].update(state_max_age_s=.04,max_camera_span_s=.02)
+        flow._input_policy_snapshot=dict(revision=9,policy_hash=policy_hash(parameters),parameters=parameters)
+        self.frame_times['right_wrist_0']-=.05
+        with self.assertRaisesRegex(ValueError,'G04'):flow._refresh_observation()
+        self.frame_times['right_wrist_0']+=.05
+        flow._refresh_observation()
+        flow.cache['observation']['feedback_sample_time_s']=self.now-.05
+        with patch.object(flow,'_sync_control_policy',side_effect=AssertionError('Owner cache read must not poll policy')):
+            self.assertIsNone(flow._observe(self.now,self.feedback,flow.prepared['binding_digest']))
+        self.now+=.05
+        with self.assertRaisesRegex(ValueError,'G03'):flow._feedback()
+
+    def test_ros_feedback_clock_is_not_the_earlier_control_rpc_clock(self):
+        from robot_workbench.ros_data import StreamRef
+        flow=self.workflow;runtime=self.device.runtime
+        inputs=runtime.control_inputs();runtime.control_inputs=lambda **kwargs:inputs
+        stamp=self.now+.02
+        reference=StreamRef('state','fixture-owner','test-clock',round(stamp*1e9),1)
+        raw=dict(self.feedback,sample_time_s=stamp,source_time_ns=reference.source_time_ns)
+        flow.ros_plane={'namespace':'/cpu','domain_id':126}
+        flow.ros_inputs=SimpleNamespace(latest=lambda stream:(reference,raw))
+        now,value,owner,_=flow._feedback()
+        self.assertEqual(now,stamp)
+        self.assertEqual(value['sample_time_s'],raw['sample_time_s'])
+        self.assertEqual(value['source_time_ns'],reference.source_time_ns)
+        self.assertEqual(owner['command_epoch'],inputs['command_epoch'])
+
+    def test_stale_physical_ros_state_cannot_look_fresh_using_stale_rpc_time(self):
+        from robot_workbench.ros_data import StreamRef
+        flow=self.workflow;inputs=self.device.runtime.control_inputs()
+        stamp=time.monotonic()-1.;reference=StreamRef('state','fixture-owner','host_monotonic',round(stamp*1e9),1)
+        raw=dict(self.feedback,sample_time_s=stamp,source_time_ns=reference.source_time_ns)
+        inputs=dict(inputs,control_time_s=stamp)
+        self.device.environment='physical';self.device.runtime.control_inputs=lambda **kwargs:inputs
+        flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.ros_inputs=SimpleNamespace(latest=lambda stream:(reference,raw))
+        with self.assertRaisesRegex(ValueError,'G03'):flow._feedback()
+
+    def test_finite_metrics_distinguish_returned_prepared_and_native_admitted(self):
+        run={'config':{'finite_chunk_count':3},'metrics':dict(queries=0,returned_predictions=0,
+            predictions=0,accepted_predictions=0,consecutive_discarded_predictions=0),'audit':{}}
+        self.workflow._metric_event(run,'prediction_requested',{})
+        self.workflow._metric_event(run,'bounded_prediction_result',dict(observation_age_s=.356,preparation={'mode':'warmed_cpu'}))
+        self.workflow._metric_event(run,'finite_chunk_prepared',dict(worker_audit={'wall_s':.201,'workbench_call_wall_s':.219},reference={'duration_s':.66}))
+        self.assertEqual(run['metrics']['returned_predictions'],1)
+        self.assertEqual(run['metrics']['accepted_predictions'],0,'preparation does not prove an admitted model window')
+        self.assertEqual(run['metrics']['last_infer_wall_s'],.201)
+        self.assertEqual(run['metrics']['last_model_wall_s'],.219)
+        self.workflow._metric_event(run,'finite_chunk_started',{})
+        self.assertEqual(run['metrics']['returned_predictions'],1)
+        self.assertEqual(run['metrics']['accepted_predictions'],1)
+
+    def test_finite_three_chunk_source_budget_is_distinct_from_execution_and_not_editable(self):
+        policy=dict(schema='workbench.infer-reference-policy.v1',curve='cubic_c2_quintic_ends',
+            velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
+            boundary_scope='complete_prepared_segment',timing_policy='retime_allowed',max_execution_duration_s=2.)
+        with patch('robot_workbench.inference_workflow.model_family',return_value='mixed366'),patch(
+                'robot_workbench.motion_reference.infer_reference_policy',create=True,side_effect=deepcopy):
+            flow=self.make_workflow(action_chunks=True,recording_enabled=False,reference_planning=policy,finite_chunk_count=3)
+            for bad in (True,0,5):
+                with self.assertRaisesRegex(ValueError,'three or four complete'):
+                    self.make_workflow(action_chunks=True,recording_enabled=False,reference_planning=policy,finite_chunk_count=bad)
+        self.addCleanup(flow.close)
+        info=flow.snapshot()['inference']
+        self.assertEqual(info['finite_chunk_count'],3);self.assertEqual(info['duration_s'],.5)
+        self.assertEqual(info['execute_steps'],15);self.assertFalse(flow.execution_settings()['allowed'])
+        with self.assertRaisesRegex(ValueError,'完整15步'):flow.set_execution_steps(30,0)
+        with self.assertRaisesRegex(ValueError,'源轨迹固定'):flow.preview_episode(duration_s=2)
+        self.assertEqual(self.submitted,[])
+
+    def test_reference_policy_uses_control_validator_and_is_visible_without_device_commands(self):
+        policy=dict(schema='workbench.infer-reference-policy.v1',curve='cubic_c2_quintic_ends',
+            velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
+            boundary_scope='complete_prepared_segment')
+        with self.assertRaisesRegex(ValueError,'recorded-native live'):self.make_workflow(reference_planning=policy)
+        with patch('robot_workbench.inference_workflow.model_family',return_value='mixed366'),patch(
+                'robot_workbench.motion_reference.infer_reference_policy',create=True,side_effect=deepcopy)as validate:
+            flow=self.make_workflow(action_chunks=True,reference_planning=policy)
+        self.addCleanup(flow.close);validate.assert_called_once_with(policy)
+        policy['velocity_limit_rad_s']=2.
+        self.assertEqual(flow.snapshot()['inference']['reference_planning']['velocity_limit_rad_s'],1.)
+        self.assertEqual(self.submitted,[])
+
+    def test_opt_in_chunk_binding_and_owner_context_use_canonical_model_service(self):
+        from robot_workbench.inference_transport import ModelService,RemoteBaseClient as RealClient,serve_model
+        from test_inference_transport import StubModel,request
+        token=Path(self.temp.name)/'chunk-auth';token.write_text('cpu-only-'+40*'x')
+        model=StubModel();model.worker_status=lambda:dict(worker_pid=456,worker_exit_code=None,worker_alive=True)
+        server=serve_model(ModelService(model),token_file=token)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.workflow.close();self.workflow=self.make_workflow(action_chunks=True,recording_enabled=False)
+        self.addCleanup(self.workflow.close)
+        self.workflow.model_endpoint='http://127.0.0.1:'+str(server.server_port);self.workflow.model_token_file=str(token)
+        runtime=self.device.runtime;runtime.remote_control_owner=True
+        runtime.push_observation=Mock();runtime.configure_remote_inference=Mock()
+        try:
+            with patch('robot_workbench.inference_workflow.RemoteBaseClient',RealClient):self.prepare()
+            binding=deepcopy(self.workflow.prepared['action_chunk_binding'])
+            self.assertEqual(binding['model_binding'],self.workflow.client.model_binding)
+            self.assertEqual(binding['action_contract'],self.workflow.client.action_contract)
+            self.assertIn('sampling',binding['action_contract'])
+            self.workflow._control_policy_parameters=dict(model={'reference_supply_timeout_s':.3},
+                observation={'maximum_age_s':.4,'state_max_age_s':.1,'max_camera_span_s':.1},execution={'prepare_drift_joint_rad':.003,'prepare_drift_jaw_mm':1.})
+            self.workflow.preview_episode()
+            config=runtime.configure_remote_inference.call_args.args[0]
+            callbacks=runtime.configure_remote_inference.call_args.kwargs
+            self.assertEqual(config['action_chunk_binding'],binding)
+            self.assertEqual(config['reference_supply_timeout_s'],.3)
+            self.assertEqual(config['maximum_observation_age_s'],.4)
+            self.assertEqual(config['prepare_drift_joint_rad'],.003)
+            self.assertEqual(config['prepare_drift_jaw_mm'],1.)
+            self.assertNotIn('action_chunk_clock_id',config,'only the Owner assigns its control clock')
+            before=len(model.requests)  # Explicit prepare has already made its warmup call.
+            context=dict(epoch=2,clock_domain='owner:fixture-owner:control_source',valid_until_source_time=3.)
+            chunk=callbacks['predict_chunk'](request('owner-request'),context)
+            self.assertEqual(chunk['schema'],'workbench.action-chunk.v1')
+            self.assertEqual(chunk['request_id'],'owner-request');self.assertEqual(chunk['epoch'],2)
+            self.assertEqual(chunk['observation']['clock_domain'],context['clock_domain'])
+            self.assertEqual(chunk['model_binding'],binding['model_binding'])
+            self.assertEqual(set(callbacks['predict'](request('legacy-request'))),{'request_id','action14','audit'})
+            self.assertEqual(len(model.requests)-before,2,'one model call per callback, no duplicate conversion call')
+            release=threading.Event();entered=threading.Event();writer=self.workflow.input_evidence
+            config['task']='coffee'  # Native-evidence metadata on the existing CPU model fixture.
+            write=writer._write
+            def slow_disk(*args):
+                entered.set()
+                if not release.wait(3):raise TimeoutError('CPU evidence disk test not released')
+                return write(*args)
+            try:
+                with patch.object(writer,'_write',side_effect=slow_disk),patch('robot_workbench.inference_workflow.model_family',return_value='mixed366'):
+                    queued=callbacks['predict_chunk'](request('queued-evidence'),context)
+                    self.assertEqual(queued['request_id'],'queued-evidence')
+                    self.assertTrue(entered.wait(1))
+                    self.assertEqual(writer.snapshot()['pending'],2,'response returned while both disk writes are pending')
+                    self.assertEqual(len(model.requests)-before,3)
+            finally:release.set();writer.close()
+            self.assertIsNone(writer.snapshot()['error'])
+            self.assertFalse(any(body.get('action')in('confirm','normal_mode')for _,body in self.submitted))
+            from robot_workbench.control_owner import ControlRuntimeClient
+            old_owner=SimpleNamespace(state={'control_owner':{}},_call=Mock())
+            runtime.configure_remote_inference=lambda *args,**kwargs:ControlRuntimeClient.configure_remote_inference(old_owner,*args,**kwargs)
+            self.submitted.clear()
+            with self.assertRaisesRegex(ValueError,'protocol version mismatch'):self.workflow.preview_episode()
+            old_owner._call.assert_not_called();self.assertEqual(self.submitted,[])
+        finally:
+            self.workflow.close();server.shutdown();server.server_close();thread.join(2);server.model_service.close()
+
+    def test_normal_mode_routes_explicit_identity_without_retry_or_implicit_hold(self):
+        body=dict(session_id='mode-session',runtime_nonce='fixture-owner',request_id='explicit-mode',epoch=2,mode='MODEL',target='MODEL')
+        with self.assertRaisesRegex(ValueError,'not enabled'):self.workflow.request_normal_mode(body)
+        normal=dict(recording_required=False)
+        for options in (dict(normal_modes=normal),dict(normal_modes=normal,action_chunks=True),
+                        dict(normal_modes={'recording_required':True},action_chunks=True,recording_enabled=False)):
+            with self.assertRaisesRegex(ValueError,'recording disabled'):self.make_workflow(**options)
+        self.workflow.normal_modes=normal;self.workflow.current={'config':{'normal_modes':normal}}
+        from robot_workbench.service import Application
+        self.device.workflows={'inference':self.workflow}
+        app=SimpleNamespace(device=lambda environment:self.device,operations_managed=False,lock=threading.RLock(),jobs={},requests={})
+        reply=Application._action(app,'inference_mode',dict(body,environment='fake',business='inference'))
+        self.assertEqual(self.submitted[-1],('inference',dict(body,action='normal_mode')))
+        with self.assertRaisesRegex(ValueError,'exact explicit'):self.workflow.request_normal_mode(dict(body,recording_gate={}))
+        from robot_workbench.control_owner import ControlCallUnknown
+        with patch.object(self.device,'submit',side_effect=ControlCallUnknown('explicit-mode','CPU injected timeout')) as submit:
+            with self.assertRaises(ControlCallUnknown):self.workflow.request_normal_mode(body)
+            submit.assert_called_once_with('inference',dict(body,action='normal_mode'))
+
+    def test_workbench_normal_mode_reaches_real_owner_socket_and_completion_ledger(self):
+        import test_normal_modes
+        from robot_workbench.service import Application
+        case=test_normal_modes.NormalModeTests()
+        case.setUp();self.addCleanup(case.doCleanups)
+        case.setup_modes();client,credential=case.setup_ipc()
+        owner=case.runtime.owner;runner=owner.runner
+        flow=object.__new__(InferenceWorkflow);flow.lock=threading.RLock()
+        flow.normal_modes=deepcopy(runner.normal_config);flow.current={'config':deepcopy(runner.config)}
+        flow.device=SimpleNamespace(runtime=client,workflows={'inference':flow},
+            submit=lambda business,body:client.submit(credential,body))
+        app=SimpleNamespace(device=lambda environment:flow.device,operations_managed=False,
+            lock=threading.RLock(),jobs={},requests={})
+        def command(target,key):
+            return dict(session_id=runner.mode_session_id,runtime_nonce=owner.runtime_nonce,request_id=key,
+                epoch=owner.epoch,mode='HOLD'if target in('END','DISCARD')else target,target=target)
+        def send(body):return Application._action(app,'inference_mode',dict(body,environment='fake',business='inference'))
+        pause=command('HOLD','c-hold');accepted=send(pause)
+        self.assertFalse(accepted['completed']);case.completed(pause)
+        done=send(pause);self.assertTrue(done['completed']);self.assertGreater(done['command_epoch'],pause['epoch'])
+        teach=command('TEACH','c-teach');send(teach);case.completed(teach)
+        with self.assertRaisesRegex(ValueError,'explicit HOLD'):send(command('MODEL','c-premature-model'))
+        hold=command('HOLD','c-explicit-hold');send(hold);case.completed(hold)
+        model=command('MODEL','c-new-model');send(model);case.completed(model)
+        snapshot=client._call('inference_state')['snapshot']
+        self.assertEqual(snapshot['mode'],'MODEL');self.assertTrue(snapshot['mode_receipts']['c-new-model']['completed'])
+        self.assertNotIn('c-premature-model',snapshot['mode_receipts'])
+
+    def test_workbench_initial_hold_finish_and_independent_release_over_owner_socket(self):
+        import test_normal_modes
+        from robot_workbench.service import Application
+        case=test_normal_modes.NormalModeTests();case.setUp();self.addCleanup(case.doCleanups)
+        case.setup_modes(initial_mode='HOLD',finish_kind='maintenance_home_v1')
+        self.assertEqual(case.requests,[],'initial HOLD must not call a model')
+        client,credential=case.setup_ipc();owner=case.runtime.owner;runner=owner.runner
+        flow=object.__new__(InferenceWorkflow);flow.lock=threading.RLock()
+        flow.normal_modes=deepcopy(runner.normal_config);flow.current={'config':deepcopy(runner.config)}
+        flow.device=SimpleNamespace(runtime=client,workflows={'inference':flow},submit=lambda business,body:client.submit(credential,body))
+        app=SimpleNamespace(device=lambda environment:flow.device,operations_managed=False,lock=threading.RLock(),jobs={},requests={})
+        ending=dict(session_id=runner.mode_session_id,runtime_nonce=owner.runtime_nonce,
+            request_id='c-end-from-hold',epoch=owner.epoch,mode='HOLD',target='END')
+        accepted=Application._action(app,'inference_mode',dict(ending,environment='fake',business='inference'))
+        self.assertFalse(accepted['no_op']);case.completed(ending)
+        before=case.raw.read_execution_output()['q_sdk14']
+        command=case.finish_request(ending);body={k:v for k,v in command.items()if k!='action'}
+        with self.assertRaisesRegex(ValueError,'exact explicit'):flow.request_normal_finish(dict(body,raw_sealed={}))
+        accepted=Application._action(app,'inference_finish',dict(body,environment='fake',business='inference'))
+        self.assertEqual(accepted['op'],'normal_finish');self.assertFalse(accepted['completed'])
+        case.until(lambda:runner.mode_receipts[command['request_id']]['status']in('completed','failed'))
+        snapshot=client._call('inference_state')['snapshot'];result=snapshot['mode_receipts'][command['request_id']]
+        self.assertTrue(result['completed'],result);self.assertTrue(result['home_completed'])
+        self.assertFalse(result['jaw_open_completed']);self.assertFalse(result['sdk_released'])
+        self.assertTrue(snapshot['finish_capability']['completed']);self.assertEqual(snapshot['command_epoch'],owner.epoch)
+        self.assertTrue(snapshot['feedback_healthy']);self.assertTrue(case.raw.is_connected)
+        np.testing.assert_allclose(np.asarray(result['native_output']['q_sdk14'])[[6,13]],np.asarray(before)[[6,13]])
+        self.assertEqual(flow.request_normal_finish(body),result,'same request only reads the original completion')
+        # The existing maintenance route is a separate explicit operation, never finish's side effect.
+        client.begin_maintenance()
+        actor=SimpleNamespace(action='release_control',require=lambda runtime:self.assertIs(runtime,client))
+        released=client.control_release(actor);self.assertFalse(released['release_receipt']['sdk_close_returned'])
+        self.assertFalse(case.runtime.tick());case.runtime.close()
+        actual=client.refresh()['release_receipt']
+        self.assertEqual(actual['status'],'released');self.assertTrue(actual['sdk_close_returned']);self.assertFalse(case.raw.is_connected)
+
+    def test_finish_transition_stays_busy_after_episode_terminal_status(self):
+        self.prepare();self.workflow.preview_episode()
+        config,factory=self.configured[-1]
+        with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):
+            runner=factory(self.owner,None,self.feedback,config)
+        self.workflow.normal_modes={'recording_required':False}
+        runner.status='READY';runner.value.update(recording_pending=False,mode='FINISH',transition_stage='FINISH',
+            command_epoch=9,control_state='RUNNING',feedback_healthy=True,finish_capability={'configured':True,'completed':False})
+        view=self.workflow.snapshot()
+        self.assertTrue(view['busy']);self.assertEqual(view['stage_id'],'inference.finish')
+        self.assertEqual(view['inference']['normal_mode']['command_epoch'],9)
+        self.assertFalse(view['inference']['normal_mode']['finish_capability']['completed'])
+        runner.value.update(mode='HOLD',transition_stage=None,finish_capability={'configured':True,'completed':True})
+        self.assertFalse(self.workflow.snapshot()['busy'])
+
+    def test_closed_ingress_unlocks_next_run_while_previous_capture_keeps_sealing(self):
+        self.prepare();self.workflow.preview_episode()
+        config,factory=self.configured[-1]
+        with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):
+            runner=factory(self.owner,None,self.feedback,config)
+        capture=SimpleNamespace(ingress_closed=False,done=threading.Event(),_finishing=True,error=None,
+            snapshot=lambda:{'state':'sealing'})
+        self.workflow.recording_backend='capture_session_v1'
+        self.workflow.current['recorder']=capture
+        self.workflow.pending_captures[self.workflow.current['id']]=capture
+        runner.status='STOPPED';runner.value.update(recording_pending=True)
+        self.assertTrue(self.workflow.snapshot()['busy'])
+        capture.ingress_closed=True
+        value=self.workflow.snapshot()
+        self.assertFalse(value['busy'])
+        self.assertTrue(value['inference']['recording_ingress_closed'])
+        self.assertEqual(value['inference']['background_recordings'][0]['state'],'sealing')
+        self.assertFalse(capture.done.is_set(),'allowing preparation must not claim the writer exited')
+
     def test_same_checkpoint_native_modes_are_selected_by_bound_runtime_digest(self):
         from test_native_model_runtime import descriptor
         from robot_workbench.inference_model import model_bundle_digest
@@ -78,6 +429,37 @@ class InferenceWorkflowTests(unittest.TestCase):
             identity,bundle,digest=self.workflow._model_selection(row['model_id'],row['bundle_digest'])
             self.assertEqual(bundle['backend'],row['backend']);self.assertEqual(digest,row['bundle_digest'])
         self.assertEqual(self.submitted,[])
+
+    def test_wam_so_catalog_is_selectable_and_unsupported_rows_expose_their_reason(self):
+        from test_wam import WamInputWorkflowTests
+        from robot_workbench.inference_model import model_bundle_digest
+        bundle=WamInputWorkflowTests().descriptor()
+        row=dict(model_id=bundle['model_id'],backend='anyinfer',selectable=True,
+            model_descriptor=bundle,bundle_digest=model_bundle_digest(bundle['model_id'],bundle))
+        self.workflow.model_catalog_provider=lambda:[row]
+        self.assertEqual(self.workflow.refresh_models()['models'][0]['backend'],'anyinfer')
+        self.assertEqual(self.workflow._model_selection(row['model_id'],row['bundle_digest'])[1],bundle)
+        for identity,backend in [(bundle['model_id'],'triton'),('pi-fixture','anyinfer')]:
+            self.workflow.model_catalog_provider=lambda:[dict(model_id=identity,backend=backend,selectable=False,reason='unsupported backend')]
+            invalid=self.workflow.refresh_models()['models'][0]
+            self.assertFalse(invalid['selectable']);self.assertEqual(invalid['reason'],'unsupported backend')
+            self.workflow.model_catalog_provider=lambda:[dict(model_id=identity,backend=backend,selectable=True)]
+            with self.assertRaisesRegex(ValueError,'模式'):self.workflow.refresh_models()
+        self.assertEqual(self.submitted,[])
+
+    def test_automatic_catalog_refresh_retains_selection_and_model_health_on_failure(self):
+        flow=self.workflow
+        original=(flow.selected_model_id,deepcopy(flow.model_bundle),deepcopy(flow.model_identity))
+        flow.model_catalog_provider=lambda:[dict(model_id='not-ready',selectable=False,reason='missing manifest')]
+        with patch.object(flow.model_probe_stop,'wait',side_effect=[False,True]):
+            flow._model_catalog_loop()
+        self.assertEqual(flow.models[0]['reason'],'missing manifest')
+        flow.model_catalog_provider=Mock(side_effect=OSError('catalog temporarily unavailable'))
+        with patch.object(flow.model_probe_stop,'wait',side_effect=[False,True]):
+            flow._model_catalog_loop()
+        self.assertEqual(flow.models[0]['reason'],'missing manifest')
+        self.assertEqual(flow.catalog_error,'catalog temporarily unavailable')
+        self.assertEqual((flow.selected_model_id,flow.model_bundle,flow.model_identity),original)
 
     def test_preview_observation_uses_authoritative_envelope_even_if_status_cache_lags_handoff(self):
         self.prepare();now,feedback,identity,_=self.workflow._feedback()
@@ -128,6 +510,33 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertFalse(self.workflow.snapshot()['inference']['model_ready'])
         self.assertEqual(self.workflow.model_binding_identity['bound_worker_pid'],456)
 
+    def test_device_binding_pins_canonical_http_and_invalidation_only_releases_its_pin(self):
+        from robot_workbench.inference_transport import ModelService,RemoteBaseClient as RealClient,serve_model
+        from robot_workbench.model_session import PinnedModelClient
+        from test_inference_transport import StubModel
+        token=Path(self.temp.name)/'model-auth';token.write_text('cpu-only-'+40*'x')
+        model=StubModel();model.worker_status=lambda:dict(worker_pid=456,worker_exit_code=None,worker_alive=True)
+        raw=ModelService(model);server=serve_model(raw,token_file=token)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        self.workflow.model_endpoint='http://127.0.0.1:'+str(server.server_port);self.workflow.model_token_file=str(token)
+        try:
+            with patch('robot_workbench.inference_workflow.RemoteBaseClient',RealClient):self.prepare()
+            self.assertIsInstance(self.workflow.client,PinnedModelClient)
+            self.assertEqual(server.model_service.status()['active_sessions'],1)
+            self.assertTrue(self.workflow._binding_current(self.workflow.prepared))
+            self.workflow.client.error='CPU injected renewal failure'
+            self.assertFalse(self.workflow._binding_current(self.workflow.prepared))
+            before=list(self.submitted)
+            with self.assertRaisesRegex(ValueError,'模型会话'):self.workflow.preview_episode()
+            self.assertEqual(self.submitted,before,'expired session must refuse before Owner preview/commands')
+            self.device.maintenance=True
+            self.workflow.operations_invalidate_model(still_current=lambda:True)
+            self.assertEqual(server.model_service.status()['active_sessions'],0)
+            self.assertEqual(model.closes,0);self.assertTrue(raw.status()['loaded'])
+        finally:
+            self.device.maintenance=False
+            self.workflow.close();server.shutdown();server.server_close();thread.join(2);server.model_service.close()
+
     def setUp(self):
         Model.loaded=set();Model.calls=[];self.model_operations=[]
         self.temp=TemporaryDirectory();self.addCleanup(self.temp.cleanup);jaw.configure_mapping(None)
@@ -148,6 +557,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             owner_pid=123,command_epoch=2,runtime_nonce='fixture-owner')
         self.owner=SimpleNamespace(lock=threading.RLock(),cache={'calibration_feedback':self.feedback,'joint_limits':self.limits},
             control_time=lambda:self.now,feedback_healthy=True,epoch=2,runtime_nonce='fixture-owner',execution_instance_id='episode-fixture',runner=None,recording=None,
+            execution_clock_id='owner:fixture-owner:control_source',
             backend=SimpleNamespace(passive_jaws=()),pending={},inference_payloads={},shared_target_profile=None)
         self.configured=[];self.submitted=[]
         def configure(config,factory):self.configured.append((deepcopy(config),factory))
@@ -192,10 +602,10 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.workflow._refresh_observation()
 
     def test_execution_length_persists_validates_and_revokes_old_review(self):
-        self.assertEqual(self.workflow.execution_settings()['execute_steps'],30)
+        self.assertEqual(self.workflow.execution_settings()['execute_steps'],15)
         self.prepare();self.workflow.preview_episode()
         old_config,old_factory=self.configured[-1]
-        self.assertEqual(old_config['execute_steps'],30)
+        self.assertEqual(old_config['execute_steps'],15)
         for invalid in (0,61,True,1.5,'30'):
             with self.assertRaises(ValueError):self.workflow.set_execution_steps(invalid,0)
         self.workflow.set_execution_steps(45,0)
@@ -237,6 +647,17 @@ class InferenceWorkflowTests(unittest.TestCase):
             rows.append(dict(model_id=identity,label=spec['label'],epoch=spec['epoch'],step=spec['step'],
                 status='ready',selectable=True,reason=None,bundle_digest=model_bundle_digest(identity)))
         return rows
+
+    def test_wam_requires_its_cpu_preprocessor_before_remote_model_warmup(self):
+        from test_wam import WamInputWorkflowTests
+        bundle=WamInputWorkflowTests().descriptor()
+        with patch('robot_workbench.wam._torch',side_effect=ModuleNotFoundError('CPU preprocessor missing')),\
+                patch.object(self.workflow,'_new_client')as client:
+            with self.assertRaisesRegex(ModuleNotFoundError,'CPU preprocessor missing'):
+                self.workflow._prepare_model(_selection=(bundle['model_id'],bundle),still_current=lambda:True)
+            client.assert_not_called()
+        self.assertIsNone(self.workflow.model_identity)
+        self.assertFalse(self.workflow.model_status=='ready')
 
     def test_offline_catalog_select_prepares_model_without_device_or_camera_access(self):
         rows=self.checkpoint_rows();rows[1].update(status='downloading',selectable=False,reason='下载中')
@@ -355,8 +776,10 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertEqual(default['preview']['duration_s'],120)
         self.assertEqual(self.configured[-1][0]['duration_s'],120)
         self.assertEqual(self.workflow.snapshot()['inference']['duration_s'],120)
+        for duration in (3,5.125):
+            self.assertEqual(self.workflow.preview_episode(seed=14,duration_s=duration)['preview']['duration_s'],duration)
         with patch.object(self.workflow,'_refresh_observation',side_effect=AssertionError('invalid duration rejected before capture')):
-            for invalid in (3,0,True,'1',float('nan')):
+            for invalid in (-1,0,True,'1',float('nan')):
                 with self.assertRaises(ValueError):self.workflow.preview_episode(seed=0,duration_s=invalid)
 
     def test_native_preparation_exposes_actual_duration_separately_from_two_second_source(self):
@@ -412,6 +835,29 @@ class InferenceWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'0.1 秒'):self.workflow._refresh_observation()
         self.frame_times['right_wrist_0']=self.now-.05;self.now+=.2
         with self.assertRaisesRegex(ValueError,'实测反馈'):self.workflow._refresh_observation()
+
+    def test_native_observation_pairs_historical_feedback_and_keeps_original_clock(self):
+        from robot_workbench.observation_pairing import PairingPending
+        self.prepare();self.device.environment='physical'
+        self.feedback.update(source_clock_id=None,clock_domain='host_wall')
+        def frame(camera):
+            role=next(k for k,v in CAMERAS.items()if v==camera)
+            return dict(width=640,height=480,rgb=bytes(640*480*3),metadata=dict(
+                host_receive_ns=self.wall-50_000_000,serial=self.binding['camera_serials'][role],
+                capture_instance_id='capture-1',frame_number=self.wall,environment='physical',clock_domain='host_wall'))
+        self.workflow.rgb_source=SimpleNamespace(latest_rgb=frame)
+        with patch('robot_workbench.inference_workflow.model_family',return_value='mixed366'):
+            with self.assertRaises(PairingPending):self.workflow._refresh_observation()
+            first_wall=self.wall;first_time=self.now
+            self.now+=.08;self.wall+=80_000_000
+            self.feedback.update(sample_wall_ns=self.wall,sample_time_s=self.now,qpos=[.001]+self.feedback['qpos'][1:])
+            self.workflow._refresh_observation()
+        cached=self.workflow.cache
+        self.assertEqual(cached['pairing']['target_wall_ns'],first_wall)
+        self.assertEqual(cached['observation']['feedback_sample_time_s'],first_time)
+        self.assertEqual(cached['observation']['device_state14'][0],0.,'state matches the selected time, not latest state')
+        self.assertAlmostEqual(cached['observation']['source_time'],first_time+.03)
+        self.assertEqual(cached['observation']['frame_ids']['base_0_rgb']['host_receive_ns'],self.wall-50_000_000)
 
     def test_changed_installation_revokes_factory_and_stale_model_preparation(self):
         self.prepare();self.workflow.action('inference_preview',{'seed':9})
@@ -522,7 +968,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertEqual(snapshot['inference']['audit']['last_worker_timing'],timing)
         self.assertEqual(snapshot['status'],'running');self.assertEqual(metrics['submitted'],0)
         self.assertIn('预测已丢弃',snapshot['message']);self.assertIn('1.400',snapshot['message'])
-        self.assertEqual((config['maximum_observation_age_s'],config['execute_steps'],config['duration_s']),(.5,30,120.))
+        self.assertEqual((config['maximum_observation_age_s'],config['execute_steps'],config['duration_s']),(.5,15,120.))
         event('prediction_requested',{})
         event('prediction_received',dict(model_wall_s=.1,observation_age_source_s=.2,
             worker_audit=dict(timing={'worker':{'infer_wall_s':.09}})))

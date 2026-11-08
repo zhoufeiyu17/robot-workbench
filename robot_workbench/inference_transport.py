@@ -23,11 +23,15 @@ import zipfile
 import numpy as np
 
 from .inference_model import (BASE379_ID, CAMS, model_family, model_spec, model_descriptor, model_bundle_digest,
-                              validate_bundle, validate_worker_identity, native_runtime)
+                              validate_bundle, validate_worker_identity, native_runtime, action_contract)
 
 MAX_PACKET = 8 * 1024 * 1024
 MAX_METADATA = 256 * 1024
-PROTOCOL = 'workbench.model-http.v1'
+
+
+class ModelSelectionChanged(ValueError):
+    """The service is reachable, but a different explicitly selected backend is loaded."""
+PROTOCOL = 'workbench.model-http.v2'
 MODEL_ID = BASE379_ID
 
 
@@ -151,13 +155,14 @@ def decode_packet(payload, expected_arrays, model_id=MODEL_ID):
         raise ValueError('invalid model packet') from error
 
 
-def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bundle=None):
-    state, images = adapter.model_input(request['observation'])
+def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bundle=None, *, prepared_input=None):
+    state, images = adapter.model_input(request['observation']) if prepared_input is None else prepared_input
     metadata = dict(protocol=PROTOCOL, model_id=model_id, conversion_id=conversion_id,
         request_id=request['request_id'], seed=request['seed'], source_time=request['observation']['source_time'],
         frame_ids=request['observation'].get('frame_ids', {}))
-    if model_family(model_id) == 'base566':metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
+    if model_family(model_id) in ('base566','mixed366','wam'):metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
     if native_runtime(model_bundle):metadata['backend']=model_bundle['backend']
+    if model_family(model_id)=='mixed366':metadata['task']=request['task']
     arrays = dict(model_state14=np.asarray(state), model_history=np.asarray(request['applied_history']), **images)
     _validate_request(metadata, arrays, model_id, model_bundle)
     return encode_packet(metadata, arrays)
@@ -166,7 +171,10 @@ def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bun
 def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
     _identity(metadata, model_id)
     keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'seed', 'source_time', 'frame_ids'}
-    if model_family(model_id) == 'base566':keys.add('expected_bundle_digest')
+    if model_family(model_id)=='mixed366':
+        keys.add('task')
+        if metadata.get('task') not in model_spec(model_id,model_bundle)['tasks']:raise ValueError('task is not registered for this checkpoint')
+    if model_family(model_id) in ('base566','mixed366','wam'):keys.add('expected_bundle_digest')
     if native_runtime(model_bundle):
         keys.add('backend')
         if metadata.get('backend')!=model_bundle['backend']:raise ValueError('model backend differs from prepared runtime')
@@ -184,13 +192,21 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
         raise ValueError('exact model-domain state, history and three RGB images required')
     _finite(arrays['model_state14'], (14,), 'model state')
     history = arrays['model_history']
-    if history.ndim != 2 or history.shape[1] != 14 or len(history) > 60:
+    if history.ndim != 2 or history.shape[1] != 14 or len(history) > (0 if model_family(model_id)in('mixed366','wam')else 60):
         raise ValueError('model history must have shape (0..60,14)')
     _finite(history, history.shape, 'model history')
     for name in CAMS:
         image = arrays[name]
-        if image.dtype != np.uint8 or image.shape != (224, 224, 3):
+        if model_family(model_id)=='wam':
+            if image.dtype!=np.uint16 or image.shape!=(256,256,3):raise ValueError('WAM input requires256x256x3 WAN BF16 bit patterns')
+            values=(image.astype(np.uint32)<<16).view(np.float32)
+            if not np.isfinite(values).all()or np.any(np.abs(values)>1):raise ValueError('WAM input has invalid BF16 image values')
+        elif image.dtype != np.uint8 or image.shape != ((480,640,3)if model_family(model_id)=='mixed366'else(224,224,3)):
             raise ValueError('preprocessed model RGB must be uint8 (224,224,3)')
+    if model_family(model_id)=='wam':
+        from .wam import bf16_values
+        if not np.array_equal(arrays['model_state14'],bf16_values(arrays['model_state14'])):
+            raise ValueError('WAM state requires effective BF16 normalized values')
 
 
 class ModelDomainAdapter:
@@ -201,13 +217,15 @@ class ModelDomainAdapter:
 
 class ModelService:
     """One serial, explicitly prepared FrozenBaseClient, owned by this service."""
-    def __init__(self, client, *, model_id=None, catalog=None, client_factory=None, catalog_rows=None):
+    def __init__(self, client, *, model_id=None, catalog=None, client_factory=None, catalog_rows=None,
+                 client_refresh=None):
         self.client = client
         self.model_id = model_id or getattr(client, 'model_id', MODEL_ID)
         self.model_bundle = getattr(client, 'bundle', None)
         model_spec(self.model_id, self.model_bundle)
         self.catalog, self.client_factory = catalog, client_factory
         self.catalog_rows = catalog_rows
+        self.client_refresh = client_refresh
         if catalog is not None and not callable(client_factory):
             raise ValueError('catalog switching requires an owned client factory')
         if getattr(client, 'model_id', self.model_id) != self.model_id:
@@ -245,6 +263,8 @@ class ModelService:
                     model_descriptor=model_descriptor(spec['id'],manifest),
                     bundle_digest=model_bundle_digest(spec['id'],manifest))
                 item['backend']=spec.get('backend','torch')
+                for key in ('inference_options','inference_capabilities'):
+                    if key in spec:item[key]=deepcopy(spec[key])
             result.append(item)
         return result
 
@@ -258,7 +278,8 @@ class ModelService:
             worker = getattr(getattr(self.client, 'client', None), 'process', None)
             result.update(worker_pid=getattr(worker, 'pid', None),worker_exit_code=worker.poll() if worker is not None else None)
         result.update(protocol=PROTOCOL, model_id=self.model_id, service_pid=os.getpid(),
-                      bundle_digest=model_bundle_digest(self.model_id,self.model_bundle))
+                      bundle_digest=model_bundle_digest(self.model_id,self.model_bundle),
+                      action_contract=action_contract(self.model_id,self.model_bundle))
         if native_runtime(self.model_bundle):result['backend']=self.model_bundle['backend']
         if result['worker_exit_code'] is not None or result['loaded'] and result.get('worker_alive')is False:
             result.update(loaded=False, status='error', error=result.get('error') or 'owned model worker exited')
@@ -301,15 +322,19 @@ class ModelService:
         if native_runtime(selected):
             keys.add('backend')
             if set(metadata)!=keys or metadata['backend']!=selected['backend']:raise ValueError('explicit prepared backend identity required')
-        elif set(metadata) not in (keys,keys-{'expected_bundle_digest'}):raise ValueError('prepare accepts model identity only')
+        elif set(metadata)!=keys:raise ValueError('prepare requires complete model and bundle identity')
         if ('expected_bundle_digest' in metadata
                 and metadata['expected_bundle_digest'] != model_bundle_digest(requested,selected)):
             raise ValueError('selected checkpoint bundle identity changed')
         if not self.lock.acquire(blocking=False):
             raise ValueError('model worker busy; preparation was not queued')
         try:
+            candidate = self.client
             if requested != self.model_id or selected != self.model_bundle:
                 candidate = self.client_factory(selected)
+            elif self.client_refresh is not None and not self.status()['loaded']:
+                candidate = self.client_refresh(self.client)
+            if candidate is not self.client:
                 if getattr(candidate, 'model_id', None) != requested:
                     candidate.close();raise ValueError('catalog client differs from selected model')
                 self.client.close()
@@ -330,10 +355,13 @@ class ModelService:
                 identity = self.client.prepare()
                 validate_worker_identity(identity, self.model_id, bundle=self.model_bundle)
                 start=time.monotonic()
-                warm=self.client.infer(dict(request_id='warmup',seed=0,applied_history=np.empty((0,14),np.float32),
+                warm_request=dict(request_id='warmup',seed=0,applied_history=np.empty((0,14),np.float32),
                     observation=dict(source_time=0.,model_state14=np.zeros(14,np.float32),
-                        images={name:np.zeros((224,224,3),np.uint8) for name in CAMS})))
-                prediction=_finite(warm['action14'],(60,14),'warmup model action')
+                        images={name:np.zeros((480,640,3)if model_family(self.model_id)=='mixed366'else(224,224,3),np.uint8) for name in CAMS}))
+                if model_family(self.model_id)=='mixed366':warm_request['task']='coffee'
+                if model_family(self.model_id)=='wam':warm_request['observation']['images']={name:np.zeros((256,256,3),np.uint16)for name in CAMS}
+                warm=self.client.infer(warm_request)
+                prediction=_finite(warm['action14'],tuple(action_contract(self.model_id,self.model_bundle)['shape']),'warmup model action')
                 self._set(status='ready', loaded=True, worker_identity=deepcopy(identity),
                     warmup=dict(completed=True,wall_s=time.monotonic()-start,seed=0,
                         input='zero model state/RGB and empty history; no device command',
@@ -354,7 +382,7 @@ class ModelService:
             raise ValueError('model worker busy; inference was not queued')
         try:
             _identity(metadata, self.model_id)
-            if (model_family(self.model_id) == 'base566'
+            if (model_family(self.model_id) in ('base566','mixed366','wam')
                     and metadata['expected_bundle_digest'] != model_bundle_digest(self.model_id,self.model_bundle)):
                 raise ValueError('selected checkpoint bundle identity changed')
         except Exception:
@@ -368,15 +396,18 @@ class ModelService:
                 observation=dict(model_state14=arrays['model_state14'], images={name: arrays[name] for name in CAMS},
                     source_time=metadata['source_time'], frame_ids=metadata['frame_ids']),
                 applied_history=arrays['model_history'])
+            if model_family(self.model_id)=='mixed366':request['task']=metadata['task']
             started = time.monotonic()
             result = self.client.infer(request)
             if result.get('request_id') != metadata['request_id']:
                 raise ValueError('worker response identity mismatch')
-            action = _finite(result['action14'], (60, 14), 'model action')
+            action = _finite(result['action14'], tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
             response = {key: metadata[key] for key in ('protocol', 'model_id', 'conversion_id', 'request_id')}
             if 'expected_bundle_digest' in metadata:response['expected_bundle_digest'] = metadata['expected_bundle_digest']
             if 'backend'in metadata:response['backend']=metadata['backend']
             response['audit'] = result.get('audit', {})
+            if model_family(self.model_id)=='mixed366':
+                response['audit']=dict(response['audit'],task=metadata['task'])
             encoded = encode_packet(response, dict(action14=action))
             self._set(last_request_id=metadata['request_id'], last_infer_wall_s=time.monotonic()-started)
             return encoded
@@ -417,6 +448,12 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
         raise ValueError('forwarded ports must be explicitly configured integers from 1 to 65535')
     forwarded_ports=tuple(forwarded_ports)
     token = read_token(token_file)
+    from .model_session import PinnedModelService,PROTOCOL as SESSION_PROTOCOL
+    if not isinstance(service,PinnedModelService):
+        if service.status().get('session_protocol')is not None:
+            raise ValueError('use the canonical model-session service; parallel wrapper registries are forbidden')
+        # All listeners for one model object share the same capability registry.
+        service=service.__dict__.setdefault('_workbench_model_sessions',PinnedModelService(service))
     class Handler(BaseHTTPRequestHandler):
         timeout = 5
         def log_message(self, *args):
@@ -434,6 +471,15 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             return len(hosts)==1 and hosts[0] in self.server.allowed_hosts
         def do_GET(self):
             if not self.valid_host():return self.reply(403, {'error':'invalid Host'})
+            if self.path.startswith('/v1/')and hasattr(service,'tool_catalog'):
+                auth=self.headers.get_all('Authorization',[])
+                if len(auth)!=1 or not secrets.compare_digest(auth[0].encode(),('Bearer '+token).encode()):
+                    return self.reply(403,{'error':'model authorization required'})
+                try:
+                    if self.path=='/v1/catalog':return self.reply(200,service.tool_catalog())
+                    if re.fullmatch('/v1/jobs/[a-f0-9]{24}',self.path):return self.reply(200,service.tool_job(self.path.rsplit('/',1)[-1]))
+                except ValueError as error:return self.reply(409,{'error':str(error)})
+                return self.reply(404,{'error':'not found'})
             if self.path == '/models':
                 auth = self.headers.get_all('Authorization', [])
                 if len(auth) != 1 or not secrets.compare_digest(auth[0].encode(), ('Bearer '+token).encode()):
@@ -447,7 +493,8 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             auth = self.headers.get_all('Authorization', [])
             if len(auth) != 1 or not secrets.compare_digest(auth[0].encode(), ('Bearer '+token).encode()):
                 return self.reply(403, {'error':'model authorization required'})
-            if self.path not in ('/prepare', '/infer', '/unload'):return self.reply(404, {'error':'not found'})
+            tool=self.path in ('/v1/conversions','/v1/infer')and hasattr(service,'tool_start')
+            if not tool and self.path not in ('/prepare', '/infer', '/unload'):return self.reply(404, {'error':'not found'})
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get_all('Transfer-Encoding', []) or len(lengths) != 1 or not lengths[0].isascii()
                     or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= MAX_PACKET):
@@ -455,6 +502,7 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             try:
                 raw = self.rfile.read(int(lengths[0]))
                 if len(raw) != int(lengths[0]):raise ValueError('incomplete model request')
+                if tool:return self.reply(202,service.tool_start(self.path.rsplit('/',1)[-1],json.loads(raw)))
                 if self.path in ('/prepare','/unload'):
                     if len(raw) > 4096:raise ValueError('bounded prepare identity required')
                     return self.reply(200, (service.prepare if self.path=='/prepare' else service.unload)(json.loads(raw)))
@@ -463,6 +511,7 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             except Exception as error:self.reply(503, {'error':str(error)})
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
+    server.model_service=service
     server.forwarded_ports=tuple(sorted(set(forwarded_ports)))
     server.allowed_hosts={f'{name}:{value}' for name in ('127.0.0.1','localhost')
                           for value in (server.server_port,*server.forwarded_ports)}
@@ -472,9 +521,11 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
 class RemoteBaseClient:
     """Device-side conversion and bounded transport; close never stops a remote service."""
     def __init__(self, endpoint, *, token_file, adapter, conversion_identity,
-                 startup_timeout_s=600., inference_timeout_s=120., model_id=MODEL_ID, model_bundle=None):
+                 startup_timeout_s=600., inference_timeout_s=120., model_id=MODEL_ID, model_bundle=None, task=None):
         model_spec(model_id, model_bundle)
         self.model_id = model_id
+        if task is not None and task not in ('coffee','lid_handoff'):raise ValueError('registered training task required')
+        self.task=task
         self.model_bundle = deepcopy(model_bundle)
         self.bundle_digest = model_bundle_digest(model_id,model_bundle)
         value = urlsplit(endpoint)
@@ -488,10 +539,27 @@ class RemoteBaseClient:
         self.conversion_id = conversion_digest(conversion_identity, model_id)
         self.conversion_identity = deepcopy(conversion_identity)
         self.startup_timeout, self.timeout = startup_timeout_s, inference_timeout_s
+        self.bind_control_policy(None)
         self.identity = None
 
-    def _request(self, path, body=None, *, timeout=None, kind='application/json'):
-        connection = HTTPConnection(self.host, self.port, timeout=timeout or self.timeout)
+    def bind_control_policy(self,policy):
+        from .execution_settings import Guard,control_parameters,defaults,policy_hash
+        if policy is None:
+            parameters=control_parameters(defaults('inference'),business='inference')
+            policy=dict(revision=None,policy_hash=policy_hash(parameters),parameters=parameters)
+        self._control_policy=deepcopy(policy)
+        self._transport_guard=Guard.bind(policy,dict(infer_timeout_s=self.timeout))
+        self._status_identity=dict(protocol=PROTOCOL,model_id=self.model_id,bundle_digest=self.bundle_digest)
+        if native_runtime(self.model_bundle):self._status_identity['backend']=self.model_bundle['backend']
+        self._status_guard=Guard.bind(policy,dict(expected_identity=self._status_identity))
+
+    def _request(self, path, body=None, *, timeout=None, kind='application/json',guard_receipts=None):
+        guard=self._transport_guard;started=time.monotonic()
+        if path=='/infer'and timeout:
+            from .execution_settings import Guard
+            guard=Guard.bind(self._control_policy,dict(infer_timeout_s=timeout))
+        limit=guard.evaluate(dict(rule_id='G09',signal_id='model_http',observed=0.,source_time=started,checked_time=started),'model_call')['limit'] if path=='/infer'else self.timeout
+        connection = HTTPConnection(self.host, self.port, timeout=timeout or limit)
         try:
             connection.request('POST' if body is not None else 'GET', path, body=body,
                 headers={'Authorization':'Bearer '+self.token, 'Content-Type':kind, 'Connection':'close'})
@@ -501,20 +569,34 @@ class RemoteBaseClient:
                 try:error = json.loads(raw).get('error', 'model request failed')
                 except (ValueError, AttributeError):error = 'invalid model error response'
                 raise RuntimeError(f'model HTTP {response.status}: {error}')
+            if path=='/infer':
+                now=time.monotonic();decision=guard.evaluate(dict(rule_id='G09',signal_id='model_http',observed=now-started,
+                    source_time=started,checked_time=now),'model_call')
+                if guard_receipts is not None:guard_receipts.append(decision)
+                if decision['verdict']=='reject':
+                    error=ValueError('G09: model HTTP result exceeded transport timeout');error.guard_decision=decision;raise error
             return raw
+        except TimeoutError as error:
+            if path=='/infer':
+                now=time.monotonic();error.guard_decision=guard.evaluate(dict(rule_id='G09',signal_id='model_http',
+                    observed=dict(elapsed_s=now-started,timed_out=True),source_time=started,checked_time=now),'model_call')
+            raise
         finally:
             connection.close()
 
     def status(self):
         value = json.loads(self._request('/status'))
-        if value.get('protocol') != PROTOCOL or value.get('model_id') != self.model_id:
-            raise ValueError('remote model status identity mismatch')
-        if native_runtime(self.model_bundle) and (value.get('backend')!=self.model_bundle['backend'] or value.get('bundle_digest')!=self.bundle_digest):
-            raise ValueError('remote backend or runtime identity mismatch')
+        now=time.monotonic()
+        decision=self._status_guard.evaluate(dict(rule_id='G01',signal_id='model_status',
+            observed={key:value.get(key)for key in self._status_identity},source_time=now,checked_time=now),'model_status')
+        if decision['verdict']=='reject':
+            error=(ValueError('remote model status identity mismatch')if value.get('protocol')!=PROTOCOL or value.get('model_id')!=self.model_id else
+                ModelSelectionChanged('常驻模型模式已切换；请重新选择 checkpoint 并核验当前工作区'))
+            error.guard_decision=decision;raise error
         return value
 
     def models(self):
-        value = json.loads(self._request('/models'))
+        value = json.loads(self._request('/models', timeout=5.))
         if value.get('protocol') != PROTOCOL or not isinstance(value.get('models'), list):
             raise ValueError('invalid checkpoint catalog response')
         for row in value['models']:
@@ -534,37 +616,50 @@ class RemoteBaseClient:
             validate_worker_identity(identity,self.model_id,bundle=self.model_bundle)
             self.identity=deepcopy(identity)
             return deepcopy(identity)
-        metadata = dict(protocol=PROTOCOL, model_id=self.model_id, conversion_id=self.conversion_id)
-        if model_family(self.model_id) == 'base566':metadata['expected_bundle_digest'] = self.bundle_digest
+        status=json.loads(self._request('/status'))
+        if status.get('protocol')!=PROTOCOL:raise ValueError('model HTTP protocol version mismatch; preparation refused')
+        metadata = dict(protocol=PROTOCOL, model_id=self.model_id, conversion_id=self.conversion_id,expected_bundle_digest=self.bundle_digest)
         if native_runtime(self.model_bundle):metadata['backend']=self.model_bundle['backend']
         value = json.loads(self._request('/prepare', json.dumps(metadata).encode(), timeout=self.startup_timeout))
         _identity(value, self.model_id)
         identity = value.get('worker_identity') or {}
-        if (value['conversion_id'] != self.conversion_id or model_family(self.model_id) == 'base566'
-                and value.get('expected_bundle_digest') != self.bundle_digest
+        if (value['conversion_id'] != self.conversion_id or value.get('expected_bundle_digest') != self.bundle_digest
                 or native_runtime(self.model_bundle)and value.get('backend')!=self.model_bundle['backend']):
             raise ValueError('remote model or conversion identity mismatch')
         validate_worker_identity(identity, self.model_id, bundle=self.model_bundle)
         self.identity = deepcopy(identity)
         return deepcopy(identity)
 
-    def infer(self, request):
+    def infer(self, request, *, prepared_input=None):
         if self.identity is None:raise ValueError('explicit remote model preparation required')
-        payload = request_packet(request, self.adapter, self.conversion_id, self.model_id, self.model_bundle)
-        metadata, arrays = decode_packet(self._request('/infer', payload, kind='application/x-npz'), {'action14'}, self.model_id)
+        if model_family(self.model_id)=='mixed366':
+            if self.task is None or request.get('task',self.task)!=self.task:raise ValueError('request differs from bound training task')
+            request=dict(request,task=self.task)
+        payload = request_packet(request, self.adapter, self.conversion_id, self.model_id, self.model_bundle, prepared_input=prepared_input)
+        decisions=[]
+        metadata, arrays = decode_packet(self._request('/infer', payload, kind='application/x-npz',guard_receipts=decisions), {'action14'}, self.model_id)
         keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'audit'}
-        if model_family(self.model_id) == 'base566':keys.add('expected_bundle_digest')
+        if model_family(self.model_id) in ('base566','mixed366','wam'):keys.add('expected_bundle_digest')
         if native_runtime(self.model_bundle):keys.add('backend')
         if (set(metadata) != keys or 'expected_bundle_digest' in metadata and metadata['expected_bundle_digest'] != self.bundle_digest
                 or native_runtime(self.model_bundle)and metadata['backend']!=self.model_bundle['backend']
                 or metadata['conversion_id'] != self.conversion_id or metadata['request_id'] != request['request_id']):
             raise ValueError('remote result request or conversion identity mismatch')
-        action = _finite(arrays['action14'], (60, 14), 'model action')
+        action = _finite(arrays['action14'], tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
         audit = deepcopy(metadata['audit'])
         if not isinstance(audit, dict):raise ValueError('model audit object required')
+        from .model_session import _CAPABILITY
+        pinned=_CAPABILITY.fullmatch(request['request_id'])
         audit['transport'] = dict(protocol=PROTOCOL, model_id=self.model_id, conversion_id=self.conversion_id,
-            request_id=request['request_id'], conversion_identity=deepcopy(self.conversion_identity))
+            request_id=pinned[2]if pinned else request['request_id'], conversion_identity=deepcopy(self.conversion_identity))
+        audit['transport']['guard_decisions']=decisions
         return dict(request_id=request['request_id'], action14=action, audit=audit)
 
     def close(self):
         self.identity = None
+
+    def pin(self,session_id,*,auto_renew=True):
+        from .model_session import PinnedModelClient
+        pinned=PinnedModelClient(self,session_id,auto_renew=auto_renew)
+        pinned.acquire()
+        return pinned
