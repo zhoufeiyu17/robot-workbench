@@ -301,7 +301,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
   }
   function syncJointSliders(){jointInputs('slider').forEach((input,index)=>input.value=jointInputs('position')[index].value);}
-  const options = () => ({fresh:online && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('manual-execution-dialog').open?el('manual-clearance').checked:el('clearance').checked,deleteClearance:el('delete-clearance').checked});
+  const options = () => ({fresh:online && !environmentAccess?.exited && clock.now()-receivedAt <= 3000, pending:[...pending.values()].some(p=>p.context === key()), clearance:el('manual-execution-dialog').open?el('manual-clearance').checked:el('clearance').checked,deleteClearance:el('delete-clearance').checked});
   const permission = action => action==='execute'&&activeReturnTask()&&(!returnOffsetsMatch(state?.workflow?.review?.offset_xy_mm??returnTask().offset_xy_mm)||manualIntent?.action!=='return_cup'||manualIntent?.reviewId!==state?.workflow?.review?.id)
     ? {allowed:false,reason:'请按当前偏移重新点击“恢复场景”，并在本次弹窗中确认'} : ['execute','manual_execute'].includes(action)&&invalidatedReviews.has(key()+'/'+state?.workflow?.review?.id)
     ? {allowed:false,reason:'此审阅已失效；等待后端生成新的执行审阅'} : action==='delete_confirm'&&confirmedDeletions.has(key()+'/'+state?.workflow?.deletion_preview?.id)
@@ -442,6 +442,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       link.href=target==='operations-link'?(el('operations-link').href||'/operations'):'#'+target;
     };
     const business=BUSINESS[context.business],stage=STAGE_LABELS[w.stage_id]||w.title||'当前任务';
+    if(environmentAccess?.exited)return show(environmentAccess.exitState==='closed'?'工作台已退出':'正在关闭工作台入口','本工作台资源已退出。需要再次使用时，请重新运行启动脚本。','physical-endpoint-panel','查看退出状态');
     if(!state)return show(business+' · 状态待核验',waitingForStateNotice?'正在读取当前业务状态；切换栏目不会连接设备或交接控制权。':'当前无法读取工作台状态；请先到服务运维核验后端。','operations-link','查看服务运维');
     if(!opts.fresh||!state.csrf)return show('当前状态待重新核验','连接中断或状态已过期；旧连接、控制权与任务信息不能作为当前可执行依据。','operations-link','查看服务运维');
     if(['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(String(r.state).toUpperCase()))
@@ -628,7 +629,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('handoff').disabled=!handoff.allowed;
     el('handoff-target').disabled=!permission('handoff').allowed;
     setText('handoff-reason',handoff.reason||'保持设备连接，不自动执行动作');
-    if(environmentAccess?.state?.target?.device_id&&environmentAccess.state.csrf){el('stop').disabled=environmentAccess.stopping;setText('stop-reason',environmentAccess.stopping?'独立停止请求已发送，等待回执':'独立停止通道；不等同硬件急停');}
+    if(environmentAccess?.state?.target?.device_id&&environmentAccess.state.csrf){el('stop').disabled=environmentAccess.exited||environmentAccess.stopping;setText('stop-reason',environmentAccess.exited?'工作台已退出':environmentAccess.stopping?'独立停止请求已发送，等待回执':'独立停止通道；不等同硬件急停');}
     if ([...pending.values()].some(p=>p.action==='stop' && p.context===key())) {
       el('stop').disabled=true; setText('stop-reason','停止请求已发送，等待停止回执');
     }
@@ -1974,7 +1975,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     })();
   }
   async function poll() {
-    if(stopped||polling)return;
+    if(stopped||polling||environmentAccess?.exited)return;
     const controller=new AbortController(),requestedContext={...context};let at=generation;polling=controller;
     try {
       const query=new URLSearchParams({...requestedContext,...resultsCursor}),response=await request('/api/state?'+query,{cache:'no-store',signal:controller.signal});

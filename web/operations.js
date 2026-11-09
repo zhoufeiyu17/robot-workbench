@@ -59,7 +59,7 @@ const canonical=value=>JSON.stringify(value,(_key,item)=>item&&typeof item==='ob
 const same=(a,b)=>canonical(a)===canonical(b);
 const describeTarget=target=>target?`${target.environment==='physical'?'Physical · 物理设备':'Fake · 开发设备'} / ${target.id||target.device_id||target.robot_id||'未命名设备'} / ${target.manager_instance||target.manager_instance_id||target.deployment_id||'未提供管理器版本'}`:'尚未核验目标';
 const readable=value=>typeof value==='string'?value:JSON.stringify(value,null,2);
-export const phaseText=value=>({preparing_exit_home:'准备退出前回零审阅',returning_home:'执行平滑低速回零',waiting_exit_home:'等待回零、静止与录制封存',verifying_postconditions:'核验实际后置条件',verifying_model_identity:'核验模型与IO身份',stopping_environment:'退出工作台资源',restoring_collection_web:'恢复原数采网页',waiting_collection_web:'核验原数采入口',stopping_current_control:'停止旧控制任务',waiting_control_stop:'等待停止与静止反馈',checking_collection_handoff:'核验数采交接',stopping_collection:'正常结束数采',waiting_collection_exit:'等待数采保存与退出',stopping_collection_web:'暂停数采网页',waiting_collection_web_exit:'核验数采进程退出',waiting_control_owner:'等待控制服务就绪',recovering_workbench_control:'接入并核验工作台控制',queued:'已排队',preflight:'核验当前条件',run:'执行已确认操作',verify:'核验实际结果',complete:'完成',recovery:'等待核验并结束遗留维护',start_workbench:'启动工作台后端',stop_workbench:'等待旧后端退出',start_model:'启动模型服务',restart_model:'重启模型服务',waiting_model_endpoint:'等待模型接口就绪',warming_model:'加载并预热模型',camera_service:'准备相机服务',start_cameras:'启动相机服务',restart_cameras:'重启相机服务',stop_cameras:'等待相机服务退出',waiting_camera_source:'等待相机真实帧',rebinding_camera_clients:'重新绑定相机消费者',resetting_camera_usb:'复位指定USB相机',restoring_warm_model_binding:'恢复原暖模型绑定',releasing_control:'释放设备控制',verifying_old_maintenance:'核验遗留维护'})[value]||value||'未知';
+export const phaseText=value=>({preparing_exit_home:'准备退出前回零审阅',returning_home:'执行平滑低速回零',waiting_exit_home:'等待回零、静止与录制封存',waiting_recording_seal:'等待录制封存与写入进程退出',verifying_postconditions:'核验实际后置条件',verifying_model_identity:'核验模型与IO身份',stopping_environment:'退出工作台资源',restoring_collection_web:'恢复原数采网页',waiting_collection_web:'核验原数采入口',stopping_current_control:'停止旧控制任务',waiting_control_stop:'等待停止与静止反馈',checking_collection_handoff:'核验数采交接',stopping_collection:'正常结束数采',waiting_collection_exit:'等待数采保存与退出',stopping_collection_web:'暂停数采网页',waiting_collection_web_exit:'核验数采进程退出',waiting_control_owner:'等待控制服务就绪',recovering_workbench_control:'接入并核验工作台控制',queued:'已排队',preflight:'核验当前条件',run:'执行已确认操作',verify:'核验实际结果',complete:'完成',recovery:'等待核验并结束遗留维护',start_workbench:'启动工作台后端',stop_workbench:'等待旧后端退出',start_model:'启动模型服务',restart_model:'重启模型服务',waiting_model_endpoint:'等待模型接口就绪',warming_model:'加载并预热模型',camera_service:'准备相机服务',start_cameras:'启动相机服务',restart_cameras:'重启相机服务',stop_cameras:'等待相机服务退出',waiting_camera_source:'等待相机真实帧',rebinding_camera_clients:'重新绑定相机消费者',resetting_camera_usb:'复位指定USB相机',restoring_warm_model_binding:'恢复原暖模型绑定',releasing_control:'释放设备控制',verifying_old_maintenance:'核验遗留维护'})[value]||value||'未知';
 export const jobText=job=>{
   if(!job)return '尚无操作记录';
   if(job.status==='succeeded')return job.verification?.ok===true?'已完成 · 后置核验通过':'返回成功状态，但后置核验尚未通过';
@@ -79,6 +79,8 @@ export function operationsGuidance(state,stale=false){
   const missing=(state?.dependencies||[]).find(row=>row.category==='onsite'&&['blocked','failed','waiting_onsite'].includes(row.status));
   if(stale||!state)return {title:'当前状态尚未核验',message:'等待管理服务返回新状态；历史结果不能代表服务现在仍然可用。'};
   if(state.active_job)return {title:(state.active_job.label||'维护操作')+' · '+jobText(state.active_job),message:phaseText(state.active_job.phase)+'。当前操作完成并通过核验后，再继续下一步。',current:true};
+  const closing=(state.recent_jobs||[]).some(job=>job.status==='succeeded'&&job.verification?.ok===true&&job.result?.manager_exit_pending===true&&job.request?.expected_target?.manager_instance===state.target?.manager_instance);
+  if(closing)return {title:'工作台资源已退出',message:'正在关闭管理入口。重新使用时请运行启动脚本。'};
   const exited=(state.recent_jobs||[]).some(job=>job?.request?.action==='exit_environment'&&job.status==='succeeded'&&job.verification?.ok===true);
   const resources=state.services||health.services||{};
   if(resources.control_owner?.lifecycle==='external'&&resources.workbench?.state==='stopped'
@@ -167,7 +169,7 @@ export function createOperations({document:doc,fetch:request,container,location=
   const health=make('div',undefined,'ops-health'),cards=make('div',undefined,'ops-groups');container.append(health);
   const current=make('section');current.id=prefix+'-current';current.setAttribute('aria-label','当前管理操作');container.append(current,cards);
   const groups=[
-    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['reclaim_control','exit_environment','connect_control','release_control','recover_control','verify_hold']},
+    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['reclaim_control','exit_workbench','exit_environment','connect_control','release_control','recover_control','verify_hold']},
     {title:'依赖与能力',description:'预置、可准备、现场条件分别核验；各业务依赖独立判断。',actions:['prepare_environment','prepare_collection','prepare_model']},
     {title:'服务与资源',description:'按实际影响管理已登记服务；计算角色可单独重启，其他健康服务保留。',actions:['start_cameras','stop_cameras','restart_cameras','rebind_cameras','restart_model','stop_model','restart_detector','restart_planner','restart_scene','restart_workbench','stop_workbench','reset_camera_head','reset_camera_left','reset_camera_right'],collapsed:true},
     {title:'诊断与回执',description:'当前事实与历史操作分开；进程退出、SDK 释放与物理保持分别核验。',actions:['status_check','recover_maintenance']}
@@ -196,13 +198,13 @@ export function createOperations({document:doc,fetch:request,container,location=
   if(environmentSelect&&(container.dataset.operationsStandalone==='true'||['fake','physical'].includes(query.get('environment'))))environmentSelect.value=queryEnvironment;
   let environment=environmentSelect?.value==='fake'?'fake':environmentSelect?.value==='physical'?'physical':queryEnvironment;
   let state=null,stale=true,posting=false,stopping=false,stopNotice='',review=null,lastJob=null,uncertain=null,destroyed=false,timer=null,generation=0,reading=null,sequence=0;
-  let pendingHandoff=null;
+  let pendingHandoff=null,exitVerified=false,entryClosed=false;
   const buttons=new Map(),reasons=new Map();
   const operation=name=>state?.operations?.[name];
   const reasonFor=row=>{const reason=row?.disabled_reason||row?.reason;return reason==='Another management operation is still in flight.'?'另一项维护操作尚未完成，请等待其核验结果。':reason||'当前前置条件不满足';};
   const compatible=()=>client.compatible(state);
   const versionReason=()=>'页面与管理器的部署版本不一致，请重新加载页面；诊断与安全停止仍可使用。';
-  const canUse=name=>!stale&&!posting&&!uncertain&&(name==='status_check'||compatible())&&operation(name)?.allowed===true&&!!state?.csrf&&state.target?.environment===environment;
+  const canUse=name=>!exitVerified&&!stale&&!posting&&!uncertain&&(name==='status_check'||compatible())&&operation(name)?.allowed===true&&!!state?.csrf&&state.target?.environment===environment;
   const reviewSignature=row=>({label:row?.label,impact:row?.impact,requires_support:row?.requires_support===true});
   const nextId=client.id;
   function endReview(){review=null;support.checked=false;if(dialog.open)dialog.close();}
@@ -212,7 +214,7 @@ export function createOperations({document:doc,fetch:request,container,location=
       button.disabled=!canUse(name);
       reasons.get(name).textContent=stale?'管理服务状态不可用，等待重新核验。':name!=='status_check'&&!compatible()?versionReason():posting?'本次请求正在提交，请勿重复操作。':uncertain?'有一次提交结果尚未核验，请先核对或重试同一提交。':operation(name)?.allowed===true?'当前条件允许':reasonFor(operation(name));
     }
-    refreshButton.disabled=posting;stopButton.disabled=stopping||!state?.csrf||!state?.target?.device_id;
+    refreshButton.disabled=posting;stopButton.disabled=exitVerified||stopping||!state?.csrf||!state?.target?.device_id;
     retryButton.hidden=!uncertain;
     retryButton.disabled=posting||stale||!same(uncertain?.expected_target,state?.target)||(uncertain?.action!=='status_check'&&!compatible());
     confirm.disabled=!review||posting||stale||!same(review?.target,state?.target)
@@ -383,8 +385,8 @@ export function createOperations({document:doc,fetch:request,container,location=
   }
   async function submit(body,kind='action'){
     if(posting||destroyed)return;
-    if(kind==='action'&&body.action==='exit_environment'){
-      pendingHandoff={requestId:body.request_id,environment,deviceId:state.target.device_id,
+    if(kind==='action'&&['exit_workbench','exit_environment'].includes(body.action)){
+      pendingHandoff={requestId:body.request_id,action:body.action,environment,deviceId:state.target.device_id,
         managerInstance:state.target.manager_instance,deployment:state.deployment.sha256};
     }
     posting=true;const epoch=generation;endReview();gates();submissionError.hidden=true;status.textContent='正在提交本次操作…';status.className='ops-status';
@@ -416,14 +418,16 @@ export function createOperations({document:doc,fetch:request,container,location=
     }
     const proof=job.verification||{};
     const shared=proof.consumer_detached===true&&proof.independent_services_preserved===true&&proof.shared_runtime_preserved===true;
-    const released=proof.environment_exited===true&&proof.sdk_release_verified===true&&proof.collection_web_ready===true;
+    const released=proof.environment_exited===true&&proof.sdk_release_verified===true&&(pendingHandoff.action==='exit_workbench'||proof.collection_web_ready===true);
     if(job.status!=='succeeded'||proof.ok!==true||!(shared||released))return;
-    const url=workspaceURL(job.result?.next_url);
+    const url=pendingHandoff.action==='exit_environment'?workspaceURL(job.result?.next_url):null;
+    exitVerified=job.result?.manager_exit_pending===true;
     pendingHandoff=null;
+    if(exitVerified){status.textContent='工作台资源已退出，正在关闭管理入口…';gates();}
     if(url)location?.assign?.(url);
   }
   async function refresh(){
-    if(destroyed)return;
+    if(destroyed||entryClosed)return;
     const epoch=generation;if(reading?.epoch===epoch)return reading.promise;
     if(timer!==null){unschedule(timer);timer=null;}
     const promise=(async()=>{
@@ -442,17 +446,18 @@ export function createOperations({document:doc,fetch:request,container,location=
         followVerifiedHandoff();
       }catch(error){
         if(epoch!==generation||destroyed)return;
-        stale=true;status.textContent='无法核验管理服务：'+String(error.message||error)+'。已有服务的运行或停止状态不能据此判断。';status.className='ops-status ops-error';render();
+        stale=true;entryClosed=exitVerified;status.textContent=entryClosed?'工作台入口已关闭。重新使用时请运行启动脚本。':'无法核验管理服务：'+String(error.message||error)+'。已有服务的运行或停止状态不能据此判断。';status.className=entryClosed?'ops-status':'ops-status ops-error';render();
+        if(entryClosed){guidanceTitle.textContent='工作台已退出';guidanceMessage.textContent='需要再次使用时，请重新运行启动脚本。';guidanceLink.hidden=true;}
       }finally{
         if(reading?.epoch===epoch)reading=null;
-        if(epoch===generation&&!destroyed&&pollMs>0)timer=schedule(()=>void refresh(),pollMs);
+        if(epoch===generation&&!destroyed&&!entryClosed&&pollMs>0)timer=schedule(()=>void refresh(),pollMs);
       }
     })();
     reading={epoch,promise};return promise;
   }
   function setEnvironment(value){
     const next=value==='fake'?'fake':'physical';if(next===environment)return;
-    environment=next;generation++;pendingHandoff=null;stopNotice='';state=null;stale=true;lastJob=null;uncertain=null;submissionError.hidden=true;endReview();status.textContent='环境已切换，正在重新核验目标…';render();void refresh();
+    environment=next;generation++;pendingHandoff=null;exitVerified=false;entryClosed=false;stopNotice='';state=null;stale=true;lastJob=null;uncertain=null;submissionError.hidden=true;endReview();status.textContent='环境已切换，正在重新核验目标…';render();void refresh();
   }
   const onEnvironment=()=>{
     const access=doc.workbenchEnvironmentAccess,next=environmentSelect.value;

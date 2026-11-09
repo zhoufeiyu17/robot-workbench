@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 409,
-  "updated_at": "2026-11-09T09:44:59.688343+00:00",
+  "revision": 411,
+  "updated_at": "2026-11-09T10:47:44.184389+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -34,7 +34,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     {
@@ -59,7 +59,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "a9bb70f152854b1ec3d2e5a1e541527b5f51691593d5be1c42b801a2fafb110d",
+      "fingerprint": "75afebc7eed103a811ae3d0ecee77029b5dd1a5952d3bdcca3ec94ea5b106047",
       "verified_fingerprint": null
     },
     {
@@ -107,7 +107,7 @@
         "sha256": "5787b98159b871dc8de79376cae1735c5d1ba08b72b50dcc0f2c3531cf83a9d9",
         "matches_file": true
       },
-      "fingerprint": "86e7fb32637901e9178d40053eeb8c401f2a33062c138f329ea99ae589d08072",
+      "fingerprint": "2b9854c6ea27e9e568ab4e9acb89be33adbfc668e8441c12b4e68cd5fb9a924e",
       "verified_fingerprint": "ae60d63f548388b52ec65e609ffba7898a4e41214be57db1932e3edadea41308"
     },
     {
@@ -138,7 +138,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "dda0623b1d163e390ebc3774a9a47c2b5038d5ad48703b4666cad3d9b626a460",
+      "fingerprint": "61b4445a556f01ff20ca2162e2b987cbeca74fef1809388f0251545c14ed16c0",
       "verified_fingerprint": null
     },
     {
@@ -163,7 +163,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "ae518236343c990d93e86b36fe81fa1ae36851f9aa82addca3280b8010c832a6",
+      "fingerprint": "89b421777bfe2dbc302631376126a3796b5c7a188a20dc24231e7dc04efa07b3",
       "verified_fingerprint": "847879c398691295376b01b8a4ae5bdc3f411b93f66231bff2fd33afa58aae72"
     },
     {
@@ -192,7 +192,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "c9618db3699caed24b83b69d477a3b8ba392cc4fe1e085d45d54f040b79fbf32",
+      "fingerprint": "a08fad8366074eafb8694d0e651558b5aa01890735c34215d1997b67e5c22c65",
       "verified_fingerprint": "2249f579e849f462d042a89ad564cbdbf14b962d117f0bfc74c44779840c92ac"
     },
     {
@@ -217,7 +217,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "667e70f49906f2199c839d1ae3332ddb21a035a5dabe066ab460f441fb730ed4",
+      "fingerprint": "22985793b175e9ea6a979ea86cc27d878b09d56d7419c301836cc77691560355",
       "verified_fingerprint": null
     },
     {
@@ -243,7 +243,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "69b13d7a6e2f0c2f9a48ae95539de6e6393e113906237703aa6e00766b8bc81e",
+      "fingerprint": "f7c0d01299391d9aaa63618cbefe1205f94f0b0eaa92adb3d1bf1dac743466c8",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     {
@@ -270,7 +270,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
     },
     {
@@ -296,7 +296,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "41e5a6e5c2cdb36428879d3ad67b3e2aeb2d73beba2cdb3ec7ee6914b2c56227",
+      "fingerprint": "74bc1855d66fcb7fae4c8f659a02806e493dd75b2ef51453ca443d11f6dffa73",
       "verified_fingerprint": "e567a0bd56bd667d5bd25e0d563375d65b6a420f44aef04d732bfbd5f0284aa0"
     },
     {
@@ -323,7 +323,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
     },
     {
@@ -350,7 +350,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "6d1adc996e6de056b7c52e30e0c2f96807393dfda82947df6671dfa2333954ad",
+      "fingerprint": "cf252df01e8294094102a36ca4d1622a708f2ca275e8b68827faedf8ae198e39",
       "verified_fingerprint": null
     },
     {
@@ -375,7 +375,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "363c4c82ede8a1fa3f03fee8c180cdeceb0af97005308d3b4a6207949edd5099",
+      "fingerprint": "6ac5ccdf415db1d6bdfdadffbba9bba88c4507a16af838aa4be710d95bfceea6",
       "verified_fingerprint": null
     },
     {
@@ -399,7 +399,7 @@
         "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
         "matches_file": true
       },
-      "fingerprint": "af62d852cdffffdc4639c73c91011e7dd272b209516ca3cebc4d07be3657773c",
+      "fingerprint": "f10aa684951dc75d2e053d5eeaf98b1f12fa9cd27808f5e9f89abff884ff5d3c",
       "verified_fingerprint": null
     },
     {
@@ -425,7 +425,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "b165268b922b5b4d01a98acf4a253584dc17f7b32dd1f5136dcdff6299548754",
+      "fingerprint": "a0a6cf572682df2866536ceb02ea03ec892fcbc3cf0766f02c1b18a3b7c7b581",
       "verified_fingerprint": "f01d7e9518aea090e8bba53b760230f407b050a892172a134ce6e59b8c3f6113"
     },
     {
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "c3fd69c010391a30a50732384dfdcb7b1d5dc17d60f40e17845728bd0d03791f",
+      "fingerprint": "6bd25eb6c886b87c19532ca087993c907cf486f6c810152351167bd5afe52974",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -463,10 +463,10 @@
       "name": "运维事务与维护流程",
       "phase": "P2",
       "state": "implemented",
-      "note": "已发布取流关闭后解锁及HOLD参数更新；176项组合/78项录制/3项定向与Node通过，ARX13三轮0模型请求HOLD完整录制，解锁1.49–1.51秒；浏览器自动化关闭，接口与资源摘要核验。",
-      "next": "实体双踩/trick效果与用户在线窗口后的SO/Torch对照；正式长时及启动控制缺口诊断",
+      "note": "Public exit_workbench owns ordered stop/home/release/seal/service exit. exit_environment only composes collector Web restoration. Verified current exit result closes the manager normally after delivery; historic or unknown jobs cannot self-close. CPU process/HTTP and DOM checks passed.",
+      "next": "Publish manager/UI independently, then validate explicit full exit with operator; current control session must remain intact.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-08T03:55:41.774218+00:00",
+      "updated_at": "2026-11-09T10:47:43.386657+00:00",
       "files": [
         "robot_workbench/operations.py",
         "robot_workbench/management.py",
@@ -474,11 +474,11 @@
         "robot_workbench/sdk_quiesce.py"
       ],
       "evidence": {
-        "path": ".evidence/infer-pedal2-start-20261107-v1/recording-lifecycle-final-acceptance.json",
-        "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
+        "path": "tests/test_environment_exit.py",
+        "sha256": "1c3cdbf026fc08a1ad5101b47cd9312cdc2491bf73aaccde37731961ef81f9ea",
         "matches_file": true
       },
-      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
+      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "688b47a6f94269704b397b20ff6d5113dde8f7f58632373dc2fe319529a698eb",
+      "fingerprint": "ea422d1a671cfc68d6bd6669ebbfb488760304820f5fa3b7c736a29aa756bdf4",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -545,7 +545,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "68a77b2f08753072819098bcdf8da3b53cf88a935a78eaa0c9605129d592bb35",
+      "fingerprint": "7fe214167b4ff461d9354720a76c2231486bc8b6731f7e8c032ce6c764ee10b9",
       "verified_fingerprint": null
     },
     {
@@ -620,7 +620,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/joint_bounds.py": {
@@ -648,7 +648,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "4316f525a2cdf93dbfe7572b84001bface3b61912867c5aa1b976b28638c5050"
     },
     "robot_workbench/state_contract.py": {
@@ -676,7 +676,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/runtime.py": {
@@ -718,7 +718,7 @@
           }
         ]
       },
-      "fingerprint": "a9bb70f152854b1ec3d2e5a1e541527b5f51691593d5be1c42b801a2fafb110d",
+      "fingerprint": "75afebc7eed103a811ae3d0ecee77029b5dd1a5952d3bdcca3ec94ea5b106047",
       "verified_fingerprint": "a87549b04977f6c2785e4e994e1227d7d63a8847f93b9aa8754b8ff4797cca95"
     },
     "robot_workbench/inference_owner.py": {
@@ -755,7 +755,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": null
     },
     "robot_workbench/target_interpreter.py": {
@@ -786,7 +786,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/arx_output_guard.py": {
@@ -814,7 +814,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "robot_workbench/can_feedback_filter.py": {
       "state": "baseline",
@@ -967,7 +967,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/observation_window.py": {
@@ -1018,7 +1018,7 @@
           }
         ]
       },
-      "fingerprint": "8289356243e04c9001220727664397ea76d436e00843eb7022d102ca079a88e3",
+      "fingerprint": "1702a652828c33a941696c5ae788742b3c8d64df26e621732ed8866ef6c23147",
       "verified_fingerprint": "a272fae85054cab8833cac549ecad95149958745c6c86dcd490580c4d7abe647"
     },
     "robot_workbench/camera_owner.py": {
@@ -1189,7 +1189,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/inference_evidence.py": {
@@ -1217,7 +1217,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_transport.py": {
@@ -1254,7 +1254,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/model_session.py": {
@@ -1289,7 +1289,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_model.py": {
@@ -1318,7 +1318,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_catalog.py": {
@@ -1348,7 +1348,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/mixed366.py": {
@@ -1385,7 +1385,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/mixed366_runtime.py": {
@@ -1494,7 +1494,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/motion_reference.py": {
@@ -1523,7 +1523,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/control_plan.py": {
@@ -1550,7 +1550,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "robot_workbench/control_reference.py": {
       "state": "verified",
@@ -1581,7 +1581,7 @@
           }
         ]
       },
-      "fingerprint": "f3d1702497a6ce18dbda405a9d5e9ee7e047b1b4e9daad5f4d3089f15b594081",
+      "fingerprint": "c0fe4de0bcd71136fd935d49bc73ebb72f955c15fd696d11d798f5ad65b4a747",
       "verified_fingerprint": "b85bc982e594d747d855a01c2efbea8f5772df2b4c69ef039123fb3d7ed6b2fb"
     },
     "robot_workbench/inference_reference.py": {
@@ -1660,7 +1660,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "827b8da82baa9f56734cc0f2e66f4f458c84ae124bc1b380946021d7bd283ef7"
     },
     "robot_workbench/control_owner.py": {
@@ -1695,7 +1695,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "6efdde405c70d326e96c546cb6c8a2094e8be18d1b35e75ce24867fdf0534fe8"
     },
     "robot_workbench/precision_study.py": {
@@ -1728,7 +1728,7 @@
           }
         ]
       },
-      "fingerprint": "2d748c404652d05de173ebe594e284698be74f267abcb46af8d031e8d68c1295",
+      "fingerprint": "2a8ee62c3278b99050b82c9343209999edc05f414643d6bf7621bd584d19706e",
       "verified_fingerprint": "ade271d9ae25b14939a780fea3af3f873ef9e48ef7f2caf5cf79a9381c4dfee5"
     },
     "robot_workbench/gravity_identification.py": {
@@ -1773,7 +1773,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "robot_workbench/physical_cup_return.py": {
       "state": "baseline",
@@ -1799,7 +1799,7 @@
           }
         ]
       },
-      "fingerprint": "3537f655e308fb06981bcf886539325982b03491cf65948a62d5925d9059a27d"
+      "fingerprint": "02447f97703c1b2aac456c3ad9504412875a6788279ebe5ca22a78f2fc24512d"
     },
     "robot_workbench/cup_return.py": {
       "state": "baseline",
@@ -1825,7 +1825,7 @@
           }
         ]
       },
-      "fingerprint": "3537f655e308fb06981bcf886539325982b03491cf65948a62d5925d9059a27d"
+      "fingerprint": "02447f97703c1b2aac456c3ad9504412875a6788279ebe5ca22a78f2fc24512d"
     },
     "robot_workbench/manual_self_collision.py": {
       "state": "baseline",
@@ -1874,7 +1874,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "734a8d393fe2f3d57f87af729f59de9bc57d62577d71a5576fd222fb7a978297"
     },
     "robot_workbench/release_trace.py": {
@@ -1936,7 +1936,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/recording_quality.py": {
@@ -1965,7 +1965,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_history.py": {
@@ -1993,7 +1993,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/collection_history.py": {
@@ -2024,7 +2024,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/lerobot_export.py": {
@@ -2048,7 +2048,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "robot_workbench/http_media.py": {
       "state": "baseline",
@@ -2110,7 +2110,7 @@
           }
         ]
       },
-      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
+      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
       "verified_fingerprint": "32e271cb3d9a186bf7e9fd6492a5bf35345d74f13b3e1281523e36806171595e"
     },
     "robot_workbench/workflows.py": {
@@ -2135,7 +2135,7 @@
           }
         ]
       },
-      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc"
+      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799"
     },
     "robot_workbench/bridges.py": {
       "state": "active",
@@ -2162,7 +2162,7 @@
           }
         ]
       },
-      "fingerprint": "a1f15920f6446e9a491670c7c97a4de8b3e05709a53875fad331f40a06ea00a5",
+      "fingerprint": "ecc881b43491b0f753560609f42484dcb9ddf0febcb87daa317b1e071053d0d9",
       "verified_fingerprint": null
     },
     "robot_workbench/resident_collection.py": {
@@ -2195,7 +2195,7 @@
           }
         ]
       },
-      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
+      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
       "verified_fingerprint": "680947a9814b89ebf4c094bacd1065b3b0d439d4ebeed063328acb2415d36107"
     },
     "robot_workbench/collection_setup.py": {
@@ -2229,7 +2229,7 @@
           }
         ]
       },
-      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
+      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
       "verified_fingerprint": null
     },
     "robot_workbench/calibration_profile.py": {
@@ -2319,7 +2319,7 @@
           }
         ]
       },
-      "fingerprint": "96aba43d73b56022d325a384ded0fefc5cf0d5455ef7d860b4729182ba20601b"
+      "fingerprint": "6f1447f03190b6adb3d22fa3e09ad4d688e6fff64a644bda5f57042846784f5b"
     },
     "robot_workbench/target_display_gateway.py": {
       "state": "baseline",
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd"
+      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2515,7 +2515,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "c04a0490036591f2b8be1e95bf5780bab47c7175fa771adddad6d1ff6f424bfd",
+        "sha256": "670e262f09e0a9c553d6501d578f358aaaa8246a7c72b5fc84fe84fc505443a7",
         "imports": [
           "robot_workbench/execution_settings.py",
           "robot_workbench/recording_process.py"
@@ -2528,7 +2528,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/management.py": {
@@ -2544,7 +2544,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "2c55b3502940231280e71fe7ade3aad330d23070df6eb4089fd5adc93d00a8f9",
+        "sha256": "d0edbe321420940b0f880e3b69dbbc7333eba7f87848b3103ac136362be9822e",
         "imports": [
           "robot_workbench/control_alerts.py",
           "robot_workbench/control_owner.py",
@@ -2572,7 +2572,7 @@
           }
         ]
       },
-      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
+      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
       "verified_fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
     },
     "robot_workbench/maintenance.py": {
@@ -2601,7 +2601,7 @@
           }
         ]
       },
-      "fingerprint": "09e3ce24bddac726c867937154097504e0a88ef18eca506529629bac857c58f5",
+      "fingerprint": "4488b903e5fb55fc399fbab2e56d9ebb111c33d2878322d5969aab38854c5588",
       "verified_fingerprint": "43708c7e6018674851272c786b388a72c49c8c0ecf831258a4f2c2fcdd0a2c8e"
     },
     "robot_workbench/sdk_quiesce.py": {
@@ -2626,7 +2626,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "robot_workbench/managed_services.py": {
       "state": "baseline",
@@ -2699,7 +2699,7 @@
           }
         ]
       },
-      "fingerprint": "5fcba4a93e405953a0a6db705eda931c9222b7fa350fd6431358e1833161107d",
+      "fingerprint": "6306beb452987b2e8877f0ef3e9cd14e99baffdd541fe6f4fd35f8d04a2bea36",
       "verified_fingerprint": null
     },
     "robot_workbench/machine_profile.py": {
@@ -2772,7 +2772,7 @@
           }
         ]
       },
-      "fingerprint": "35028772844edb377e2d4a03a017b2afff776154acbc0dd9f0c686b9e2b39e17"
+      "fingerprint": "562d497524aec227f2c411bb7146066b3bda39d091674cfdc0270ea15fcc0dca"
     },
     "robot_workbench/sdk_process.py": {
       "state": "implemented",
@@ -2804,7 +2804,7 @@
           }
         ]
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": null
     },
     "robot_workbench/physx.py": {
@@ -2927,7 +2927,7 @@
           }
         ]
       },
-      "fingerprint": "04faf6cfc6acd016ac7b1209d441a54a22252ae2aa55f27b7912bbf41d828092",
+      "fingerprint": "ef3231678070ad53cb5e08330956e08662c15baeef92296fe65dd95711152978",
       "verified_fingerprint": "f24303a29304f1e4f5e430c4d84a53ff76eaeb3401b9e72c1c5b5a1759627f1b"
     },
     "calibration/infra/arx_env/joint_head_real_motion.py": {
@@ -2958,7 +2958,7 @@
           }
         ]
       },
-      "fingerprint": "15a89500ce880ee7fde01d7604037cf0cbd84452f7fd52511aec4109c978518e",
+      "fingerprint": "7d9d6e2e95c568cba8529e3a157847f85e53f5c092c3c4ca65c70f66762c5916",
       "verified_fingerprint": "ffae173ae887ed234450c6942fc560fc83b082d3259ab587f33977d4a13aa833"
     },
     "calibration/infra/arx_env/joint_head_jaw_mapping.py": {
@@ -2982,7 +2982,7 @@
           }
         ]
       },
-      "fingerprint": "068373f07b334ff063e6302d619b8c4171dbf78d98ee4a9db85167fe4770b5ce"
+      "fingerprint": "5fdd7f6348b2cd0c7c04f31a7ab6e513fb5da6186202944e2422b267175d30ce"
     },
     "calibration/infra/arx_env/joint_head_workbench_hardware.py": {
       "state": "baseline",
@@ -3028,7 +3028,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "scripts/start_registered_workbench.py": {
       "state": "verified",
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "82e69bfad4be88005871369edb8a83c89ba6db0439c21be57a8caff2d03cf96f",
+      "fingerprint": "e194beb607ff2e5900662356f48c67f8fb3741ae6769ab77761dfbf2aa35fa72",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3092,7 +3092,7 @@
           }
         ]
       },
-      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
+      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3118,7 +3118,7 @@
           }
         ]
       },
-      "fingerprint": "f690b9b765a27ad871869b428132050875dc4be572813e76cd37bbffdb0cf028"
+      "fingerprint": "0f6db8c22d150d3c6cdcb11ec368cc369e50b669b67b5be1649361a48cf49295"
     },
     "scripts/serve_mixed366_model.py": {
       "state": "baseline",
@@ -3137,7 +3137,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "270678d7cc7938945caed0eb784c8ebc3816bde8bd42f7138dfd4f6404cb7634"
+      "fingerprint": "34814a9ff4763a5bde28621a314f9e71c8bec5f7f0c5fd066edea0e5fd7ec31e"
     },
     "scripts/serve_base566_model.py": {
       "state": "baseline",
@@ -3154,7 +3154,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "46d1f4e8864cc5e856795897c6c7d4f2310b9989bdf2cf0f36a85b770aedb455"
+      "fingerprint": "19d633363500404e10019ae17823ef73ef154feab267ad33957ff79833bb3541"
     },
     "scripts/serve_prometheus_rgb.py": {
       "state": "baseline",
@@ -3171,7 +3171,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "3a506af93aa3adb38acc13cc7a1372679fa03361e53cfc70927e834be36d28f6"
+      "fingerprint": "b37cb3bb90a700413eb8d6b62358ae0ac883ae7757b05b355d0a041f7d01def3"
     },
     "scripts/development_map.py": {
       "state": "verified",
@@ -3367,7 +3367,7 @@
           }
         ]
       },
-      "fingerprint": "69b13d7a6e2f0c2f9a48ae95539de6e6393e113906237703aa6e00766b8bc81e",
+      "fingerprint": "f7c0d01299391d9aaa63618cbefe1205f94f0b0eaa92adb3d1bf1dac743466c8",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     "scripts/serve_sdk_control.py": {
@@ -3393,7 +3393,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "1a233acc46e5ec70bfb2c741196c6df00cbff4e734aa5282289a462e197df80e",
+      "fingerprint": "76dbabf985429169f518d6bb570b4043dcaa7eb191c100e2b2569b4d7184ab8e",
       "verified_fingerprint": "8d6e33336f6a6e884f2eb9a0192dc12c5e695f523a797e18de580b16eed460bf"
     },
     "rule_based_workbench/rgbd_segments.py": {
@@ -3459,7 +3459,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "rule_based_workbench/real_control.py": {
@@ -3488,7 +3488,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "scripts/serve_recording.py": {
@@ -3510,7 +3510,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "6d1adc996e6de056b7c52e30e0c2f96807393dfda82947df6671dfa2333954ad",
+      "fingerprint": "cf252df01e8294094102a36ca4d1622a708f2ca275e8b68827faedf8ae198e39",
       "verified_fingerprint": "9755babac4fce7ad8c9b3cbbd2bedcc2d997e8da85895190c4e6cea9bb88c14c"
     },
     "robot_workbench/ros_data.py": {
@@ -3582,7 +3582,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "6155c49002d49a9ac31bd23eabad6b288dd880a31c62362329ed9689ad07ecb9"
     },
     "robot_workbench/ros_recording.py": {
@@ -3611,7 +3611,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
       "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/ros_driver.py": {
@@ -3662,7 +3662,7 @@
           }
         ]
       },
-      "fingerprint": "0bd167be9d6096d35657af10ea2213ecca0d47b140253fe0b455d7874049a085",
+      "fingerprint": "06a571fb14d8524bc8c4c9b5a72f4fd9269c1c72fcc59780bec6d52321a42b26",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3688,7 +3688,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "1bef1bd419447e6a46b6de326803c09c6e814bbf02ea80266b9b352b396e7543",
+      "fingerprint": "3e11f6ae591eaf0d42dd8eb5699d64a51118fb045d08971fed165536e1f2cb4e",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3730,7 +3730,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "99dd269add8cba28c6545882b50e486760cf64340c6b780595e7caf44b5e41b7",
+      "fingerprint": "392a84af81ec20366b0707fa7660487064cd5092075f3065821991bc79c728d7",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3754,7 +3754,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "ae518236343c990d93e86b36fe81fa1ae36851f9aa82addca3280b8010c832a6",
+      "fingerprint": "89b421777bfe2dbc302631376126a3796b5c7a188a20dc24231e7dc04efa07b3",
       "updated_at": "2026-11-06T15:18:45.407033+00:00",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
@@ -3857,7 +3857,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
+      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
     },
     "scripts/serve_workbench_manager.py": {
       "state": "implemented",
@@ -3879,7 +3879,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "ddee5256a8390b66148d763e3605493096afc2b19c91aac1724fec250ae3b37f"
+      "fingerprint": "e3ef7c3529124d5b3778a86bad24c361fe7a6e12163ff17331f74a2810a6d07c"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,16 +3937,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T04:25:44.923752+00:00",
-      "kind": "domain",
-      "ids": [
-        "lifecycle-operation",
-        "lifecycle-services"
-      ],
-      "state": "implemented",
-      "note": "本次批准的异常退役和当前位置正常quiesce/retire/disarm/重接分别留证；当前服务/SDK健康静止供用户试用。正式管理代理部署和跨平台交回尚未验。"
-    },
     {
       "at": "2026-11-07T04:25:45.880506+00:00",
       "kind": "file",
@@ -4862,9 +4852,18 @@
       ],
       "state": "verified",
       "note": "边界事件插入后先按源时间排序再校验首点；录制只按声明的最终序号判定缺口。65项参考/模式和23项录制检查通过，真实过期与范围内缺口仍拒绝。"
+    },
+    {
+      "at": "2026-11-09T10:47:43.386819+00:00",
+      "kind": "domain",
+      "ids": [
+        "lifecycle-operation"
+      ],
+      "state": "implemented",
+      "note": "Public exit_workbench owns ordered stop/home/release/seal/service exit. exit_environment only composes collector Web restoration. Verified current exit result closes the manager normally after delivery; historic or unknown jobs cannot self-close. CPU process/HTTP and DOM checks passed."
     }
   ],
   "unmapped_files": [],
-  "source_head": "a2eed5e20335c30236d30623c232fccde0781a7f",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.29372f42b13c"
+  "source_head": "ebe0b9ceefb7bb744d0c11db4dbd4d13fe7a57bb",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.8cfec856c270"
 }

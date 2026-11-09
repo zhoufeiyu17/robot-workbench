@@ -49,6 +49,19 @@ function harness({environment='physical',standalone=false,query='',crypto={rando
   return {api,container,select,entry,back,nodes,requests,reply,button,last,doc,navigations};
 }
 
+for(const complete of [true,false]){
+  const h=harness(),initial=fixture();
+  initial.operations.exit_workbench={label:'退出工作台',impact:'正常回零释放后关闭服务',allowed:true};
+  h.reply(0,initial);await settle();h.button('exit_workbench').fire('click');h.api.elements.confirm.fire('click');
+  const posted=JSON.parse(h.requests[h.last()].options.body);
+  h.reply(h.last(),{job_id:'exit-job',status:'queued',request:posted});await settle();
+  const finished=structuredClone(initial);finished.target.backend_instance=null;
+  finished.recent_jobs=[{job_id:'exit-job',request:posted,status:complete?'succeeded':'unknown',verification:{ok:complete,environment_exited:complete,sdk_release_verified:complete},result:{manager_exit_pending:complete}}];
+  h.reply(h.last(),finished);await settle();assert.equal(h.navigations.length,0);
+  h.api.refresh();h.requests[h.last()].reject(Error('closed'));await settle();
+  assert.match(h.container.textContent,complete?/入口已关闭/:/无法核验管理服务/);h.api.destroy();
+}
+
 for(const mode of ['verified','lan-http','unknown','manager-changed','runtime-changed','formal','formal-unreleased']){
   const verified=mode==='verified'||mode==='lan-http'||mode==='formal';
   const destination=mode.startsWith('formal')?'http://10.17.32.5:8080/':'http://10.17.32.5:18080/';

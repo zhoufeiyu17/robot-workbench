@@ -13,7 +13,7 @@ class UserWorkbenchHandoffTests(unittest.TestCase):
     def test_platform_start_is_after_consumer_exit_and_before_navigation(self):
         manager=exit_fixture.EnvironmentExitTest().manager()
         manager.config.update(control_lifecycle='external',model_lifecycle='external',
-            control_consumer_id='C',consumer_handoff_url='http://10.17.32.5:18080/',
+            control_consumer_id='C',consumer_handoff_url='http://collector.invalid:18080/',
             consumer_handoff_web={'registered':'fixture'})
         manager.health_cache.update(control_owner_reachable=True)
         manager.health_cache['runtime'].update(control_owner={'consumer_holder':None},feedback_healthy=True)
@@ -22,7 +22,7 @@ class UserWorkbenchHandoffTests(unittest.TestCase):
             self.assertEqual(manager.calls,['stop_workbench'])
             return dict(ready=True,collection_started=False)
         with patch('scripts.workbench_deploy.restore_collection_web',side_effect=ready)as start:
-            result=manager.consumer_lifecycle('exit_environment',{'request_id':'platform'},Mock())
+            result=manager.exit_environment({'request_id':'platform'},Mock())
             self.assertTrue(result['collection_web']['ready'])
             self.assertEqual(result['next_url'],manager.config['consumer_handoff_url'])
             start.assert_called_once()
@@ -41,12 +41,12 @@ class UserWorkbenchHandoffTests(unittest.TestCase):
     def test_verified_consumer_exit_returns_only_the_configured_destination(self):
         manager = exit_fixture.EnvironmentExitTest().manager()
         manager.config.update(control_lifecycle='external', control_consumer_id='workbench-C',
-                              consumer_handoff_url='http://10.17.32.5:18080/', model_lifecycle='external')
+                              consumer_handoff_url='http://collector.invalid:18080/', model_lifecycle='external')
         manager.health_cache.update(control_owner_reachable=True)
         manager.health_cache['runtime']['control_owner'] = dict(consumer_holder=None)
         manager.health_cache['runtime']['feedback_healthy'] = True
         manager.target = Mock(return_value={'runtime_nonce': 'cpu'})
-        result = manager.consumer_lifecycle('exit_environment', {'request_id': 'switch'}, Mock())
+        result = manager.exit_environment( {'request_id': 'switch'}, Mock())
         self.assertEqual(result['next_url'], manager.config['consumer_handoff_url'])
         self.assertEqual(manager.calls, ['stop_workbench'])
         manager.home_for_exit.assert_not_called()
@@ -56,9 +56,9 @@ class UserWorkbenchHandoffTests(unittest.TestCase):
         job = dict(job_id='switch-job', request={'action': 'exit_environment', 'request_id': 'switch'},
                    status='succeeded', verification={'ok': True, 'consumer_detached': True,
                    'independent_services_preserved': True, 'private': 'not-public'},
-                   result={'next_url': 'http://10.17.32.5:18080/', 'private': 'not-public'})
+                   result={'next_url': 'http://collector.invalid:18080/', 'manager_exit_pending': True, 'private': 'not-public'})
         summary = job_summary(job)
-        self.assertEqual(summary['result'], {'next_url': 'http://10.17.32.5:18080/'})
+        self.assertEqual(summary['result'], {'next_url': 'http://collector.invalid:18080/', 'manager_exit_pending': True})
         self.assertEqual(summary['verification'], dict(ok=True, consumer_detached=True, independent_services_preserved=True))
         self.assertNotIn('not-public', str(summary))
         for result in (None, 'completed', 1, ['completed']):

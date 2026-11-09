@@ -16,14 +16,14 @@ const fixture=(environment='physical',manager='manager-one')=>({schema:'robot_wo
   capabilities:{observe:{ready:true},control:{ready:false,reason:'未接入'},inference:{ready:false,reason:'未准备模型'}},
   profiles:['physical','fake'].map(id=>({id,device_id:'device-'+id,label:id+' registered',environment:id,configured:true,robot_address:id==='physical'?'10.1.2.3':undefined,
     compute_address:id==='fake'?'registered.dsw.invalid':undefined,manager_url:id==='physical'?'http://physical.invalid/':'http://fake.invalid/'})),
-  operations:{connect_control:{allowed:true,label:'接入控制',impact:'准备登记依赖并连接设备，不开始业务动作',requires_support:environment==='physical'},recover_control:{allowed:true,label:'中断恢复',impact:'恢复新鲜会话，不续跑旧轨迹',requires_support:environment==='physical'},prepare_model:{allowed:true,label:'准备所选模型',impact:'不连接控制'},prepare_collection:{allowed:true,label:'准备数采',impact:'不连接控制'}},active_job:null,recent_jobs:[]});
+  operations:{exit_workbench:{allowed:true,label:'退出工作台',impact:'正常回零、释放并退出自有服务'},connect_control:{allowed:true,label:'接入控制',impact:'准备登记依赖并连接设备，不开始业务动作',requires_support:environment==='physical'},recover_control:{allowed:true,label:'中断恢复',impact:'恢复新鲜会话，不续跑旧轨迹',requires_support:environment==='physical'},prepare_model:{allowed:true,label:'准备所选模型',impact:'不连接控制'},prepare_collection:{allowed:true,label:'准备数采',impact:'不连接控制'}},active_job:null,recent_jobs:[]});
 function harness(environment='physical'){
   const nodes=[],main=new Element('main'),select=new Element('select'),entry=new Element('a');select.value=environment;entry.dataset.business='inference';
-  const connect=new Element('button'),recover=new Element('button'),summary=new Element('p');
-  const doc={body:main,getElementById:id=>({environment:select,'operations-link':entry,'environment-connect':connect,'environment-recover':recover,'environment-operation-status':summary})[id]||nodes.find(n=>n.id===id),querySelector:()=>main,createElement:tag=>{const n=new Element(tag);nodes.push(n);return n;}};
+  const connect=new Element('button'),recover=new Element('button'),exit=new Element('button'),summary=new Element('p');
+  const doc={body:main,getElementById:id=>({environment:select,'operations-link':entry,'environment-connect':connect,'environment-recover':recover,'environment-exit':exit,'environment-operation-status':summary})[id]||nodes.find(n=>n.id===id),querySelector:()=>main,createElement:tag=>{const n=new Element(tag);nodes.push(n);return n;}};
   const requests=[],navigated=[];let sequence=0;
   const api=mountPhysicalEndpoint({document:doc,fetch:(url,options={})=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject})),location:{href:'http://physical.invalid/?business=inference',search:'?business=inference',assign:url=>navigated.push(url)},crypto:{randomUUID:()=>`request-${++sequence}`},deploymentVersion:'a'.repeat(64),pollMs:0});
-  return {api,requests,navigated,connect,recover,summary,doc,reply(index,value,ok=true){requests[index].resolve({ok,status:ok?200:409,json:async()=>value});}};
+  return {api,requests,navigated,connect,recover,exit,summary,doc,reply(index,value,ok=true){requests[index].resolve({ok,status:ok?200:409,json:async()=>value});}};
 }
 for(const environment of ['physical','fake']){
   const h=harness(environment);assert.equal(h.requests[0].url,'/api/environment?environment='+environment+'&view=summary');h.reply(0,fixture(environment));await settle();
@@ -124,6 +124,19 @@ for(const workbench of [{state:'running',running:true},{state:'unknown',running:
   await h.api.navigateEnvironment('physical');assert.equal(h.requests.length,1);assert.equal(h.navigated.length,0);
   h.api.elements.profile.value='physical';h.api.elements.profile.fire('change');h.api.elements.check.fire('click');await settle();
   assert.equal(h.requests.length,1,'both profile resolution and dropdown navigation reject live-unreachable or unconfirmed shutdown');h.api.destroy();
+}
+for(const completed of [true,false]){
+  const h=harness();h.reply(0,fixture());await settle();h.exit.fire('click');
+  assert.equal(h.api.elements.dialog.open,true);assert.equal(h.requests.length,1);
+  h.api.elements.confirm.fire('click');const body=JSON.parse(h.requests[1].options.body);
+  assert.equal(body.action,'exit_workbench');assert.equal(body.arms_supported,false);
+  h.requests[1].reject(Error('reply lost'));await settle();
+  const final=fixture();final.target.backend_instance=null;final.target.runtime_nonce=null;
+  final.recent_jobs=[{request:body,status:completed?'succeeded':'unknown',phase:'complete',verification:{ok:completed},result:{manager_exit_pending:completed}}];
+  h.reply(2,final);await settle();assert.equal(h.api.exited,completed);assert.equal(h.navigated.length,0);
+  h.api.refresh();h.requests[3].reject(Error('connection refused'));await settle();
+  assert.match(h.summary.textContent,completed?/入口已关闭/:/状态未知/);
+  assert.equal(h.api.exitState,completed?'closed':null);h.api.destroy();
 }
 assert(!source.includes('/api/physical-endpoint'),'new UI has no second endpoint binding writer');
 assert(!source.includes('18868'),'no guessed port default');

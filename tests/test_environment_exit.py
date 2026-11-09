@@ -144,7 +144,7 @@ class EnvironmentExitTest(unittest.TestCase):
 
     def manager(self,connected=True):
         m=object.__new__(WorkbenchManager);m.environment='physical';m.port=18878;m.stop_generation=0
-        m.config=dict(device_id='arx13',control_owner_descriptor='/cpu/owner.json',collection_handoff=dict(unit='prometheus-arx13-web.service',files={'/cpu/unit':'a'},status_url='http://127.0.0.1:18980/api/status'))
+        m.config=dict(device_id='cpu-device',control_owner_descriptor='/cpu/owner.json',collection_handoff=dict(unit='collection-web.service',files={'/cpu/unit':'a'},status_url='http://127.0.0.1:18980/api/status'))
         m.timeouts=dict(backend=.1,state=.1,operation=.2)
         m.health_cache={'runtime':dict(connected=connected,runtime_nonce='cpu'if connected else None),'busy':False}
         m.target=Mock(return_value=dict(manager_instance='manager',backend_instance='backend',deployment_sha256='a',services={}))
@@ -162,13 +162,13 @@ class EnvironmentExitTest(unittest.TestCase):
         m.service_action=Mock(side_effect=stop)
         return m
 
-    def run_exit(self,m,progress=lambda *a,**k:None):
+    def run_exit(self,m,progress=lambda *a,**k:None,action='exit_environment'):
         def restored(*a,**k):
             self.assertTrue(all(x['state']=='stopped'for x in m.rows.values()))
             m.calls.append('restore_collection_web');return dict(ready=True,collection_started=False)
         with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),patch.object(workbench_deploy,'restore_collection_web',side_effect=restored),patch('robot_workbench.control_owner.ControlChannel')as channel:
             channel.return_value.call.return_value=dict(connected=False,runtime_nonce=None)
-            return m.exit_environment(dict(request_id='exit-test',expected_target=m.target(),arms_supported=False),progress)
+            return getattr(m,action)(dict(request_id='exit-test',expected_target=m.target(),arms_supported=False),progress)
 
     def test_exit_requires_home_then_release_and_all_processes_before_web(self):
         m=self.manager();result=self.run_exit(m)
@@ -177,6 +177,36 @@ class EnvironmentExitTest(unittest.TestCase):
         self.assertTrue(result['environment_exited']);self.assertFalse(result['collection_started'])
         self.assertEqual(result['release_basis'],'reviewed_normal_home_completed')
         self.assertTrue(WorkbenchManager.release_verified(result['release_receipt']))
+
+    def test_standalone_exit_has_no_collection_dependency_or_start(self):
+        m=self.manager();del m.config['collection_handoff']
+        result=self.run_exit(m,action='exit_workbench')
+        self.assertEqual(result['action'],'exit_workbench')
+        self.assertTrue(result['environment_exited'])
+        self.assertNotIn('restore_collection_web',m.calls)
+        self.assertNotIn('next_url',result)
+        self.assertNotIn('collection_web',result)
+        m.refresh=Mock(return_value={'services':m.rows})
+        proof=WorkbenchManager.verify(m,result)
+        self.assertTrue(proof['ok']);self.assertFalse(proof['collection_started_by_operation'])
+
+    def test_exit_waits_for_writer_then_stops_recorder_and_pedal(self):
+        for ready in (True,False):
+            with self.subTest(ready=ready):
+                m=self.manager();m.timeouts['operation']=.01
+                for name in ('recording','pedal'):
+                    m.rows[name]=dict(state='running',running=True)
+                    m.services[name]=SimpleNamespace(snapshot=lambda name=name:deepcopy(m.rows[name]))
+                with patch.dict('os.environ',WORKBENCH_RECORDING_SERVICE='/cpu/recorder.json'),\
+                        patch('robot_workbench.recording_process.recording_call',side_effect=[dict(can_stop=False),dict(can_stop=ready)]):
+                    if ready:
+                        result=self.run_exit(m,action='exit_workbench')
+                        self.assertTrue(result['environment_exited'])
+                        self.assertLess(m.calls.index('stop_recording'),m.calls.index('stop_workbench'))
+                        self.assertIn('stop_pedal',m.calls)
+                    else:
+                        with self.assertRaisesRegex(OperationError,'尚未封存'):self.run_exit(m,action='exit_workbench')
+                        self.assertEqual(m.calls,['release_control'])
 
     def test_disconnected_exit_never_homes_or_reacquires(self):
         m=self.manager(False);m.rows['control_owner'].update(state='stopped',running=False)
@@ -212,11 +242,11 @@ class EnvironmentExitTest(unittest.TestCase):
         calls.assert_called_once_with('waiting')
 
     def test_restore_only_starts_pinned_web_and_never_collection(self):
-        pin=dict(unit='prometheus-arx13-web.service',files={'/cpu/unit':'a'},status_url='http://127.0.0.1:18980/api/status')
+        pin=dict(unit='collection-web.service',files={'/cpu/unit':'a'},status_url='http://127.0.0.1:18980/api/status')
         inactive=dict(ActiveState='inactive',MainPID='0',ControlPID='0',ControlGroup='')
         active=dict(ActiveState='active',MainPID='7',ControlPID='0',ControlGroup='/cpu')
-        with patch.object(workbench_deploy,'verify_unit',side_effect=[inactive,active]),patch.object(workbench_deploy,'http_json',return_value=dict(robot_vin='arx13',orphan_alive=False,manager_alive=False,collect_status='idle'))as http,patch.object(workbench_deploy.subprocess,'run')as command:
-            result=workbench_deploy.restore_collection_web(pin,'arx13')
+        with patch.object(workbench_deploy,'verify_unit',side_effect=[inactive,active]),patch.object(workbench_deploy,'http_json',return_value=dict(robot_vin='cpu-device',orphan_alive=False,manager_alive=False,collect_status='idle'))as http,patch.object(workbench_deploy.subprocess,'run')as command:
+            result=workbench_deploy.restore_collection_web(pin,'cpu-device')
         command.assert_called_once_with(['systemctl','--user','start','--no-block',pin['unit']],check=True,timeout=10)
         http.assert_called_once_with(pin['status_url']);self.assertFalse(result['collection_started'])
 

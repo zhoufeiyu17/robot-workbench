@@ -489,6 +489,38 @@ class ManagementTests(unittest.TestCase):
             time.sleep(.01)
         self.fail('management job did not finish')
 
+    def test_verified_exit_returns_durable_receipt_then_closes_http_server(self):
+        h=self.h;m=h['manager']
+        # Use actual CPU subprocesses and the HTTP operation queue. No SDK exists.
+        def exit_cpu(request,progress):
+            for name in ('model','workbench'):m.service_action(name,'stop',progress)
+            return dict(action='exit_workbench',sdk_was_disconnected=True,environment_exited=True)
+        with patch.object(m,'check',return_value=None),patch.object(m,'exit_workbench',side_effect=exit_cpu):
+            code,accepted,_=self.start('exit_workbench')
+            self.assertEqual(code,200)
+            job=self.wait_job(accepted.get('job',accepted))
+        self.assertEqual(job['status'],'succeeded');self.assertTrue(job['verification']['ok'])
+        self.assertTrue(job['result']['manager_exit_pending'])
+        code,body,_=self.request('/api/operations?environment=fake')
+        self.assertEqual(code,200)
+        self.assertTrue(body['recent_jobs'][0]['result']['manager_exit_pending'])
+        self.assertIsNotNone(m.check('prepare_model'))
+        self.assertTrue(h['server']._BaseServer__is_shut_down.wait(6),'manager HTTP loop exits after result delivery')
+        self.assertTrue(all(row.snapshot()['state']=='stopped'for row in h['services'].values()))
+        files=list((m.root/'operations').glob('*.json'))
+        self.assertTrue(any(json.loads(path.read_text()).get('status')=='succeeded'for path in files))
+
+    def test_old_failed_or_unknown_exit_never_closes_manager(self):
+        m=self.h['manager'];server=self.h['server']
+        with patch.object(server,'shutdown')as shutdown:
+            for status in ('failed','unknown','succeeded'):
+                m.operations.jobs['old-exit']=dict(status=status,verification={'ok':status=='succeeded'},finished_at_ns=1)
+                m.exit_request_id=None
+                server.service_actions();shutdown.assert_not_called()
+                if status!='succeeded':
+                    m.exit_request_id='old-exit';server.service_actions();shutdown.assert_not_called()
+            m.exit_request_id=None;m.operations.jobs.pop('old-exit')
+
     def test_shared_environments_release_restart_and_do_not_end_old_token_on_new_backend(self):
         for h in (self.h,self.camera_reset_fixture()[0]):
             self.configure(h=h,connected=True)

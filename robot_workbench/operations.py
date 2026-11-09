@@ -184,6 +184,8 @@ def job_summary(job):
     next_url = result.get('next_url') if isinstance(result, dict) else None
     if isinstance(next_url, str) and len(next_url) <= 2048:
         row['result'] = {'next_url': next_url}
+    if isinstance(result,dict) and type(result.get('manager_exit_pending'))is bool:
+        row.setdefault('result',{})['manager_exit_pending']=result['manager_exit_pending']
     if job.get('error'):
         row['error']={key:str(job['error'].get(key,''))[:1024] for key in ('code','message')}
     detail=job.get('detail')
