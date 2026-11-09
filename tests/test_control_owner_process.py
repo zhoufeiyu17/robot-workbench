@@ -353,6 +353,10 @@ class ControlOwnerProcessTests(unittest.TestCase):
     def test_wam32_operator_stop_pending_model_keeps_position_and_recording(self):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(wam32=True,normal32=True,operator_stop=True)
 
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_direct_run_stop_restores_prepared_hold_and_all_pedals(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(wam32=True,normal32=True,direct_run=True)
+
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
     def test_wam32_operator_home_uses_shared_owner_and_records(self):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(
@@ -429,7 +433,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(simulated=True)
 
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
-    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False):
+    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False,direct_run=False):
         import numpy as np
         from types import SimpleNamespace
         from sensor_msgs.msg import Image
@@ -529,6 +533,55 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 pause_frames.set();time.sleep(.15)
                 resume=threading.Timer(.1,pause_frames.clear);resume.start();self.addCleanup(resume.cancel)
             duration=5. if normal32 else .5 if wam32 and not stop_during_model else 2.
+            if direct_run:
+                from robot_workbench.service import Application
+                import uuid
+                parent.workflows['inference']=flow;app=Application({'fake':parent})
+                flow.operator_controls=dict(home_velocity_rad_s=.1,timeout_s=30.,focus_timeout_s=8.,double_press_window_s=.5)
+                self.assertIsNone(getattr(flow,'operator_session',None))
+                view=app.state('fake','inference');info=view['workflow']['inference']
+                app.action('inference_run',dict(environment='fake',business='inference',request_id=uuid.uuid4().hex,
+                    seed=1,duration_s=duration,model_id=info['selected_model_id'],expected_bundle_digest=info['bundle_digest'],
+                    expected_context=info['run_context'],state_wall_ns=view['server_wall_ns'],physical_clearance=True,scene_reset=True))
+                def wait_mode(target):
+                    deadline=time.monotonic()+15
+                    while True:
+                        state=flow.current['runner'].snapshot()if flow.current and flow.current.get('runner')else{}
+                        if state.get('mode')==target and not state.get('transition_stage'):return state
+                        self.assertLess(time.monotonic(),deadline,state);time.sleep(.02)
+                wait_mode('MODEL');facts=client.refresh()
+                app.action('inference_hold',dict(environment='fake',business='inference',request_id='direct-run-stop',
+                    runtime_nonce=client.nonce,epoch=facts['command_epoch']))
+                wait_mode('HOLD');deadline=time.monotonic()+5
+                while app.jobs[('fake','inference')]['status']=='running':
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                self.assertEqual(app.jobs[('fake','inference')]['status'],'completed')
+                run=flow.current;session=flow.operator_session
+                self.assertEqual(session['run_id'],run['id']);self.assertFalse(run['recorder'].done.is_set())
+                gates=app.state('fake','inference')['runtime']['allowed_operations']
+                for name in ('inference_run','inference_teach','inference_home'):self.assertTrue(gates[name]['allowed'],gates[name])
+                sequence=0;focus=dict(client_id='cpu-direct-run',started_wall=time.time())
+                def press(command):
+                    nonlocal sequence
+                    sequence+=1
+                    return app._operator_pedal_action(parent,flow,command,
+                        SimpleNamespace(source_instance_id='cpu-direct-pedal',sequence=sequence),time.time(),focus)
+                press(22);wait_mode('TEACH');press(22);wait_mode('HOLD')
+                deadline=time.monotonic()+5
+                while app.operator_tasks['fake']['status']=='running':
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                press(33);deadline=time.monotonic()+10
+                while app.operator_tasks['fake']['status']=='running':
+                    self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                self.assertEqual(app.operator_tasks['fake']['status'],'completed')
+                wait_mode('HOLD');press(11);time.sleep(.3);self.assertIn('job_id',press(11));wait_mode('MODEL')
+                press(11);time.sleep(.3);self.assertFalse(press(11)['accepted']);wait_mode('HOLD')
+                self.assertIs(flow.current,run);self.assertEqual(flow.operator_session,session)
+                app.action('cancel',dict(environment='fake',business='inference',request_id='direct-run-end'))
+                self.assertTrue(run['recorder'].done.wait(15));manifest=run['recorder'].manifest
+                self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
+                self.assertTrue(client.refresh()['connected'])
+                return
             review=flow.preview_episode(seed=1,duration_s=duration)
             flow.execute_review(review['preview']['token'])
             if normal32:

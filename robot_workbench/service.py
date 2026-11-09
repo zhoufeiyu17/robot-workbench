@@ -720,7 +720,7 @@ class Application:
                 workflow.current.pop('operator_positioning',None)
             job['execution_submitted']=True
             episode=self.run_normal_episode(device,workflow,job,current,runtime,runtime.nonce,body['duration_s'],keep_session=True)
-            return dict(message='本轮推理已保持，控制会话继续录制',execution=dict(normal_episode=episode))
+            return dict(message='本轮推理已保持，控制会话与踏板可继续使用',execution=dict(normal_episode=episode))
         stage('binding');bound=workflow.bind_device()
         if isinstance(bound,dict)and type(bound.get('generation'))is int:
             if bound['generation']!=flow_generation+1 or workflow.generation!=bound['generation']:
@@ -749,14 +749,16 @@ class Application:
                 and getattr(workflow,'reference_planning',None) is not None
                 and workflow.normal_initial_mode=='HOLD'):
             normal_episode=self.run_normal_episode(device,workflow,job,current,runtime,binding['runtime_nonce'],body['duration_s'],
-                prepare_only=body.get('prepare_only',False))
+                prepare_only=True)
+            workflow.operator_session=dict(run_id=normal_episode['execution_instance_id'],runtime_nonce=runtime.nonce,
+                wam_stall_recovery=body.get('wam_stall_recovery',False),
+                **{name:body[name]for name in ('seed','duration_s','model_id','expected_bundle_digest')})
             if body.get('prepare_only'):
-                workflow.operator_session=dict(run_id=normal_episode['execution_instance_id'],runtime_nonce=runtime.nonce,
-                    wam_stall_recovery=body.get('wam_stall_recovery',False),
-                    **{name:body[name]for name in ('seed','duration_s','model_id','expected_bundle_digest')})
                 return dict(message='控制与录制已准备，踏板可直接切换模式',execution=normal_episode)
+            normal_episode=self.run_normal_episode(device,workflow,job,current,runtime,binding['runtime_nonce'],body['duration_s'],
+                keep_session=True)
             result=dict(result,normal_episode=normal_episode)
-        return dict(message='本轮持续推理已正常结束'if normal_episode else'本轮推理已提交；请查看实际执行与录像状态',execution=result,
+        return dict(message='本轮推理已保持，控制会话与踏板可继续使用'if normal_episode else'本轮推理已提交；请查看实际执行与录像状态',execution=result,
             model_id=body['model_id'],seed=body['seed'],duration_s=body['duration_s'])
 
     def run_normal_episode(self,device,workflow,job,current,runtime,nonce,duration,*,prepare_only=False,keep_session=False):

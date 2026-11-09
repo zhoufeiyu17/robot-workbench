@@ -45,6 +45,19 @@ class CommonCaptureIndexTest(unittest.TestCase):
         return dict(execution_instance_id=run,business_kind='calibration',seal_revision=revision,
             receipt_ref=dict(path=str(rp),**_pin(rp)),manifest_ref=dict(path=str(mp),**_pin(mp)))
 
+    def test_recording_date_uses_original_activity_or_existing_frame_not_file_mtime(self):
+        from robot_workbench.collection_history import _capture_started_wall_ns,_pin
+        root=self.root/'date';root.mkdir();manifest=root/'manifest.json'
+        def read(value):
+            manifest.write_text(json.dumps(value))
+            return _capture_started_wall_ns(str(manifest),_pin(manifest)['sha256'])
+        stamp=1_794_201_234_000_000_000
+        self.assertEqual(read(dict(recording_activity={'intervals':[{'start_wall_ns':stamp}]})),stamp)
+        (root/'camera.jsonl').write_text(json.dumps(dict(recorded_wall_ns=stamp+100,
+            payload={'metadata':{'ros_reference':{'source_clock_id':'host_wall','source_time_ns':stamp}}}))+'\n')
+        self.assertEqual(read(dict(streams={'missing':{},'camera':{}})),stamp)
+        self.assertIsNone(read(dict(streams={'absent':{}})))
+
     def test_revision_idempotency_late_notice_restart_and_tampered_media(self):
         from robot_workbench.collection_history import CaptureResults
         first=self.sealed(1);self.index.register(first);before=Path(first['receipt_ref']['path']).read_bytes()

@@ -31,7 +31,7 @@ from .ros_data import bounded_value as _capture_value, BoundedQueue as _CaptureE
 
 ROOT=Path(__file__).resolve().parents[1]
 LIMIT=4*1024*1024
-RECORDING_SERVICE_SCHEMA='workbench.recording-service.v5'
+RECORDING_SERVICE_SCHEMA='workbench.recording-service.v6'
 
 
 def _capture_spec(request_id, sources, purpose, resource_budget):
@@ -1593,11 +1593,21 @@ def _seal_capture(root,spec,extra_issue=None):
         issues.append(json.loads(producer_gap.read_text())['reason']);files[producer_gap.name]=_capture_file(producer_gap)
     if finish is None:issues.append('no final sequence barrier received')
     if binding is None:issues.append('capture was not bound to a Run')
+    activity=None;activity_policy=((binding or{}).get('execution_context')or{}).get('recording_activity')
+    if activity_policy is not None:
+        from .recording_activity import ActiveTimeAxis,POLICY
+        try:
+            if activity_policy!=POLICY:raise ValueError('unknown recording activity policy')
+            activity=ActiveTimeAxis((finish or{}).get('recording_activity'))
+        except ValueError as error:issues.append(str(error))
     with (root/gap_name).open('x') as gap_file,(root/segment_name).open('x') as segment_index:
         for descriptor in spec['source_descriptors']:
             issue_start=len(issues)
             identity=descriptor['stream_id'];path=root/(identity+'.jsonl')
             last=count=valid_bytes=missing=0;digest=hashlib.sha256();tail_error=None;times=[]
+            effective_count=0;effective_times=[]
+            effective_name=f'effective-{identity}-r{revision:06d}.jsonl'
+            effective_file=(root/effective_name).open('x')if activity is not None else None
             final=finish['final_seq_by_stream'][identity] if finish else None
             active_segment=None;segment_manifest=None;segment_frames=None;frame_index=0
             if descriptor['kind']=='video' and 'source_ref' in descriptor:
@@ -1664,15 +1674,32 @@ def _seal_capture(root,spec,extra_issue=None):
                         if sequence>last+1:gap(last+1,sequence-1,'sequence_gap');missing+=sequence-last-1
                         count+=1;last=sequence;valid_bytes+=len(line);digest.update(line)
                         times=[times[0],stamp] if times else [stamp]
+                        if activity is not None:
+                            reference=row['payload'].get('metadata',{}).get('ros_reference')or row['payload'].get('reference')
+                            if reference is not None:
+                                try:effective=activity.offset_ns(reference['source_clock_id'],reference['source_time_ns'])
+                                except (ValueError,KeyError,TypeError)as error:
+                                    issues.append(identity+': effective time mapping: '+str(error));effective=None
+                                if effective is not None:
+                                    effective_file.write(json.dumps(dict(sequence=sequence,effective_time_ns=effective))+'\n')
+                                    effective_count+=1;effective_times=[effective_times[0],effective]if effective_times else[effective]
             if final is not None:
                 if final<last:issues.append(identity+': final sequence precedes committed data')
                 elif final>last:gap(last+1,final,'missing_tail');missing+=final-last
             if missing:issues.append(identity+': sequence coverage incomplete')
-            if descriptor['required'] and (not descriptor['source_instance_id'] or not descriptor['source_clock_id'] or not count):
+            if descriptor['required'] and (not descriptor['source_instance_id'] or not descriptor['source_clock_id']
+                    or not count and not(activity is not None and activity.duration_ns==0)):
                 issues.append(identity+': required source unavailable or empty')
+            if descriptor['required']and activity is not None and activity.duration_ns and not effective_count:
+                issues.append(identity+': required active source unavailable or empty')
             streams[identity]=dict(committed=count,last_sequence=last,final_sequence=final,missing=missing,
                 source_time_range=times,verified_prefix_bytes=valid_bytes,verified_prefix_sha256=digest.hexdigest(),tail_error=tail_error,
                 coverage_failed_conditions=len(issues)-issue_start)
+            if effective_file is not None:
+                effective_file.flush();os.fsync(effective_file.fileno());effective_file.close()
+                streams[identity].update(effective_count=effective_count,effective_time_range_ns=effective_times,
+                    effective_timestamps_ref=effective_name)
+                files[effective_name]=_capture_file(root/effective_name)
             if path.exists():files[path.name]=_capture_file(path)
             if segment_frames is not None:
                 if frame_index!=segment_manifest['frame_count']:issues.append(identity+': unindexed segment frames')
@@ -1743,7 +1770,9 @@ def _seal_capture(root,spec,extra_issue=None):
         gaps_ref=gap_name,segments_ref=segment_name,seal_revision=revision,coverage_scope='declared producer sequences; upstream sensor completeness is not inferred')
     if ros_capture:
         manifest.update(model_inputs=model_indexes['model_input'],model_results=model_indexes['model_result'])
-    if any('source_ref' in source for source in spec['source_descriptors']):
+    if activity is not None:manifest['recording_activity']=deepcopy(finish['recording_activity'])
+    if activity_policy is not None and activity is None:manifest['playback_error']='recording activity timeline unavailable; unfiltered replay prohibited'
+    elif any('source_ref' in source for source in spec['source_descriptors']):
         try:
             from segmented_playback import export_capture
             playback=export_capture(root,manifest,root/f'replay-r{revision:06d}')

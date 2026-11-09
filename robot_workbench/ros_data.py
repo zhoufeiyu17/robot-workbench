@@ -21,7 +21,7 @@ MAX_METADATA_BYTES = 512 * 1024
 MAX_CACHE_BYTES = 64 * 1024 * 1024
 MAX_CACHE_SAMPLES = 64
 RECORDING_HEALTH_FIELDS=frozenset(('state','prepared','ready','degraded','missing_streams','available_streams',
-    'streams','source_errors','data_queue','heartbeat_monotonic_s','error'))
+    'streams','source_errors','data_queue','heartbeat_monotonic_s','error','recording_activity'))
 _NAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:-]{0,199}')
 _TOPIC = re.compile(r'/[A-Za-z_][A-Za-z0-9_/]*')
 _MESSAGE_NAMES=('StreamRef','SourceDescriptor','RobotState','Observation','ModelRequest','ModelInput','ModelResult','DataEvent')
@@ -410,6 +410,9 @@ class RecordingHealth:
                 raise ValueError('invalid recording health '+key)
         if any(not isinstance(v,str)for v in value.get('source_errors',{}).values()):raise ValueError('invalid recording source errors')
         if value.get('error')is not None and not isinstance(value['error'],str):raise ValueError('invalid recording health error')
+        if 'recording_activity'in value:
+            from .recording_activity import activity_summary
+            activity_summary(value['recording_activity'])
         with self.lock:
             if self.closed or self.error:return
             if self.run_id is not None and message.run_id not in('',self.run_id):raise ValueError('recording health belongs to another Run')

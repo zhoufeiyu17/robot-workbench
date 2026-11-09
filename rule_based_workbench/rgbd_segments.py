@@ -389,6 +389,12 @@ class SegmentWriter:
             self.abort()
             raise
 
+    def flush_segment(self):
+        """Commit a paused capture's tail while keeping this writer reusable."""
+        self._check_active()
+        if self.children:self._queue_commit()
+        return self.wait_committed()
+
     def _queue_commit(self):
         # At most two queued/running commits per camera. A slower disk cannot
         # turn closed codec instances or segment jobs into an unbounded queue.

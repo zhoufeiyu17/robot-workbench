@@ -50,7 +50,7 @@ ControlPolicy。顶部RGB在预处理前用同形零数组替换，腕部RGB、s
 ModelInput复用现有metadata_json保存干预决定和实际种子，黑屏输入使用可重建的
 `wam_zero_head_bicubic256_wan_bf16`转换。常驻记录器保留原始ROS图像、验证实际输入摘要，
 封存时从原ModelInput日志生成`stall_recovery.jsonl`，包含失败模型请求的干预记录。
-记录服务在线协议现为`workbench.recording-service.v5`，同时提供下文的取流关闭证明，旧组合在绑定时拒绝。
+记录服务在线协议现为`workbench.recording-service.v6`，同时提供下文的取流关闭证明，旧组合在绑定时拒绝。
 Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 `.evidence/infer-pedal2-start-20261107-v1/wam-trick-design.json`和本目录统一进度记录。
 维护触发为检测单位、步数语义、转换格式、Run配置或录制协议变化。
@@ -61,7 +61,13 @@ Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 
 来源保留已有 250 ms 去抖和按住锁定。业务侧在既有 `inference.operator_controls` 中一次绑定 `double_press_window_s=0.5`，以原始 `occurred_at` 判断双踩间隔。手势同时绑定已有踏板来源实例、前台客户端、Owner 与控制会话。重复来源序号、失焦、会话更换以及夹杂其他踏板均不能把旧第一脚用于启动。每次手势资格由第一脚时的模式确定，执行前再次核对当前 HOLD 与准入。
 
-- “准备控制与踏板”使用现有 inference_run 的 prepare_only=true，冻结本次模型、seed、运行时长和 ControlPolicy，并建立录制中的 HOLD 会话。随后 MODEL、TEACH、HOLD 和原生回零共用该会话及 Run 身份，各次操作使用既有 request_id。保持状态应用参数时结束旧 Run 的取流、应用设置并准备新 Run；SDK 保持连接。旧 Run 参数不变，踏板只使用新准备成功的值。用户显式结束会话后封存录制。
+2026-11-09 用户确认推理录像按 MODEL／TEACH 模式分段：准备和 HOLD 等待、HOME 回零不计入有效录像；TEACH 内短暂停手继续录制，不依赖速度判定。业务在既有 `execution_context` 冻结 `recording_activity=model_teach_compact_v1`，记录器消费同一 Owner 的模式接纳事件，以请求进入 MODEL／TEACH 为开始，退出请求或终止事件为结束。原始源时间和序列不改；仅为模型输入追溯保留策略规定范围内的前置原始样本，前置样本不进入有效回放。
+
+封存的 `recording_activity` 保存原始控制／wall 时间区间及各区间 `effective_start_ns`。每流的 `effective_timestamps_ref` 指向原记录序号与连续有效纳秒时间的映射；每相机把全部有效区间连接成一个 MP4，去掉等待时间，保留 `effective_origin_ns` 关联其首帧。没有有效区间则没有视频。迟到的活动尾帧按原始源时间接纳，不按回调到达时刻误删；缺失或无效活动映射明确标记不完整，不导出未裁切录像。I15 原始记录器健康发布 `recording_activity`（当前有效模式、累计有效秒数、区间数和首次开始 wall 时间），页面据此显示等待／录制。历史任务名以实际首次录制时间的 `MM-DD HH:mm` 显示，内部 Run 身份保持；旧记录只做有界只读投影，没有时间证据则显示未知，不以文件修改时间猜测。
+
+2026-11-09 用户进一步确认：直接点击 Run 也先建立相同的 HOLD 控制会话，再进入本轮 MODEL。正常中止或时长结束后保留该会话、冻结参数和 SDK 连接；双踩 1、踏板 2／3 恢复准入，MODEL 内的首脚停止和第二脚忽略规则保持。只有“结束控制会话并封存”或独立全局 Stop 结束整轮控制会话；故障恢复不自动续跑。
+
+- “准备控制与踏板”使用现有 inference_run 的 prepare_only=true，冻结本次模型、seed、运行时长和 ControlPolicy，并建立已准备录制的 HOLD 会话。随后 MODEL、TEACH、HOLD 和原生回零共用该会话及 Run 身份，各次操作使用既有 request_id。保持状态应用参数时结束旧 Run 的取流、应用设置并准备新 Run；SDK 保持连接。旧 Run 参数不变，踏板只使用新准备成功的值。用户显式结束会话后封存录制。
 - 踏板 1 请求停止推理并保持。踏板 2 在 TEACH 重力补偿拖动和 HOLD 之间切换。下一次显式 Run 使用新鲜观测与当前保持位置。踏板 3 依次执行双臂 SDK 原生回零，按原生逻辑张开夹爪，正常踏板操作等待其完成。独立 Stop 继续执行撤权与停止确认。
 - 原生回零的插值阶段和增益由 SDK 后台反馈／输出线程推进。Owner 持续读取反馈、维护监督心跳并记录过程。SDK 方法返回、目标命令到位和实测残差分别保留证据。
 - 用户于本日最终批准关节到位误差、审阅／启动／准备漂移以及静止位置跨度统一为 2°。静止窗口为 0.3 秒。物理关节反馈越界容差为 5°。角度在代码和接口中使用 rad，夹爪使用其已登记的毫米／SDK单位。各业务到位设置及 Infer 准备漂移通过唯一 ControlPolicy 提交并回读。
@@ -70,7 +76,7 @@ Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 
 WAM 静止恢复 trick 由用户安排在踏板开发、上线和验收之后。其目标入口为默认未勾选的复选框，具体实现与验收另行记录。
 
-文档版本 `c-workbench-interface/2.6-development`。更新日期 2026-11-08，Asia/Shanghai。
+文档版本 `c-workbench-interface/2.7-development`。更新日期 2026-11-09，Asia/Shanghai。
 
 当前实测状态（2026-11-07）：ARX13上的E04_2 SO/Torch各5秒总控制诊断均已通过模型输出、SDK参考窗口、实测运动及完整ROS录制核验。任意有限正数秒数输入已发布。证据与实际进程身份见 `.evidence/infer-observation-timeout-20261107-v1/progress.json`；较早带日期章节的“仅CPU/暂停”描述只作当时记录，不代表当前硬件状态。模型精度、长期稳定性和回零残差是独立待办。
 

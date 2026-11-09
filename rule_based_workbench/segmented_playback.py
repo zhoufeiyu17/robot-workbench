@@ -248,7 +248,10 @@ def export_capture(root, manifest, output):
     output.mkdir(exist_ok=False)
     ffmpeg,ffprobe=shutil.which('ffmpeg'),shutil.which('ffprobe')
     if not ffmpeg or not ffprobe:raise ValueError('CPU replay codecs unavailable')
-    files={};streams={}
+    files={};streams={};activity=None
+    if 'recording_activity'in manifest:
+        from robot_workbench.recording_activity import ActiveTimeAxis
+        activity=ActiveTimeAxis(manifest['recording_activity'])
     spec=json.loads(_pinned(root,manifest,'capture.json').read_text())
     descriptors={row['stream_id']:row for row in spec['source_descriptors']}
     segment_pins={row['segment']:{key:row[key] for key in ('size_bytes','sha256')}
@@ -289,25 +292,46 @@ def export_capture(root, manifest, output):
                         or row['source_time']!=stamp[0]/1e9):
                     raise ValueError('capture replay source identity or timestamp differs')
                 previous=assert_progress(previous,stamp);frame_index+=1
-            stamps=[row['source_time'] for row in rows]
-            offsets=[round((stamp-stamps[0])*1e6) for stamp in stamps]
-            periods=[b-a for a,b in zip(stamps,stamps[1:])]
-            tail=max(1,round((statistics.median(periods) if periods else 1/30)*1e6))
+            selected=list(range(len(rows)));effective=None;origin_ns=0
+            if activity is not None:
+                clock_id=descriptor['source_clock_id']
+                effective=[activity.offset_ns(clock_id,row['payload']['metadata']['ros_reference']['source_time_ns'])for row in rows]
+                selected=[index for index,stamp in enumerate(effective)if stamp is not None]
+                if not selected:return None
+                origin_ns=effective[selected[0]]
+                offsets=[round((effective[index]-origin_ns)/1000)for index in selected]
+                kept=[rows[index]for index in selected]
+            else:
+                kept=rows;offsets=[round((row['source_time']-rows[0]['source_time'])*1e6)for row in rows]
+            stamps=[row['source_time']for row in kept]
+            periods=([b-a for a,b in zip(offsets,offsets[1:])]if activity is not None
+                     else[(b-a)*1e6 for a,b in zip(stamps,stamps[1:])])
+            tail=max(1,round(statistics.median(periods)if periods else 1e6/(descriptor.get('nominal_hz')or 30)))
+            if activity is not None:tail=min(tail,max(1,round((activity.duration_ns-origin_ns)/1000)-offsets[-1]))
             concat=temporary/(identity+'.concat');filters=temporary/(identity+'.filter')
             concat.write_text('ffconcat version 1.0\n'+''.join("file '"+str(path).replace("'","'\\''")+"'\n" for path in paths))
-            filters.write_text("settb=1/1000000,setpts='"+_setpts(offsets)+"'\n")
+            select=''
+            if len(selected)!=len(rows):
+                spans=[];start=end=selected[0]
+                for index in selected[1:]:
+                    if index==end+1:end=index
+                    else:spans.append((start,end));start=end=index
+                spans.append((start,end))
+                select="select='"+'+'.join(f'between(n,{first},{last})'for first,last in spans)+"',"
+            filters.write_text(select+"settb=1/1000000,setpts='"+_setpts(offsets)+"'\n")
             destination=output/(identity+'.mp4')
             # Same source-PTS/final-duration contract as legacy replay above.
             run([ffmpeg,'-nostdin','-v','error','-n','-threads','1','-filter_threads','1','-f','concat','-safe','0',
-                 '-r',f'1000000/{tail}','-i',str(concat),'-filter_script:v',str(filters),'-frames:v',str(len(rows)),'-an','-c:v','libx264','-threads','1','-preset','fast',
+                 '-r',f'1000000/{tail}','-i',str(concat),'-filter_script:v',str(filters),'-frames:v',str(len(kept)),'-an','-c:v','libx264','-threads','1','-preset','fast',
                  '-crf','24','-pix_fmt','yuv420p','-bf','0',
                  '-vsync','vfr','-enc_time_base','1:1000000','-video_track_timescale','1000000','-movflags','+faststart',
                  str(destination)],check=True,timeout=300)
             probe=_probe_video(destination,run,offsets,offsets[-1]+tail)
             relative=str(destination.relative_to(root))
             pin=dict(size_bytes=destination.stat().st_size,sha256=sha256(destination),probe=probe)
-            timing=dict(path=relative,frame_count=len(rows),first_source_time=stamps[0],
+            timing=dict(path=relative,frame_count=len(kept),first_source_time=stamps[0],
                                    frame_offsets_s=[value/1e6 for value in offsets],duration_s=(offsets[-1]+tail)/1e6)
+            if activity is not None:timing.update(effective_origin_ns=origin_ns,source_clock_id=descriptor['source_clock_id'])
             return identity,relative,pin,timing
         with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS,thread_name_prefix='capture-export')as workers:
             for result in workers.map(export_camera,manifest['streams'].items()):
@@ -315,4 +339,5 @@ def export_capture(root, manifest, output):
                     identity,relative,pin,timing=result
                     files[relative]=pin;streams[identity]=timing
     return dict(schema='workbench.capture-playback.v1',files=files,streams=streams,
-                timing='original source frame intervals; microsecond container time base')
+                timing=('compact MODEL/TEACH intervals; original source timestamps retained in capture indexes'
+                        if activity is not None else'original source frame intervals; microsecond container time base'))

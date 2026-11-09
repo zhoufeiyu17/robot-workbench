@@ -3,6 +3,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from functools import lru_cache
 import re
 import shutil
 import os
@@ -370,6 +371,29 @@ def load_history(root,*,environment,robot_id):
     return history
 
 
+@lru_cache(maxsize=128)
+def _capture_started_wall_ns(manifest_path,expected_digest):
+    """Bounded metadata projection for both new and existing immutable Runs."""
+    try:
+        path=Path(manifest_path)
+        if path.stat().st_size>8*1024**2 or _pin(path)['sha256']!=expected_digest:return None
+        manifest=json.loads(path.read_text());activity=manifest.get('recording_activity')
+        if activity is not None:return activity['intervals'][0]['start_wall_ns']if activity.get('intervals')else None
+        streams=list((manifest.get('playback')or{}).get('streams',{}))or list(manifest.get('streams',{}))
+        starts=[]
+        for stream in streams:
+            try:
+                source=_file(path.parent,stream+'.jsonl',allow_empty=True)
+                with source.open('rb')as data:line=data.readline(512*1024+1)
+                if not line.endswith(b'\n')or len(line)>512*1024:continue
+                row=json.loads(line);reference=row.get('payload',{}).get('metadata',{}).get('ros_reference')or{}
+                stamp=reference.get('source_time_ns')if reference.get('source_clock_id')=='host_wall'else row.get('recorded_wall_ns')
+                if type(stamp)is int and stamp>0:starts.append(stamp)
+            except (OSError,ValueError,KeyError,TypeError):continue
+        return min(starts)if starts else None
+    except (OSError,ValueError,KeyError,TypeError):return None
+
+
 class CaptureResults:
     """Business-side, bounded-page projection of sealed common-control Runs."""
     BUSINESSES=('calibration','collection','research')
@@ -452,6 +476,7 @@ class CaptureResults:
             device_id=self.device_id,environment=self.environment,
             recording_outcome=outcome,controller_outcome=controller.get('status'),receipt_pin=pin,
             manifest_pin=_pin(manifest_path)if manifest_path else None)
+        if manifest_path:base['started_wall_ns']=_capture_started_wall_ns(str(manifest_path),base['manifest_pin']['sha256'])
         url=lambda ident:'/api/result-media?'+urlencode(dict(environment=self.environment,business=business,result_id=ident))
         row=dict(id=identity,run_id=run,kind='control_recording',label=f'控制录制 · {business} · {outcome}',
             status=controller.get('status','unknown'),download_url=url(identity),details=dict(base,file_pin=pin))
@@ -497,7 +522,19 @@ class CaptureResults:
                 finally:self.queue.task_done()
             except Exception as error:self.error=str(error)
 
-    def page(self,business,*,before=None,after=None):return self.histories[business].page(before=before,after=after)
+    def page(self,business,*,before=None,after=None):
+        page=self.histories[business].page(before=before,after=after)
+        for row in page['results']:
+            details=row.get('details')or{};revision=details.get('seal_revision');run=row.get('run_id')
+            if 'started_wall_ns'in details or revision is None or not run:continue
+            try:
+                receipt=self._read(_file(self.root,('inference-'if business=='inference'else'')+run+f'/receipt-r{revision:06d}.json'))
+                directory=(receipt.get('recording')or{}).get('directory')
+                if directory:
+                    manifest=_file(self.root,str(Path(directory)/f'manifest-r{revision:06d}.json'))
+                    details['started_wall_ns']=_capture_started_wall_ns(str(manifest),details['manifest_pin']['sha256'])
+            except (OSError,ValueError,KeyError,TypeError):pass
+        return page
 
     def media(self,business,identity):
         row=self.histories[business].result(identity)

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.8ba101a4c191",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.91b60095443c",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -892,8 +892,9 @@
         "recording_backend选择既定记录用途；Owner v2保证协议，连接时核验实际录制工厂及格式能力",
         "绑定时可选control_policy/execution_context：完整冻结策略与既有设备/环境上下文，服务生成Run回执；hash与用途必须匹配原绑定，不给窗口增加字段",
         "ROS capture health_source returned once and echoed by bind: existing SourceDescriptor/source_ref, Run and writer birth identity; missing source/confirmation rejects before control",
-        "Uniform recording service registration schema workbench.recording-service.v5; reject mismatched schema at configuration/review, no extra protocol_features flag or v1 fallback",
-        "ingress_closed: original writer proves subscriptions closed and accepted tail durable; Owner/workbench admit next Run while sealing continues; does not replace sealed/writer_exited"
+        "Uniform recording service registration schema workbench.recording-service.v6; reject mismatched schema at configuration/review, no extra protocol_features flag or v1 fallback",
+        "ingress_closed: original writer proves subscriptions closed and accepted tail durable; Owner/workbench admit next Run while sealing continues; does not replace sealed/writer_exited",
+        "execution_context.recording_activity=model_teach_compact_v1: normal Infer Run冻结；记录器按Owner MODEL/TEACH接纳边界录制，manifest保存原始区间与连续effective时间映射；每相机一个合并视频"
       ],
       "clock": "保留source_clock_id、source timestamp、采集/接收/写盘时间；流间映射可追溯。",
       "units": "StreamDescriptor固定字段、单位、坐标、采样层级与频率。",
@@ -904,10 +905,10 @@
         "operation-job"
       ],
       "transport": "已批准：登记的本地Unix IPC，常驻记录服务持有writer；生产端内存有界入队，后台发送；业务断连不结束会话。既有Run/请求/策略字段及final_seq屏障保持。",
-      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v5，连接时精确核验；历史文件按原schema读取",
+      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
-      "recording_protocol": "workbench.recording-service.v5；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
-      "lifecycle_update": "已发布；ARX13三轮HOLD及参数更改/完整录制通过，CPU延迟封存隔离通过；正式长时验收未完成"
+      "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
+      "lifecycle_update": "ARX6候选：仅MODEL/TEACH有效录制；HOLD/HOME无有效时间；ingress_closed继续与封存分离。部署验收见infer-active-recording-20261109-v1/progress.json"
     },
     {
       "id": "I12",
@@ -1014,7 +1015,8 @@
         "封存通知复用execution_instance_id/business_kind/seal_revision及receipt_ref/manifest_ref，业务侧异步入有界索引",
         "Recording health uses one original DataEvent source per Run; consumers subscribe directly. RPC retains lifecycle/actual-exit/seal proofs and immutable terminal coverage, not a live health feed",
         "ingress_closed: original writer proves subscriptions closed and accepted tail durable; Owner/workbench admit next Run while sealing continues; does not replace sealed/writer_exited",
-        "UI background_recordings references original run_id with closure/sealing/error state; currentRun metrics and control remain isolated"
+        "UI background_recordings references original run_id with closure/sealing/error state; currentRun metrics and control remain isolated",
+        "recording_activity健康摘要：active_mode/effective_duration_s/interval_count/started_wall_ns；UI显示有效时长，历史以首次活动时间命名，原Run身份不变"
       ],
       "clock": "保留source_clock_id、source timestamp、采集/接收/写盘时间；流间映射可追溯。",
       "units": "StreamDescriptor固定字段、单位、坐标、采样层级与频率。",
@@ -1025,14 +1027,14 @@
         "recording-quality"
       ],
       "transport": "I11返回health_source，Owner/业务/UI直接订阅记录器原始DataEvent。RPC只确认生命周期、真实writer退出与不可变封存覆盖；模型/非模型Run封存事件均从原控制ROS源进入结果索引。",
-      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v5，连接时精确核验；历史文件按原schema读取",
+      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
       "consumers": [
         "guard",
         "lifecycle",
         "ui"
       ],
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
-      "recording_protocol": "workbench.recording-service.v5；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
+      "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
       "lifecycle_update": "已发布；ARX13三轮HOLD及参数更改/完整录制通过，CPU延迟封存隔离通过；正式长时验收未完成"
     },
     {
@@ -2765,7 +2767,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "7c8a4a1e8ec693632ef049f0bd4a9ae6e6d18c59994dd79b896dbc9420fb1918",
+        "fingerprint": "715052af5b9a7a5312abc49a18180d41bd80090235561a3741d54e1d523513c7",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2889,7 +2891,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "bcc61f4824596f8c845d021b102acee1e25b9b955496d48218598615ce82255b",
+        "fingerprint": "f37a58fa2865255cbbd0466540469047a9d63065053e8406443b1925de1fa67c",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3016,7 +3018,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "bc9cc948c66659d1bb4c343cac47b99122e922022b630188465fd69aa06bba6d",
+        "fingerprint": "76bdc649f77239ab209fc362be7d4c4633951f9fd7f0ed1b2df10311170dbe23",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3135,7 +3137,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "6c723892f65cba7c66b494bac925bcc5996aadec4217dd45eb604d5c694c0e73",
+        "fingerprint": "f6adc00b1e0532aaff8f5fcbddb3f99ccf290b954a962f6f4ee856ff52347146",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3349,7 +3351,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "eb8c96fbe0f2ab78246b1d3d0ef9eec0a0e81efcc2c0abc9cc26622fe26aefb0",
+        "fingerprint": "6e092cd9efd5e4551f926df94deaa1c0fc37903d812b22d52bea12ecd32ed4a7",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3512,7 +3514,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "0eafe8c274b476c827ef53653a69003bb758ac0b3f7290a12ee8d2dba4e5fa9f",
+        "fingerprint": "7b531aa1a35c2b0c03710a3065d961d3cd2acc74e3b195b8883c1d24021aa54b",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3649,7 +3651,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "eb2e5dca5ef0165c712746834e7fa819bb4a0d6f0d25df2720134b0f20c76ab9",
+        "fingerprint": "6328c787f2b273669207ce351ced48cc09b5338bfa45b869d315abf5b588e0c8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3791,7 +3793,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "2a32094528aed9a2f857d5f716c8a2b9ffd8db81527c9f74b9564efe9628f32c",
+        "fingerprint": "c949c8b4acc6ba38573f337cb0a91937ec6c1c7fb19231acb39b257063f7f4cd",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3917,7 +3919,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "b53c8c46fd7966ba4633bebc5c36462e4666dcf5174f51f7fc3b4aa08bf1069b",
+        "fingerprint": "8fee4fe7fdedf4bc6ac789e81f83ee9cbf6ff270b5cfa7160b1cdfd7901dcc56",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4046,7 +4048,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "7c134196b33b69198544b96a343a703c9e34327eafa19bc5a965282eb8e4f8d6",
+        "fingerprint": "06e46c259174a8b0da8cebddce5bd20f3448cdf7868b3c93abd5e5ad3f535007",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4172,7 +4174,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "efa940046a36b626c51633765d55cf4c6c42243be27f8c9477f97cbf7131ede9",
+        "fingerprint": "7df199882f913ee845ee20207392cad23b71d728f94bed063c0d43c1875f62e6",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10565,7 +10567,7 @@
     "evidence": ".evidence/infer-pedal2-start-20261107-v1/recording-lifecycle-final-acceptance.json",
     "protocols": {
       "owner": "workbench.control_owner.v8",
-      "recording": "workbench.recording-service.v5"
+      "recording": "workbench.recording-service.v6"
     },
     "background_seal_observer": {
       "status": "published",

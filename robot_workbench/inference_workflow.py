@@ -1165,6 +1165,9 @@ class InferenceWorkflow:
                         finally:
                             with self.lock:self.pending_captures.pop(run['id'],None)
                     recorder_config=dict(configuration,execution_context=dict(device_id=self.device.id,environment=self.device.environment))
+                    if self.ros_plane is not None and configuration.get('normal_modes')and configuration.get('normal_initial_mode')=='HOLD':
+                        from .recording_activity import POLICY
+                        recorder_config['execution_context']['recording_activity']=POLICY
                     recorder_config['execution_context']['wam_stall_recovery']=dict(enabled=wam_stall_recovery,
                         config=run['stall_recovery'].config if wam_stall_recovery else None)
                     run['recorder']=self.capture_factory(run['id'],run['directory'],recorder_config,control_policy,self.cameras,

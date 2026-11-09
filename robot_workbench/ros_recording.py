@@ -16,6 +16,7 @@ import select
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -89,6 +90,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     ros=RosNode(root.name.replace('-','_'),namespace=refs[0]['namespace'],domain_id=refs[0]['domain_id'],localhost_only=False)
     events=_CaptureEvents(spec['resource_budget']['event_queue_bytes'])
     lock=threading.RLock();errors={};active=False;binding=None;terminal=None;ending_at=None
+    activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={}
     received={k:0 for k in sources};flushed=dict(received);first={};last={};files={};segments={};model_results=set();artifact_index=None
     recorded_models={}
     file_locks={k:threading.Lock()for k in sources}
@@ -123,25 +125,70 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         finally:pending_images.pop(stream,None)
     state=dict(state='preparing',prepared=False,ready=False,done=False,ingress_closed=False,capture_session_id=spec['capture_session_id'],
         worker_pid=os.getpid(),writer_identity=writer_identity,streams={},source_errors=errors,binding=None)
+    def admit(ref,value,group=None,prefill=False):
+        source=sources[ref.stream_id];selected=None
+        if source['kind']=='image':size=len(value['rgb'])+len(value.get('depth')or b'')+4096
+        elif source['kind']=='state':size=len(json.dumps(value))+4096
+        else:
+            from rclpy.serialization import serialize_message
+            wire_size=len(serialize_message(value))
+            if wire_size>spec['resource_budget']['message_bytes']:
+                errors[ref.stream_id]='ROS event exceeds the bound message size';return
+            size=wire_size*4+4096
+            if source['kind']=='model_input':
+                try:selected=inputs.resolve_observation(value.observation)
+                except (LookupError,ValueError):pass  # Exact journal/cache lookup still runs when dequeued.
+                if selected is not None:
+                    # Pin the exact originals before slow preprocessing imports
+                    # can let the live ring evict them; charge the existing queue.
+                    size+=sum(len(frame['rgb'])+len(frame.get('depth')or b'')+4096 for frame in selected[1].values())
+                    size+=len(json.dumps(selected[0]))+4096
+        try:events.put_nowait((size,(ref,value,group,prefill,selected)))
+        except queue.Full:errors.setdefault(ref.stream_id,'ROS recorder queue overflow; source data missing')
     def enqueue(ref,value):
         with lock:
-            source=sources[ref.stream_id]
+            source=sources[ref.stream_id];old=observed_last.get(ref.stream_id)
+            if old is None or ref.sequence>old.sequence:observed_last[ref.stream_id]=ref
             if source['kind']in('image','state')and ref.stream_id not in source_seen:
                 source_seen.add(ref.stream_id)
                 # Source readiness is a transition, not a periodic metric.
                 # Wake the existing health publisher; never emit on the DDS callback.
                 health_changed.set()
             if not active:return
-            if source['kind']=='image':size=len(value['rgb'])+len(value.get('depth')or b'')+4096
-            elif source['kind']=='state':size=len(json.dumps(value))+4096
-            else:
-                from rclpy.serialization import serialize_message
-                wire_size=len(serialize_message(value))
-                if wire_size>spec['resource_budget']['message_bytes']:
-                    errors[ref.stream_id]='ROS event exceeds the bound message size';return
-                size=wire_size*4+4096
-            try:events.put_nowait((size,(ref,value)))
-            except queue.Full:errors.setdefault(ref.stream_id,'ROS recorder queue overflow; source data missing')
+            group=None;lifecycle=False
+            if activity is not None:
+                previous_group=activity.current['request_id']if activity.current else None
+                if ref.stream_id=='control':
+                    if old and ref.sequence>old.sequence+1:fault('control','activity control source sequence gap')
+                    lifecycle=value.event in ('inference_mode_transition','inference_finish','inference_episode_stopped','stop','reference_cancelled')
+                    data=json_value(value.payload_json)if lifecycle else {}
+                    if value.event=='inference_mode_transition'and data.get('runtime_nonce')!=source['source_instance_id']:
+                        raise ValueError('recording mode receipt belongs to another Owner')
+                    opened=activity.observe(value.event,data,ref,value.run_id)
+                    if previous_group is not None and (activity.current is None or activity.current['request_id']!=previous_group):
+                        events.put_nowait((0,(None,None,None,False,None)))
+                    if opened:
+                        # Retain only the bounded input-reference prefix. Export
+                        # excludes these evidence frames from effective video time.
+                        for raw_source in raw:
+                            stream=raw_source['stream_id'];clock=raw_source['source_clock_id']
+                            start=opened['start_wall_ns']if clock=='host_wall'else opened['start_source_ns']
+                            for saved_ref,saved in inputs.caches[stream].history():
+                                if saved_ref.source_time_ns<start-activity_prefix_ns:continue
+                                try:saved=inputs.rgbd(saved_ref)if raw_source['kind']=='image'else saved
+                                except (LookupError,ValueError):continue
+                                prefilled_until[stream]=max(prefilled_until.get(stream,0),saved_ref.sequence)
+                                admit(saved_ref,saved,opened['request_id'],True)
+                group=activity.current['request_id']if activity.current else previous_group if lifecycle else None
+                if source['kind']in('image','state'):
+                    group=activity.sample_group(ref.source_clock_id,ref.source_time_ns)
+                    if group is None:return
+                elif activity.current is None and not lifecycle and source['kind']not in ('model_input','model_result'):return
+            admit(ref,value,group)
+            if activity is not None and activity.current is None and source['kind']=='image':
+                # Delayed transport can deliver an active tail after HOLD.
+                # Keep it by source time, then commit that paused tail too.
+                events.put_nowait((0,(None,None,None,False,None)))
     raw=[s for s in sources.values()if s['kind']in('image','state')]
     inputs=RosInputs(ros,raw,on_sample=enqueue,max_samples=16,subscription_depth=16,include_depth=True)
     def message(stream,value):
@@ -186,6 +233,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         available_streams=[k for k in sources if k not in missing],streams={k:dict(received=v,committed=committed[k],
                             last_sequence=v,source_sequence=last[k].sequence if k in last else None)for k,v in received.items()},
                         data_queue=events.snapshot(),heartbeat_monotonic_s=time.monotonic())
+                    if activity is not None:state['recording_activity']=activity.summary()
                     if state['state']=='preparing'and prepared:state['state']='prepared'
                     if errors and spec['purpose_profile']=='data_required':state.update(ready=False,error='; '.join(errors.values()))
                     snapshot=deepcopy(state)
@@ -246,7 +294,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                 frames={role:inputs.resolve(ref,timeout=timeout)for role,ref in zip(observation.camera_roles,observation.frames)}
                 return saved,frames
     recorded_inputs=RecordedInputs()
-    def write(ref,value):
+    def write(ref,value,group=None,prefill=False,selected=None):
         nonlocal artifact_index
         source=sources[ref.stream_id];previous=last.get(ref.stream_id)
         model_key=model_digest=None
@@ -261,8 +309,11 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                 return
         if ref==previous:return
         if previous is not None and ref.sequence<=previous.sequence:
+            if prefill or ref.sequence<=prefilled_until.get(ref.stream_id,0):return
             errors.setdefault(ref.stream_id,'source sequence regressed');return
-        if source['kind']!='image' and previous is not None and ref.sequence!=previous.sequence+1:
+        if (source['kind']!='image' and not(activity is not None and ref.stream_id=='control')
+                and previous is not None and ref.sequence!=previous.sequence+1
+                and (activity is None or written_groups.get(ref.stream_id)==group)):
             errors.setdefault(ref.stream_id,f'source sequence gap: {previous.sequence} -> {ref.sequence}')
         if source['kind']=='image':
             writer=segments.get(ref.stream_id)
@@ -274,7 +325,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         elif source['kind']=='model_input':
             payload=_plain(value)
             append(ref,payload)
-            reconstruct_input(value,recorded_inputs)
+            reconstruct_input(value,recorded_inputs if selected is None else
+                SimpleNamespace(resolve_observation=lambda *args,**kwargs:selected))
         elif source['kind']=='model_result':
             directory=root/'model'/value.request_id;directory.mkdir(parents=True,exist_ok=True)
             if value.request_id in model_results:raise ValueError('duplicate model output identity')
@@ -292,6 +344,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             append(ref,dict(reference=ref.__dict__,event=value.event,data=payload,
                             run_id=value.run_id,epoch=value.epoch))
         else:append(ref,dict(reference=ref.__dict__,data=_plain(value)))
+        written_groups[ref.stream_id]=group
         if model_key is not None:recorded_models[model_key]=model_digest
     pending=bytearray(remaining)
     try:
@@ -317,13 +370,25 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         if not state['ready']:raise ValueError(state.get('error')or'capture sources/resources not ready')
                         with emit_lock:
                             binding=command['binding'];write_json(root/'binding.json',binding);state['state']='bound'
+                            policy=(binding.get('execution_context')or{}).get('recording_activity')
+                            if policy is not None:
+                                from .recording_activity import ActivityTimeline,POLICY
+                                control=sources.get('control')or{}
+                                if (policy!=POLICY or binding.get('business_kind')!='inference'or control.get('kind')!='event'
+                                        or control['source_instance_id']!=(binding.get('execution_owner')or{}).get('runtime_nonce')):
+                                    raise ValueError('declared inference activity/control source required')
+                                if any(s['source_clock_id']not in(control['source_clock_id'],'host_wall')for s in raw):
+                                    raise ValueError('recording activity needs the declared control or host-wall clock')
+                                activity=ActivityTimeline(binding['run_id'],control['source_clock_id'])
+                                observation=binding['control_policy']['parameters']['observation']
+                                activity_prefix_ns=round(max(observation['state_max_age_s'],observation['max_camera_span_s'])*1e9)
                         emit()
                     elif action=='start':
                         if binding is None:raise ValueError('recording needs a Run binding')
                         if not active:
                             with emit_lock,lock:
                                 active=True;state['state']='recording'
-                                for source in raw:
+                                for source in ([]if activity is not None else raw):
                                     for ref,value in inputs.caches[source['stream_id']].history():
                                         try:value=inputs.rgbd(ref)if source['kind']=='image'else value
                                         except LookupError:continue
@@ -342,8 +407,15 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         write_json(root/'finish-request.json',command);emit()
                     else:raise ValueError('ROS recording accepts lifecycle only; source data must arrive through ROS')
             for _ in range(128):
-                try:ref,value=events.get_nowait()
+                try:ref,value,group,prefill,selected=events.get_nowait()
                 except queue.Empty:break
+                if ref is None:
+                    for source in raw:
+                        stream=source['stream_id']
+                        if source['kind']!='image':continue
+                        collect_image(stream,wait=True)
+                        if stream in segments:pending_images[stream]=encoders.submit(segments[stream].flush_segment)
+                    continue
                 if terminal is not None:
                     final=terminal.get('final_seq_by_stream',{}).get(ref.stream_id)
                     if final is not None and ref.sequence>final:continue
@@ -355,16 +427,17 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                     # queue retains the backlog; a slow encoder cannot create
                     # an unbounded executor queue or serialize the other cameras.
                     collect_image(ref.stream_id,wait=True)
-                    pending_images[ref.stream_id]=encoders.submit(write,ref,value)
+                    pending_images[ref.stream_id]=encoders.submit(write,ref,value,group,prefill,selected)
                 else:
-                    try:write(ref,value)
+                    try:write(ref,value,group,prefill,selected)
                     except Exception as error:fault(ref.stream_id,error)
             for stream in list(pending_images):collect_image(stream)
             if terminal is not None:
                 targets=terminal.get('final_seq_by_stream',{})
                 ends=terminal.get('source_endpoints',{})
-                met=all(last.get(k)and last[k].sequence>=v or v==0 for k,v in targets.items())
-                met=met and all(last.get(k)and last[k].source_time_ns/1e9>=v['source_time']or v['source_time']==0 for k,v in ends.items())
+                watermarks=observed_last if activity is not None else last
+                met=all(watermarks.get(k)and watermarks[k].sequence>=v or v==0 for k,v in targets.items())
+                met=met and all(watermarks.get(k)and watermarks[k].source_time_ns/1e9>=v['source_time']or v['source_time']==0 for k,v in ends.items())
                 if met and events.empty()and not pending_images:break
                 if time.monotonic()-ending_at>=5:
                     missing=sorted({k for k,v in targets.items()if v and (k not in last or last[k].sequence<v)}|
@@ -386,7 +459,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             except Exception as error:fault('journal',error)
         for ref in inputs.pending_rgbd|inputs.pending_metadata:
             end=terminal.get('source_endpoints',{}).get(ref.stream_id,{}).get('source_time',0.)
-            if ref.stream_id in first and first[ref.stream_id].source_time_ns<=ref.source_time_ns<=round(end*1e9):
+            relevant=activity is None or activity.sample_group(ref.source_clock_id,ref.source_time_ns)is not None
+            if relevant and ref.stream_id in first and first[ref.stream_id].source_time_ns<=ref.source_time_ns<=round(end*1e9):
                 fault(ref.stream_id,'original RGB sample has no matching depth or metadata at the final barrier')
         for stream,out in files.items():out.flush();__import__('os').fsync(out.fileno());out.close()
         if artifact_index is not None:artifact_index.flush();__import__('os').fsync(artifact_index.fileno());artifact_index.close()
@@ -394,9 +468,18 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if source['kind']=='image':
                 end=terminal.get('source_endpoints',{}).get(stream,{}).get('source_time',0.)
                 write_json(root/(stream+'-source.json'),dict(received=received[stream],committed=received[stream],
-                    endpoint_reached=not end or stream in last and last[stream].source_time_ns/1e9>=end,
+                    endpoint_reached=not end or stream in observed_last and observed_last[stream].source_time_ns/1e9>=end,
                     error=errors.get(stream),cleanup_error=None))
-        finish=dict(terminal,final_seq_by_stream=dict(received),source_watermarks={k:v.__dict__ for k,v in last.items()})
+        finish=dict(terminal,final_seq_by_stream=dict(received),source_watermarks={k:v.__dict__ for k,v in observed_last.items()})
+        if activity is not None:
+            if activity.current is not None:
+                end=(terminal.get('source_endpoints',{}).get('control')or{}).get('source_time')
+                control=last.get('control');target=terminal.get('final_seq_by_stream',{}).get('control')
+                if end is not None:activity.finish(round(end*1e9))
+                elif control is not None and target is not None and control.sequence==target:activity.finish(control.source_time_ns)
+                else:raise ValueError('activity final control watermark required')
+            finish['recording_activity']=activity.manifest()
+            state['recording_activity']=activity.summary()
         write_json(root/'finish.json',finish)
         state.update(ingress_closed=True,ready=False,source_errors=dict(errors),degraded=bool(errors))
         write_json(root/'status.json',state);emit(persist=False)

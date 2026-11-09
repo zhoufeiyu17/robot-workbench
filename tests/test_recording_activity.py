@@ -1,0 +1,138 @@
+"""Mode-selected capture and a shared compact timeline; CPU sources only."""
+from copy import deepcopy
+from types import SimpleNamespace
+import json,os,tempfile,threading,time,unittest
+from pathlib import Path
+from robot_workbench.recording_activity import ActivityTimeline,ActiveTimeAxis,POLICY
+
+
+class ActivityTests(unittest.TestCase):
+    def event(self,timeline,mode,stamp,request):
+        ref=SimpleNamespace(source_clock_id='clock',source_time_ns=round(stamp*1e9))
+        return timeline.observe('inference_mode_transition',dict(op='normal_mode',requested_mode=mode,
+            request_id=request,accepted=True,status='accepted',capture_wall_ns=1_790_000_000_000_000_000+ref.source_time_ns),ref,'run')
+
+    def test_model_and_teach_join_without_waiting_gaps(self):
+        timeline=ActivityTimeline('run','clock')
+        self.event(timeline,'HOLD',1,'initial');self.event(timeline,'MODEL',10,'model')
+        self.event(timeline,'HOLD',12.8,'stop');self.event(timeline,'TEACH',50,'teach')
+        self.event(timeline,'HOLD',53,'hold');timeline.finish(100_000_000_000)
+        axis=ActiveTimeAxis(timeline.manifest())
+        self.assertEqual(axis.duration_ns,5_800_000_000)
+        self.assertIsNone(axis.offset_ns('clock',30_000_000_000))
+        self.assertEqual(axis.offset_ns('clock',50_000_000_000),2_800_000_000)
+        self.assertEqual(axis.offset_ns('host_wall',1_790_000_051_000_000_000),3_800_000_000)
+        self.assertIsNone(axis.offset_ns('clock',53_000_000_000))
+        self.assertEqual(timeline.sample_group('clock',12_700_000_000),'model')
+        self.assertIsNone(timeline.sample_group('clock',30_000_000_000))
+        broken=timeline.manifest();broken['intervals'][1]['effective_start_ns']+=1
+        with self.assertRaises(ValueError):ActiveTimeAxis(broken)
+        with self.assertRaises(ValueError):axis.offset_ns('unbound',1)
+
+    def test_hold_only_and_failed_model_attempt_keep_truthful_boundaries(self):
+        timeline=ActivityTimeline('run','clock');self.event(timeline,'HOLD',1,'initial')
+        self.assertEqual(ActiveTimeAxis(timeline.manifest()).duration_ns,0)
+        self.event(timeline,'MODEL',2,'attempt')
+        ref=SimpleNamespace(source_clock_id='clock',source_time_ns=3_000_000_000)
+        timeline.observe('inference_mode_transition',dict(status='failed',request_id='attempt',
+            capture_wall_ns=1_790_000_003_000_000_000),ref,'run')
+        self.assertEqual(ActiveTimeAxis(timeline.manifest()).duration_ns,1_000_000_000)
+        self.assertIsNone(timeline.summary()['active_mode'])
+
+
+@unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS and CPU codecs required')
+class ActiveCaptureTests(unittest.TestCase):
+    def test_real_recorder_skips_hold_flushes_segments_and_joins_all_cameras(self):
+        from robot_workbench.ros_data import RosNode,StreamRef,json_text
+        from sensor_msgs.msg import Image
+        from robot_workbench.ros_recording import capture_source
+        from robot_workbench.recording_process import CaptureSession
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        from test_recording_process import start_recording_fixture,stop_recording_fixture
+        from test_ros_inputs import sources
+        fixture=start_recording_fixture();self.addCleanup(stop_recording_fixture,fixture)
+        node=RosNode('active_capture_source',namespace='/wb_active_capture',domain_id=168)
+        self.addCleanup(node.close)
+        descriptions=sources()
+        for row in descriptions:
+            row['source_clock_id']='clock';row['topic']='/wb_active_capture/'+row['stream_id']
+        descriptions.append(dict(device_id='cpu_robot',stream_id='control',source_instance_id='cpu-owner',
+            source_clock_id='clock',topic='/wb_active_capture/control',message_type='workbench_interfaces/msg/DataEvent',
+            kind='event',units='control',coordinate_frame='device',nominal_hz=30.,available=True,metadata={'continuous_window':True}))
+        publishers={row['stream_id']:node.publisher(row['topic'],Image if row['kind']=='image'else getattr(node.types,'RobotState'if row['kind']=='state'else'DataEvent'))for row in descriptions}
+        lock=threading.Lock();stopped=threading.Event();sequence=0;state_sequence=0
+        run='activity-run'
+        def control(event,data):
+            nonlocal sequence
+            with lock:
+                sequence+=1;stamp=time.monotonic_ns();ref=StreamRef('control','cpu-owner','clock',stamp,sequence)
+                publishers['control'].publish(node.types.DataEvent(reference=ref.message(),event=event,run_id=run,epoch=1,
+                    payload_json=json_text(dict(data,capture_wall_ns=time.time_ns(),runtime_nonce='cpu-owner'))))
+                return stamp
+        def pump():
+            nonlocal state_sequence
+            while not stopped.is_set():
+                stamp=time.monotonic_ns();state_sequence+=1
+                for role in ('head','left','right'):
+                    image=Image()
+                    image.header.stamp.sec,image.header.stamp.nanosec=divmod(stamp,1_000_000_000)
+                    image.height=image.width=2;image.encoding='rgb8';image.step=6;image.data=bytes([state_sequence%255]*12)
+                    publishers[role].publish(image)
+                ref=StreamRef('state','cpu_source','clock',stamp,state_sequence)
+                publishers['state'].publish(node.types.RobotState(reference=ref.message(),positions=[0.]*14,velocities=[0.]*14,
+                    metadata_json=json_text(dict(sample_time_s=stamp/1e9,sample_wall_ns=time.time_ns(),runtime_nonce='cpu-owner',command_epoch=1,owner_pid=os.getpid()))))
+                control('feedback',{});stopped.wait(1/30)
+        worker=threading.Thread(target=pump);worker.start()
+        def close_source():stopped.set();worker.join(3)
+        self.addCleanup(close_source)
+        temporary=tempfile.TemporaryDirectory(prefix='active-capture-')
+        self.addCleanup(temporary.cleanup);directory=temporary.name
+        root=Path(directory)/('inference-'+run)/'capture'
+        session=CaptureSession.create(root,request_id=run,source_descriptors=[capture_source(row,namespace='/wb_active_capture',domain_id=168)for row in descriptions],purpose_profile='infer_debug')
+        self.addCleanup(session.close)
+        prepared=session.prepare();parameters=control_parameters(defaults('inference'),business='inference')
+        policy=dict(revision=0,parameters=parameters,policy_hash=policy_hash(parameters))
+        session.bind(run_id=run,business_kind='inference',policy_hash=policy['policy_hash'],control_policy=policy,
+            execution_context=dict(device_id='cpu_robot',environment='fake',recording_activity=POLICY),
+            execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
+        session.start();time.sleep(.5)
+        self.assertFalse((session.directory/'camera').exists(),'HOLD must not start video encoding')
+        def mode(value,request):return control('inference_mode_transition',dict(op='normal_mode',requested_mode=value,request_id=request,accepted=True,status='accepted'))
+        start=mode('MODEL','m1');time.sleep(2.8);end=mode('HOLD','h1')
+        time.sleep(.7)
+        initial={k:session.snapshot()['streams'][k]['received']for k in ('head','left','right')}
+        time.sleep(.4);self.assertEqual(initial,{k:session.snapshot()['streams'][k]['received']for k in initial})
+        self.assertTrue(list((session.directory/'camera').rglob('*.commit.json')),'paused tail must be committed before ending the session')
+        teach=mode('TEACH','t1');time.sleep(3.);held=mode('HOLD','h2');time.sleep(.2)
+        endpoint=time.monotonic_ns()
+        session.finish({},dict(status='completed'),source_endpoints={row['stream_id']:dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions})
+        self.assertTrue(session.done.wait(30),session.snapshot())
+        manifest=json.loads((session.directory/'manifest.json').read_text())
+        self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
+        expected=(end-start+held-teach)/1e9
+        self.assertAlmostEqual(manifest['recording_activity']['effective_duration_ns']/1e9,expected,places=6)
+        self.assertEqual(len(manifest['playback']['streams']),3)
+        for video in manifest['playback']['streams'].values():
+            self.assertLess(abs(video['duration_s']-expected),.08)
+            self.assertLess(max(b-a for a,b in zip(video['frame_offsets_s'],video['frame_offsets_s'][1:])),.15)
+        self.assertGreater(manifest['streams']['state']['effective_count'],0)
+        session.close()
+        idle=CaptureSession.create(Path(directory)/'idle'/('inference-'+run)/'capture',request_id=run+'-idle',
+            source_descriptors=[capture_source(row,namespace='/wb_active_capture',domain_id=168)for row in descriptions],purpose_profile='infer_debug')
+        self.addCleanup(idle.close)
+        prepared=idle.prepare()
+        idle.bind(run_id=run,business_kind='inference',policy_hash=policy['policy_hash'],control_policy=policy,
+            execution_context=dict(device_id='cpu_robot',environment='fake',recording_activity=POLICY),
+            execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
+        idle.start();time.sleep(.3);endpoint=time.monotonic_ns()
+        idle.finish({},dict(status='completed'),source_endpoints={row['stream_id']:dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions})
+        self.assertTrue(idle.done.wait(10))
+        empty=json.loads((idle.directory/'manifest.json').read_text())
+        self.assertEqual(empty['recording_outcome'],'complete',empty['issues'])
+        self.assertEqual(empty['recording_activity']['effective_duration_ns'],0)
+        self.assertEqual(empty['playback']['streams'],{})
+        self.assertFalse((idle.directory/'camera').exists())
+        idle.close()
+
+
+if __name__=='__main__':unittest.main()

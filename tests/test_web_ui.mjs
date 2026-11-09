@@ -22,7 +22,7 @@ for(const id of ['observation-panel','manual-tools','media-preview','camera-grid
   assert.equal([...html.matchAll(new RegExp('id="'+id+'"','g'))].length,1,'shared workspace component must not be duplicated: '+id);
 assert.match(html, /id="control-fault-recovery" href="#environment-recover"/);
 assert.match(html, /id="collection-speed" type="range" min="30" max="170"/);
-const {createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+const {recordingTaskTime,createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
 
 
 class Element {
@@ -81,6 +81,9 @@ assert.equal(countedProgress({current:12,total:10}),null);
 assert.equal(countedProgress({current:0,total:10}).current,0);
 assert.equal(frameAgeSeconds({source_wall_ns:7e9},{server_wall_ns:10e9},250),3.25);
 assert.equal(frameAgeSeconds({},snapshot()),null);
+assert.equal(recordingTaskTime(Date.parse('2026-11-09T05:37:00Z')*1e6,'Asia/Shanghai'),'11-09 13:37');
+assert.equal(recordingTaskTime(null),null);
+assert.equal(recordingTaskTime(NaN),null);
 assert.equal(safeMediaUrl('https://external.invalid/frame.jpg','http://localhost:8110/'),null);
 assert.equal(safeMediaUrl('/media/head.jpg','http://localhost:8110/'),'http://localhost:8110/media/head.jpg');
 assert.equal(actionPermission(snapshot(),'generate_plan').allowed,true);
@@ -1527,12 +1530,13 @@ for(const status of ['ready','invalidated']){
   const value=snapshot(),current='/runs/current-job',historical='/runs/old-job';value.workflow.id=current;
   const video=(role,run)=>({id:role,kind:'replay',mime_type:'video/mp4',ready:true,camera:'base_0',role,url:'/videos/'+(run?'old':'current')+'-'+role+'.mp4',...(run?{run_id:run}:{})});
   value.media=['source','target'].map(role=>video(role));
-  value.results=['source','target'].map(role=>({id:role,kind:'recording',status:'failed',run_id:historical,label:role,media:video(role,historical),
+  value.results=['source','target'].map(role=>({id:role,kind:'recording',status:'failed',run_id:historical,label:role,media:video(role,historical),details:{started_wall_ns:Date.parse('2026-11-09T05:37:00Z')*1e6},
     recording_quality:{raw_manifest_sha256:'a'.repeat(64),dimensions:{motion:{label:'控制执行完成'},data:{label:'存在采样缺口'},video:{label:'视频可回放'},training:{label:'训练用途待筛选'}},
       cameras:{base_0:{label:'头部',accepted_pairs:3,consecutive_sequences:[{first_index:0,last_index:1,first_time_ns:100,last_time_ns:200},{first_index:2,last_index:2,first_time_ns:400,last_time_ns:400}],
         discontinuities:[{reason:'accepted_counter_discontinuity',before_index:1,after_index:2}],ingress_diagnostics:{status:'not_available'}}}}}));
   h.reply(1,value);await settle();h.app.selectTab('results');
   assert.equal(h.get('collection-history-run').children.length,2);assert.equal(h.get('collection-history-run').value,current);
+  assert.match(h.get('collection-history-run').children[1].textContent,/11-09/);assert.equal(h.get('collection-history-run').children[1].value,historical);
   let videos=h.get('replay-media').querySelectorAll('video');assert.equal(videos.length,2);assert(videos.every(node=>node.src.includes('current-')));
   for(const node of videos){node.duration=3;node.events.loadedmetadata();}await h.get('collection-replay-toggle').events.click();assert(videos.every(node=>!node.paused));
   const before=h.requests.length;h.get('collection-history-run').value=historical;h.get('collection-history-run').events.change();

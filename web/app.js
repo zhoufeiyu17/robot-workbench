@@ -42,6 +42,12 @@ export function meshRows(state){
 const BUSINESS = {calibration: '标定', collection: '数采', inference:'推理 / Infer',research:'控制研究'};
 const INFERENCE_BACKENDS={pi:[['torch','Torch'],['triton','Triton']],wam:[['torch','Torch'],['anyinfer','SO 算子加速']]};
 const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理设备'};
+export function recordingTaskTime(wallNs,timeZone){
+  if(!Number.isFinite(wallNs)||wallNs<=0)return null;
+  const date=new Date(wallNs/1e6);if(!Number.isFinite(date.getTime()))return null;
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23',...(timeZone?{timeZone}:{})}).formatToParts(date).map(row=>[row.type,row.value]));
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
 const CALIBRATION_TOOLS=['configure_calibration','plan_batch','preview_batch','fit_source','fit_batch'];
 const DISPLAY_ACTIONS=['preview_target','preview_overview','preview_mesh','preview_recover'];
 const STAGE_LABELS={'head.plan':'头部规划','head.review':'头部轨迹审阅','head.capture':'头部采集','head.solve':'头部求解与验收','head.fit':'头部重新求解','wrist.plan':'双腕规划','wrist.review':'双腕轨迹审阅','wrist.capture':'双腕采集','wrist.solve':'双腕求解与验收','wrist.fit':'双腕重新求解','install':'安装标定','calibration.idle':'准备标定','calibration.complete':'标定完成','collection.prepare':'准备数采环境','collection.plan':'观测与规划','collection.execute':'执行与录制','collection.idle':'准备数采','manual.review':'人工轨迹待审阅','manual.rejected':'人工动作未执行','connecting':'正在连接'};
@@ -1277,9 +1283,9 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       (value.finite_chunk_count?`连续${value.finite_chunk_count}轮，每轮完整执行15步模型轨迹，源时长0.5秒；可减速至最多${value.reference_planning?.max_execution_duration_s??2}秒。每轮重新观测和推理，等待另计；完成后Stop，异常即停。`:
        value.normal_modes_enabled&&value.reference_planning?`本轮最长运行 ${duration} 秒，包含观测、推理、准备、段间等待与运动；每段完整${steps}点，下一整段放不下时保持并正常结束。可随时Stop。`:duration===.5?'取得实时预测后执行0.5秒并自动Stop；执行节奏可能受速度/加速度约束而放慢。':`每次执行 ${steps} / ${state?.inference_execution?.action_horizon??60} 步。`)+
       '设备控制须已接入；本轮仅申请推理执行准入，不连接或恢复设备。');
-    if(prepareOnly)setText('inference-run-summary',`准备当前位置保持和连续录制。模型 ${value.model?.label||inferenceModelId()}，种子 ${seed}，每轮最长 ${duration} 秒。准备完成后从保持状态双踩踏板1或点击 Run 开始推理。保持中应用参数会自动结束旧Run取流并重新准备。`);
+    if(prepareOnly)setText('inference-run-summary',`准备当前位置保持与录制服务；只录制推理和拖动阶段，等待时间不计入有效时长。模型 ${value.model?.label||inferenceModelId()}，种子 ${seed}，每轮最长 ${duration} 秒。准备完成后从保持状态双踩踏板1或点击 Run 开始推理。保持中应用参数会自动结束旧Run取流并重新准备。`);
     if(inferenceRunIntent.wam_stall_recovery)setText('inference-run-summary',el('inference-run-summary').textContent+' 已启用WAM静止恢复，触发时顶部输入黑屏并逐块随机采样，实际输入和种子随本轮录制。');
-    setText('inference-run-details',prepareOnly?'确认后建立当前位置保持和录制，等待后续 Run 或双踩踏板1启动模型。':
+    setText('inference-run-details',prepareOnly?'确认后建立当前位置保持并预热录制；MODEL／TEACH 片段会合成连续回放。等待后续 Run 或双踩踏板1启动模型。':
       '确认后核验当前控制与业务依赖，按所选时长开始推理。停止按钮始终可用。');
     setText('inference-run-clearance-label',prepareOnly?'工作区可安全保持。我确认准备控制与踏板，后续双踩踏板1可启动模型。':
       '场景已复位、工作区无人。我允许本轮模型执行。');
@@ -1290,7 +1296,9 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   function renderInference(){
     const value=state?.workflow?.inference||{},model=value.model||{},metrics=value.metrics||{},outcome=value.outcome||{},audit=value.audit||{};
     const background=value.background_recordings||[];
-    setText('inference-recording-status',background.map(row=>`Run ${row.run_id}：${row.ingress_closed?'取流已关闭，后台校验与导出中':'正在确认尾部落盘'}${row.error?' · '+row.error:''}`).join('；'));
+    const activity=value.operator_session?state?.runtime?.recording?.recording_activity:null;
+    const activityText=activity?`${activity.active_mode?'正在录制 '+activity.active_mode:'等待中，不录制'} · 有效录制 ${Number(activity.effective_duration_s).toFixed(1)} 秒`:'';
+    setText('inference-recording-status',[activityText,...background.map(row=>`Run ${row.run_id}：${row.ingress_closed?'取流已关闭，后台校验与导出中':'正在确认尾部落盘'}${row.error?' · '+row.error:''}`)].filter(Boolean).join('；'));
     const steps=state?.inference_execution?.execute_steps??value.execute_steps??15,maxSegment=Number((steps/30*4).toFixed(3));
     const operator=value.operator_task;
     const modelActive=value.normal_mode?.mode==='MODEL'||['RESUMING','MODEL_ADMITTED'].includes(value.normal_mode?.transition_stage)||
@@ -1827,9 +1835,12 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const historyLabel=context.business==='inference'?'推理任务':context.business==='collection'?'数采任务':'控制录制任务';
     setText('history-business-label',historyLabel);
     el('collection-history-run').setAttribute('aria-label',historyLabel);
-    const selector=el('collection-history-run'),optionsKey=JSON.stringify([key(),currentRun,[...runs]]);
+    const runTime=run=>recordingTaskTime((run===currentRun?state?.runtime?.recording?.recording_activity?.started_wall_ns:null)
+      ??allResults.find(row=>runFor(row)===run&&Number.isFinite(row.details?.started_wall_ns))?.details.started_wall_ns);
+    const runLabel=run=>{const stamp=runTime(run);return stamp?`${stamp} · ${run===currentRun?'当前':historyLabel}`:run===currentRun?'当前任务（尚未录制）':`时间未知 · ${historyLabel}`;};
+    const selector=el('collection-history-run'),optionsKey=JSON.stringify([key(),currentRun,[...runs].map(run=>[run,runLabel(run)])]);
     if(selector.dataset.options!==optionsKey){selector.dataset.options=optionsKey;selector.replaceChildren();
-      for(const run of runs){const option=make('option',run===currentRun?'当前任务':'历史任务 · '+String(run).split('/').filter(Boolean).at(-1).slice(-24));option.value=run;option.title=run==='__current__'?'尚未生成当前任务':run;selector.append(option);}
+      for(const run of runs){const option=make('option',runLabel(run));option.value=run;option.title=run==='__current__'?'尚未生成当前任务':run;selector.append(option);}
     }
     selector.value=historyRun;
     const selectedMedia=[...new Map(allMedia.filter(row=>!collection||context.business==='calibration'&&!captureRow(row)||runFor(row)===historyRun).map(row=>[JSON.stringify([runFor(row),row.id||row.url]),{...row,run_id:runFor(row)}])).values()];
@@ -1842,7 +1853,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const addAction=(container,label,action,body,rule={})=>{const cell=make('div',undefined,'action-cell'),button=make('button',label),reason=make('p','', 'action-reason');button.addEventListener('click',()=>send(action,typeof body==='function'?body():body));cell.append(button,reason);container.append(cell);resultActions.push({button,reason,action,allowed:rule.allowed,ruleReason:rule.reason||'此结果当前不可安装'});};
     for(const result of results){
       const row=make('article',undefined,'result-row'),label=make('div'),actions=make('div',undefined,'result-actions');
-      label.append(make('h3',result.label||result.id),make('p',({calibration:'头部与双腕完整标定',head:'头部中间候选',wrist:'双腕中间候选',capture:'采集批次',recording:'录制视频',control_recording:'控制过程录制',replay:'过程视频'}[result.kind]||result.kind||'结果')+' · '+(result.recording_quality?'旧版判定：':'')+statusText(result.status)));
+      label.append(make('h3',result.kind==='control_recording'&&runTime(runFor(result))?runLabel(runFor(result)):result.label||result.id),make('p',({calibration:'头部与双腕完整标定',head:'头部中间候选',wrist:'双腕中间候选',capture:'采集批次',recording:'录制视频',control_recording:'控制过程录制',replay:'过程视频'}[result.kind]||result.kind||'结果')+' · '+(result.recording_quality?'旧版判定：':'')+statusText(result.status)));
       if(result.recording_quality){
         const quality=result.recording_quality,dimensions=quality.dimensions||{},list=make('dl',undefined,'detail-list');
         for(const [name,title] of [['motion','控制执行'],['data','数据覆盖'],['video','过程视频'],['training','训练用途']]){
