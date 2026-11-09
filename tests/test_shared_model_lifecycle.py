@@ -62,7 +62,7 @@ class SharedLifecycleTests(unittest.TestCase):
         self.assertNotIn(('model','stop'),[(c.args[0],c.args[1])for c in m.service_action.call_args_list])
         m.health_cache['services']=deepcopy(m.rows)
         with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'active','MainPID':'7'}),\
-             patch.object(workbench_deploy,'http_json',return_value={'robot_vin':'arx13','orphan_alive':False}):
+             patch.object(workbench_deploy,'http_json',return_value={'robot_vin':m.config['device_id'],'orphan_alive':False}):
             self.assertTrue(WorkbenchManager.verify(m,result)['ok'])
         # This is an explicit service administrator shutdown, never a consumer operation.
         self.a.acquire()

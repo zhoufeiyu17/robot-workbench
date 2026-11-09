@@ -273,6 +273,31 @@ class NormalModeTests(unittest.TestCase):
         self.assertEqual(self.runtime.owner.runner.mode_receipts[request['request_id']]['status'],'failed')
         self.assertIsNone(self.raw.window)
 
+    def test_confirmed_hold_retains_native_output_without_repeating_admission(self):
+        from robot_workbench.sdk_process import ReferenceWindowRejected
+        self.setup_modes(recording=True,initial_mode='HOLD')
+        runner=self.runtime.owner.runner
+        for phase in ('initial','after_model'):
+            before=self.raw.read_execution_output();epoch=self.runtime.owner.epoch
+            packets=len(self.raw.packets)
+            # Reproduce the observed failure if an idle HOLD tries to re-admit
+            # an identical short window. Real feedback must continue throughout.
+            with patch.object(self.raw,'queue_reference',side_effect=ReferenceWindowRejected(
+                    'future reference expired during multi-arm admission'))as admission,\
+                    patch.object(self.raw,'read_calibration_state',wraps=self.raw.read_calibration_state)as feedback:
+                self.advance(500)
+                self.assertNotIn('FAULT',self.runtime.owner.control.state.value,phase)
+                admission.assert_not_called();self.assertGreater(feedback.call_count,400)
+            after=self.raw.read_execution_output()
+            self.assertEqual(before['q_sdk14'],after['q_sdk14'])
+            self.assertEqual(after['dq_sdk14'],[0.]*14)
+            self.assertEqual(before['gains'],after['gains'])
+            self.assertEqual(epoch,self.runtime.owner.epoch);self.assertEqual(packets,len(self.raw.packets))
+            request,_=self.request('MODEL');self.completed(request)
+            request,_=self.request('HOLD',gate=True);self.completed(request)
+        request,_=self.request('TEACH',gate=True);self.completed(request)
+        request,_=self.request('HOLD',gate=True);self.completed(request)
+
     def test_prepared_initial_hold_does_not_infer_until_explicit_model_request(self):
         self.setup_modes(recording=True,initial_mode='HOLD');runner=self.runtime.owner.runner
         self.assertEqual(self.requests,[]);self.assertEqual(runner.mode,'HOLD')

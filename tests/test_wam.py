@@ -22,6 +22,34 @@ PINS=dict(checkpoint='1'*64,stats=hashlib.sha256((ROOT/'tests/fixtures/wam-e03-n
 
 
 class WamInputWorkflowTests(unittest.TestCase):
+    def test_registry_uses_large_weight_metadata_but_checks_small_content_and_sizes(self):
+        import json
+        from unittest.mock import patch
+        with TemporaryDirectory()as temp:
+            root=Path(temp);files=[];pins={}
+            for name in ('checkpoint.pt','stats.json','context.pt','model_config.json','engine.so',
+                         'phoenix_encoder.pt','csvae.pt','Wan2.2_VAE.safetensors'):
+                p=root/name;p.write_bytes(name.encode())
+                if name=='checkpoint.pt':
+                    with p.open('r+b')as f:f.truncate(64*1024*1024+1)
+                    digest='a'*64
+                else:digest=hashlib.sha256(p.read_bytes()).hexdigest()
+                files.append(dict(path=name,bytes=p.stat().st_size,sha256=digest));pins[name]=digest
+            def sha(path):
+                if str(path)=='/etc/machine-id':return 'host'
+                self.assertNotEqual(Path(path).name,'checkpoint.pt','ordinary verification must not reread the large weight')
+                return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            canonical=json.dumps(sorted(files,key=lambda r:r['path']),sort_keys=True,separators=(',',':')).encode()
+            registry=dict(root=str(root),files=files,machine_id_sha256='host',gpu_uuid='GPU-fixture',bundle_sha256=hashlib.sha256(canonical).hexdigest())
+            bundle=dict(artifacts={k:dict(sha256=pins[v])for k,v in dict(checkpoint='checkpoint.pt',stats='stats.json',context='context.pt',model_config='model_config.json').items()},runtime=dict(engine_sha256=pins['engine.so']))
+            with patch('robot_workbench.mixed366.sha',side_effect=sha),patch.object(wam,'descriptor',return_value=bundle):
+                self.assertEqual(wam.verify_registry(registry)[1]['checkpoint'],root/'checkpoint.pt')
+                (root/'stats.json').write_bytes(b'x'*len('stats.json'))
+                with self.assertRaisesRegex(ValueError,'artifact changed'):wam.verify_registry(registry)
+                (root/'stats.json').write_bytes(b'stats.json')
+                with (root/'checkpoint.pt').open('r+b')as f:f.truncate(3)
+                with self.assertRaisesRegex(ValueError,'artifact changed'):wam.verify_registry(registry)
+
     def test_stall_window_counts_executed_points_then_cycles_and_recovers(self):
         from unittest.mock import patch
         recovery=wam.StallRecovery({'left':80.,'right':89.})

@@ -9,7 +9,7 @@ from scripts.workbench_deploy import Blocked
 
 class ManualStartupTests(unittest.TestCase):
     def test_webpage_opens_before_service_preparation_and_model_wait(self):
-        config=dict(units=['robot-workbench-ui.service'],ui_unit='robot-workbench-ui.service',url='http://127.0.0.1:18868')
+        config=dict(units=['demo-ui@bench.service'],ui_unit='demo-ui@bench.service',url='http://127.0.0.1:18868')
         response=MagicMock();response.__enter__.return_value.status=200
         with patch('scripts.start_registered_workbench.build_opener')as opener,patch('scripts.start_registered_workbench.subprocess.run')as command:
             opener.return_value.open.return_value=response
@@ -101,7 +101,7 @@ class ManualStartupTests(unittest.TestCase):
     def test_registered_recording_starts_first_and_requires_its_own_readiness(self):
         with TemporaryDirectory()as tmp:
             profile=Path(tmp)/'manager.json'
-            profile.write_text(json.dumps(dict(services={'recording':dict(kind='user_unit',unit='robot-workbench-recording.service')})))
+            profile.write_text(json.dumps(dict(services={'recording':dict(kind='user_unit',unit='demo-recorder.service')})))
             config=dict(manager_profile=str(profile),units=['robot-workbench-business.service'],url='http://127.0.0.1:18868')
             for ready in (True,False):
                 state=dict(health={'backend_reachable':True,'recording_service':{'ready':ready}},target={'services':{'model':{'pid':7}}},model={'ready':True})
@@ -111,7 +111,7 @@ class ManualStartupTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(Blocked,'recording service readiness'):start(config)
                 self.assertEqual([call.args[0][-1]for call in command.call_args_list],
-                    ['robot-workbench-recording.service','robot-workbench-business.service'])
+                    ['demo-recorder.service','robot-workbench-business.service'])
 
     def test_missing_planner_is_not_reported_as_complete_startup(self):
         state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':True})

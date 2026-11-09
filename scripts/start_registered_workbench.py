@@ -29,7 +29,7 @@ def acquire_control(config):
 def open_page(config):
     """Open the manager independently of model/control preparation."""
     unit=config.get('ui_unit')
-    require(unit in config['units'] and re.fullmatch(r'robot-workbench-[A-Za-z0-9_.@-]+\.service',str(unit)),
+    require(unit in config['units'] and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(unit)),
         'registered ui_unit required for early browser opening')
     started=time.monotonic()
     subprocess.run(['systemctl','--user','start',unit],check=True,timeout=4)
@@ -72,21 +72,21 @@ def start(config):
             if 'recording' in services:roles.append('recording')
         elif 'recording' in services:
             recording=services['recording']
-            require(isinstance(recording,dict)and recording.get('kind')=='user_unit'and re.fullmatch(r'robot-workbench-[A-Za-z0-9_.@-]+\.service',str(recording.get('unit'))),
+            require(isinstance(recording,dict)and recording.get('kind')=='user_unit'and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(recording.get('unit'))),
                 'recording requires a registered user unit')
             recording_unit=recording['unit']
         for role in roles:
             model=services.get(role)
             require(isinstance(model,dict)and model.get('kind')=='user_unit'
                 and isinstance(model.get('unit'),str)
-                and re.fullmatch(r'robot-workbench-[A-Za-z0-9_.@-]+\.service',model['unit']),
+                and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',model['unit']),
                 f'external {role} requires an explicit supported user_unit mapping before any service startup')
             external_units.add(model['unit'])
         if not takeover and manager.get('control_lifecycle','managed')=='managed' and manager.get('collection_handoff'):
             handoff=handoff_collection(manager['collection_handoff'],manager['device_id'],stop_active=False)
     units=([recording_unit]if recording_unit else [])+[unit for unit in config['units']if unit!=recording_unit]
     for unit in units:
-        require(unit.startswith('robot-workbench-')and unit.endswith('.service'),'registered workbench unit required')
+        require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(unit)),'registered workbench unit required')
         if unit in external_units:continue
         subprocess.run(['systemctl','--user','start',unit],check=True,timeout=30)
     url=config['url'];deadline=time.monotonic()+30

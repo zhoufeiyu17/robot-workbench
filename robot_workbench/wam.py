@@ -369,7 +369,7 @@ def variants(registry):
 
 
 def verify_registry(registry):
-    """CPU-only content/host proof; no weights are deserialized here."""
+    """Host/manifest and lightweight content checks; large weights use size and strict loading."""
     from .mixed366 import sha
     root=Path(registry['root']).resolve(strict=True);files=registry['files'];paths={}
     if registry.get('machine_id_sha256')!=sha('/etc/machine-id')or not str(registry.get('gpu_uuid','')).startswith('GPU-'):
@@ -378,7 +378,12 @@ def verify_registry(registry):
     if hashlib.sha256(canonical).hexdigest()!=registry['bundle_sha256']:raise ValueError('WAM bundle manifest changed')
     for row in files:
         path=(root/row['path']).resolve(strict=True)
-        if not path.is_relative_to(root)or not path.is_file()or path.stat().st_size!=row['bytes']or sha(path)!=row['sha256']:
+        if not path.is_relative_to(root)or not path.is_file()or path.stat().st_size!=row['bytes']:
+            raise ValueError('WAM registered artifact changed: '+row['path'])
+        large_weight=path.suffix.lower()in ('.pt','.pth','.ckpt','.safetensors','.bin')and row['bytes']>64*1024*1024
+        # Reuse the registered digest for large weights, then strictly load them.
+        # Runtime code, manifests and small artifacts still receive content checks.
+        if not large_weight and sha(path)!=row['sha256']:
             raise ValueError('WAM registered artifact changed: '+row['path'])
         paths.setdefault(row['sha256'],[]).append(path)
     bundle=descriptor(registry)

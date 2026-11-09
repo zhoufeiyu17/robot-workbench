@@ -1065,8 +1065,11 @@ class InferenceRunner:
         import numpy as np
         job=self.normal_job
         if job is None:
-            if self.mode=='HOLD':self._queue_native(now,feedback);return True
-            if self.mode=='TEACH':return True
+            # A completed HOLD has already confirmed its fixed zero-velocity
+            # native output. The SDK retains that endpoint; recurring identical
+            # windows only add a future-admission deadline while standing still.
+            # Feedback, epoch and device checks still run before this branch.
+            if self.mode in ('HOLD','TEACH'):return True
             if getattr(self,'normal_supply_exhausted',False):
                 self._queue_native(now,feedback);return True
             if self.normal_planned and self.mode=='MODEL':

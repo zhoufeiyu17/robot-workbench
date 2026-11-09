@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 415,
-  "updated_at": "2026-11-09T11:23:08.567866+00:00",
+  "revision": 419,
+  "updated_at": "2026-11-09T12:03:19.687185+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -34,7 +34,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     {
@@ -59,7 +59,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "75afebc7eed103a811ae3d0ecee77029b5dd1a5952d3bdcca3ec94ea5b106047",
+      "fingerprint": "a327128a9bb10137fb7d3387bfe45ca71f61f1d8da948fe34cf70e4303aba3a6",
       "verified_fingerprint": null
     },
     {
@@ -107,7 +107,7 @@
         "sha256": "5787b98159b871dc8de79376cae1735c5d1ba08b72b50dcc0f2c3531cf83a9d9",
         "matches_file": true
       },
-      "fingerprint": "2b9854c6ea27e9e568ab4e9acb89be33adbfc668e8441c12b4e68cd5fb9a924e",
+      "fingerprint": "a857dad476e0e16b21764089259444b474360e1f7ad1483bc3032fe6da22cc23",
       "verified_fingerprint": "ae60d63f548388b52ec65e609ffba7898a4e41214be57db1932e3edadea41308"
     },
     {
@@ -138,7 +138,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "61b4445a556f01ff20ca2162e2b987cbeca74fef1809388f0251545c14ed16c0",
+      "fingerprint": "b6e15d3b9a0041cbaec45d00e10f4ca1f70ad22ac3458111b1cbb56449767f25",
       "verified_fingerprint": null
     },
     {
@@ -163,7 +163,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "89b421777bfe2dbc302631376126a3796b5c7a188a20dc24231e7dc04efa07b3",
+      "fingerprint": "1303a8ef8fa22784d00bcc808b9f96148c2632dec9a42201722578e5ff72b095",
       "verified_fingerprint": "847879c398691295376b01b8a4ae5bdc3f411b93f66231bff2fd33afa58aae72"
     },
     {
@@ -192,7 +192,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "a08fad8366074eafb8694d0e651558b5aa01890735c34215d1997b67e5c22c65",
+      "fingerprint": "ed9fe85fe79284d234e31d15a9fe05e676ccb036b4ae96cfc321720960380722",
       "verified_fingerprint": "2249f579e849f462d042a89ad564cbdbf14b962d117f0bfc74c44779840c92ac"
     },
     {
@@ -201,10 +201,10 @@
       "name": "Torch / Triton 模型执行",
       "phase": "P3",
       "state": "implemented",
-      "note": "已确认MODEL/TEACH紧凑录制、时间命名、直接Run停止后保留会话；相关CPU/ROS与UI检查通过。ARX6控制已释放；用户转ARX13，当前仅同步代码，实机后续验证。",
-      "next": "按progress完成ARX13代码同步，实机接入/踏板测试等待用户继续",
+      "note": "Ordinary WAM loading reuses registered large-weight digests with path/size/manifest checks and strict loading. Small artifacts and runtime code still receive content verification. CPU regressions and actual model cold loading passed.",
+      "next": "User online model/pedal testing; no unrequested backend benchmark.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T08:01:25.142749+00:00",
+      "updated_at": "2026-11-09T12:03:18.818221+00:00",
       "files": [
         "robot_workbench/mixed366.py",
         "robot_workbench/mixed366_runtime.py",
@@ -213,11 +213,11 @@
         "robot_workbench/wam.py"
       ],
       "evidence": {
-        "path": ".evidence/infer-active-recording-20261109-v1/cpu-acceptance.json",
-        "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
+        "path": ".evidence/hold-exit-acceptance/result.json",
+        "sha256": "f185bf9ea367949104669f4124acea220f9ab1b0b9dfdc18d5864018bffa1cbb",
         "matches_file": true
       },
-      "fingerprint": "22985793b175e9ea6a979ea86cc27d878b09d56d7419c301836cc77691560355",
+      "fingerprint": "41dcf61dd0e1bba41eedf9b2c5b74fefe5baa8ba8bcc76d6908791e176d0bddc",
       "verified_fingerprint": null
     },
     {
@@ -243,7 +243,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "f7c0d01299391d9aaa63618cbefe1205f94f0b0eaa92adb3d1bf1dac743466c8",
+      "fingerprint": "1979bd7cf145883a71396a070055d09d574370e80c6eb4f8a9e5d7889ada0c44",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     {
@@ -251,11 +251,11 @@
       "module": "translation",
       "name": "连续执行与唯一出口",
       "phase": "P3",
-      "state": "verified",
-      "note": "WAM/ARX13有界3x15及运动中Stop通过；两条新Run原始数据/IO/回放complete，6调用42网络张量位精确重建。仅本回执范围，不等于全业务/长期/任务精度资格。",
-      "next": "正式G34预算、持续/变步数现场覆盖、最终精度与正式运维入口仍列待办",
+      "state": "implemented",
+      "note": "Confirmed HOLD retains native zero-velocity output without repeated short-window admission. Original failure reproduced in CPU; feedback, epoch and limits checks remain. Mode-transition regressions and live stationary HOLD passed with unchanged submission count.",
+      "next": "User physical pedal gesture validation.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-07T04:25:44.063477+00:00",
+      "updated_at": "2026-11-09T12:03:16.980258+00:00",
       "files": [
         "robot_workbench/inference.py",
         "robot_workbench/inference_owner.py",
@@ -266,12 +266,12 @@
         "rule_based_workbench/real_control.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
-        "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
+        "path": ".evidence/hold-exit-acceptance/result.json",
+        "sha256": "f185bf9ea367949104669f4124acea220f9ab1b0b9dfdc18d5864018bffa1cbb",
         "matches_file": true
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
-      "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
+      "verified_fingerprint": null
     },
     {
       "id": "translation-study",
@@ -296,7 +296,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "74bc1855d66fcb7fae4c8f659a02806e493dd75b2ef51453ca443d11f6dffa73",
+      "fingerprint": "094dcd4ce522f6982d6b3aa05a9bae3b4b27a131cbd03945938b6b94fbbfc5f7",
       "verified_fingerprint": "e567a0bd56bd667d5bd25e0d563375d65b6a420f44aef04d732bfbd5f0284aa0"
     },
     {
@@ -323,7 +323,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
     },
     {
@@ -350,7 +350,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "cf252df01e8294094102a36ca4d1622a708f2ca275e8b68827faedf8ae198e39",
+      "fingerprint": "21741cae0aa17643a43bc9792fb77c73fd506f46f4d8efd266684579b0af0798",
       "verified_fingerprint": null
     },
     {
@@ -375,7 +375,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "6ac5ccdf415db1d6bdfdadffbba9bba88c4507a16af838aa4be710d95bfceea6",
+      "fingerprint": "84c0f3a0a2d8e8c4f48f2eee9b2a82b2a4e27178e041311d9f16c58721dc3fc0",
       "verified_fingerprint": null
     },
     {
@@ -399,7 +399,7 @@
         "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
         "matches_file": true
       },
-      "fingerprint": "f10aa684951dc75d2e053d5eeaf98b1f12fa9cd27808f5e9f89abff884ff5d3c",
+      "fingerprint": "86beaf0ec2a55bef42aa6c9b72b059e7b9c18bf7d3a683c0ec5a94d8ea9fa68e",
       "verified_fingerprint": null
     },
     {
@@ -425,7 +425,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "a0a6cf572682df2866536ceb02ea03ec892fcbc3cf0766f02c1b18a3b7c7b581",
+      "fingerprint": "e7e00da763382a9faeca23f26fa588ac2e3f196aa662eeee917d5a88ec672d12",
       "verified_fingerprint": "f01d7e9518aea090e8bba53b760230f407b050a892172a134ce6e59b8c3f6113"
     },
     {
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "0caa251679e22b2fc8da2b61e06f7e8cbf0028a8b8c045a939967c5e608d1d66",
+      "fingerprint": "80c9f6e14cb37ae5bd71f76bef7c62236bf2653fd93d477bca53210ad535e768",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -463,10 +463,10 @@
       "name": "运维事务与维护流程",
       "phase": "P2",
       "state": "implemented",
-      "note": "Public exit verified after explicitly authorized protected retirement: all registered service subprocesses and manager exited; recorder sealed and original incomplete outcome preserved. No reconnect or successor startup. This does not qualify normal home/SDK-close exit.",
-      "next": "Fix HOLD reference expiry before reconnect; qualify normal-home exit in a later healthy session.",
+      "note": "Normal low-speed home, SDK close, recorder sealing, all owned-service exits and manager-last shutdown passed. Full cold desktop startup then returned ready with cameras, manual planning, model, recorder and pedal bound.",
+      "next": "Keep prepared HOLD for user pedal validation; no automatic model trajectory.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T11:23:07.753208+00:00",
+      "updated_at": "2026-11-09T12:03:17.891379+00:00",
       "files": [
         "robot_workbench/operations.py",
         "robot_workbench/management.py",
@@ -474,11 +474,11 @@
         "robot_workbench/sdk_quiesce.py"
       ],
       "evidence": {
-        "path": ".evidence/exit-lifecycle-acceptance/result.json",
-        "sha256": "594f497d2e7067fe8e259c4454e2e56d60f984a59fe5772f5f8a37ffde4f1938",
+        "path": ".evidence/hold-exit-acceptance/result.json",
+        "sha256": "f185bf9ea367949104669f4124acea220f9ab1b0b9dfdc18d5864018bffa1cbb",
         "matches_file": true
       },
-      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
+      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "f41e74613d37a89ff77c6c0c3dd837ce8a4b33a45f6f2d50ea95bf36084555b1",
+      "fingerprint": "c48338d6f0f6c5b642190b1465c248115ce70b3c4094af68f45e54aa8f97da6b",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -545,7 +545,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "7fe214167b4ff461d9354720a76c2231486bc8b6731f7e8c032ce6c764ee10b9",
+      "fingerprint": "ddf056ddb18e32299f1603c7e1a438a79be2a69ac893c70bba0fbd5ece7b47fa",
       "verified_fingerprint": null
     },
     {
@@ -620,7 +620,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/joint_bounds.py": {
@@ -648,7 +648,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "4316f525a2cdf93dbfe7572b84001bface3b61912867c5aa1b976b28638c5050"
     },
     "robot_workbench/state_contract.py": {
@@ -676,7 +676,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/runtime.py": {
@@ -718,7 +718,7 @@
           }
         ]
       },
-      "fingerprint": "75afebc7eed103a811ae3d0ecee77029b5dd1a5952d3bdcca3ec94ea5b106047",
+      "fingerprint": "a327128a9bb10137fb7d3387bfe45ca71f61f1d8da948fe34cf70e4303aba3a6",
       "verified_fingerprint": "a87549b04977f6c2785e4e994e1227d7d63a8847f93b9aa8754b8ff4797cca95"
     },
     "robot_workbench/inference_owner.py": {
@@ -734,7 +734,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "c5f7e3308a0bb02346f148ffd618f6ec46e91cdbd60707c97709fb50ddef1775",
+        "sha256": "604af63b2517d06264fd299f8e54e64082489d1287b6954760fd9a00980dcbe2",
         "imports": [
           "robot_workbench/control_plan.py",
           "robot_workbench/execution_settings.py",
@@ -755,7 +755,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": null
     },
     "robot_workbench/target_interpreter.py": {
@@ -786,7 +786,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/arx_output_guard.py": {
@@ -814,7 +814,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "robot_workbench/can_feedback_filter.py": {
       "state": "baseline",
@@ -967,7 +967,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/observation_window.py": {
@@ -1018,7 +1018,7 @@
           }
         ]
       },
-      "fingerprint": "1702a652828c33a941696c5ae788742b3c8d64df26e621732ed8866ef6c23147",
+      "fingerprint": "c97bcd3eb040bee3967d5a18c5668d45eb033fe1f57f313b7079e4ba01d4ad0b",
       "verified_fingerprint": "a272fae85054cab8833cac549ecad95149958745c6c86dcd490580c4d7abe647"
     },
     "robot_workbench/camera_owner.py": {
@@ -1189,7 +1189,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/inference_evidence.py": {
@@ -1217,7 +1217,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_transport.py": {
@@ -1254,7 +1254,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/model_session.py": {
@@ -1289,7 +1289,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_model.py": {
@@ -1318,7 +1318,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_catalog.py": {
@@ -1348,7 +1348,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/mixed366.py": {
@@ -1385,7 +1385,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/mixed366_runtime.py": {
@@ -1494,7 +1494,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/motion_reference.py": {
@@ -1523,7 +1523,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/control_plan.py": {
@@ -1550,7 +1550,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "robot_workbench/control_reference.py": {
       "state": "verified",
@@ -1581,7 +1581,7 @@
           }
         ]
       },
-      "fingerprint": "c0fe4de0bcd71136fd935d49bc73ebb72f955c15fd696d11d798f5ad65b4a747",
+      "fingerprint": "68d46a629a6f5347ec2394f76b92ae8f905705fcab11a8f5403077d4870017c5",
       "verified_fingerprint": "b85bc982e594d747d855a01c2efbea8f5772df2b4c69ef039123fb3d7ed6b2fb"
     },
     "robot_workbench/inference_reference.py": {
@@ -1660,7 +1660,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "827b8da82baa9f56734cc0f2e66f4f458c84ae124bc1b380946021d7bd283ef7"
     },
     "robot_workbench/control_owner.py": {
@@ -1695,7 +1695,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "6efdde405c70d326e96c546cb6c8a2094e8be18d1b35e75ce24867fdf0534fe8"
     },
     "robot_workbench/precision_study.py": {
@@ -1728,7 +1728,7 @@
           }
         ]
       },
-      "fingerprint": "2a8ee62c3278b99050b82c9343209999edc05f414643d6bf7621bd584d19706e",
+      "fingerprint": "c65d04bd805513550a8cc998fe3e198362686db75ba4ea455845d59e3338e990",
       "verified_fingerprint": "ade271d9ae25b14939a780fea3af3f873ef9e48ef7f2caf5cf79a9381c4dfee5"
     },
     "robot_workbench/gravity_identification.py": {
@@ -1773,7 +1773,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "robot_workbench/physical_cup_return.py": {
       "state": "baseline",
@@ -1799,7 +1799,7 @@
           }
         ]
       },
-      "fingerprint": "02447f97703c1b2aac456c3ad9504412875a6788279ebe5ca22a78f2fc24512d"
+      "fingerprint": "029dfaf11ccc8fc8bfece567dfd5c5f33e4ad6fba1e0aae8a2ad1a50ebca5f30"
     },
     "robot_workbench/cup_return.py": {
       "state": "baseline",
@@ -1825,7 +1825,7 @@
           }
         ]
       },
-      "fingerprint": "02447f97703c1b2aac456c3ad9504412875a6788279ebe5ca22a78f2fc24512d"
+      "fingerprint": "029dfaf11ccc8fc8bfece567dfd5c5f33e4ad6fba1e0aae8a2ad1a50ebca5f30"
     },
     "robot_workbench/manual_self_collision.py": {
       "state": "baseline",
@@ -1874,7 +1874,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "734a8d393fe2f3d57f87af729f59de9bc57d62577d71a5576fd222fb7a978297"
     },
     "robot_workbench/release_trace.py": {
@@ -1936,7 +1936,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/recording_quality.py": {
@@ -1965,7 +1965,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_history.py": {
@@ -1993,7 +1993,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/collection_history.py": {
@@ -2024,7 +2024,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/lerobot_export.py": {
@@ -2048,7 +2048,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "robot_workbench/http_media.py": {
       "state": "baseline",
@@ -2110,7 +2110,7 @@
           }
         ]
       },
-      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
+      "fingerprint": "1181175c685475bff85553fdce353f9b2e13749e747b24fe8ea440c5ee103873",
       "verified_fingerprint": "32e271cb3d9a186bf7e9fd6492a5bf35345d74f13b3e1281523e36806171595e"
     },
     "robot_workbench/workflows.py": {
@@ -2135,7 +2135,7 @@
           }
         ]
       },
-      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799"
+      "fingerprint": "1181175c685475bff85553fdce353f9b2e13749e747b24fe8ea440c5ee103873"
     },
     "robot_workbench/bridges.py": {
       "state": "active",
@@ -2162,7 +2162,7 @@
           }
         ]
       },
-      "fingerprint": "ecc881b43491b0f753560609f42484dcb9ddf0febcb87daa317b1e071053d0d9",
+      "fingerprint": "32914203bec629b17a912b7e8c1f69bb182f8b8916219a1aecd50d0e9b727b93",
       "verified_fingerprint": null
     },
     "robot_workbench/resident_collection.py": {
@@ -2195,7 +2195,7 @@
           }
         ]
       },
-      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
+      "fingerprint": "1181175c685475bff85553fdce353f9b2e13749e747b24fe8ea440c5ee103873",
       "verified_fingerprint": "680947a9814b89ebf4c094bacd1065b3b0d439d4ebeed063328acb2415d36107"
     },
     "robot_workbench/collection_setup.py": {
@@ -2229,7 +2229,7 @@
           }
         ]
       },
-      "fingerprint": "ea2df77cbf40c3d79a298afef5c1439a782be23e1e9c974dcfd9881051992799",
+      "fingerprint": "1181175c685475bff85553fdce353f9b2e13749e747b24fe8ea440c5ee103873",
       "verified_fingerprint": null
     },
     "robot_workbench/calibration_profile.py": {
@@ -2319,7 +2319,7 @@
           }
         ]
       },
-      "fingerprint": "6f1447f03190b6adb3d22fa3e09ad4d688e6fff64a644bda5f57042846784f5b"
+      "fingerprint": "5fedbf4cc72df6bb3e2008229b1e89249a066e624a85bd7a41371b53ca2f9ba7"
     },
     "robot_workbench/target_display_gateway.py": {
       "state": "baseline",
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886"
+      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2528,7 +2528,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/management.py": {
@@ -2572,7 +2572,7 @@
           }
         ]
       },
-      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
+      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
       "verified_fingerprint": null
     },
     "robot_workbench/maintenance.py": {
@@ -2601,7 +2601,7 @@
           }
         ]
       },
-      "fingerprint": "4488b903e5fb55fc399fbab2e56d9ebb111c33d2878322d5969aab38854c5588",
+      "fingerprint": "11ec5221a292f07d911db0fdb5725f010779e4039aead4040f332b0d71bddfec",
       "verified_fingerprint": "43708c7e6018674851272c786b388a72c49c8c0ecf831258a4f2c2fcdd0a2c8e"
     },
     "robot_workbench/sdk_quiesce.py": {
@@ -2626,7 +2626,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "robot_workbench/managed_services.py": {
       "state": "baseline",
@@ -2699,7 +2699,7 @@
           }
         ]
       },
-      "fingerprint": "6306beb452987b2e8877f0ef3e9cd14e99baffdd541fe6f4fd35f8d04a2bea36",
+      "fingerprint": "967cc4a0977fcb6ab6d44a70b0deb2f0a18a9829bf058fba22a73cab8552fc5c",
       "verified_fingerprint": null
     },
     "robot_workbench/machine_profile.py": {
@@ -2772,7 +2772,7 @@
           }
         ]
       },
-      "fingerprint": "562d497524aec227f2c411bb7146066b3bda39d091674cfdc0270ea15fcc0dca"
+      "fingerprint": "b265c469095d0c318df4d937919328e70b7ed93b670a517f98d6f97039548f61"
     },
     "robot_workbench/sdk_process.py": {
       "state": "implemented",
@@ -2804,7 +2804,7 @@
           }
         ]
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": null
     },
     "robot_workbench/physx.py": {
@@ -2927,7 +2927,7 @@
           }
         ]
       },
-      "fingerprint": "ef3231678070ad53cb5e08330956e08662c15baeef92296fe65dd95711152978",
+      "fingerprint": "632459225393ca5b1b4ca8a81434c1e47d0df6fa930e43262285a963bba30331",
       "verified_fingerprint": "f24303a29304f1e4f5e430c4d84a53ff76eaeb3401b9e72c1c5b5a1759627f1b"
     },
     "calibration/infra/arx_env/joint_head_real_motion.py": {
@@ -2958,7 +2958,7 @@
           }
         ]
       },
-      "fingerprint": "7d9d6e2e95c568cba8529e3a157847f85e53f5c092c3c4ca65c70f66762c5916",
+      "fingerprint": "8fec88102f0f29bbaa72e2a0c9d149a976aec8f2d9bf3b92fc10203c263ca47f",
       "verified_fingerprint": "ffae173ae887ed234450c6942fc560fc83b082d3259ab587f33977d4a13aa833"
     },
     "calibration/infra/arx_env/joint_head_jaw_mapping.py": {
@@ -2982,7 +2982,7 @@
           }
         ]
       },
-      "fingerprint": "5fdd7f6348b2cd0c7c04f31a7ab6e513fb5da6186202944e2422b267175d30ce"
+      "fingerprint": "9bc9b441385a56b5e2ed8936df8243370c8722a883a64232200e465ecdfc9a81"
     },
     "calibration/infra/arx_env/joint_head_workbench_hardware.py": {
       "state": "baseline",
@@ -3028,7 +3028,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "scripts/start_registered_workbench.py": {
       "state": "verified",
@@ -3043,7 +3043,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "47079b6dacdc3449fe7c12a6d73df730be151373bafa173abe0dfbf07d499541",
+        "sha256": "700a84177f45593fc034e18f0de84f0fa7da439b8654c4261e26bff331d281f2",
         "imports": [
           "robot_workbench/state_contract.py",
           "scripts/workbench_deploy.py"
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "8891b29d58ccb13e3af5e762dd9e52ff008f33ab0e28e4638144058032b60f44",
+      "fingerprint": "dcf295d17fca61a9bf082edbf9363d066013bb710b6efe1074f73caed68d58b5",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3092,7 +3092,7 @@
           }
         ]
       },
-      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
+      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3118,7 +3118,7 @@
           }
         ]
       },
-      "fingerprint": "0f6db8c22d150d3c6cdcb11ec368cc369e50b669b67b5be1649361a48cf49295"
+      "fingerprint": "ce1b012c0a6e59f9c5a7d865f22c097df1e280c668d580c252dc7ec18f6c0d08"
     },
     "scripts/serve_mixed366_model.py": {
       "state": "baseline",
@@ -3137,7 +3137,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "34814a9ff4763a5bde28621a314f9e71c8bec5f7f0c5fd066edea0e5fd7ec31e"
+      "fingerprint": "aa69450c0f604cc48280a66b93c343fdc71383fedd01fb52d34c6f7d5a84c760"
     },
     "scripts/serve_base566_model.py": {
       "state": "baseline",
@@ -3154,7 +3154,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "19d633363500404e10019ae17823ef73ef154feab267ad33957ff79833bb3541"
+      "fingerprint": "c0325d49684c59607aa80ba42b3d0cbf81e398de63b8a7621e8390d225402e95"
     },
     "scripts/serve_prometheus_rgb.py": {
       "state": "baseline",
@@ -3171,7 +3171,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "b37cb3bb90a700413eb8d6b62358ae0ac883ae7757b05b355d0a041f7d01def3"
+      "fingerprint": "c1a28c0970945d9517a9d33a1837814ac3d3af34acb65790fbfa46e48d07c6fd"
     },
     "scripts/development_map.py": {
       "state": "verified",
@@ -3367,7 +3367,7 @@
           }
         ]
       },
-      "fingerprint": "f7c0d01299391d9aaa63618cbefe1205f94f0b0eaa92adb3d1bf1dac743466c8",
+      "fingerprint": "1979bd7cf145883a71396a070055d09d574370e80c6eb4f8a9e5d7889ada0c44",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     "scripts/serve_sdk_control.py": {
@@ -3393,7 +3393,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "76dbabf985429169f518d6bb570b4043dcaa7eb191c100e2b2569b4d7184ab8e",
+      "fingerprint": "afc448e2e4fed37971ad4ee555d120f031536b21b352afdb1c8ca5c14ddd68cd",
       "verified_fingerprint": "8d6e33336f6a6e884f2eb9a0192dc12c5e695f523a797e18de580b16eed460bf"
     },
     "rule_based_workbench/rgbd_segments.py": {
@@ -3459,7 +3459,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "rule_based_workbench/real_control.py": {
@@ -3488,7 +3488,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "scripts/serve_recording.py": {
@@ -3510,7 +3510,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "cf252df01e8294094102a36ca4d1622a708f2ca275e8b68827faedf8ae198e39",
+      "fingerprint": "21741cae0aa17643a43bc9792fb77c73fd506f46f4d8efd266684579b0af0798",
       "verified_fingerprint": "9755babac4fce7ad8c9b3cbbd2bedcc2d997e8da85895190c4e6cea9bb88c14c"
     },
     "robot_workbench/ros_data.py": {
@@ -3582,7 +3582,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "6155c49002d49a9ac31bd23eabad6b288dd880a31c62362329ed9689ad07ecb9"
     },
     "robot_workbench/ros_recording.py": {
@@ -3611,7 +3611,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550",
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111",
       "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/ros_driver.py": {
@@ -3662,7 +3662,7 @@
           }
         ]
       },
-      "fingerprint": "06a571fb14d8524bc8c4c9b5a72f4fd9269c1c72fcc59780bec6d52321a42b26",
+      "fingerprint": "f09cca8ac81dfea908b6e6bdbaa1ba46c56a8a203fec6556bda8a190e00b065c",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3688,7 +3688,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "3e11f6ae591eaf0d42dd8eb5699d64a51118fb045d08971fed165536e1f2cb4e",
+      "fingerprint": "4b5d896d6a707c491b28d48fddba7e3b4c2dd842f15bbbd0627438170bbedb34",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3730,7 +3730,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "392a84af81ec20366b0707fa7660487064cd5092075f3065821991bc79c728d7",
+      "fingerprint": "9b2725cc5f56504a4c8ffe51e125b48ce2ab24af5af94ca73d117c21160ad5a3",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3754,7 +3754,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "89b421777bfe2dbc302631376126a3796b5c7a188a20dc24231e7dc04efa07b3",
+      "fingerprint": "1303a8ef8fa22784d00bcc808b9f96148c2632dec9a42201722578e5ff72b095",
       "updated_at": "2026-11-06T15:18:45.407033+00:00",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
@@ -3842,7 +3842,7 @@
       "verified_fingerprint": null,
       "source": {
         "exists": true,
-        "sha256": "db0b04adc4ae6ef2747cec90727ff3b0c86448ae64bfc323929251fe57586a16",
+        "sha256": "de75d0ab72939e3f8799551a2548f64ec15762d3578315f483f7f7284e7e8ecf",
         "imports": [
           "robot_workbench/arx_output_guard.py",
           "robot_workbench/control_plan.py",
@@ -3857,7 +3857,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "4312be08eec96730169073d240c0f2530a363a487797df0c96f265a669998550"
+      "fingerprint": "98d402930574175927cb8595cb01d68de09447d21bae152945041465d870e111"
     },
     "scripts/serve_workbench_manager.py": {
       "state": "implemented",
@@ -3879,7 +3879,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "66e2e0c7de6364f97335b91450ccd015fdfbfa4d90096dd1a680811bf3985497"
+      "fingerprint": "277e5d37f6cf0a06d8218a71162c3a105cf4720e220b3fd67fb831248a8cc136"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,33 +3937,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T04:36:53.128137+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/service.py"
-      ],
-      "state": "active",
-      "note": "ARX13网页等待后端：实际状态API正常，主模块依赖physical_endpoint/operations/model_probe被旧静态白名单404拒绝；修正已存在网页资源路由并增加真实HTTP依赖加载用例。"
-    },
-    {
-      "at": "2026-11-07T04:44:32.323324+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/service.py"
-      ],
-      "state": "implemented",
-      "note": "ARX13网页启动404已修复并发布：现有首页与全部ES模块/延迟预览依赖11资源均200，真实HTTP依赖图/路径边界及实机状态DOM通过。只替换业务进程；Owner/SDK/热模型/记录器PID-start保留，模型ready。此处只资格静态入口修复。"
-    },
-    {
-      "at": "2026-11-07T04:57:40.255664+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/management.py"
-      ],
-      "state": "active",
-      "note": "ARX13用户完整运维路径复现失败：公开端口绕过管理服务，summary/target/operations协议不可用。按既有架构恢复管理入口与内部业务端口，增加实际Application→Manager→网页客户端用例；不新增模块或控制权限。"
-    },
     {
       "at": "2026-11-07T07:14:43.773128+00:00",
       "kind": "file",
@@ -4852,9 +4825,36 @@
       ],
       "state": "implemented",
       "note": "Public exit verified after explicitly authorized protected retirement: all registered service subprocesses and manager exited; recorder sealed and original incomplete outcome preserved. No reconnect or successor startup. This does not qualify normal home/SDK-close exit."
+    },
+    {
+      "at": "2026-11-09T12:03:16.980396+00:00",
+      "kind": "domain",
+      "ids": [
+        "translation-run"
+      ],
+      "state": "implemented",
+      "note": "Confirmed HOLD retains native zero-velocity output without repeated short-window admission. Original failure reproduced in CPU; feedback, epoch and limits checks remain. Mode-transition regressions and live stationary HOLD passed with unchanged submission count."
+    },
+    {
+      "at": "2026-11-09T12:03:17.891565+00:00",
+      "kind": "domain",
+      "ids": [
+        "lifecycle-operation"
+      ],
+      "state": "implemented",
+      "note": "Normal low-speed home, SDK close, recorder sealing, all owned-service exits and manager-last shutdown passed. Full cold desktop startup then returned ready with cameras, manual planning, model, recorder and pedal bound."
+    },
+    {
+      "at": "2026-11-09T12:03:18.818384+00:00",
+      "kind": "domain",
+      "ids": [
+        "infer-runtime"
+      ],
+      "state": "implemented",
+      "note": "Ordinary WAM loading reuses registered large-weight digests with path/size/manifest checks and strict loading. Small artifacts and runtime code still receive content verification. CPU regressions and actual model cold loading passed."
     }
   ],
   "unmapped_files": [],
-  "source_head": "3f751aa841eb8564d0d459d5bc569f588672daeb",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.4955d8784f3f"
+  "source_head": "cf86e6eb597a78fd19766341e4a5de952ff3939e",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.2504a4fe8f89"
 }
