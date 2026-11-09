@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 437,
-  "updated_at": "2026-11-09T18:13:47.650332+00:00",
+  "revision": 439,
+  "updated_at": "2026-11-09T18:17:25.015785+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -722,15 +722,15 @@
       "verified_fingerprint": "a87549b04977f6c2785e4e994e1227d7d63a8847f93b9aa8754b8ff4797cca95"
     },
     "robot_workbench/inference_owner.py": {
-      "state": "implemented",
-      "note": "Shared three-fix candidate is deployed; native CPU boundaries verified, physical sustained acceptance in progress. Manual backdrive and real USB unplug remain human checks.",
-      "next": "Complete physical600 sealing and manual hardware feedback.",
+      "state": "blocked",
+      "note": "Implementation and CPU qualification completed; acceptance is blocked on human physical pedal USB reconnect and manual jaw adjustment/HOLD confirmation. Current user HOLD session remains available; no new control actions.",
+      "next": "Continue from the two pending human acceptance results; do not substitute synthetic commands for physical interaction.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T17:35:45.282286+00:00",
+      "updated_at": "2026-11-09T18:17:24.182922+00:00",
       "evidence": {
-        "path": ".evidence/arx13-three-fixes-20261109-v1/progress.json",
-        "sha256": "bc4423b522915d767ed216dc2e3653c49cfe140c55d8823eb1c750cfa727f4ae",
-        "matches_file": false
+        "path": ".evidence/arx13-three-fixes-20261109-v1/goal-blocked-audit.json",
+        "sha256": "6a208fcaa9d36fbe634644c070bfa7b335d2182f4ec7a8d4a8fdd11ad427f934",
+        "matches_file": true
       },
       "source": {
         "exists": true,
@@ -3903,15 +3903,15 @@
       "fingerprint": "b5e7aa394c0516e43fda96b7d5c6b8e1f7d97bdf290bb193d8aa21d69894c2d5"
     },
     "scripts/serve_pedal_source.py": {
-      "state": "implemented",
-      "note": "Shared three-fix candidate is deployed; native CPU boundaries verified, physical sustained acceptance in progress. Manual backdrive and real USB unplug remain human checks.",
-      "next": "Complete physical600 sealing and manual hardware feedback.",
+      "state": "blocked",
+      "note": "Implementation and CPU qualification completed; acceptance is blocked on human physical pedal USB reconnect and manual jaw adjustment/HOLD confirmation. Current user HOLD session remains available; no new control actions.",
+      "next": "Continue from the two pending human acceptance results; do not substitute synthetic commands for physical interaction.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T17:35:45.282125+00:00",
+      "updated_at": "2026-11-09T18:17:24.182776+00:00",
       "evidence": {
-        "path": ".evidence/arx13-three-fixes-20261109-v1/progress.json",
-        "sha256": "bc4423b522915d767ed216dc2e3653c49cfe140c55d8823eb1c750cfa727f4ae",
-        "matches_file": false
+        "path": ".evidence/arx13-three-fixes-20261109-v1/goal-blocked-audit.json",
+        "sha256": "6a208fcaa9d36fbe634644c070bfa7b335d2182f4ec7a8d4a8fdd11ad427f934",
+        "matches_file": true
       },
       "source": {
         "exists": true,
@@ -3943,15 +3943,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T10:34:20.854096+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/ros_inputs.py"
-      ],
-      "state": "verified",
-      "note": "state订阅窗口复用有界缓存容量，保持原始引用与100ms门槛；两后端5s实机通过"
-    },
     {
       "at": "2026-11-07T10:34:22.125176+00:00",
       "kind": "file",
@@ -4872,9 +4863,19 @@
       ],
       "state": "implemented",
       "note": "Seal-only candidate reuses content-bound codec proofs across one capture;108 CPU/native checks:107 pass,1 skip.130-segment three-pass benchmark reduces decode probes390 to130 and11.13s to3.74s. Candidate not published; prior physical600 recording remains complete, actual25m32seal unchanged."
+    },
+    {
+      "at": "2026-11-09T18:17:24.182926+00:00",
+      "kind": "file",
+      "ids": [
+        "scripts/serve_pedal_source.py",
+        "robot_workbench/inference_owner.py"
+      ],
+      "state": "blocked",
+      "note": "Implementation and CPU qualification completed; acceptance is blocked on human physical pedal USB reconnect and manual jaw adjustment/HOLD confirmation. Current user HOLD session remains available; no new control actions."
     }
   ],
   "unmapped_files": [],
-  "source_head": "ca7405b305a75e946be37b0de121512cf86e9c62",
+  "source_head": "f0497367189a046061e63d3bc639e489f57fef52",
   "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.2e760929d4b9"
 }
