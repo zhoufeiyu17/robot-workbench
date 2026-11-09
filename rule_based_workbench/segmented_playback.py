@@ -242,7 +242,7 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
     return manifest
 
 
-def export_capture(root, manifest, output):
+def export_capture(root, manifest, output, *, probe_cache=None):
     """Reuse source-time replay checks for the generic CaptureSession format."""
     root,output=Path(root),Path(output)
     output.mkdir(exist_ok=False)
@@ -279,7 +279,7 @@ def export_capture(root, manifest, output):
                     if segment!=f'camera/{identity}/{len(paths):06d}.commit.json':
                         raise ValueError('capture replay requires ordered segment prefix')
                     commit=_pinned(root,{'files':segment_pins},segment)
-                    verified=verify_segment(root/'camera',str(commit.relative_to(root/'camera')),ffprobe=ffprobe)
+                    verified=verify_segment(root/'camera',str(commit.relative_to(root/'camera')),ffprobe=ffprobe,probe_cache=probe_cache)
                     metadata_rows=list(_rows(_safe(root/'camera',verified['files']['frames']['path'])))
                     paths.append(_safe(root/'camera',verified['files']['rgb']['path']))
                     active_segment=segment;frame_index=0

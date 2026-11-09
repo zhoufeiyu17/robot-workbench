@@ -1587,6 +1587,10 @@ def _seal_capture(root,spec,extra_issue=None):
     revision=max(revisions,default=0)+1;gap_name=f'gaps-r{revision:06d}.jsonl';segment_name=f'segments-r{revision:06d}.jsonl'
     issues=[extra_issue] if extra_issue else [];streams={};files={}
     model_indexes={'model_input':{},'model_result':{}}
+    # Keep only codec metadata for this seal's files, released on return. The
+    # small process LRU cannot retain a long capture across its three passes.
+    # Each reuse still hashes the current bytes; no stat-only authorization.
+    probe_cache={}
     ros_capture=all(s.get('source_ref',{}).get('kind')=='ros'for s in spec['source_descriptors'])
     producer_gap=root/'producer-gap.json'
     if producer_gap.exists():
@@ -1643,7 +1647,7 @@ def _seal_capture(root,spec,extra_issue=None):
                                     raise ValueError('camera segment belongs to another stream')
                                 if segment!=active_segment:
                                     if segment_frames is not None:segment_frames.close()
-                                    segment_manifest=verify_segment(root/'camera',str(relative.relative_to('camera')),ffprobe=shutil.which('ffprobe') or 'ffprobe')
+                                    segment_manifest=verify_segment(root/'camera',str(relative.relative_to('camera')),ffprobe=shutil.which('ffprobe') or 'ffprobe',probe_cache=probe_cache)
                                     segment_frames=(root/'camera'/segment_manifest['files']['frames']['path']).open()
                                     frame_index=0;active_segment=segment
                                     segment_index.write(json.dumps(dict(stream_id=identity,segment=segment,**_capture_file(root/segment)))+'\n')
@@ -1766,7 +1770,7 @@ def _seal_capture(root,spec,extra_issue=None):
                 for request in sorted(requests):issues.append('model input '+request+' references missing original '+stream+' sample')
         if not issues and model_indexes['model_input']:
             from .ros_recording import verify_model_inputs
-            try:verify_model_inputs(root,model_indexes['model_input'],streams)
+            try:verify_model_inputs(root,model_indexes['model_input'],streams,probe_cache=probe_cache)
             except (OSError,ValueError,KeyError,TypeError,RuntimeError)as error:
                 issues.append('model input validation: '+str(error))
     manifest=dict(schema='workbench.capture-manifest.v1',capture_session_id=spec['capture_session_id'],
@@ -1780,7 +1784,7 @@ def _seal_capture(root,spec,extra_issue=None):
     elif any('source_ref' in source for source in spec['source_descriptors']):
         try:
             from segmented_playback import export_capture
-            playback=export_capture(root,manifest,root/f'replay-r{revision:06d}')
+            playback=export_capture(root,manifest,root/f'replay-r{revision:06d}',probe_cache=probe_cache)
             manifest['playback']=playback
             files.update({path:{key:pin[key] for key in ('size_bytes','sha256')} for path,pin in playback['files'].items()})
         except Exception as error:manifest['playback_error']=str(error)

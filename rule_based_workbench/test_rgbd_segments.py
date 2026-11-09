@@ -287,7 +287,10 @@ class CodecTest(unittest.TestCase):
     def writer(self, root, **kwargs):
         return segments.SegmentWriter(root, 'base_0', segment_frames=3, ffmpeg=FFMPEG, ffprobe=FFPROBE, **kwargs)
 
-    def test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(self):
+    def test_seal_scope_retains_proofs_after_global_lru_eviction(self):
+        self.test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(scoped=True)
+
+    def test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(self,scoped=False):
         with segments._PROBE_LOCK:segments._PROBE_CACHE.clear()
         with TemporaryDirectory()as directory:
             root=Path(directory);writer=self.writer(root)
@@ -300,12 +303,17 @@ class CodecTest(unittest.TestCase):
                     meta,_,_,color,depth=frame(i);writer.add(meta,color,depth)
                 manifest=writer.finish()[0];count=len(probes)
                 self.assertGreater(count,0)
-                for _ in range(2):segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE)
+                cache={}if scoped else None
+                segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE,probe_cache=cache)
+                for _ in range(2):
+                    if scoped:
+                        with segments._PROBE_LOCK:segments._PROBE_CACHE.clear()
+                    segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE,probe_cache=cache)
                 self.assertEqual(len(probes),count,'identical bytes must not be decoded again just to count frames')
                 path=root/manifest['files']['rgb']['path'];before=path.stat();data=bytearray(path.read_bytes())
                 data[-1]^=1;path.write_bytes(data);os.utime(path,ns=(before.st_atime_ns,before.st_mtime_ns))
                 with self.assertRaisesRegex(ValueError,'hash/size'):
-                    segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE)
+                    segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE,probe_cache=cache)
                 self.assertEqual(len(probes),count)
 
     def test_exact_pixels_at_tiny_odd_and_camera_dimensions(self):

@@ -160,15 +160,17 @@ class _Child:
         self.process.stderr.close()
 
 
-def _probe(path, ffprobe, timeout_s, *, factory=_Child, release=lambda child: None):
+def _probe(path, ffprobe, timeout_s, *, factory=_Child, release=lambda child: None, probe_cache=None):
     # Always reread the bytes. Only the expensive decode/count is reusable;
     # stat/mtime alone cannot authorize a previously verified segment.
     pin=_digest(Path(path));tool=str(Path(shutil.which(ffprobe)or ffprobe).resolve())
     key=(tool,pin['size_bytes'],pin['sha256'])
     with _PROBE_LOCK:
-        cached=_PROBE_CACHE.get(key)
+        cached=(probe_cache or {}).get(key)or _PROBE_CACHE.get(key)
         if cached is not None:
-            _PROBE_CACHE.move_to_end(key);return dict(cached)
+            if probe_cache is not None:probe_cache[key]=dict(cached)
+            if key in _PROBE_CACHE:_PROBE_CACHE.move_to_end(key)
+            return dict(cached)
     child = factory([ffprobe, '-v', 'error', '-threads', str(_DEPTH_DECODE_THREADS if Path(path).suffix=='.mkv'else 1), '-count_frames', '-select_streams', 'v:0', '-show_entries',
                     'stream=width,height,nb_read_frames,codec_name,pix_fmt', '-of', 'json', str(path)], timeout_s)
     try:
@@ -184,6 +186,7 @@ def _probe(path, ffprobe, timeout_s, *, factory=_Child, release=lambda child: No
             raise ValueError('one video stream required')
         if _digest(Path(path))!=pin:raise ValueError('segment changed during codec verification')
         with _PROBE_LOCK:
+            if probe_cache is not None:probe_cache[key]=dict(streams[0])
             _PROBE_CACHE[key]=dict(streams[0]);_PROBE_CACHE.move_to_end(key)
             while len(_PROBE_CACHE)>128:_PROBE_CACHE.popitem(last=False)
         return streams[0]
@@ -515,7 +518,7 @@ class SegmentWriter:
             self._executor.shutdown(wait=False, cancel_futures=True)
 
 
-def verify_segment(root, segment, *, ffprobe='ffprobe', timeout_s=30):
+def verify_segment(root, segment, *, ffprobe='ffprobe', timeout_s=30, probe_cache=None):
     path = _safe(root, segment)
     if not re.fullmatch(r'[A-Za-z0-9_-]+/[0-9]{6}\.commit\.json', segment) or path.stat().st_size > 64 * 1024:
         raise ValueError('bounded committed segment manifest required')
@@ -542,7 +545,7 @@ def verify_segment(root, segment, *, ffprobe='ffprobe', timeout_s=30):
         if _digest(member) != {key: pin.get(key) for key in ('size_bytes', 'sha256')}:
             raise ValueError('segment file hash/size differs')
         if kind != 'frames':
-            _check_probe(member, manifest, kind, ffprobe, timeout_s)
+            _check_probe(member, manifest, kind, ffprobe, timeout_s, probe_cache=probe_cache)
     with _safe(root, manifest['files']['frames']['path']).open('rb') as stream:
         for _ in range(manifest['frame_count']):
             row = stream.readline(64 * 1024 + 1)
@@ -567,9 +570,9 @@ def _png(raw, width, height, depth):
             + chunk(b'IDAT', zlib.compress(pixels, 1)) + chunk(b'IEND', b''))
 
 
-def iter_segment(root, segment, *, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s=30, png=True):
+def iter_segment(root, segment, *, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s=30, png=True, probe_cache=None):
     """Verify once, then decode one paired frame at a time (never whole video)."""
-    manifest = verify_segment(root, segment, ffprobe=ffprobe, timeout_s=timeout_s)
+    manifest = verify_segment(root, segment, ffprobe=ffprobe, timeout_s=timeout_s, probe_cache=probe_cache)
     children = {}
     kinds=('rgb',)if manifest['schema']==_RGB_SCHEMA else ('rgb','depth')
     pixel_hashes = {kind: hashlib.sha256() for kind in kinds}

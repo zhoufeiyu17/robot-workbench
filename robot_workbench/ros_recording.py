@@ -42,7 +42,7 @@ def _plain(value):
     return [_plain(v)for v in value]
 
 
-def verify_model_inputs(root,model_inputs,streams):
+def verify_model_inputs(root,model_inputs,streams,*,probe_cache=None):
     """After ingress closes, verify exact saved frames in one pass per segment."""
     from rgbd_segments import iter_segment
     wanted={};segments={}
@@ -73,7 +73,7 @@ def verify_model_inputs(root,model_inputs,streams):
         if refs:raise ValueError('model input references missing original '+stream+' sample')
     for segment,frames in segments.items():
         manifest=json.loads((root/'camera'/segment).read_text())
-        for index,(meta,rgb,_)in enumerate(iter_segment(root/'camera',segment,png=False)):
+        for index,(meta,rgb,_)in enumerate(iter_segment(root/'camera',segment,png=False,probe_cache=probe_cache)):
             for ref,checks in frames.pop(index,[]):
                 if meta.get('ros_reference')!=ref.__dict__:raise ValueError('model input frame identity changed')
                 frame=dict(rgb=rgb,width=manifest['width'],height=manifest['height'])
