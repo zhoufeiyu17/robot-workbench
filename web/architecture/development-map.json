@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 411,
-  "updated_at": "2026-11-09T10:47:44.184389+00:00",
+  "revision": 413,
+  "updated_at": "2026-11-09T11:13:46.080589+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "6bd25eb6c886b87c19532ca087993c907cf486f6c810152351167bd5afe52974",
+      "fingerprint": "0caa251679e22b2fc8da2b61e06f7e8cbf0028a8b8c045a939967c5e608d1d66",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -476,9 +476,9 @@
       "evidence": {
         "path": "tests/test_environment_exit.py",
         "sha256": "1c3cdbf026fc08a1ad5101b47cd9312cdc2491bf73aaccde37731961ef81f9ea",
-        "matches_file": true
+        "matches_file": false
       },
-      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
+      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "ea422d1a671cfc68d6bd6669ebbfb488760304820f5fa3b7c736a29aa756bdf4",
+      "fingerprint": "f41e74613d37a89ff77c6c0c3dd837ce8a4b33a45f6f2d50ea95bf36084555b1",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8"
+      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2532,19 +2532,19 @@
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/management.py": {
-      "state": "verified",
-      "note": "数采服务名由可信部署配置声明，公共校验只检查单位名格式；配置边界与正常交接检查通过，已去除机器编号特判。",
-      "next": "新部署使用相同配置契约",
+      "state": "implemented",
+      "note": "Exit preflight rejects a disconnected SDK with an unretired runtime or unconfirmed release receipt; both standalone and composed exits share this boundary. 27 CPU cases passed.",
+      "next": "Full physical exit still requires a valid retirement/release state; do not treat lost connection as release.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T08:53:32.896784+00:00",
+      "updated_at": "2026-11-09T11:13:45.232653+00:00",
       "evidence": {
-        "path": ".evidence/portable-collection-services-20261109-v1/acceptance.json",
-        "sha256": "07f9b042a311f63c83787775e4ecce037e520868f613605baa919dfd8f110883",
+        "path": "tests/test_environment_exit.py",
+        "sha256": "cabaeb27e3a50e0fe6e1325bdc0085dc8d223a385feb709f98018832b0583268",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "d0edbe321420940b0f880e3b69dbbc7333eba7f87848b3103ac136362be9822e",
+        "sha256": "f0b682284abbffb1567bdfb64ded7aef07c2f4e565014e91e1b359ae9d7f5f49",
         "imports": [
           "robot_workbench/control_alerts.py",
           "robot_workbench/control_owner.py",
@@ -2572,8 +2572,8 @@
           }
         ]
       },
-      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
-      "verified_fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
+      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
+      "verified_fingerprint": null
     },
     "robot_workbench/maintenance.py": {
       "state": "verified",
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "e194beb607ff2e5900662356f48c67f8fb3741ae6769ab77761dfbf2aa35fa72",
+      "fingerprint": "8891b29d58ccb13e3af5e762dd9e52ff008f33ab0e28e4638144058032b60f44",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3092,7 +3092,7 @@
           }
         ]
       },
-      "fingerprint": "828fcb9370e64e4fef0a26a53eb4d44b056652311fa354891af2016a50c5bdb8",
+      "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3879,7 +3879,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e3ef7c3529124d5b3778a86bad24c361fe7a6e12163ff17331f74a2810a6d07c"
+      "fingerprint": "66e2e0c7de6364f97335b91450ccd015fdfbfa4d90096dd1a680811bf3985497"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,19 +3937,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T04:25:45.880506+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/wam.py",
-        "robot_workbench/inference_owner.py",
-        "robot_workbench/inference_workflow.py",
-        "robot_workbench/recording_process.py",
-        "robot_workbench/ros_recording.py"
-      ],
-      "state": "verified",
-      "note": "当前源码对应WAM有界3x15/Stop和原始ROS IO封存验证；GPU worker请求线程生命周期、有限段分阶段计时、零速供给失败正常Stop和原始state日志回查均留真实故障及回归。资格限回执scope。"
-    },
     {
       "at": "2026-11-07T04:25:46.780464+00:00",
       "kind": "sc",
@@ -4861,9 +4848,18 @@
       ],
       "state": "implemented",
       "note": "Public exit_workbench owns ordered stop/home/release/seal/service exit. exit_environment only composes collector Web restoration. Verified current exit result closes the manager normally after delivery; historic or unknown jobs cannot self-close. CPU process/HTTP and DOM checks passed."
+    },
+    {
+      "at": "2026-11-09T11:13:45.232786+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/management.py"
+      ],
+      "state": "implemented",
+      "note": "Exit preflight rejects a disconnected SDK with an unretired runtime or unconfirmed release receipt; both standalone and composed exits share this boundary. 27 CPU cases passed."
     }
   ],
   "unmapped_files": [],
-  "source_head": "ebe0b9ceefb7bb744d0c11db4dbd4d13fe7a57bb",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.8cfec856c270"
+  "source_head": "f75aaf8a16eba98bd268d9140af7bac1105a3c18",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.4955d8784f3f"
 }

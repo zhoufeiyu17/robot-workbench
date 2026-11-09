@@ -2,6 +2,8 @@
 from copy import deepcopy
 from types import SimpleNamespace
 import unittest
+import threading
+import time
 from unittest.mock import Mock,patch
 
 from robot_workbench.management import WorkbenchManager
@@ -177,6 +179,19 @@ class EnvironmentExitTest(unittest.TestCase):
         self.assertTrue(result['environment_exited']);self.assertFalse(result['collection_started'])
         self.assertEqual(result['release_basis'],'reviewed_normal_home_completed')
         self.assertTrue(WorkbenchManager.release_verified(result['release_receipt']))
+
+    def test_disconnected_fault_cannot_bypass_exit_review(self):
+        m=self.manager(False);m.health_lock=threading.RLock();m.window=None;m.unresolved=lambda:[]
+        m.health_cache.update(checked_wall_ns=time.time_ns(),services=m.rows,control_owner_reachable=True)
+        runtime=m.health_cache['runtime']
+        for action in ('exit_workbench','exit_environment'):
+            runtime.update(state='FAULT_STOP_UNCONFIRMED',runtime_nonce='dead-sdk-runtime')
+            self.assertIn('尚未正常退役',m.check(action))
+            runtime.update(runtime_nonce=None,release_receipt={'status':'unconfirmed'})
+            self.assertIn('释放回执未确认',m.check(action))
+            runtime.update(state='DISCONNECTED',release_receipt={'status':'released','sdk_close_returned':True})
+            self.assertIsNone(m.check(action))
+            runtime.pop('release_receipt')
 
     def test_standalone_exit_has_no_collection_dependency_or_start(self):
         m=self.manager();del m.config['collection_handoff']

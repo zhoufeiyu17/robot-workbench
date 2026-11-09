@@ -606,6 +606,10 @@ class WorkbenchManager:
             if runtime.get('connected'):
                 if not h.get('backend_reachable')or runtime.get('feedback_healthy')is not True or 'FAULT'in str(runtime.get('state')):
                     return '当前控制或反馈异常，无法走正常回零释放；先按中断恢复流程核验'
+            elif runtime.get('runtime_nonce')is not None:
+                return 'SDK连接已失效，但控制Runtime尚未正常退役；请先通过中断恢复核验退出与现场条件'
+            elif runtime.get('release_receipt')and not self.release_verified(runtime['release_receipt']):
+                return 'SDK释放回执未确认，不能继续退出服务'
             elif h.get('services',{}).get('control_owner',{}).get('state')=='running'and not h.get('control_owner_reachable'):
                 return '控制Owner状态未知，未确认SDK已退出'
             return None
