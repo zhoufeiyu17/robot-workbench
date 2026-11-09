@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 426,
-  "updated_at": "2026-11-09T13:54:51.678935+00:00",
+  "revision": 428,
+  "updated_at": "2026-11-09T14:01:19.275784+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -161,7 +161,7 @@
       "evidence": {
         "path": ".evidence/run-controls-20261109/validation.json",
         "sha256": "f4e8a48d39232b5ba32571bd98aaa0f012341c59f0f4a0bda3fd69e2f065fd10",
-        "matches_file": true
+        "matches_file": false
       },
       "fingerprint": "af81f9c7de63e2885f93062c9195431541bf561ac65cc8b959f64ba63ab16406",
       "verified_fingerprint": null
@@ -397,7 +397,7 @@
       "evidence": {
         "path": ".evidence/run-controls-20261109/validation.json",
         "sha256": "f4e8a48d39232b5ba32571bd98aaa0f012341c59f0f4a0bda3fd69e2f065fd10",
-        "matches_file": true
+        "matches_file": false
       },
       "fingerprint": "8fdcb61ecfce049a4771f5cd719a5753990db6d3d5a70bab6bddba28741e8073",
       "verified_fingerprint": null
@@ -1499,13 +1499,13 @@
     },
     "robot_workbench/motion_reference.py": {
       "state": "implemented",
-      "note": "Normal braking reuses batched full polynomial extrema, preserving exact prefix and limits;52 related CPU checks pass. Actual-reference CPU preparation27.3ms to2.35ms; live reload pending.",
-      "next": "Load candidate through authorized maintenance and verify physical MODEL-to-HOLD.",
+      "note": "Normal braking reuses batched full polynomial extrema, preserving exact prefix and limits;52 related CPU checks pass. Original-reference CPU preparation27.3ms to2.35ms; published and prepared HOLD verified with zero model calls.",
+      "next": "Physical MODEL-to-HOLD retest remains pending; no automatic trajectory replay.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T13:54:49.927757+00:00",
+      "updated_at": "2026-11-09T14:01:18.427268+00:00",
       "evidence": {
         "path": ".evidence/run-controls-20261109/validation.json",
-        "sha256": "f4e8a48d39232b5ba32571bd98aaa0f012341c59f0f4a0bda3fd69e2f065fd10",
+        "sha256": "9fdb50a45c3b027084f77b2706784c0c59ae06da0e2da482f241472819df38e3",
         "matches_file": true
       },
       "source": {
@@ -3939,15 +3939,6 @@
   },
   "changes": [
     {
-      "at": "2026-11-07T08:10:18.656117+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/wam.py"
-      ],
-      "state": "active",
-      "note": "已批准WAM包声明去噪默认2/范围1..10，经既有prepare_model选择配置摘要；I03更新为wam.v2，Owner/SDK不接收参数。"
-    },
-    {
       "at": "2026-11-07T08:39:04.117783+00:00",
       "kind": "file",
       "ids": [
@@ -4853,9 +4844,18 @@
       ],
       "state": "active",
       "note": "Prepared-session MODEL requests were accepted but Owner received no qualified observation before supply deadline. Current native probe and6 complete repeated CPU pedal cases pass; historical root cause not proven."
+    },
+    {
+      "at": "2026-11-09T14:01:18.427395+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/motion_reference.py"
+      ],
+      "state": "implemented",
+      "note": "Normal braking reuses batched full polynomial extrema, preserving exact prefix and limits;52 related CPU checks pass. Original-reference CPU preparation27.3ms to2.35ms; published and prepared HOLD verified with zero model calls."
     }
   ],
   "unmapped_files": [],
-  "source_head": "cd368561b31661e8e320a9446e516abf46bced97",
+  "source_head": "9257fac5011fdeadae6f86643591247ed3fa70c6",
   "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.a0d5d9932273"
 }
