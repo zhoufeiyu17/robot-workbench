@@ -47,8 +47,6 @@ class MachineProfile:
                 or set(row)!={'capability','reason'} or any(not _text(v) for v in row.values()) for row in degraded)):
             raise ValueError('bounded declared capability limitations required')
         self.declared=value;self.identity=dict(device_id=config['device_id'],environment=config['environment'])
-
-    def snapshot(self):
         indexes={}
         for name,raw in self.declared['calibration'].items():
             path=Path(raw);row=dict(path=raw,status='unavailable',sha256=None)
@@ -59,14 +57,17 @@ class MachineProfile:
                     else:row.update(status='file_present',sha256=digest(path.read_bytes()))
             except OSError:row['status']='unreadable'
             indexes[name]=row
+        self.indexes=indexes;self.captured_wall_ns=time.time_ns()
+
+    def snapshot(self):
         return dict(schema='robot_workbench.machine_profile.v1',identity=deepcopy(self.identity),
-            declared=deepcopy(self.declared),calibration_indexes=indexes,checked_wall_ns=time.time_ns(),
-            evidence_scope='trusted_deployment_declarations_and_index_files',hardware_verified=False,
+            declared=deepcopy(self.declared),calibration_indexes=deepcopy(self.indexes),checked_wall_ns=self.captured_wall_ns,
+            evidence_scope='trusted_deployment_declarations_and_indexes_captured_at_startup',hardware_verified=False,
             hardware_verification='not_performed_by_management',configured=bool(self.declared.get('hardware') or self.declared.get('label')))
 
 
 class Deployment:
-    """Fingerprint deployed source bytes, never Git HEAD, model weights or secrets."""
+    """Capture source identity once at startup; never poll or gate on file drift."""
     def __init__(self,root,services):
         root=Path(root);paths={}
         roots={'manager':root}
@@ -100,14 +101,6 @@ class Deployment:
             component['source_sha256']=digest(json.dumps({key:sha for key,(_,sha) in self.files.items()if key.startswith(prefix)},sort_keys=True).encode())
         self.sha256=digest(json.dumps({name:sha for name,(_,sha) in self.files.items()},sort_keys=True).encode())
         self.built_wall_ns=time.time_ns()
-        self.checked_monotonic=0.;self.checked_changed=[]
-        self.file_stats={name:self._stat(path) for name,(path,_) in self.files.items()}
-
-    @staticmethod
-    def _stat(path):
-        try:
-            row=path.stat();return row.st_ino,row.st_size,row.st_mtime_ns,row.st_ctime_ns
-        except OSError:return None
 
     def bind_configuration(self,config):
         """Hash trusted configuration and explicitly pinned external SDK/profile files."""
@@ -120,29 +113,13 @@ class Deployment:
             if path.is_symlink() or not path.is_file() or path.stat().st_size>32*1024**2:
                 raise ValueError('publication pin must be a bounded regular file: '+name)
             self.files['configuration:'+name]=(path,digest(path.read_bytes()))
-            self.file_stats['configuration:'+name]=self._stat(path)
         self.configuration_sha256=digest(json.dumps(config,sort_keys=True).encode())
         self.sha256=digest(json.dumps(dict(files={name:sha for name,(_,sha) in self.files.items()},
             configuration=self.configuration_sha256),sort_keys=True).encode())
 
-    def snapshot(self,*,check_files=False,force=False):
-        full=force or time.monotonic()-self.checked_monotonic>=60
-        changed=self._check_files(full) if check_files else self.checked_changed
+    def snapshot(self):
         return dict(sha256=self.sha256,source_scope='composite_deployed_sources_entrypoints_and_trusted_configuration',
             source_files=len(self.files),captured_wall_ns=self.built_wall_ns,
-            checked_wall_ns=getattr(self,'checked_wall_ns',None),check_interval_s=60,
-            files_unchanged=not changed,changed_files=changed,components=deepcopy(self.components),
+            source_verification='captured_at_startup',components=deepcopy(self.components),
             configuration_sha256=getattr(self,'configuration_sha256',None),
             entrypoints={name.removeprefix('service:'):sha for name,(_,sha) in self.files.items() if name.startswith('service:')})
-
-    def _check_files(self,full):
-        changed=[]
-        for name,(path,sha) in self.files.items():
-            if sha is None:changed.append(name);continue
-            if full or self._stat(path)!=self.file_stats.get(name):
-                try:
-                    if digest(path.read_bytes())!=sha:changed.append(name)
-                except OSError:changed.append(name)
-        if full:self.checked_monotonic=time.monotonic()
-        self.checked_wall_ns=time.time_ns();self.checked_changed=changed
-        return changed

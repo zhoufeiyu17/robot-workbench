@@ -233,7 +233,7 @@ class ManagedGatewayTest(unittest.TestCase):
         for environment,digest in [('fake','a'*64),('physical','b'*64)]:
             state=dict(schema='robot_workbench.environment.v1',csrf=environment+'-manager-token',selected_profile_id=environment+'-profile',
                 target=dict(environment=environment,device_id=environment+'-device',manager_instance=environment+'-manager'),
-                deployment=dict(sha256=digest,files_unchanged=True),runtime=dict(connected=False),health=dict(busy=False,maintenance=None),
+                deployment=dict(sha256=digest),runtime=dict(connected=False),health=dict(busy=False,maintenance=None),
                 operations={},active_job=None,recent_jobs=[])
             self.nodes[environment]=state
             server=ThreadingHTTPServer(('127.0.0.1',0),self.handler(environment))

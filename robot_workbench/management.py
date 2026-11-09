@@ -379,7 +379,7 @@ class WorkbenchManager:
 
     def refresh(self):
         value=dict(checked_wall_ns=time.time_ns(),services={name:service.snapshot() for name,service in self.services.items()},
-            deployment=self.deployment.snapshot(check_files=True),machine_profile=self.machine_profile.snapshot(),resources=self.resources())
+            deployment=self.deployment.snapshot(),machine_profile=self.machine_profile.snapshot(),resources=self.resources())
         camera_error=self.camera_source_error(value['services'].get('cameras',{}))
         if camera_error:value['services']['cameras']['error']=camera_error
         try:
@@ -567,7 +567,6 @@ class WorkbenchManager:
             if self.environment!='physical':return 'Fake 没有物理 USB 相机；此软件重置操作不支持仿真'
             try:self.camera_reset_command(CAMERA_RESETS[action])
             except ValueError as error:return str(error)
-        if h.get('deployment',{}).get('files_unchanged') is not True:return '部署源文件已变化，请重新启动管理器并刷新页面；诊断仍可查看'
         if time.time_ns()-h.get('checked_wall_ns',0)>10_000_000_000:
             raise OperationError('environment_state_unknown','环境状态已过期，请先检查状态',unknown=True)
         if h.get('services',{}).get('workbench',{}).get('state')=='unknown':
@@ -1220,8 +1219,6 @@ class WorkbenchManager:
         state=self.state()
         if not self._publication_control_valid(state['runtime'],expected_owner):
             raise OperationError('unexpected_connection','发布收口要求设备未连接；不会代替操作者释放或接入')
-        if not self.deployment.snapshot(check_files=True,force=True)['files_unchanged']:
-            raise OperationError('deployment_changed','发布期间组合清单发生变化')
         restored=(self.restore_warm_model_binding(binding,progress,expected_owner=expected_owner)
             if expected_owner is not None else self.restore_warm_model_binding(binding,progress))
         health=self.refresh()
@@ -2011,8 +2008,6 @@ class WorkbenchManager:
         values=headers.get_all('X-Workbench-Deployment',[])
         if values!=[self.deployment.sha256]:
             raise OperationError('deployment_mismatch','页面与管理器的部署版本不一致，请刷新页面；诊断和安全停止仍可使用')
-        if not self.deployment.snapshot(check_files=True,force=True)['files_unchanged']:
-            raise OperationError('deployment_changed','部署源文件已变化，请重新启动管理器并刷新页面；诊断和安全停止仍可使用')
 
     def close(self):
         self.closed.set()
@@ -2092,7 +2087,7 @@ def serve(manager,*,host,port,allowed_hosts=()):
                     result=manager.triton_preview.start(path.removeprefix('/api/triton/'),{k:v for k,v in value.items()if k not in('environment','business')})
                     return self.send(202,result)
                 if path=='/api/deployment' and self.command in ('GET','HEAD'):
-                    return self.send(200,manager.deployment.snapshot(check_files=True))
+                    return self.send(200,manager.deployment.snapshot())
                 if path=='/api/environment' and self.command in ('GET','HEAD'):
                     query=parse_qs(parsed.query,keep_blank_values=True)
                     if (set(query)-{'environment','view'} or query.get('environment',[manager.environment])!=[manager.environment]

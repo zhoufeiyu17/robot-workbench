@@ -388,7 +388,7 @@ class Application:
             node=None
             try:
                 plane=workflow.ros_plane
-                node=RosNode('infer_pedal_'+device.id,namespace=plane['namespace'],domain_id=plane['domain_id'])
+                node=RosNode('infer_pedal_'+device.id,namespace=plane['namespace'],domain_id=plane['domain_id'],localhost_only=False)
                 declared=source_descriptor(json.loads(Path(descriptor).read_text()))
                 if declared['device_id']!=device.id or declared['stream_id']!='pedal'or declared['kind']!='event':
                     raise ValueError('registered pedal belongs to another device/source role')

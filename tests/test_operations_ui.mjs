@@ -14,7 +14,7 @@ class Element{
 }
 const settle=async()=>{for(let index=0;index<24;index++)await Promise.resolve();};
 const fixture=(environment='physical',manager='manager-v1')=>({schema:'robot_workbench.environment.v1',csrf:'secret-token',target:{environment,id:'cpu-'+environment,device_id:'cpu-'+environment,manager_instance:manager},
-  deployment:{sha256:'a'.repeat(64),files_unchanged:true,source_files:12},
+  deployment:{sha256:'a'.repeat(64),source_files:12},
   health:{workbench:{status:'unreachable',reason:'业务页面不可达；管理器独立可用'},cameras:{status:'running'}},busy:false,active_job:null,recent_jobs:[],
   operations:{status_check:{label:'核验服务状态',impact:'只读检查',allowed:true},restart_workbench:{label:'重启工作台',impact:'将重启本部署工作台；现有业务会中断',allowed:true,requires_support:true},
     restart_cameras:{label:'重启相机',impact:'会暂时中断三路画面',allowed:false,reason:'正在录制'},prepare_model:{label:'准备模型',impact:'加载当前登记模型',allowed:true},
@@ -293,9 +293,9 @@ for(const environment of ['fake','physical']){
   assert.equal(h.button('prepare_model').disabled,true);assert.equal(h.button('status_check').disabled,false);
   assert.equal(h.api.elements.reloadButton.hidden,false);assert.match(h.api.elements.versionWarning.textContent,/版本不一致/);
   h.button('prepare_model').fire('click');assert.equal(h.requests.length,1);
-  const refresh=h.api.refresh();state.deployment.sha256='a'.repeat(64);state.deployment.files_unchanged=false;
-  h.reply(h.last(),state);await refresh;assert.equal(h.button('prepare_model').disabled,true);
-  assert.match(h.api.elements.versionWarning.textContent,/部署文件已变化/);h.api.destroy();
+  const refresh=h.api.refresh();state.deployment.sha256='a'.repeat(64);delete state.deployment.files_unchanged;
+  h.reply(h.last(),state);await refresh;assert.equal(h.button('prepare_model').disabled,false);
+  assert.equal(h.api.elements.versionWarning.hidden,true);h.api.destroy();
 }
 for(const environment of ['fake','physical']){
   const h=harness({environment});const state=fixture(environment);

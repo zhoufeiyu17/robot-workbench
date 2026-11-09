@@ -117,6 +117,8 @@ class PedalGestureTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
 class PedalSourceTests(unittest.TestCase):
     def test_single_evdev_source_focus_and_shared_action_routing(self):
+        from unittest.mock import patch
+        environment=patch.dict(os.environ,ROS_LOCALHOST_ONLY='0');environment.start();self.addCleanup(environment.stop)
         from robot_workbench.ros_data import RosNode,SourceDirectory
         from robot_workbench.service import Application,Device
         reader_root=Path(os.environ['PROMETHEUS_PEDAL_TEST_ROOT'])
@@ -147,6 +149,8 @@ class PedalSourceTests(unittest.TestCase):
                 calls.append((action,body));mode[0]='TEACH'if action=='inference_teach'else'HOLD'
                 return {'accepted':True}
             app._operator_action=operator
+            # Physical deployments can expose ROS beyond loopback. The consumer
+            # must follow its declared plane, just like camera/state consumers.
             app.install_operator_pedal(device,flow,str(source_root/'source.json'))
             def close_consumer():
                 flow.operator_input_closed.set();flow.operator_input_thread.join(3)

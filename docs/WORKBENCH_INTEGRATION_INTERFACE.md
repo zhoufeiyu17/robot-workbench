@@ -1,5 +1,36 @@
 # C 工作台消费者集成：唯一接口源
 
+## 2026-11-09 桌面冷启动与自动接管（I10）
+
+ARX6 桌面启动配置 `connect_control=true` 表达操作者已在现场确认可以接入。入口先启动
+已登记软件，再通过既有 `reclaim_control` 正常停止旧工作台动作和已登记数采、核验真实
+进程退出，并接入当前位置保持；无需第二次网页确认，不执行模型轨迹。健康静止连接复用。
+未配置该布尔值的消费者继续只启动软件。配置须有 managed Owner 与登记的数采交接入口。
+
+启动操作复用 I10 的 target、request_id、job_id 和成功核验，不重放未知结果。相机来源
+重新登记后，失效订阅通过一次 `rebind_cameras` 恢复；健康订阅不重绑。启动完成须同时
+满足实际三路帧、目标资产、人工规划、常驻记录器、所选模型与配置要求的控制就绪。
+
+数采 `safe_ok` 是 episode 的复位结果。仅 schema v1 的 stopped、明确 null、空 error、
+完整五类组件终态允许使用无 episode 的正常退出证据；manager/orphan/teleop 与 Web
+进程及 cgroup 退出仍须核验，false 或缺字段不降级为成功。桌面失败显示该 job 的实际原因。
+已确认的 `startup_failed` 可在 episode_index 和 recording_started_at 均明确为空、robot
+stopped、其余组件仅 waiting/stopped/disabled 时正常退役；它仍须通过上述真实进程退出
+核验，回执保留 previous_collection_phase/error，不把失败数采改写成成功。
+验收须从七个登记服务全部停止、网页不可访问开始，验证原桌面入口自动打开网页并达到
+上述条件；CPU 用例或热启动不能代替该项。实际回执见本轮 ARX6 startup-rebind 进度。
+
+用户随后明确网页打开目标为 5 秒，不能等待模型准备结束。桌面入口在准备锁之前调用
+`--open-page-only`，只启动显式 `ui_unit` 并打开已响应的管理网页，再独立执行原准备链。
+模型/控制/输入准备通过既有状态与 job 回执呈现；启动成功仍要求完整就绪。
+
+同日用户要求去掉源码、配置的重复文件扫描。Deployment 在管理器启动时登记一次源码
+与配置摘要，投影 `source_verification=captured_at_startup`，删除 `files_unchanged`、
+`changed_files` 等运行时漂移投影及前后端/网关中的对应阻塞条件。页面与管理器的部署
+身份握手保留。机器配置索引也只在启动时采集；unit/drop-in 摘要保留为历史发布证据，
+生命周期按登记 unit、实际 PID/cgroup、已加载状态及真实退出核验。模型/SDK 首次制品
+校验保留。此变更不把“未反复校验”表述为“文件持续未变”。
+
 ## 2026-11-07 踏板会话与边界门槛
 
 ### 2026-11-08 WAM可选静止恢复

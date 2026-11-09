@@ -29,7 +29,7 @@ class MachineProfileTest(unittest.TestCase):
             self.assertEqual(first['calibration_indexes']['library_index']['status'],'directory_present')
             self.assertEqual(first['calibration_indexes']['configuration_index']['status'],'unavailable')
             manifest.write_text('{"head":{"id":"new-installation"}}')
-            self.assertNotEqual(profile.snapshot()['calibration_indexes']['active_manifest_index']['sha256'],
+            self.assertEqual(profile.snapshot()['calibration_indexes']['active_manifest_index']['sha256'],
                                 first['calibration_indexes']['active_manifest_index']['sha256'])
 
     def test_profile_rejects_unknown_secret_fields_and_undeclared_index_routes(self):
@@ -48,14 +48,14 @@ class MachineProfileTest(unittest.TestCase):
             (root/'.evidence/runtime.py').write_text('never part of deployed code manifest')
             (root/'scripts/private.env').write_text('PRIVATE_FIXTURE=do-not-display')
             services={'workbench':SimpleNamespace(spec=SimpleNamespace(expected_script=str(script)))}
-            deployed=Deployment(root,services);original=deployed.snapshot(check_files=True)
-            self.assertTrue(original['files_unchanged']);self.assertEqual(len(original['sha256']),64)
+            deployed=Deployment(root,services);original=deployed.snapshot()
+            self.assertEqual(original['source_verification'],'captured_at_startup');self.assertEqual(len(original['sha256']),64)
             self.assertNotIn('PRIVATE_FIXTURE',json.dumps(original))
             (root/'.evidence/runtime.py').write_text('updated historical output')
             self.assertEqual(Deployment(root,services).sha256,original['sha256'])
             ui.write_text('// release two\n')
-            changed=deployed.snapshot(check_files=True,force=True)
-            self.assertFalse(changed['files_unchanged']);self.assertIn('manager:web/operations.js',changed['changed_files'])
+            changed=deployed.snapshot()
+            self.assertNotIn('files_unchanged',changed)
             self.assertEqual(changed['sha256'],original['sha256'])
             self.assertNotEqual(Deployment(root,services).sha256,original['sha256'])
 

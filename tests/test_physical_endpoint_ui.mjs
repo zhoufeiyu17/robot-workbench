@@ -12,7 +12,7 @@ class Element{
 }
 const settle=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
 const fixture=(environment='physical',manager='manager-one')=>({schema:'robot_workbench.environment.v1',csrf:'manager-token',target:{device_id:'device-'+environment,environment,manager_instance:manager},
-  deployment:{sha256:'a'.repeat(64),files_unchanged:true},runtime:{connected:false},health:{busy:false,maintenance:null},selected_profile_id:environment,
+  deployment:{sha256:'a'.repeat(64)},runtime:{connected:false},health:{busy:false,maintenance:null},selected_profile_id:environment,
   capabilities:{observe:{ready:true},control:{ready:false,reason:'未接入'},inference:{ready:false,reason:'未准备模型'}},
   profiles:['physical','fake'].map(id=>({id,device_id:'device-'+id,label:id+' registered',environment:id,configured:true,robot_address:id==='physical'?'10.1.2.3':undefined,
     compute_address:id==='fake'?'registered.dsw.invalid':undefined,manager_url:id==='physical'?'http://physical.invalid/':'http://fake.invalid/'})),

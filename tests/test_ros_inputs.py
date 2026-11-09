@@ -237,6 +237,14 @@ class SourceDecoding(unittest.TestCase):
             deadline=time.monotonic()+3
             while view.frames['base_0'].snapshot(formats=())['status'].get('ready')and time.monotonic()<deadline:time.sleep(.01)
             self.assertFalse(view.frames['base_0'].snapshot(formats=())['status'].get('ready'))
+            declared['base_0'].publish(descriptor_message(node,descriptors['base_0']))
+            time.sleep(.1)
+            self.assertFalse(view.frames['base_0'].snapshot(formats=())['status'].get('ready'),'same source returning also requires explicit rebind')
+            self.assertTrue(view.reconnect(max_age_s=.5)['reconnected'])
+            self.assertEqual(view.frames['base_0'].snapshot(formats=())['status']['capture_instance_id'],'source')
+            declared['base_0'].publish(descriptor_message(node,changed))
+            deadline=time.monotonic()+3
+            while view.frames['base_0'].snapshot(formats=())['status'].get('ready')and time.monotonic()<deadline:time.sleep(.01)
             declared['base_0'].publish(descriptor_message(node,dict(descriptors['base_0'],source_instance_id='replacement')))
             time.sleep(.1)
             self.assertFalse(view.frames['base_0'].snapshot(formats=())['status'].get('ready'),'source replacement needs explicit rebind')

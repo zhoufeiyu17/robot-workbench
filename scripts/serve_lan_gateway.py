@@ -239,8 +239,7 @@ def serve(*,listen='10.17.0.27',port=18866,upstream_port=18867,
                     if len(tokens)!=1 or not secrets.compare_digest(tokens[0],state['csrf']):
                         self.reply(403,{'error':'invalid manager token'});return True
                     if not(path=='/api/operations/action' and value.get('action')=='status_check'):
-                        if (self.headers.get_all('X-Workbench-Deployment',[])!=[state['deployment']['sha256']]
-                                or state['deployment'].get('files_unchanged') is not True):
+                        if self.headers.get_all('X-Workbench-Deployment',[])!=[state['deployment']['sha256']]:
                             raise ValueError('页面与当前管理器版本不匹配，请重新加载；独立Stop仍可请求')
                     if path=='/api/operations/target':
                         if (set(value)-{'profile_id','robot_address','compute_address','expected_target'}
@@ -324,8 +323,7 @@ def serve(*,listen='10.17.0.27',port=18866,upstream_port=18867,
             if profiles is not None and self.command=='POST' and not urlsplit(target).path.endswith('/stop'):
                 try:
                     state=read_manager('physical' if route is not None else 'fake')
-                    if (self.headers.get_all('X-Workbench-Deployment',[])!=[state['deployment']['sha256']]
-                            or state['deployment'].get('files_unchanged') is not True):
+                    if self.headers.get_all('X-Workbench-Deployment',[])!=[state['deployment']['sha256']]:
                         raise ValueError('业务页面与对应管理器版本不匹配，请重新加载')
                 except (OSError,HTTPException):return self.reply(503,{'error':'管理服务无法核验，未提交业务请求'})
                 except (ValueError,TypeError,KeyError) as error:return self.reply(409,{'error':str(error)})

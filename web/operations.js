@@ -124,7 +124,7 @@ export function createOperationClient({fetch:request,crypto=globalThis.crypto,de
   }
   return {id,read:environment=>call(environment,'environment'),submit:(environment,body,csrf,kind='action')=>call(environment,kind,body,csrf),
     stop:(environment,target,csrf)=>call(environment,'stop',{expected_device_id:target.device_id,request_id:id()},csrf),
-    compatible:state=>/^[a-f0-9]{64}$/.test(deploymentVersion)&&state?.deployment?.sha256===deploymentVersion&&state.deployment.files_unchanged===true};
+    compatible:state=>/^[a-f0-9]{64}$/.test(deploymentVersion)&&state?.deployment?.sha256===deploymentVersion};
 }
 
 export const capabilityText=value=>({ready:'已核验就绪',blocked:'条件未满足',unknown:'状态未知',unsupported:'不支持',degraded:'能力受限',failed:'核验失败',waiting_onsite:'等待现场处理',active:'正在处理',declared:'部署已声明，待实际核验',operator_confirmation:'操作时确认现场条件',not_applicable:'不适用',requires_review:'执行前需审阅'})[value]||value||'状态未知';
@@ -201,7 +201,7 @@ export function createOperations({document:doc,fetch:request,container,location=
   const operation=name=>state?.operations?.[name];
   const reasonFor=row=>{const reason=row?.disabled_reason||row?.reason;return reason==='Another management operation is still in flight.'?'另一项维护操作尚未完成，请等待其核验结果。':reason||'当前前置条件不满足';};
   const compatible=()=>client.compatible(state);
-  const versionReason=()=>state?.deployment?.files_unchanged===false?'部署文件已变化，请重新启动管理器并重新加载页面；诊断与安全停止仍可使用。':'页面与管理器的部署版本不一致，请重新加载页面；诊断与安全停止仍可使用。';
+  const versionReason=()=>'页面与管理器的部署版本不一致，请重新加载页面；诊断与安全停止仍可使用。';
   const canUse=name=>!stale&&!posting&&!uncertain&&(name==='status_check'||compatible())&&operation(name)?.allowed===true&&!!state?.csrf&&state.target?.environment===environment;
   const reviewSignature=row=>({label:row?.label,impact:row?.impact,requires_support:row?.requires_support===true});
   const nextId=client.id;
@@ -279,7 +279,7 @@ export function createOperations({document:doc,fetch:request,container,location=
     for(const [name,row]of Object.entries(machine?.calibration_indexes||{}))profile.append(make('p',`${indexNames[name]||name}：${row.path} · ${({file_present:'文件可读',directory_present:'目录存在',unavailable:'不可用',unreadable:'无法读取',present_not_hashed_size_limit:'存在，未核验摘要'})[row.status]||'未核验'}${row.sha256?' · SHA '+row.sha256:''}`,'ops-muted'));
     if(!Object.keys(machine?.calibration_indexes||{}).length)profile.append(make('p','标定索引尚未登记。','ops-muted'));
     for(const row of declared.known_degradations||[])profile.append(make('p',`已声明限制 · ${row.capability}：${row.reason}`,'ops-warning'));
-    profile.append(make('p',`部署源码 SHA-256：${state?.deployment?.sha256||'未核验'} · ${state?.deployment?.source_files??'未知'} 个源码文件`,'ops-muted'));
+    profile.append(make('p',`启动时登记的部署版本：${state?.deployment?.sha256||'未核验'}`,'ops-muted'));
     healthTitle.textContent=`${stale?'上次核验（当前状态未知）':'当前服务状态'} · ${state?.health?.checked_wall_ns?new Date(state.health.checked_wall_ns/1e6).toLocaleString('zh-CN'):'尚无核验时间'}`;
     health.replaceChildren();
     const names={manager:'管理服务',workbench:'工作台',control_owner:'控制服务',recording:'记录服务',pedal:'踏板输入源',cameras:'相机服务',model:'模型服务',detector:'检测服务',planner:'规划服务',scene:'场景服务',environment:'运行环境'};

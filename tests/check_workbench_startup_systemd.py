@@ -46,7 +46,7 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def do_GET(self):
   if self.path.startswith('/api/environment'):
-   v=dict(deployment=dict(files_unchanged=True),activity=dict(busy=False))
+   v=dict(deployment=dict(sha256='a'*64),activity=dict(busy=False))
   else:
    stamp=time.time_ns();v=dict(device=dict(id='startup-fixture'),runtime=dict(connected=False,state='DISCONNECTED',runtime_nonce=None,holder=None,command_epoch=0,automatic_enabled=False,feedback_healthy=False,stationary=False),server_instance_id='CPU-fixture',server_wall_ns=stamp,media=[dict(id=s,ready=True,source_wall_ns=stamp)for s in ('head','left','right')],preview=dict(webgl_model={{'fixture':True}}),manual=dict(limits=[[-1,1]]*12))
   raw=json.dumps(v).encode();self.send_response(200);self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)

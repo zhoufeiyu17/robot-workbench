@@ -107,7 +107,7 @@ class InformationFlowTests(unittest.TestCase):
             self.assertEqual(len(service.snapshot(summary=True)['recent_jobs']),20)
             self.assertEqual(len(service.snapshot()['recent_jobs'][0]['result']['cold']),1000000)
 
-    def test_composite_manifest_detects_backend_camera_and_configuration_drift(self):
+    def test_deployment_identity_is_captured_once_without_runtime_file_scans(self):
         from types import SimpleNamespace as NS
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);manager=root/'manager';camera=root/'camera'
@@ -118,16 +118,19 @@ class InformationFlowTests(unittest.TestCase):
             profile=root/'profile.json';profile.write_text('{"disabled_grippers":["right"]}')
             deployed=Deployment(manager,{'cameras':NS(spec=NS(expected_script=str(camera/'scripts/service.py')))})
             deployed.bind_configuration(dict(publication_files={'profile':str(profile)}))
-            baseline=deployed.snapshot(check_files=True)
-            self.assertTrue(baseline['files_unchanged']);self.assertIn('cameras',baseline['components'])
-            with patch.object(Path,'read_bytes',side_effect=AssertionError('unchanged polling should stat, not hash all files')):
-                self.assertTrue(deployed.snapshot(check_files=True)['files_unchanged'])
+            baseline=deployed.snapshot()
+            self.assertEqual(baseline['source_verification'],'captured_at_startup');self.assertIn('cameras',baseline['components'])
+            with patch.object(Path,'read_bytes',side_effect=AssertionError('polling must not hash files')),patch.object(Path,'stat',side_effect=AssertionError('polling must not scan files')):
+                self.assertEqual(deployed.snapshot(),baseline)
             changed=camera/'robot_workbench/source.py';stamp=changed.stat()
             changed.write_text('# dependency two\n')
             os.utime(changed,ns=(stamp.st_atime_ns,stamp.st_mtime_ns+1_000_000_000))
-            self.assertFalse(deployed.snapshot(check_files=True)['files_unchanged'])
+            self.assertEqual(deployed.snapshot(),baseline)
             profile.write_text('{"disabled_grippers":[]}')
-            self.assertIn('configuration:profile',deployed.snapshot(check_files=True,force=True)['changed_files'])
+            self.assertEqual(deployed.snapshot(),baseline)
+            replacement=Deployment(manager,{'cameras':NS(spec=NS(expected_script=str(camera/'scripts/service.py')))})
+            replacement.bind_configuration(dict(publication_files={'profile':str(profile)}))
+            self.assertNotEqual(replacement.sha256,baseline['sha256'])
 
     def test_execution_packet_does_not_grow_with_historical_evidence(self):
         from physical_cup_maintenance import execution_package,derive_return,validate_evidence

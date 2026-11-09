@@ -63,14 +63,24 @@ def gpu_lock(registry):
 
 
 def registered_desktop(pid,registry,proc=Path('/proc')):
-    """Match a host-verified desktop identity without ptrace across user namespaces."""
-    row=(registry.get('desktop_gpu_processes')or{}).get(str(pid))
-    if not row:return False
-    p=proc/str(pid);raw=(p/'cmdline').read_bytes();stat=(p/'stat').read_text().split(') ',1)[1].split()
-    return (row.get('exe')=='/opt/google/chrome/chrome'and row.get('start_ticks')==stat[19]
+    """Verify live desktop processes after browser restarts; retain pinned container evidence."""
+    rows=registry.get('desktop_gpu_processes')or{}
+    if not str(pid).isdigit()or not rows:return False
+    p=proc/str(pid)
+    try:
+        raw=(p/'cmdline').read_bytes();stat=(p/'stat').read_text().split(') ',1)[1].split()
+        if re.search(rb'(?:^|[ \x00])--type=gpu-process(?:[ \x00]|$)',raw)is None:return False
+        try:
+            executable=str((p/'exe').resolve(strict=True))
+            if (executable in {r.get('exe')for r in rows.values()}
+                    and p.stat().st_uid==os.getuid() and '/session.slice/'in(p/'cgroup').read_text()
+                    and (p/'stat').read_text().split(') ',1)[1].split()[19]==stat[19]):return True
+        except (OSError,RuntimeError):pass
+        row=rows.get(str(pid))or{}
+        return (row.get('exe')=='/opt/google/chrome/chrome'and row.get('start_ticks')==stat[19]
         and row.get('cmdline_sha256')==hashlib.sha256(raw).hexdigest()
-        and row.get('boot_id')==(proc/'sys/kernel/random/boot_id').read_text().strip()
-        and re.search(rb'(?:^|[ \x00])--type=gpu-process(?:[ \x00]|$)',raw)is not None)
+        and row.get('boot_id')==(proc/'sys/kernel/random/boot_id').read_text().strip())
+    except (OSError,IndexError):return False
 
 
 def _worker(connection,root,backend,packed,gpu,log):

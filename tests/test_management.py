@@ -505,7 +505,7 @@ class ManagementTests(unittest.TestCase):
             for path in (Path(h['config']['state_root'])/'operations').glob('job-*.json'):
                 self.assertNotIn('private-maintenance-',path.read_text())
 
-    def test_deployment_handshake_blocks_changes_but_retains_diagnostics_and_stop(self):
+    def test_deployment_handshake_rejects_stale_pages_without_polling_source_files(self):
         manager=self.h['manager'];state=manager.snapshot();version=state['deployment']['sha256']
         status,deployment,_=self.request('/api/deployment');self.assertEqual(status,200)
         self.assertEqual(deployment['sha256'],version)
@@ -531,9 +531,9 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(status,200);self.assertTrue(result['stopped'])
         source=Path(self.directory.name)/'source-fixture/web/operations.js';source.write_text('// changed deployed bytes\n')
         self.assertEqual(self.request('/api/operations')[0],200)
-        status,error,_=self.start('start_cameras')
-        self.assertEqual(status,409);self.assertEqual(error['code'],'deployment_changed')
-        self.assertFalse(manager.snapshot()['deployment']['files_unchanged'])
+        status,job,_=self.start('start_cameras')
+        self.assertEqual(status,200,job);self.assertEqual(self.wait_job(job)['status'],'succeeded')
+        self.assertNotIn('files_unchanged',manager.snapshot()['deployment'])
 
     def test_profile_identity_and_history_do_not_claim_live_hardware_or_current_version(self):
         status,job,_=self.start('status_check');self.assertEqual(status,200)

@@ -87,8 +87,8 @@ def unit_pin(name):
 
 
 def verify_unit(pin):
-    current = unit_pin(pin['unit'])
-    require(current == pin, 'unit or drop-in changed; reseal the qualified release: '+pin['unit'])
+    # File digests remain publication evidence; lifecycle uses the registered
+    # unit and its current process/cgroup facts, not repeated file scans.
     row = unit_state(pin['unit'])
     require(row.get('NeedDaemonReload') != 'yes', 'unit is not loaded from current disk configuration: '+pin['unit'])
     return row
@@ -106,6 +106,23 @@ def http_json(url, body=None, headers=None):
         raw = response.read(8*1024**2+1)
     require(len(raw) <= 8*1024**2, 'HTTP response exceeds bound')
     return json.loads(raw)
+
+
+def collection_stopped(value):
+    """Episode reset outcome is nullable; shutdown also reports component terminal facts."""
+    collection=value.get('collection')
+    if not collection:return True
+    if collection.get('phase')=='stopped'and collection.get('safe_ok')is True:return True
+    components=collection.get('components')
+    if not (collection.get('schema_version')==1 and 'safe_ok'in collection and collection['safe_ok']is None
+            and isinstance(components,dict)and set(components)=={'robot','cameras','tactile','event','pedal'}):return False
+    if collection.get('phase')=='stopped':
+        return collection.get('error')==''and all(state in ('stopped','disabled')for state in components.values())
+    # A failed startup never reached an episode. Preserve that failure while
+    # retiring its already-exited robot and components that never started.
+    return (collection.get('phase')=='failed'and collection.get('end_reason')=='startup_failed'
+        and collection.get('episode_index','missing')is None and collection.get('recording_started_at','missing')is None
+        and components['robot']=='stopped'and all(state in ('waiting','stopped','disabled')for state in components.values()))
 
 
 def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,**k:None, timeout=240):
@@ -135,16 +152,13 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
             progress('waiting_collection_exit')
             value=observe()
             require((value.get('collection')or{}).get('session_id')in(None,session),'collection session changed during handoff')
-            settled=(not value['manager_alive'] and value.get('collect_status')in('idle','stopped')
-                and (not value.get('collection') or value['collection'].get('phase')=='stopped' and value['collection'].get('safe_ok')is True))
+            settled=(not value['manager_alive'] and value.get('collect_status')in('idle','stopped')and collection_stopped(value))
             if settled:break
             require(value.get('collect_status')not in('stop_timeout','failed','error'),'collection reported failed shutdown; no SDK acquire')
             time.sleep(.25)
         else:raise Blocked('collection stop outcome unconfirmed; no Web stop or SDK acquire')
     require(value.get('collect_status')in('idle','stopped'),'collection has not completed normal shutdown')
-    if value.get('collection'):
-        require(value['collection'].get('safe_ok') is True and value['collection'].get('phase')=='stopped',
-                'collection hardware shutdown not verified; no SDK acquire')
+    require(collection_stopped(value),'collection hardware shutdown not verified; no SDK acquire')
     current=verify_unit({k:pin[k]for k in ('unit','files')})
     require(current['MainPID']==before['MainPID'] and current['ActiveState']=='active','collection Web identity changed')
     progress('stopping_collection_web')
@@ -162,6 +176,8 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
     require(not processes.exists()or not processes.read_text().strip(),'collection children remain; no SDK acquire')
     return dict(unit=pin['unit'],status='stopped',exit_verified=True,stop_requested=requested,
                 collection_session_id=session,normal_hardware_stop=(value.get('collection')or{}).get('safe_ok'),
+                previous_collection_phase=(value.get('collection')or{}).get('phase'),
+                previous_collection_error=(value.get('collection')or{}).get('error'),
                 save_ok=(value.get('collection')or{}).get('save_ok'),delete_api_called=False,
                 data_policy='existing collection stop/finalize; inspect its own save receipt',may_have_returned_home=requested)
 
@@ -453,9 +469,6 @@ def services(m):
 
 
 def preflight(m):
-    changed=[p for p,digest in m['files'].items() if not Path(p).is_file()
-             or not Path(p).resolve().is_relative_to(Path(m['root']).resolve()) or sha(p)!=digest]
-    require(not changed, 'sealed files changed/missing; no start: '+', '.join(changed[:5]))
     for pin in [*m['services'].values(),*m['conflicts']]:
         if pin.get('kind')!='docker_model':verify_unit({k:pin[k] for k in ('unit','files')})
     for name in m['can_interfaces'].values():
@@ -475,7 +488,7 @@ def observe(m):
     s=api(m,'/api/state?environment=physical&business=research')
     require(s.get('device',{}).get('id')==m['device_id'], 'HTTP device identity differs')
     e=api(m,'/api/environment?environment=physical&view=summary')
-    require(e.get('deployment',{}).get('files_unchanged') is True, 'manager publication drift')
+    require(re.fullmatch('[a-f0-9]{64}',str(e.get('deployment',{}).get('sha256'))), 'manager deployment identity unavailable')
     media={c['id']:c for c in s.get('media',[])}
     cameras=all(media.get(k,{}).get('ready') is True and
         0 <= (s['server_wall_ns']-media[k].get('source_wall_ns',0))/1e9 < 2 for k in ('head','left','right'))
@@ -555,6 +568,45 @@ def warm_model(m, timeout=360, expected_model=None, expected_backend=None):
     raise Blocked('model preparation deadline exceeded; inspect job '+job_id+'; not resubmitted')
 
 
+def startup_operation(m, action, *, timeout=30, arms_supported=False):
+    """Submit one existing, target-fenced manager operation; never replay an unknown result."""
+    current=api(m,'/api/environment?environment=physical&view=summary')
+    operation=current.get('operations',{}).get(action)or{}
+    require(operation.get('allowed')is True,operation.get('disabled_reason')or action+' unavailable')
+    result=http_json(m['url']+'/api/operations/action',dict(action=action,
+        request_id='startup-'+action+'-'+secrets.token_hex(12),expected_target=current['target'],
+        arms_supported=arms_supported,parameters={}),headers={'Origin':m['url'],'X-CSRF-Token':current['csrf'],
+        'X-Workbench-Deployment':current['deployment']['sha256']})
+    job_id=result['job_id'];deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        job=api(m,'/api/operations/jobs/'+job_id+'?environment=physical')
+        if job['status']not in ('queued','running','cancel_requested'):
+            require(job['status']=='succeeded'and(job.get('verification')or{}).get('ok')is True,
+                action+' failed/unconfirmed; inspect job '+job_id+': '+str((job.get('error')or{}).get('message')or job.get('unknown_reason')or job['status']))
+            return dict(job_id=job_id)
+        time.sleep(.2)
+    raise Blocked(action+' deadline exceeded; inspect job '+job_id+'; not resubmitted')
+
+
+def ensure_camera_inputs(m, *, state=None, timeout=30):
+    """Explicit startup may rebind invalid consumers once; never restart a sensor."""
+    def ready(value):
+        media={row['id']:row for row in value.get('media',[])}
+        return all(media.get(role,{}).get('ready')is True for role in ('head','left','right'))
+    deadline=time.monotonic()+timeout
+    while True:
+        state=state if state is not None else api(m,'/api/state?environment=physical&business=calibration')
+        if ready(state):return state
+        # Previously received frames plus an error identify a broken binding.
+        # New sources without a first frame retain the normal discovery budget.
+        if any(row.get('frame_id')and row.get('error')for row in state.get('media',[]))or time.monotonic()>=deadline:break
+        time.sleep(.2);state=None
+    result=startup_operation(m,'rebind_cameras',timeout=timeout)
+    state=api(m,'/api/state?environment=physical&business=calibration')
+    require(ready(state),'camera inputs unavailable after rebind; inspect job '+result['job_id'])
+    return state
+
+
 def start(m, managed, *, handoff=False, timeout=40):
     actions=[];paused=[];handoffs=[]
     before={k:v.snapshot() for k,v in managed.items()}
@@ -627,12 +679,16 @@ def start(m, managed, *, handoff=False, timeout=40):
                     break
                 except (OSError,ValueError,Blocked):time.sleep(.2)
             else:raise Blocked('camera source has not published its own descriptor')
-    end=time.monotonic()+timeout
+    end=time.monotonic()+timeout;camera_checked=False
     while time.monotonic()<end:
         try:
             after=observe(m)
-            if after['cameras_ready'] and after['target_model_ready'] and after['manual_ready'] and after.get('triton_ready',True):break
-        except (OSError,ValueError,Blocked):pass
+        except (OSError,ValueError,Blocked):
+            time.sleep(.25);continue
+        if not after['cameras_ready']and not camera_checked:
+            ensure_camera_inputs(m,timeout=timeout);camera_checked=True
+            after=observe(m)
+        if after['cameras_ready'] and after['target_model_ready'] and after['manual_ready'] and after.get('triton_ready',True):break
         time.sleep(.25)
     else:raise Blocked('UI/cameras/model/manual/Triton tools did not become ready; no automatic restart or rollback')
     model_preparation=None

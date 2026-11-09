@@ -1115,7 +1115,7 @@ def _environment(*,ros=False):
         for key in ('AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','COLCON_PREFIX_PATH','LD_LIBRARY_PATH','RMW_IMPLEMENTATION','ROS_DISTRO'):
             if key in os.environ:result[key]=os.environ[key]
         result['PYTHONPATH']=os.pathsep.join([result['PYTHONPATH'],os.environ.get('PYTHONPATH','')])
-        result['ROS_LOCALHOST_ONLY']='1'
+        result['ROS_LOCALHOST_ONLY']=os.environ.get('ROS_LOCALHOST_ONLY','1')
     return result
 
 

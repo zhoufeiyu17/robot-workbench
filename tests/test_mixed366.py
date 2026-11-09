@@ -41,6 +41,20 @@ class MixedTest(unittest.TestCase):
             r=dict(desktop_gpu_processes={'123':dict(exe='/opt/google/chrome/chrome',start_ticks='99',boot_id='boot',cmdline_sha256=hashlib.sha256(raw).hexdigest())})
             self.assertTrue(registered_desktop('123',r,p));self.assertFalse(registered_desktop('124',r,p))
             (p/'123/cmdline').write_bytes(raw+b'changed');self.assertFalse(registered_desktop('123',r,p))
+    def test_restarted_browser_is_verified_from_executable_user_and_desktop_session(self):
+        with TemporaryDirectory()as tmp:
+            root=Path(tmp);p=root/'456';p.mkdir();exe=root/'chrome';exe.touch()
+            (p/'exe').symlink_to(exe);(p/'cmdline').write_bytes(b'chrome\0--type=gpu-process\0')
+            (p/'stat').write_text('456 (chrome) '+' '.join(['S']+['0']*18+['100']))
+            (p/'cgroup').write_text('0::/user.slice/user-1000.slice/user@1000.service/session.slice/desktop.service\n')
+            registry=dict(desktop_gpu_processes={'123':dict(exe=str(exe),start_ticks='old')})
+            self.assertTrue(registered_desktop('456',registry,root))
+            with patch('robot_workbench.mixed366.os.getuid',return_value=-1):
+                self.assertFalse(registered_desktop('456',registry,root))
+            (p/'cgroup').write_text('0::/system.slice/unknown.service\n')
+            self.assertFalse(registered_desktop('456',registry,root))
+            (p/'cmdline').write_bytes(b'python\0model.py\0')
+            self.assertFalse(registered_desktop('456',registry,root))
     def test_catalog_does_not_hash_gigabytes_on_every_poll(self):
         from robot_workbench import mixed366
         with TemporaryDirectory()as tmp:

@@ -35,6 +35,38 @@ def observation(state='DISCONNECTED',connected=False):
 
 
 class StartupTest(unittest.TestCase):
+    def test_camera_rebind_recovers_stale_consumers_once_without_starting_hardware(self):
+        stale=dict(media=[dict(id=role,ready=False,error='source unavailable',frame_id='old-frame')for role in ('head','left','right')])
+        ready=dict(media=[dict(id=role,ready=True)for role in ('head','left','right')])
+        environment=dict(operations={'rebind_cameras':{'allowed':True}},target={'backend_instance':'same'},
+            csrf='fixture',deployment={'sha256':'a'*64})
+        for outcome in ('succeeded','failed','denied','still_unready'):
+            current=json.loads(json.dumps(environment))
+            if outcome=='denied':current['operations']['rebind_cameras']=dict(allowed=False,disabled_reason='business is active')
+            result=dict(status='failed'if outcome=='failed'else'succeeded',verification={'ok':outcome!='failed'})
+            with self.subTest(outcome=outcome),patch.object(d,'api',side_effect=[current,result,stale if outcome=='still_unready'else ready]),\
+                    patch.object(d,'http_json',return_value={'job_id':'one'})as post:
+                if outcome=='succeeded':self.assertEqual(d.ensure_camera_inputs(self.m,state=stale),ready)
+                else:
+                    with self.assertRaises(d.Blocked):d.ensure_camera_inputs(self.m,state=stale)
+                self.assertEqual(post.call_count,0 if outcome=='denied'else 1)
+                if post.called:
+                    body=post.call_args.args[1];self.assertEqual(body['action'],'rebind_cameras');self.assertFalse(body['arms_supported'])
+
+    def test_initial_camera_discovery_waits_and_healthy_binding_is_reused(self):
+        waiting=dict(media=[dict(id=role,ready=False,frame_id=None)for role in ('head','left','right')])
+        ready=dict(media=[dict(id=role,ready=True)for role in ('head','left','right')])
+        with patch.object(d,'api',return_value=ready)as read,patch.object(d,'http_json')as post,patch.object(d.time,'sleep'):
+            self.assertEqual(d.ensure_camera_inputs(self.m,state=waiting),ready);read.assert_called_once();post.assert_not_called()
+        with patch.object(d,'api')as read,patch.object(d,'http_json')as post:
+            self.assertEqual(d.ensure_camera_inputs(self.m,state=ready),ready);read.assert_not_called();post.assert_not_called()
+
+    def test_sealed_start_repairs_invalid_binding_in_an_existing_business(self):
+        stale=observation();stale['cameras_ready']=False
+        with patch.object(d,'observe',side_effect=[stale,stale,observation()]),patch.object(d,'ensure_camera_inputs',create=True)as rebind:
+            result=d.start(self.m,self.units(True))
+        self.assertTrue(result['checks']['cameras_ready']);rebind.assert_called_once();self.assertEqual(self.events,[])
+
     def test_native_camera_uses_its_live_registered_recording_descriptor(self):
         self.assertEqual(d.camera_descriptor({'native_rgb':{'directory':'/dev/shm/cpu'}},{}),'/dev/shm/cpu/recording-camera-service.json')
         self.assertEqual(d.camera_descriptor({}, {'camera_service_descriptor':'/registered/rgbd.json'}),'/registered/rgbd.json')
@@ -218,6 +250,31 @@ class StartupTest(unittest.TestCase):
                 with self.assertRaises(d.Blocked):d.handoff_collection(pin,'arx13',stop_active=True)
                 mutation.assert_not_called()
 
+    def test_stopped_collection_without_episode_has_terminal_components_not_safe_result(self):
+        pin=dict(unit='collector.service',files={'/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
+        unit=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-cpu-fixture')
+        terminal=dict(schema_version=1,phase='stopped',safe_ok=None,error='',
+            components=dict(robot='stopped',cameras='stopped',tactile='disabled',event='stopped',pedal='stopped'))
+        status=dict(robot_vin='cpu',manager_alive=False,orphan_alive=False,teleop=None,collect_status='stopped',collection=terminal)
+        with patch.object(d,'verify_unit',return_value=unit),patch.object(d,'unit_state',return_value=dict(ActiveState='inactive',MainPID='0')),\
+                patch.object(d,'http_json',return_value=status),patch.object(d.subprocess,'run')as stop:
+            result=d.handoff_collection(pin,'cpu')
+        self.assertTrue(result['exit_verified']);self.assertFalse(result['stop_requested']);stop.assert_called_once()
+        failed=dict(terminal,phase='failed',end_reason='startup_failed',episode_index=None,recording_started_at=None,
+            error='robot exited before ready',components=dict(robot='stopped',cameras='waiting',tactile='waiting',event='waiting',pedal='waiting'))
+        with patch.object(d,'verify_unit',return_value=unit),patch.object(d,'unit_state',return_value=dict(ActiveState='inactive',MainPID='0')),\
+                patch.object(d,'http_json',return_value=dict(status,collection=failed)),patch.object(d.subprocess,'run'):
+            result=d.handoff_collection(pin,'cpu')
+        self.assertTrue(result['exit_verified']);self.assertEqual(result['previous_collection_phase'],'failed')
+        for bad in (dict(terminal,schema_version=0),dict(terminal,components={}),dict(terminal,error='shutdown failed'),
+                    dict(terminal,components=dict(terminal['components'],robot='running')),dict(terminal,safe_ok=False),
+                    {k:v for k,v in terminal.items()if k!='safe_ok'},dict(failed,episode_index=1),
+                    dict(failed,components=dict(failed['components'],robot='waiting'))):
+            with self.subTest(bad=bad),patch.object(d,'verify_unit',return_value=unit),\
+                    patch.object(d,'http_json',return_value=dict(status,collection=bad)),patch.object(d.subprocess,'run')as stop:
+                with self.assertRaises(d.Blocked):d.handoff_collection(pin,'cpu')
+                stop.assert_not_called()
+
     def test_collection_handoff_stop_cancels_future_steps(self):
         pin=dict(unit='prometheus-arx13-web.service',files={'/unit':'a'*64},status_url='http://127.0.0.1:18980/api/status')
         active=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-cpu-fixture')
@@ -227,12 +284,16 @@ class StartupTest(unittest.TestCase):
         with patch.object(d,'verify_unit',return_value=active),patch.object(d,'http_json',side_effect=[running,{}])as api,patch.object(d.subprocess,'run')as mutation:
             with self.assertRaisesRegex(RuntimeError,'operator stop'):d.handoff_collection(pin,'arx13',stop_active=True,progress=cancelled)
             self.assertEqual(api.call_count,2);mutation.assert_not_called()
-    def test_pins_detect_unit_dropin_and_source_drift_before_start(self):
+    def test_startup_checks_live_units_without_rescanning_source_or_dropin_files(self):
         pin=dict(unit='x.service',files={'/x':'a'})
-        with patch.object(d,'unit_pin',return_value=dict(unit='x.service',files={'/x':'b'})):
-            with self.assertRaises(d.Blocked):d.verify_unit(pin)
+        with patch.object(d,'unit_pin',side_effect=AssertionError('no repeated file scan')),patch.object(d,'unit_state',return_value={'NeedDaemonReload':'no'}):
+            self.assertEqual(d.verify_unit(pin),{'NeedDaemonReload':'no'})
+        with patch.object(d,'unit_state',return_value={'NeedDaemonReload':'yes'}):
+            with self.assertRaisesRegex(d.Blocked,'not loaded'):d.verify_unit(pin)
         p=self.root/'x.py';p.write_text('before');self.m['files']={str(p):d.sha(p)};p.write_text('after')
-        with self.assertRaisesRegex(d.Blocked,'sealed files changed'):d.preflight(self.m)
+        self.m.update(services={},conflicts=[],can_interfaces={})
+        with patch.object(d,'sha',side_effect=AssertionError('no repeated file hash')),patch.object(d,'services',return_value={}):
+            self.assertEqual(d.preflight(self.m),{})
         self.assertEqual(self.events,[])
     def test_dependencies_pin_static_graph_without_reading_secret_or_mutable_descriptor(self):
         child=self.root/'child.json';child.write_text('{}');token=self.root/'token';token.write_text('private')
