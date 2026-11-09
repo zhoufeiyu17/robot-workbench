@@ -248,6 +248,28 @@ class TargetInterpreterTests(unittest.TestCase):
         self.now+=.021
         with self.assertRaisesRegex(ValueError,'observed_age_ms=52.000'):executor.tick(sampled_now,sample,force=True)
 
+    def test_preserved_boundary_event_uses_chronological_first_knot(self):
+        previous=self.fixture(profile='x5_control50_damping_v1',native_grid='reference_origin_100Hz')
+        previous.tick(self.now,self.feedback(previous));prefix=deepcopy(previous.last_packet)
+        boundary=prefix['host_times_s'][-1];original=previous.reference
+        reference=NS(metadata=original.metadata,duration_s=original.duration_s,sample=original.sample,
+                     event_times=np.asarray([boundary-previous.start_s]))
+        def replacement():
+            value=TargetInterpreter(previous.backend,reference,active_arm='both',start_s=previous.start_s,
+                epoch=self.epoch,current_epoch=lambda:self.epoch,gate=lambda:None,clock=lambda:self.now,
+                profile='x5_control50_damping_v1')
+            value.preserved_prefix=deepcopy(prefix)
+            return value
+        self.now=boundary-.035;executor=replacement()
+        packet=executor.tick(self.now,self.feedback(executor))['packet']
+        self.assertAlmostEqual(packet['host_times_s'][0],boundary)
+        self.assertTrue(all(b>a for a,b in zip(packet['host_times_s'],packet['host_times_s'][1:])))
+        np.testing.assert_allclose(packet['q_sdk14'][0],prefix['q_sdk14'][-1],rtol=0,atol=1e-12)
+        count=len(self.packets);self.now=boundary+.001;expired=replacement()
+        with self.assertRaisesRegex(ValueError,'committed prefix expired'):
+            expired.tick(self.now,self.feedback(expired))
+        self.assertEqual(len(self.packets),count)
+
     def test_stop_epoch_revokes_future_admission_and_old_integral(self):
         executor=self.fixture(integral=True);executor.tick(self.now,self.feedback(executor,.01))
         self.epoch+=1;count=len(self.packets);self.now+=.01

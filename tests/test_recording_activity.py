@@ -58,7 +58,7 @@ class ActiveCaptureTests(unittest.TestCase):
             row['source_clock_id']='clock';row['topic']='/wb_active_capture/'+row['stream_id']
         descriptions.append(dict(device_id='cpu_robot',stream_id='control',source_instance_id='cpu-owner',
             source_clock_id='clock',topic='/wb_active_capture/control',message_type='workbench_interfaces/msg/DataEvent',
-            kind='event',units='control',coordinate_frame='device',nominal_hz=30.,available=True,metadata={'continuous_window':True}))
+            kind='event',units='control',coordinate_frame='device',nominal_hz=30.,available=True,metadata={}))
         publishers={row['stream_id']:node.publisher(row['topic'],Image if row['kind']=='image'else getattr(node.types,'RobotState'if row['kind']=='state'else'DataEvent'))for row in descriptions}
         lock=threading.Lock();stopped=threading.Event();sequence=0;state_sequence=0
         run='activity-run'
@@ -105,7 +105,8 @@ class ActiveCaptureTests(unittest.TestCase):
         self.assertTrue(list((session.directory/'camera').rglob('*.commit.json')),'paused tail must be committed before ending the session')
         teach=mode('TEACH','t1');time.sleep(3.);held=mode('HOLD','h2');time.sleep(.2)
         endpoint=time.monotonic_ns()
-        session.finish({},dict(status='completed'),source_endpoints={row['stream_id']:dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions})
+        session.finish({'control':sequence},dict(status='completed'),source_endpoints={row['stream_id']:
+            dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions if row['kind']in('image','state')})
         self.assertTrue(session.done.wait(30),session.snapshot())
         manifest=json.loads((session.directory/'manifest.json').read_text())
         self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
@@ -117,22 +118,34 @@ class ActiveCaptureTests(unittest.TestCase):
             self.assertLess(max(b-a for a,b in zip(video['frame_offsets_s'],video['frame_offsets_s'][1:])),.15)
         self.assertGreater(manifest['streams']['state']['effective_count'],0)
         session.close()
-        idle=CaptureSession.create(Path(directory)/'idle'/('inference-'+run)/'capture',request_id=run+'-idle',
-            source_descriptors=[capture_source(row,namespace='/wb_active_capture',domain_id=168)for row in descriptions],purpose_profile='infer_debug')
-        self.addCleanup(idle.close)
-        prepared=idle.prepare()
-        idle.bind(run_id=run,business_kind='inference',policy_hash=policy['policy_hash'],control_policy=policy,
-            execution_context=dict(device_id='cpu_robot',environment='fake',recording_activity=POLICY),
-            execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
-        idle.start();time.sleep(.3);endpoint=time.monotonic_ns()
-        idle.finish({},dict(status='completed'),source_endpoints={row['stream_id']:dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions})
-        self.assertTrue(idle.done.wait(10))
-        empty=json.loads((idle.directory/'manifest.json').read_text())
-        self.assertEqual(empty['recording_outcome'],'complete',empty['issues'])
-        self.assertEqual(empty['recording_activity']['effective_duration_ns'],0)
-        self.assertEqual(empty['playback']['streams'],{})
-        self.assertFalse((idle.directory/'camera').exists())
-        idle.close()
+        for outside in (True,False):
+            idle=CaptureSession.create(Path(directory)/('after-end'if outside else'within-end')/('inference-'+run)/'capture',request_id=run+('-after'if outside else'-within'),
+                source_descriptors=[capture_source(row,namespace='/wb_active_capture',domain_id=168)for row in descriptions],purpose_profile='infer_debug')
+            self.addCleanup(idle.close)
+            prepared=idle.prepare()
+            idle.bind(run_id=run,business_kind='inference',policy_hash=policy['policy_hash'],control_policy=policy,
+                execution_context=dict(device_id='cpu_robot',environment='fake',recording_activity=POLICY),
+                execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
+            idle.start();time.sleep(.3)
+            with lock:
+                final_control=sequence;sequence+=2
+            control('outside_run',{})
+            # The source gap can be seen before the finish RPC, while raw camera
+            # tails are still draining. It lies wholly after the declared control end.
+            time.sleep(.1)
+            if not outside:final_control=sequence
+            endpoint=time.monotonic_ns()+300_000_000
+            idle.finish({'control':final_control},dict(status='completed'),source_endpoints={row['stream_id']:
+                dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions if row['kind']in('image','state')})
+            self.assertTrue(idle.done.wait(10))
+            empty=json.loads((idle.directory/'manifest.json').read_text())
+            self.assertEqual(empty['recording_outcome'],'complete'if outside else'incomplete',empty['issues'])
+            if not outside:self.assertTrue(any('control source sequence gap'in issue for issue in empty['issues']))
+            self.assertEqual(empty['recording_activity']['effective_duration_ns'],0)
+            self.assertEqual(empty['playback']['streams'],{})
+            self.assertFalse((idle.directory/'camera').exists())
+            idle.close()
+
 
 
 if __name__=='__main__':unittest.main()

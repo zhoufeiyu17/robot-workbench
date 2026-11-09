@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 407,
-  "updated_at": "2026-11-09T08:53:33.711821+00:00",
+  "revision": 409,
+  "updated_at": "2026-11-09T09:44:59.688343+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -34,7 +34,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     {
@@ -59,7 +59,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "3bb7a8e3b5de5cf057d5bf97a0bff81cd99ae2883987c14791801d4af227bb10",
+      "fingerprint": "a9bb70f152854b1ec3d2e5a1e541527b5f51691593d5be1c42b801a2fafb110d",
       "verified_fingerprint": null
     },
     {
@@ -107,7 +107,7 @@
         "sha256": "5787b98159b871dc8de79376cae1735c5d1ba08b72b50dcc0f2c3531cf83a9d9",
         "matches_file": true
       },
-      "fingerprint": "037bb961e31cc22c1c38912ada9c03b22af77459e8038ed9195751f6a687d16b",
+      "fingerprint": "86e7fb32637901e9178d40053eeb8c401f2a33062c138f329ea99ae589d08072",
       "verified_fingerprint": "ae60d63f548388b52ec65e609ffba7898a4e41214be57db1932e3edadea41308"
     },
     {
@@ -138,7 +138,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "cba1a507bb78a9f41c1ceab27af7cc1f29cc98b5bda16ee801998ca8861c58fa",
+      "fingerprint": "dda0623b1d163e390ebc3774a9a47c2b5038d5ad48703b4666cad3d9b626a460",
       "verified_fingerprint": null
     },
     {
@@ -163,7 +163,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "2151108183510e239f7146b3f54663ac032a35114374fedb3f080e2540fd73bd",
+      "fingerprint": "ae518236343c990d93e86b36fe81fa1ae36851f9aa82addca3280b8010c832a6",
       "verified_fingerprint": "847879c398691295376b01b8a4ae5bdc3f411b93f66231bff2fd33afa58aae72"
     },
     {
@@ -192,7 +192,7 @@
         "sha256": "a3c36cadff9dbf82dd881d266a677e910ddb9baa4a1c16ebd9b468494ed841c6",
         "matches_file": false
       },
-      "fingerprint": "1b7254675e07f29a3014ed34062c8aa9d2c5cd877e5bfc138cba340a935125e6",
+      "fingerprint": "c9618db3699caed24b83b69d477a3b8ba392cc4fe1e085d45d54f040b79fbf32",
       "verified_fingerprint": "2249f579e849f462d042a89ad564cbdbf14b962d117f0bfc74c44779840c92ac"
     },
     {
@@ -217,7 +217,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "a020002aaba75f19e7079763d521435e6398e684539e91708b11435bba59bab5",
+      "fingerprint": "667e70f49906f2199c839d1ae3332ddb21a035a5dabe066ab460f441fb730ed4",
       "verified_fingerprint": null
     },
     {
@@ -243,7 +243,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "d2488174610186994eb4829a98cecb77a4c8eff5aea0a0ea4eba3eb5cf0b5b6b",
+      "fingerprint": "69b13d7a6e2f0c2f9a48ae95539de6e6393e113906237703aa6e00766b8bc81e",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     {
@@ -270,7 +270,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
     },
     {
@@ -296,7 +296,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "27f7189b3a4fec34255bf902c61e6da4456db06ad0230be18ccc14786b250fe7",
+      "fingerprint": "41e5a6e5c2cdb36428879d3ad67b3e2aeb2d73beba2cdb3ec7ee6914b2c56227",
       "verified_fingerprint": "e567a0bd56bd667d5bd25e0d563375d65b6a420f44aef04d732bfbd5f0284aa0"
     },
     {
@@ -323,7 +323,7 @@
         "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
         "matches_file": true
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "156ab30dd7d98ecab5013850650aefdc6cb8d9604a3c8637e15b855fa0b56bd3"
     },
     {
@@ -350,7 +350,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "48f1cd22e7ff0277438366f2fb7b3087eff40d14c8cc549d9bb5607d503cb03e",
+      "fingerprint": "6d1adc996e6de056b7c52e30e0c2f96807393dfda82947df6671dfa2333954ad",
       "verified_fingerprint": null
     },
     {
@@ -375,7 +375,7 @@
         "sha256": "9c2833a5788e9c120819ae53d91a9d78bc51abe4f37824e3e2ad3e7a30dfd74c",
         "matches_file": true
       },
-      "fingerprint": "00871ba0328fc63938e7e0bb172f9005c8bbf8f06c6ec6523a4e9d7b933d62d6",
+      "fingerprint": "363c4c82ede8a1fa3f03fee8c180cdeceb0af97005308d3b4a6207949edd5099",
       "verified_fingerprint": null
     },
     {
@@ -399,7 +399,7 @@
         "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
         "matches_file": true
       },
-      "fingerprint": "0cae5cbfe03872dbaf9484471c537a3a21e06d9a8b3ea4d9b0b4cc1eb2424310",
+      "fingerprint": "af62d852cdffffdc4639c73c91011e7dd272b209516ca3cebc4d07be3657773c",
       "verified_fingerprint": null
     },
     {
@@ -425,7 +425,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "2a2406558f9613f2265cc6eb7261505bf305dfa5b7f54645e0cfb018587b3f61",
+      "fingerprint": "b165268b922b5b4d01a98acf4a253584dc17f7b32dd1f5136dcdff6299548754",
       "verified_fingerprint": "f01d7e9518aea090e8bba53b760230f407b050a892172a134ce6e59b8c3f6113"
     },
     {
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "adbe187999164930a6dd79d9428008ee4ed7e554a3892e24e97430357ec095ab",
+      "fingerprint": "c3fd69c010391a30a50732384dfdcb7b1d5dc17d60f40e17845728bd0d03791f",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -478,7 +478,7 @@
         "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
         "matches_file": true
       },
-      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
+      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "79ab6c75f822b974dfdb1556e2296a4a94da10d947b3a0800d1b8b02c9fdd87a",
+      "fingerprint": "688b47a6f94269704b397b20ff6d5113dde8f7f58632373dc2fe319529a698eb",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -545,7 +545,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "fdef36bf0a807ff12dcef95b21342fd2706b7b02d6314cb30e534d2f16fc7789",
+      "fingerprint": "68a77b2f08753072819098bcdf8da3b53cf88a935a78eaa0c9605129d592bb35",
       "verified_fingerprint": null
     },
     {
@@ -620,7 +620,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/joint_bounds.py": {
@@ -648,7 +648,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "4316f525a2cdf93dbfe7572b84001bface3b61912867c5aa1b976b28638c5050"
     },
     "robot_workbench/state_contract.py": {
@@ -676,7 +676,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/runtime.py": {
@@ -718,7 +718,7 @@
           }
         ]
       },
-      "fingerprint": "3bb7a8e3b5de5cf057d5bf97a0bff81cd99ae2883987c14791801d4af227bb10",
+      "fingerprint": "a9bb70f152854b1ec3d2e5a1e541527b5f51691593d5be1c42b801a2fafb110d",
       "verified_fingerprint": "a87549b04977f6c2785e4e994e1227d7d63a8847f93b9aa8754b8ff4797cca95"
     },
     "robot_workbench/inference_owner.py": {
@@ -755,23 +755,23 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": null
     },
     "robot_workbench/target_interpreter.py": {
-      "state": "implemented",
-      "note": "窗口起点修复已发布到Owner v11；实机完整32步、端点后下一次预测及完整录制通过，较长多段仍待补验。",
-      "next": "组合验收补齐长时连续运行",
+      "state": "verified",
+      "note": "边界事件插入后先按源时间排序再校验首点；录制只按声明的最终序号判定缺口。65项参考/模式和23项录制检查通过，真实过期与范围内缺口仍拒绝。",
+      "next": "继续使用既有保护与统一配置契约",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-07T18:28:28.528118+00:00",
+      "updated_at": "2026-11-09T09:44:58.769036+00:00",
       "evidence": {
-        "path": ".evidence/infer-pedal2-start-20261107-v1/window-origin-live.json",
-        "sha256": "0b521109e3f6a959611370c1eb1488fb715308bed760ce3d37d5df42a021f332",
+        "path": ".evidence/reference-stream-boundaries-20261109-v1/acceptance.json",
+        "sha256": "5c7ab83b47c190f38d10d39b5175d59d6fbd01f96d02e18fcfec4d07a88b5fa2",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "13d162a4aa0337a510fcadcc4998f9ccfb876ebbb0bf466159fcabdf5a6bc6f4",
+        "sha256": "b18306eba0345bd8078c5528a7682b38e377ce2e0f44e64007eeaaf710811b26",
         "imports": [
           "robot_workbench/execution_settings.py",
           "robot_workbench/motion_reference.py",
@@ -786,8 +786,8 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
-      "verified_fingerprint": null
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/arx_output_guard.py": {
       "state": "baseline",
@@ -814,7 +814,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/can_feedback_filter.py": {
       "state": "baseline",
@@ -967,7 +967,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/observation_window.py": {
@@ -1018,7 +1018,7 @@
           }
         ]
       },
-      "fingerprint": "6c6e35e4304e05f0968df51054344cf976b210c65fd09a199786cd98b51e98cf",
+      "fingerprint": "8289356243e04c9001220727664397ea76d436e00843eb7022d102ca079a88e3",
       "verified_fingerprint": "a272fae85054cab8833cac549ecad95149958745c6c86dcd490580c4d7abe647"
     },
     "robot_workbench/camera_owner.py": {
@@ -1189,7 +1189,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "74008357e62d22c52d408fe0c7cfe44223e215fd917f916b977022d14c6936a2"
     },
     "robot_workbench/inference_evidence.py": {
@@ -1217,7 +1217,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_transport.py": {
@@ -1254,7 +1254,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/model_session.py": {
@@ -1289,7 +1289,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_model.py": {
@@ -1318,7 +1318,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": null
     },
     "robot_workbench/inference_catalog.py": {
@@ -1348,7 +1348,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "a3bef8a7d34958c808ba9e8969024b14890023aac8d988c0cf7126d87368766e"
     },
     "robot_workbench/mixed366.py": {
@@ -1385,7 +1385,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/mixed366_runtime.py": {
@@ -1494,7 +1494,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/motion_reference.py": {
@@ -1523,7 +1523,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/control_plan.py": {
@@ -1550,7 +1550,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/control_reference.py": {
       "state": "verified",
@@ -1581,7 +1581,7 @@
           }
         ]
       },
-      "fingerprint": "61aa1f19b27c8be160699a9f489f54f569efa55643931729d9e7688dc3f04cda",
+      "fingerprint": "f3d1702497a6ce18dbda405a9d5e9ee7e047b1b4e9daad5f4d3089f15b594081",
       "verified_fingerprint": "b85bc982e594d747d855a01c2efbea8f5772df2b4c69ef039123fb3d7ed6b2fb"
     },
     "robot_workbench/inference_reference.py": {
@@ -1660,7 +1660,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "827b8da82baa9f56734cc0f2e66f4f458c84ae124bc1b380946021d7bd283ef7"
     },
     "robot_workbench/control_owner.py": {
@@ -1695,7 +1695,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "6efdde405c70d326e96c546cb6c8a2094e8be18d1b35e75ce24867fdf0534fe8"
     },
     "robot_workbench/precision_study.py": {
@@ -1728,7 +1728,7 @@
           }
         ]
       },
-      "fingerprint": "c69071802f0d0506abc909c65c18a5ab511c7ad97dcf2cdaf2556eb7482d10ed",
+      "fingerprint": "2d748c404652d05de173ebe594e284698be74f267abcb46af8d031e8d68c1295",
       "verified_fingerprint": "ade271d9ae25b14939a780fea3af3f873ef9e48ef7f2caf5cf79a9381c4dfee5"
     },
     "robot_workbench/gravity_identification.py": {
@@ -1773,7 +1773,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/physical_cup_return.py": {
       "state": "baseline",
@@ -1799,7 +1799,7 @@
           }
         ]
       },
-      "fingerprint": "35a7c34fa8d75095326a6a70746096290ec801c193a3713dc21ea8bb46914ab3"
+      "fingerprint": "3537f655e308fb06981bcf886539325982b03491cf65948a62d5925d9059a27d"
     },
     "robot_workbench/cup_return.py": {
       "state": "baseline",
@@ -1825,7 +1825,7 @@
           }
         ]
       },
-      "fingerprint": "35a7c34fa8d75095326a6a70746096290ec801c193a3713dc21ea8bb46914ab3"
+      "fingerprint": "3537f655e308fb06981bcf886539325982b03491cf65948a62d5925d9059a27d"
     },
     "robot_workbench/manual_self_collision.py": {
       "state": "baseline",
@@ -1874,7 +1874,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "734a8d393fe2f3d57f87af729f59de9bc57d62577d71a5576fd222fb7a978297"
     },
     "robot_workbench/release_trace.py": {
@@ -1936,7 +1936,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "d2d2a32bb8f6fea5663a6cb98d148141291b3bc7e1c0fea2189fbe37078360bd"
     },
     "robot_workbench/recording_quality.py": {
@@ -1965,7 +1965,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/inference_history.py": {
@@ -1993,7 +1993,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/collection_history.py": {
@@ -2024,7 +2024,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/lerobot_export.py": {
@@ -2048,7 +2048,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/http_media.py": {
       "state": "baseline",
@@ -2110,7 +2110,7 @@
           }
         ]
       },
-      "fingerprint": "d9740f7fa834507049163c677a0047634fb75155d015deabcf1fd080fe4c8f74",
+      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
       "verified_fingerprint": "32e271cb3d9a186bf7e9fd6492a5bf35345d74f13b3e1281523e36806171595e"
     },
     "robot_workbench/workflows.py": {
@@ -2135,7 +2135,7 @@
           }
         ]
       },
-      "fingerprint": "d9740f7fa834507049163c677a0047634fb75155d015deabcf1fd080fe4c8f74"
+      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc"
     },
     "robot_workbench/bridges.py": {
       "state": "active",
@@ -2162,7 +2162,7 @@
           }
         ]
       },
-      "fingerprint": "491885f509be46eee03a5c2b3f7790030abf00a46f83ecbb2096c91735ac04e1",
+      "fingerprint": "a1f15920f6446e9a491670c7c97a4de8b3e05709a53875fad331f40a06ea00a5",
       "verified_fingerprint": null
     },
     "robot_workbench/resident_collection.py": {
@@ -2195,7 +2195,7 @@
           }
         ]
       },
-      "fingerprint": "d9740f7fa834507049163c677a0047634fb75155d015deabcf1fd080fe4c8f74",
+      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
       "verified_fingerprint": "680947a9814b89ebf4c094bacd1065b3b0d439d4ebeed063328acb2415d36107"
     },
     "robot_workbench/collection_setup.py": {
@@ -2229,7 +2229,7 @@
           }
         ]
       },
-      "fingerprint": "d9740f7fa834507049163c677a0047634fb75155d015deabcf1fd080fe4c8f74",
+      "fingerprint": "dd22bf7be84684d8140c8ad93d5948c32f1c025cfe0aba413d141524361e73bc",
       "verified_fingerprint": null
     },
     "robot_workbench/calibration_profile.py": {
@@ -2319,7 +2319,7 @@
           }
         ]
       },
-      "fingerprint": "df111cb95a40f4e18daa5e5ef4f6612138b9b4d53de11c2c8efd003375b3feab"
+      "fingerprint": "96aba43d73b56022d325a384ded0fefc5cf0d5455ef7d860b4729182ba20601b"
     },
     "robot_workbench/target_display_gateway.py": {
       "state": "baseline",
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
+      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2528,7 +2528,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "robot_workbench/management.py": {
@@ -2572,7 +2572,7 @@
           }
         ]
       },
-      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
+      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
       "verified_fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
     },
     "robot_workbench/maintenance.py": {
@@ -2601,7 +2601,7 @@
           }
         ]
       },
-      "fingerprint": "46abb2be56e3b37a325f59c4ada0becfcd48adfc3d8b2ac1eafa45f11b0e41fe",
+      "fingerprint": "09e3ce24bddac726c867937154097504e0a88ef18eca506529629bac857c58f5",
       "verified_fingerprint": "43708c7e6018674851272c786b388a72c49c8c0ecf831258a4f2c2fcdd0a2c8e"
     },
     "robot_workbench/sdk_quiesce.py": {
@@ -2626,7 +2626,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/managed_services.py": {
       "state": "baseline",
@@ -2699,7 +2699,7 @@
           }
         ]
       },
-      "fingerprint": "73c45f9864453ba16ae147ec7350b0db208defcd3b57118466dee8b666347cc0",
+      "fingerprint": "5fcba4a93e405953a0a6db705eda931c9222b7fa350fd6431358e1833161107d",
       "verified_fingerprint": null
     },
     "robot_workbench/machine_profile.py": {
@@ -2772,7 +2772,7 @@
           }
         ]
       },
-      "fingerprint": "0000f4bd46629616a8c9ccc934ab38bd531f930a434d48cadb9fac6937db3b35"
+      "fingerprint": "35028772844edb377e2d4a03a017b2afff776154acbc0dd9f0c686b9e2b39e17"
     },
     "robot_workbench/sdk_process.py": {
       "state": "implemented",
@@ -2804,7 +2804,7 @@
           }
         ]
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": null
     },
     "robot_workbench/physx.py": {
@@ -2927,7 +2927,7 @@
           }
         ]
       },
-      "fingerprint": "f6e8de9a52f27b95e9f3a5eee31758fe61139949ff0e07276925835f2a69e9fe",
+      "fingerprint": "04faf6cfc6acd016ac7b1209d441a54a22252ae2aa55f27b7912bbf41d828092",
       "verified_fingerprint": "f24303a29304f1e4f5e430c4d84a53ff76eaeb3401b9e72c1c5b5a1759627f1b"
     },
     "calibration/infra/arx_env/joint_head_real_motion.py": {
@@ -2958,7 +2958,7 @@
           }
         ]
       },
-      "fingerprint": "7e2745041b336a8916c278bfe9939f9efd525682b674b14e31b531b3837ab650",
+      "fingerprint": "15a89500ce880ee7fde01d7604037cf0cbd84452f7fd52511aec4109c978518e",
       "verified_fingerprint": "ffae173ae887ed234450c6942fc560fc83b082d3259ab587f33977d4a13aa833"
     },
     "calibration/infra/arx_env/joint_head_jaw_mapping.py": {
@@ -2982,7 +2982,7 @@
           }
         ]
       },
-      "fingerprint": "e363ccddad548f4fc814d3b734114e790041092da50e9f04cbdd70298f6699a0"
+      "fingerprint": "068373f07b334ff063e6302d619b8c4171dbf78d98ee4a9db85167fe4770b5ce"
     },
     "calibration/infra/arx_env/joint_head_workbench_hardware.py": {
       "state": "baseline",
@@ -3028,7 +3028,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "scripts/start_registered_workbench.py": {
       "state": "verified",
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "317c372c4f5487c4ec1f40a1d9c3fe616c747ce7d41a98e408674c549a7b7b33",
+      "fingerprint": "82e69bfad4be88005871369edb8a83c89ba6db0439c21be57a8caff2d03cf96f",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3092,7 +3092,7 @@
           }
         ]
       },
-      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
+      "fingerprint": "11dd5bd74891d8bb4baa14cad7b477f5170a9f0dec75cc07c3613b77480f1dfd",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3118,7 +3118,7 @@
           }
         ]
       },
-      "fingerprint": "e0c183105db58c4ea2974b7391d4ddf62e8c79272f45ca0b4998fe1d3447f1db"
+      "fingerprint": "f690b9b765a27ad871869b428132050875dc4be572813e76cd37bbffdb0cf028"
     },
     "scripts/serve_mixed366_model.py": {
       "state": "baseline",
@@ -3137,7 +3137,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "30307fd91dbfa29c97a328b247621fb8dbd5f2fdf27543d93f6c7fbfb0d7c20d"
+      "fingerprint": "270678d7cc7938945caed0eb784c8ebc3816bde8bd42f7138dfd4f6404cb7634"
     },
     "scripts/serve_base566_model.py": {
       "state": "baseline",
@@ -3154,7 +3154,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "92414e8de6c127c35859b495f22a9e1b663e0a2431a901a53aeb60dbed1ed1d8"
+      "fingerprint": "46d1f4e8864cc5e856795897c6c7d4f2310b9989bdf2cf0f36a85b770aedb455"
     },
     "scripts/serve_prometheus_rgb.py": {
       "state": "baseline",
@@ -3171,7 +3171,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "6bf831a627e1f1c2711a3eebf7f0dfc6eede4bf51fa8eb4ebc25acaefc72ac1b"
+      "fingerprint": "3a506af93aa3adb38acc13cc7a1372679fa03361e53cfc70927e834be36d28f6"
     },
     "scripts/development_map.py": {
       "state": "verified",
@@ -3367,7 +3367,7 @@
           }
         ]
       },
-      "fingerprint": "d2488174610186994eb4829a98cecb77a4c8eff5aea0a0ea4eba3eb5cf0b5b6b",
+      "fingerprint": "69b13d7a6e2f0c2f9a48ae95539de6e6393e113906237703aa6e00766b8bc81e",
       "verified_fingerprint": "a6d55cd565831a7a48d5471a8c707ca578784171dcb0066fdfe20dc1290a0c53"
     },
     "scripts/serve_sdk_control.py": {
@@ -3393,7 +3393,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "0ca83e87f29c35be86535c8b0209f25af0ec1a680cd83d0d43634b816b9bdd8f",
+      "fingerprint": "1a233acc46e5ec70bfb2c741196c6df00cbff4e734aa5282289a462e197df80e",
       "verified_fingerprint": "8d6e33336f6a6e884f2eb9a0192dc12c5e695f523a797e18de580b16eed460bf"
     },
     "rule_based_workbench/rgbd_segments.py": {
@@ -3459,7 +3459,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "rule_based_workbench/real_control.py": {
@@ -3488,7 +3488,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "01b17c47e1aa11e6328bc6298933b048811adfd52b6f9caee82107e0c7b478f8"
     },
     "scripts/serve_recording.py": {
@@ -3510,7 +3510,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "48f1cd22e7ff0277438366f2fb7b3087eff40d14c8cc549d9bb5607d503cb03e",
+      "fingerprint": "6d1adc996e6de056b7c52e30e0c2f96807393dfda82947df6671dfa2333954ad",
       "verified_fingerprint": "9755babac4fce7ad8c9b3cbbd2bedcc2d997e8da85895190c4e6cea9bb88c14c"
     },
     "robot_workbench/ros_data.py": {
@@ -3582,23 +3582,23 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
       "verified_fingerprint": "6155c49002d49a9ac31bd23eabad6b288dd880a31c62362329ed9689ad07ecb9"
     },
     "robot_workbench/ros_recording.py": {
       "state": "verified",
-      "note": "v41已上线：首批原始来源唤醒既有健康线程，周期心跳与1秒预算不变。21项录制/11项组合检查通过；六次正常准备505–937ms。实机HOLD1.481秒完整封存，0模型调用。",
-      "next": "600秒全分辨率RGB-D容量/RSS验收进行中；完整物理MODEL/正式预算仍独立验收",
+      "note": "边界事件插入后先按源时间排序再校验首点；录制只按声明的最终序号判定缺口。65项参考/模式和23项录制检查通过，真实过期与范围内缺口仍拒绝。",
+      "next": "继续使用既有保护与统一配置契约",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-08T07:56:01.140046+00:00",
+      "updated_at": "2026-11-09T09:44:58.769168+00:00",
       "evidence": {
-        "path": ".evidence/infer-pedal2-start-20261107-v1/capture-ready-acceptance.json",
-        "sha256": "d1d03d570eb1478dfc52297860f5df8e3ace6c6ca9dcb0b79c15b4694b5ed8db",
+        "path": ".evidence/reference-stream-boundaries-20261109-v1/acceptance.json",
+        "sha256": "5c7ab83b47c190f38d10d39b5175d59d6fbd01f96d02e18fcfec4d07a88b5fa2",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "e1f0b3e684a0b731cb6f179fb2cfd02cff161a0532288a625b632dd2b01b517d",
+        "sha256": "f730313ee738e81df49edafcee85f9b49326a1e61a763b4b6398ca159ab9d426",
         "imports": [
           "robot_workbench/inference_trace.py",
           "robot_workbench/managed_services.py",
@@ -3611,8 +3611,8 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d",
-      "verified_fingerprint": "4fcd3221d3fed5fbc3969c1b95d5f0ad480bdcf148b9b54297bfc5976aaed811"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72",
+      "verified_fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "robot_workbench/ros_driver.py": {
       "state": "verified",
@@ -3662,7 +3662,7 @@
           }
         ]
       },
-      "fingerprint": "f59d1d6765b5379af25b10ba40528d1f1cf23d382ca66a5f6844dcfac1b7c0d6",
+      "fingerprint": "0bd167be9d6096d35657af10ea2213ecca0d47b140253fe0b455d7874049a085",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3688,7 +3688,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "731a6a20bcc8af003e555d029da0fe8f310c4308c0f7b0a77f099946543cd113",
+      "fingerprint": "1bef1bd419447e6a46b6de326803c09c6e814bbf02ea80266b9b352b396e7543",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3730,7 +3730,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "85c1c410d3268fa55c020b4ef9b53a48e833867ca9c77437e996c35f6f77d9a5",
+      "fingerprint": "99dd269add8cba28c6545882b50e486760cf64340c6b780595e7caf44b5e41b7",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3754,7 +3754,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "2151108183510e239f7146b3f54663ac032a35114374fedb3f080e2540fd73bd",
+      "fingerprint": "ae518236343c990d93e86b36fe81fa1ae36851f9aa82addca3280b8010c832a6",
       "updated_at": "2026-11-06T15:18:45.407033+00:00",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
@@ -3857,7 +3857,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "e447e758c78ea80970f59fcc641ec48c93bef8406d87dc46507447a1c17b074d"
+      "fingerprint": "aa2fe0d3127f43c20008780175f364f92909eb027fb44d96e3c020539a7fec72"
     },
     "scripts/serve_workbench_manager.py": {
       "state": "implemented",
@@ -3879,7 +3879,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "2b2b5850b229ab2da27e26d4767b00908a3d50f7f040534e43b7177d4ec10cb1"
+      "fingerprint": "ddee5256a8390b66148d763e3605493096afc2b19c91aac1724fec250ae3b37f"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,20 +3937,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T04:25:44.063491+00:00",
-      "kind": "domain",
-      "ids": [
-        "infer-runtime",
-        "translation-run",
-        "input-assembly",
-        "evidence-worker",
-        "evidence-ingress",
-        "evidence-read"
-      ],
-      "state": "verified",
-      "note": "WAM/ARX13有界3x15及运动中Stop通过；两条新Run原始数据/IO/回放complete，6调用42网络张量位精确重建。仅本回执范围，不等于全业务/长期/任务精度资格。"
-    },
     {
       "at": "2026-11-07T04:25:44.923752+00:00",
       "kind": "domain",
@@ -4866,9 +4852,19 @@
       ],
       "state": "verified",
       "note": "数采服务名由可信部署配置声明，公共校验只检查单位名格式；配置边界与正常交接检查通过，已去除机器编号特判。"
+    },
+    {
+      "at": "2026-11-09T09:44:58.769171+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/target_interpreter.py",
+        "robot_workbench/ros_recording.py"
+      ],
+      "state": "verified",
+      "note": "边界事件插入后先按源时间排序再校验首点；录制只按声明的最终序号判定缺口。65项参考/模式和23项录制检查通过，真实过期与范围内缺口仍拒绝。"
     }
   ],
   "unmapped_files": [],
-  "source_head": "d055b02e6bd784bda52c355307bf2107d9d8fd4a",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f908525dd697"
+  "source_head": "a2eed5e20335c30236d30623c232fccde0781a7f",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.29372f42b13c"
 }

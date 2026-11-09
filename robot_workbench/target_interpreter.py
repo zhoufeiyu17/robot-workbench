@@ -394,6 +394,7 @@ class TargetInterpreter:
             # Preserve declared boundaries rather than interpolating a gripper
             # event a fraction of one sampling period before its source stage.
             host=np.r_[host[np.abs(host-stamp)>1e-6],stamp]
+        host=np.sort(host)  # Replaced event knots must precede first/last-time checks.
         prefix=self.preserved_prefix
         if prefix is not None and host[0]>prefix['host_times_s'][-1]:
             if not self.submissions:raise ValueError('committed prefix expired before brake installation')

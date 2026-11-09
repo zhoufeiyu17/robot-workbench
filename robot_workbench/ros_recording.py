@@ -90,7 +90,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     ros=RosNode(root.name.replace('-','_'),namespace=refs[0]['namespace'],domain_id=refs[0]['domain_id'],localhost_only=False)
     events=_CaptureEvents(spec['resource_budget']['event_queue_bytes'])
     lock=threading.RLock();errors={};active=False;binding=None;terminal=None;ending_at=None
-    activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={}
+    activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={};control_gap_start=None
     received={k:0 for k in sources};flushed=dict(received);first={};last={};files={};segments={};model_results=set();artifact_index=None
     recorded_models={}
     file_locks={k:threading.Lock()for k in sources}
@@ -146,6 +146,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         try:events.put_nowait((size,(ref,value,group,prefill,selected)))
         except queue.Full:errors.setdefault(ref.stream_id,'ROS recorder queue overflow; source data missing')
     def enqueue(ref,value):
+        nonlocal control_gap_start
         with lock:
             source=sources[ref.stream_id];old=observed_last.get(ref.stream_id)
             if old is None or ref.sequence>old.sequence:observed_last[ref.stream_id]=ref
@@ -159,7 +160,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if activity is not None:
                 previous_group=activity.current['request_id']if activity.current else None
                 if ref.stream_id=='control':
-                    if old and ref.sequence>old.sequence+1:fault('control','activity control source sequence gap')
+                    if old and ref.sequence>old.sequence+1:
+                        control_gap_start=min(control_gap_start or old.sequence+1,old.sequence+1)
+                        fault('control_sequence','activity control source sequence gap')
                     lifecycle=value.event in ('inference_mode_transition','inference_finish','inference_episode_stopped','stop','reference_cancelled')
                     data=json_value(value.payload_json)if lifecycle else {}
                     if value.event=='inference_mode_transition'and data.get('runtime_nonce')!=source['source_instance_id']:
@@ -444,6 +447,12 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         {k for k,v in ends.items()if v['source_time'] and (k not in last or last[k].source_time_ns/1e9<v['source_time'])})
                     fault('final_barrier','ROS final source watermark not reached: '+(', '.join(missing)or'pending source writes'));break
         active=False;ros.close()
+        if activity is not None and control_gap_start is not None:
+            final_control=terminal.get('final_seq_by_stream',{}).get('control')
+            # Finish can arrive after later global control events. Only gaps
+            # intersecting this Run's declared prefix affect its completeness.
+            if final_control is not None and control_gap_start>final_control:
+                errors.pop('control_sequence',None)
         for stream in list(pending_images):collect_image(stream,wait=True)
         encoders.shutdown(wait=True)
         for stream,writer in segments.items():
