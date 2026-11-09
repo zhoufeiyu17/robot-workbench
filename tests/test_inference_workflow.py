@@ -63,6 +63,26 @@ class Runner:
 
 
 class InferenceWorkflowTests(unittest.TestCase):
+    def test_initial_physical_planning_uses_current_protection_and_keeps_explicit_policy(self):
+        from robot_workbench.execution_settings import control_parameters,defaults,policy_hash
+        from test_infer_curve_policy import POLICY
+        parameters=control_parameters(defaults('inference'),business='inference')
+        parameters['measured']['limit_rad_s']=.6
+        policy=dict(revision=0,parameters=parameters,policy_hash=policy_hash(parameters),
+            origins={'execution.execute_steps':'product_default'})
+        runtime=self.device.runtime;runtime.supports_control_policy=True;runtime.execution_settings_revision=0
+        runtime.control_policy_snapshot=lambda business:deepcopy(policy)
+        self.device.environment='physical';self.workflow.reference_planning=deepcopy(POLICY)
+        self.workflow.normal_modes=dict(velocity_limit=1.,acceleration_limit=40.)
+        self.workflow._sync_control_policy()
+        self.assertEqual(self.workflow.reference_planning['velocity_limit_rad_s'],.6)
+        self.assertEqual(self.workflow.normal_modes['velocity_limit'],.6)
+        self.assertEqual(parameters['measured']['limit_rad_s'],.6)
+        parameters['planning']=dict(velocity_limit_rad_s=.4,acceleration_limit_rad_s2=30.,jaw_velocity_limit_mm_s=20.)
+        policy.update(revision=1,policy_hash=policy_hash(parameters));runtime.execution_settings_revision=1
+        self.workflow._sync_control_policy()
+        self.assertEqual(self.workflow.reference_planning['velocity_limit_rad_s'],.4)
+
     def test_control_input_for_stall_recovery_requires_the_bound_ros_publisher(self):
         flow=self.workflow;flow.ros_plane={'namespace':'/cpu','domain_id':126}
         node=Mock();node.subscriptions=[];node.errors=[]

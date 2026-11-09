@@ -507,7 +507,7 @@ class HTTPTest(unittest.TestCase):
         with self.assertRaises(HTTPError):self.action('execution_settings',settings={},expected_revision=0)
         self.connect()
         before=self.state()['runtime']['execution_settings'];settings=deepcopy(before['settings'])
-        self.assertEqual(settings['speed_protection'],dict(enabled=True,limit_rad_s=.8))
+        self.assertEqual(settings['speed_protection'],dict(enabled=True,limit_rad_s=2.5))
         legacy=deepcopy(settings);legacy.pop('speed_protection')
         with self.assertRaises(HTTPError):self.action('execution_settings',settings=legacy,expected_revision=before['revision'])
         settings['speed_protection']['limit_rad_s']=.9

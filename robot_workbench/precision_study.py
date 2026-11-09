@@ -8,7 +8,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
-from .execution_settings import study_defaults,study_caps,study_presets,validate_study
+from .execution_settings import study_defaults,study_caps,study_presets,validate_study,DEFAULT_MEASURED_SPEED_LIMIT_RAD_S
 from .precision_metrics import SPATIAL_CONTRACT
 
 SPEEDS=(.5,1.,1.5,2.)
@@ -60,7 +60,7 @@ class PrecisionStudy:
         if state.get('target_interpreter',{}).get('controller_profile')!=self.config['controller_profile']:return '当前执行基线与研究模块声明不匹配'
         speed=state.get('speed_protection')or{}
         if speed.get('enabled')is not True or not speed.get('monitored'):
-            return '本次研究要求峰值保护开启且正在监测（默认0.8 rad/s）'
+            return '本次研究要求峰值保护开启且正在监测；阈值以当前设备设置为准'
         if not state.get('idle_readiness',{}).get('allowed'):return state.get('idle_readiness',{}).get('reason')or '当前不满足空闲准入'
         return None
 
@@ -74,7 +74,7 @@ class PrecisionStudy:
         with self.lock:
             reason=self._reason(state,business);review=self.review
             current=bool(review and review['binding']==self.binding(state,business)and time.monotonic()<review['deadline'])
-            return dict(configured=True,profile=self.config['controller_profile'],default_speed_limit_rad_s=.8,
+            return dict(configured=True,profile=self.config['controller_profile'],default_speed_limit_rad_s=DEFAULT_MEASURED_SPEED_LIMIT_RAD_S,
                 settings=deepcopy(self.settings),settings_revision=self.revision,settings_caps=study_caps(),settings_presets=study_presets(),
                 settings_allowed=not(self.thread and self.thread.is_alive())and not state.get('automatic_enabled'),
                 history=deepcopy(self.history),selected=deepcopy(self.selected or self.latest),

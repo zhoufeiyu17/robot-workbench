@@ -48,7 +48,7 @@ for(const steps of [1,15,25,30,60]) {
   assert.equal(draft.tracking.mode,'disabled');
   assert.equal(draft.arrival.mode,'disabled');
   assert.equal(draft.recording.failure_action,'continue_and_mark_incomplete');
-  assert.equal(draft.measured.joint_velocity_rad_s,1.5);
+  assert.equal(draft.measured.joint_velocity_rad_s,2.5);
 }
 for(const steps of [0,61,1.5,NaN,Infinity])assert(validateDraft({...defaults,steps},catalog.parameters).length);
 assert(validateDraft({...defaults,planning_speed:2,measured_speed:1.5},catalog.parameters).length);

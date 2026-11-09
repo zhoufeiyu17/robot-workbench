@@ -7,6 +7,16 @@ current_runtime/latest_resource 为准；开发工作树和历史成功记录不
 
 ## ARX6 桌面启动（2026-11-09）
 
+同日补修“准备控制与踏板”：首次绑定时规划速度 1 rad/s 与旧实测保护默认 0.8 rad/s 冲突，
+旧实现先提交配置、后在控制 tick 校验，导致 Owner 故障及后续旧 epoch 观测报错。
+现在绑定与旧设置入口都在提交前原子校验完整 ControlPolicy；未绑定的物理规划默认值
+按当前实测保护范围约束，已有显式规划策略继续按原值核验。
+用户随后将共享实测速度保护默认值指定为 **2.5 rad/s**，唯一来源为
+`execution_settings.DEFAULT_MEASURED_SPEED_LIMIT_RAD_S`，网页读取实际 Owner 值。
+ARX6 已实测准备 HOLD、完整三视频/状态/控制/踏板录制，模型请求为 0；结束后 1.20 秒
+解除忙态，后台封存 outcome=complete、无缺失或错误，SDK 保留健康静止保持。
+回执见 [准备控制修复进度](../.evidence/arx6-infer-prepare-20261109-v1/progress.json)。
+
 用户于 2026-11-09 明确将 ARX6 桌面入口改为自动接管 CAN：启动脚本即确认现场可以接入，
 不再弹出第二次确认。配置 `connect_control: true` 时，脚本复用运维 `reclaim_control`：
 正常结束已登记的旧控制／数采，核验退出，接入工作台并保持当前位置，不续跑旧模型轨迹。

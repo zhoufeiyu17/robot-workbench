@@ -31,7 +31,7 @@ class SpeedProtectionTest(unittest.TestCase):
 
     def test_defaults_validation_and_all_joint_directions(self):
         for business in ('calibration','collection','inference','research'):
-            self.assertEqual(defaults(business)['speed_protection'],dict(enabled=True,limit_rad_s=.8))
+            self.assertEqual(defaults(business)['speed_protection'],dict(enabled=True,limit_rad_s=2.5))
         for value in (False,0,-1,float('nan'),float('inf'),'0.8',None):
             settings=defaults();settings['speed_protection']['limit_rad_s']=value
             with self.subTest(value=value),self.assertRaises(ValueError):validate(settings)
@@ -42,24 +42,24 @@ class SpeedProtectionTest(unittest.TestCase):
         self.assertEqual(validate(legacy,allow_legacy=True)['speed_protection'],defaults()['speed_protection'])
         for slot in (*range(6),*range(7,13)):
             for sign in (-1,1):
-                velocity=[0.]*14;velocity[slot]=sign*.81;velocity[6]=velocity[13]=99.
+                velocity=[0.]*14;velocity[slot]=sign*2.51;velocity[6]=velocity[13]=99.
                 measured=measured_joint_speed(dict(qvel=velocity,sample_time_s=10.),defaults()['speed_protection'])
                 self.assertEqual(measured['joint'],('left'if slot<7 else'right')+f'_J{slot%7+1}')
-                self.assertEqual(measured['velocity_rad_s'],sign*.81)
+                self.assertEqual(measured['velocity_rad_s'],sign*2.51)
 
     def test_equal_limit_and_jaw_are_excluded_but_single_peak_trips_before_confirm(self):
-        self.create();self.inject_velocity(12,-.8);self.velocity[6]=self.velocity[13]=99.
+        self.create();self.inject_velocity(12,-2.5);self.velocity[6]=self.velocity[13]=99.
         self.advance();self.assertNotEqual(self.runtime.owner.control.state,self.runtime.owner.states.FAULT)
         self.velocity=[0.]*14;self.advance(40)
         review=self.runtime.submit(self.creds['calibration'],dict(action='preview_both_home'))
         self.confirm('calibration',review);epoch=self.runtime.owner.epoch
-        self.velocity[12]=-.800001;self.advance()
+        self.velocity[12]=-2.500001;self.advance()
         state=self.runtime.snapshot(self.creds['calibration'])
         self.assertEqual(state['state'],'FAULT_STOP_UNCONFIRMED');self.assertTrue(state['feedback_healthy'])
         self.assertFalse(state['automatic_enabled']);self.assertGreater(self.runtime.owner.epoch,epoch)
         self.assertFalse(self.raw.packets,'overspeed must win over queued confirm in the same tick')
         trip=state['speed_protection']['last_trip']
-        self.assertEqual(trip['joint'],'right_J6');self.assertEqual(trip['velocity_rad_s'],-.800001)
+        self.assertEqual(trip['joint'],'right_J6');self.assertEqual(trip['velocity_rad_s'],-2.500001)
         self.assertTrue(state['speed_protection']['latched']);self.assertIn('中断恢复',state['reason'])
         self.velocity=[0.]*14;self.advance(50)
         self.assertFalse(self.raw.packets);self.assertEqual(self.runtime.owner.control.state,self.runtime.owner.states.FAULT)
@@ -80,7 +80,7 @@ class SpeedProtectionTest(unittest.TestCase):
                         self.advance()
                         if self.raw.window is not None:break
                     self.assertIsNotNone(self.raw.window,self.runtime.owner.snapshot())
-                    self.inject_velocity(3,1.);self.advance();count=len(self.raw.packets)
+                    self.inject_velocity(3,2.6);self.advance();count=len(self.raw.packets)
                     self.assertIsNone(self.raw.window);self.assertEqual(self.runtime.owner.runner.status,'FAULT')
                     self.assertTrue(self.runtime.owner.runner.target_interpreter.cancelled)
                     self.velocity=[0.]*14;self.advance(50)
@@ -94,7 +94,7 @@ class SpeedProtectionTest(unittest.TestCase):
             self.advance()
             if self.runtime.owner.runner.status=='READY':break
         self.assertEqual(self.runtime.owner.runner.status,'READY',self.runtime.owner.runner.motion_record())
-        self.inject_velocity(0,.9);self.advance(40)
+        self.inject_velocity(0,2.6);self.advance(40)
         owner=self.runtime.owner
         self.assertFalse(owner.recovery_ready(),'continuing overspeed must prohibit recovery')
         recovery=lambda:dict(action='recover',confirmation='ACKNOWLEDGE_MOTION_FAULT',owner_pid=os.getpid(),command_epoch=owner.epoch)
@@ -104,7 +104,7 @@ class SpeedProtectionTest(unittest.TestCase):
         self.assertTrue(stop['hold_return_confirmed']);self.assertTrue(stop['feedback_stationary_confirmed'])
         self.assertEqual(owner.control.state,owner.states.FAULT)
         count=len(self.raw.packets)
-        self.runtime.submit(self.creds['calibration'],recovery());self.velocity[0]=.9;self.advance()
+        self.runtime.submit(self.creds['calibration'],recovery());self.velocity[0]=2.6;self.advance()
         self.assertEqual(owner.control.state,owner.states.FAULT,'new overspeed must revoke queued recovery')
         self.velocity=[0.]*14;self.advance(40)
         self.runtime.submit(self.creds['calibration'],recovery())
@@ -113,7 +113,7 @@ class SpeedProtectionTest(unittest.TestCase):
         self.assertEqual(len(self.raw.packets),count);self.assertIsNone(self.raw.window)
 
     def test_stop_failure_stays_unconfirmed_and_nonrecoverable(self):
-        self.create();self.inject_velocity(0,1.)
+        self.create();self.inject_velocity(0,2.6)
         with patch.object(self.raw,'set_damping_hold',side_effect=RuntimeError('CPU native stop failed')):
             self.advance()
         self.velocity=[0.]*14;self.advance(50)
@@ -134,7 +134,7 @@ class SpeedProtectionTest(unittest.TestCase):
         for _ in range(500):
             self.advance()
             if self.raw.window is not None:break
-        self.assertIsNotNone(self.raw.window);self.inject_velocity(8,-.9);self.advance()
+        self.assertIsNotNone(self.raw.window);self.inject_velocity(8,-2.6);self.advance()
         count=len(self.raw.packets);self.velocity=[0.]*14;self.advance(50)
         self.assertEqual(self.runtime.owner.runner.status,'FAULT');self.assertIsNone(self.raw.window)
         self.assertEqual(len(self.raw.packets),count)
@@ -143,7 +143,7 @@ class SpeedProtectionTest(unittest.TestCase):
         review=self.runtime.submit(self.creds['inference'],dict(action='preview_inference'))
         self.confirm('inference',review);self.advance(5);runner=self.runtime.owner.runner
         self.assertTrue(runner.is_inference)
-        self.inject_velocity(1,.9);self.advance();count=len(self.raw.packets)
+        self.inject_velocity(1,2.6);self.advance();count=len(self.raw.packets)
         self.velocity=[0.]*14;self.advance(150)
         self.assertEqual(runner.status,'FAULT');self.assertIsNone(self.raw.window)
         self.assertEqual(len(self.raw.packets),count,'late model result must not emit after the speed trip')
@@ -160,7 +160,7 @@ class SpeedProtectionTest(unittest.TestCase):
             self.assertEqual(self.runtime.execution_settings_snapshot(business)['settings']['speed_protection']['limit_rad_s'],limit)
         self.cleanup();saved=json.loads(path.read_text());saved['policies']['calibration'].pop('speed_protection')
         path.write_text(json.dumps(saved));self.create()
-        self.assertEqual(self.runtime.execution_settings_snapshot('calibration')['settings']['speed_protection'],dict(enabled=True,limit_rad_s=.8))
+        self.assertEqual(self.runtime.execution_settings_snapshot('calibration')['settings']['speed_protection'],dict(enabled=True,limit_rad_s=2.5))
 
     def test_explicit_disable_does_not_implicitly_lower_threshold(self):
         self.create();settings=defaults();settings['speed_protection']=dict(enabled=False,limit_rad_s=.9)
@@ -176,7 +176,7 @@ class SpeedProtectionTest(unittest.TestCase):
             if business != self.runtime.holder:
                 self.runtime.handoff(self.creds[self.runtime.holder], business)
             self.runtime.owner.check_speed_protection(sample)
-            self.assertEqual(self.runtime.owner.speed_protection_observation['limit_rad_s'], .8)
+            self.assertEqual(self.runtime.owner.speed_protection_observation['limit_rad_s'], 2.5)
             settings = defaults(business)
             settings['speed_protection']['limit_rad_s'] = limit
             self.runtime.update_execution_settings(self.creds[business], settings)

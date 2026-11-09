@@ -131,6 +131,34 @@ class SettingsTest(unittest.TestCase):
             fresh.restore_execution_settings(stored)
         self.assertEqual(runtime.control_policy_snapshot('calibration'),before)
 
+    def test_inference_policy_is_validated_before_binding_or_legacy_settings_commit(self):
+        from robot_workbench.inference_model import MIXED366_ID
+        from robot_workbench.sdk_process import EXECUTION_CONTEXT_SCHEMA
+        from test_infer_curve_policy import POLICY
+        runtime,creds=self.create(environment='physical')
+        creds['inference']=runtime.register_business('inference')
+        runtime.handoff(creds['calibration'],'inference')
+        initial=defaults('inference');initial['speed_protection']['limit_rad_s']=.8
+        runtime.update_execution_settings(creds['inference'],initial)
+        runtime.owner.backend.execution_context_capabilities={'schema':EXECUTION_CONTEXT_SCHEMA}
+        config=dict(model_id=MIXED366_ID,reference_planning=deepcopy(POLICY),duration_s=.5,
+            finite_chunk_count=3,task='coffee',execute_steps=15,target_execution='shared_reference_windows',
+            recording_enabled=False,maximum_observation_age_s=.5,reference_supply_timeout_s=.5)
+        epoch=runtime.owner.epoch;revision=runtime.inference_revision
+        with self.assertRaisesRegex(ValueError,'measured-speed protection'):
+            runtime.configure_inference(config,lambda *a:None)
+        self.assertIsNone(runtime.inference_configuration);self.assertEqual(runtime.inference_revision,revision)
+        self.advance(runtime);self.assertEqual(runtime.owner.epoch,epoch)
+        self.assertNotEqual(runtime.owner.control.state,runtime.owner.states.FAULT)
+        config['reference_planning']['velocity_limit_rad_s']=.8
+        runtime.configure_inference(config,lambda *a:None)
+        settings=runtime.execution_settings_snapshot('inference')['settings'];before=runtime.control_policy_snapshot('inference')
+        settings['speed_protection']['limit_rad_s']=.5
+        with self.assertRaisesRegex(ValueError,'measured-speed protection'):
+            runtime.update_execution_settings(creds['inference'],settings,expected_revision=before['revision'])
+        self.assertEqual(runtime.control_policy_snapshot('inference'),before)
+        self.advance(runtime);self.assertNotEqual(runtime.owner.control.state,runtime.owner.states.FAULT)
+
     def test_control_policy_freezes_in_review_and_rejects_bad_fields(self):
         runtime,creds=self.create();before=runtime.control_policy_snapshot('calibration')
         for changes in ({'unknown':1},{'arrival.jaw_mm':-1},{'measured.limit_rad_s':float('nan')}):
@@ -230,7 +258,7 @@ class SettingsTest(unittest.TestCase):
         from robot_workbench.execution_settings import Guard,control_parameters,policy_hash
         parameters=control_parameters(defaults('inference'),configuration=dict(maximum_observation_age_s=.5),business='inference')
         policy=dict(revision=7,policy_hash=policy_hash(parameters),parameters=parameters)
-        for rule,limit in [('G02',.5),('G03',.1),('G04',.1),('G11',math.radians(2.)),('G12',2.),('G14',.8)]:
+        for rule,limit in [('G02',.5),('G03',.1),('G04',.1),('G11',math.radians(2.)),('G12',2.),('G14',2.5)]:
             signal=dict(rule_id=rule,signal_id='cpu',observed=limit,source_time=10.,checked_time=10.5,epoch=3)
             passed=Guard.evaluate(signal,'submission',policy)
             self.assertEqual(passed['verdict'],'pass')
@@ -357,7 +385,7 @@ class SettingsTest(unittest.TestCase):
                 self.assertEqual(Guard.evaluate(dict(signal,observed=0),'capture',policy)['verdict'],'pass')
                 self.assertEqual(Guard.evaluate(signal,'seal',policy)['action'],'CONTINUE')
                 with self.assertRaises(ValueError):Guard.evaluate(dict(signal,observed=-1),'capture',policy)
-            signal.update(rule_id='G14',observed=.9)
+            signal.update(rule_id='G14',observed=2.6)
             self.assertEqual(Guard.evaluate(signal,'execution',policy)['action'],'FAULT_STOP')
             bound=Guard.bind(policy,{})
             for rule in ('G33','G36','G37'):

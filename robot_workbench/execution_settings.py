@@ -18,6 +18,7 @@ NORMAL_BRAKE_DURATION_S=.2
 NORMAL_GAIN_TRANSITION_S=.05
 NATIVE_WATCHDOG_TIMEOUT_S=.1
 DEFAULT_JOINT_TOLERANCE_RAD=math.radians(2.)
+DEFAULT_MEASURED_SPEED_LIMIT_RAD_S=2.5
 PHYSICAL_FEEDBACK_MARGIN_RAD=math.radians(5.)
 STATIONARY_PROFILE=dict(window_s=.3,max_sample_gap_s=.1,joint_span_rad=DEFAULT_JOINT_TOLERANCE_RAD,jaw_span_mm=2.)
 LEGACY_REFERENCE_LIMITS=dict(velocity_limit_rad_s=.25,acceleration_limit_rad_s2=1.)
@@ -542,7 +543,7 @@ def defaults(business='calibration', arrival_tolerances_rad=None):
         arrival_tolerances_rad=list(arrival_tolerances_rad or [DEFAULT_JOINT_TOLERANCE_RAD] * 12), arrival_jaw_mm=2.,
         tracking_enabled=enabled, tracking_joint_rad=.08, tracking_jaw_mm=4., tracking_duration_s=.2,
         fake_error=dict(enabled=False, joint_bias_max_rad=0., seed=0),
-        speed_protection=dict(enabled=True, limit_rad_s=.8))
+        speed_protection=dict(enabled=True, limit_rad_s=DEFAULT_MEASURED_SPEED_LIMIT_RAD_S))
 
 
 def validate(value, *, environment=None, allow_legacy=False):

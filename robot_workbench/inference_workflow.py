@@ -328,6 +328,9 @@ class InferenceWorkflow:
             self.execute_steps=parameters['execution']['execute_steps']
         if self.reference_planning is not None:
             self.reference_planning.update(parameters.get('planning',{}),max_execution_duration_s=self.execute_steps/30.*4)
+            if 'planning'not in parameters and self.device.environment=='physical'and parameters['measured']['enabled']:
+                self.reference_planning['velocity_limit_rad_s']=min(
+                    self.reference_planning['velocity_limit_rad_s'],parameters['measured']['limit_rad_s'])
             if getattr(self,'normal_modes',None) is not None:
                 self.normal_modes.update(velocity_limit=self.reference_planning['velocity_limit_rad_s'],
                     acceleration_limit=self.reference_planning['acceleration_limit_rad_s2'])

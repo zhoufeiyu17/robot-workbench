@@ -134,7 +134,8 @@ async function boot() {
       }catch(error){get('model-design-error').textContent=error.message;}
     }
   });
-  get('metrics').innerHTML=[[catalog.components.length,'核心模块','目标边界待确认'],[catalog.gates.length,'已梳理规则','每项有执行点与来源'],[catalog.interfaces.length,'接口契约','当前协议 + 目标设计'],['1 / 1.5','规划 / 实测速度 rad/s','最后Run实值 · 默认代码0.8']].map(([value,label,sub])=>`<div class="metric"><strong>${value}</strong><span>${label}</span><small>${sub}</small></div>`).join('');
+  const speedDefaults=['planning_speed','measured_speed'].map(key=>catalog.parameters.find(row=>row.key===key)?.value??'未声明').join(' / ');
+  get('metrics').innerHTML=[[catalog.components.length,'核心模块','目标边界待确认'],[catalog.gates.length,'已梳理规则','每项有执行点与来源'],[catalog.interfaces.length,'接口契约','当前协议 + 目标设计'],[esc(speedDefaults),'规划 / 实测速度 rad/s','目录默认值 · 实际值以设备回读为准']].map(([value,label,sub])=>`<div class="metric"><strong>${value}</strong><span>${label}</span><small>${sub}</small></div>`).join('');
   get('legend').innerHTML=Object.entries(catalog.statuses).filter(([id])=>id!=='confirmed').map(([,s])=>`<span><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join('');
   let selected='guard',target=true;
   function selectComponent(id) {

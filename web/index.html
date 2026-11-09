@@ -38,8 +38,8 @@
     </div></details>
     <section id="speed-protection-tools" class="panel speed-protection" aria-labelledby="speed-protection-title">
       <h2 id="speed-protection-title">关节速度峰值保护</h2>
-      <div class="manual-actions"><label class="check-label"><input id="speed-protection-enabled" type="checkbox" checked disabled>启用保护</label><label>速度阈值 · rad/s<input id="speed-protection-limit" type="number" min="0.000001" step="0.1" value="0.8" disabled></label></div>
-      <p class="hint">默认开启 · 0.8 rad/s。任一手臂关节的单次反馈绝对速度超过阈值，立即中断执行并请求当前位置停止保持，撤销未来轨迹并锁定故障；速度下降不自动恢复。独立于到位／跟踪误差开关，夹爪不参与此阈值。</p>
+      <div class="manual-actions"><label class="check-label"><input id="speed-protection-enabled" type="checkbox" checked disabled>启用保护</label><label>速度阈值 · rad/s<input id="speed-protection-limit" type="number" min="0.000001" step="0.1" placeholder="读取中" disabled></label></div>
+      <p class="hint">默认开启，实际阈值以上方设备回读为准。任一手臂关节的单次反馈绝对速度超过阈值，立即中断执行并请求当前位置停止保持，撤销未来轨迹并锁定故障；速度下降不自动恢复。独立于到位／跟踪误差开关，夹爪不参与此阈值。</p>
       <p id="speed-protection-effective" role="status" aria-live="polite">尚未读取实际生效设置。</p>
       <div class="manual-actions"><button id="speed-protection-apply" disabled>应用并保存到当前业务</button><button id="speed-protection-reset" disabled>重新读取生效设置</button></div>
       <p id="speed-protection-draft" class="hint" role="status" aria-live="polite"></p><p id="speed-protection-reason" class="action-reason"></p>

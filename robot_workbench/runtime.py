@@ -494,6 +494,9 @@ class Runtime:
             reason = self._idle_reason()
             if reason:
                 raise ValueError(reason)
+            parameters=control_parameters(self._execution_policy('inference'),configuration=value,business='inference')
+            self._overlay_policy_values('inference',parameters,value)
+            validate_control_parameters(parameters,environment=self.environment,business='inference')
             self.inference_configuration, self.inference_factory = value, factory
             self.inference_revision += 1
             self.preview_revision += 1
@@ -694,6 +697,7 @@ class Runtime:
                 for group in ('measured', 'tracking', 'arrival'):
                     parameters[group] = updated[group]
                 parameters['execution']['fake_error'] = updated['execution']['fake_error']
+            parameters=validate_control_parameters(parameters,environment=self.environment,business=business)
             configuration = self._configuration_from_policy(self.inference_configuration, parameters) if business == 'inference' else self.inference_configuration
             if business == self.holder:
                 self._configure_fake_error(settings)  # Memory-only backend configuration; never sends a target.

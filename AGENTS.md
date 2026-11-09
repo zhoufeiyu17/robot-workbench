@@ -1,5 +1,11 @@
 # Robot Workbench 项目约定
 
+2026-11-09 后续：用户要求先暂停 ARX13 同步，优先修复 ARX6“准备控制与踏板”，之后再提交。
+该修复已发布并通过 prepare-only HOLD、完整录制与封存验收，模型请求为 0；最新入口为
+`.evidence/arx6-infer-prepare-20261109-v1/progress.json`。ARX13 只做了只读预检，未写入或启停：
+正式数采 task1274 仍被认领并持有 CAN，最近 episode 已结束；不能把 ARX6 的验收当作
+ARX13 已同步。用户本轮明确将共享实测速度保护默认值设为 **2.5 rad/s**，ARX6 实际回读已核验。
+
 2026-11-09 当前任务是 **ARX6 桌面启动修复、自动 CAN 接管和完整冷启动验收，随后 commit/push**；
 最新续接入口为 `.evidence/arx6-startup-rebind-20261109-v1/progress.json`。
 commit/push 已明确授权，不重复询问。用户明确将此前“只启服务、网页接入”改为桌面启动即确认
@@ -52,6 +58,9 @@ WAM接入、ARX13既有验收及治理对账的
 
 ## 当前阈值与低优先级遗留
 
+- 2026-11-09 用户将实测关节速度保护默认值指定为 **2.5 rad/s**；统一来源为
+  `execution_settings.DEFAULT_MEASURED_SPEED_LIMIT_RAD_S`。规划上限与保护门槛在配置提交前
+  一起校验，拒绝不能破坏已有 Owner 状态；具体已保存的业务策略仍以 ControlPolicy 回读为准。
 - 2026-11-07 用户最终指定关节到位误差、起点／准备漂移和静止位置跨度为 **2°**，
   物理关节实测反馈的限位越界容差为 **5°**。静止窗口为 0.3 秒，夹爪静止跨度为 2 mm。
   统一数值来源为 execution_settings.py 的命名默认值与当前 Owner 的 ControlPolicy；
