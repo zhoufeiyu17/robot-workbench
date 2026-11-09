@@ -1127,7 +1127,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       &&state?.runtime?.feedback_healthy===true&&state?.runtime?.stationary===true;
   }
   async function renewPreparedParameters(apply=async()=>true,{model=null}={}){
-    if(inferenceParameterUpdate)return;
+    if(inferenceParameterUpdate)return false;
     if(!preparedParameterHold())return apply();
     let seed,duration;try{seed=inferenceSeed();duration=inferenceDuration();}catch(error){notice(error.message);return;}
     const session=inferenceInfo().operator_session;
@@ -1179,10 +1179,10 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
         if(request?.id===result.job_id&&['failed','cancelled'].includes(request.status))throw Error(request.error||'新会话准备失败');
         const current=inferenceInfo().operator_session;
         return !!current&&current.run_id!==update.run&&current.duration_s===update.duration
-          &&current.seed===update.seed&&current.expected_bundle_digest===update.digest;
+          &&current.seed===update.seed&&current.expected_bundle_digest===update.digest&&permission('inference_run').allowed===true;
       });
-      notice('参数已应用，控制与踏板已重新准备；SDK连接保持。');
-    }catch(error){notice('参数更新未完成：'+error.message);}
+      notice('参数已应用，控制与踏板已重新准备；SDK连接保持。');return true;
+    }catch(error){notice('参数更新未完成：'+error.message);return false;}
     finally{if(inferenceParameterUpdate===update)inferenceParameterUpdate=null;renderGates();renderInferenceSteps();}
   }
   let inferenceDenoiseContext=null,inferenceDenoiseDirty=false;
@@ -1267,6 +1267,16 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       dismissInferenceRun();return;
     }
     el('inference-run-confirm').disabled=!el('inference-run-clearance').checked;
+  }
+  let inferenceRunOpening=false;
+  async function requestInferenceRun(){
+    if(inferenceRunOpening)return;
+    inferenceRunOpening=true;
+    try{
+      if(preparedParameterHold()&&Number(el('inference-duration').value)!==inferenceInfo().operator_session.duration_s
+          &&!await renewPreparedParameters())return;
+      openInferenceRun();
+    }finally{inferenceRunOpening=false;}
   }
   function openInferenceRun(prepareOnly=false){
     if(inferenceBackendReason()){notice(inferenceBackendReason());return;}
@@ -2340,7 +2350,12 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-denoise-apply').addEventListener('click',()=>{if(!el('inference-denoise-apply').disabled){const row=inferenceDenoiseRow();void renewPreparedParameters(()=>prepareInferenceRow(row),{model:row});}});
     el('inference-backend').addEventListener('change',()=>{dismissInferenceRun();clearReview();inferenceSelection=null;inferenceCatalogKey='';renderInference();renderGates();});
     el('inference-family').addEventListener('change',()=>{setInferenceBackends(inferenceBackend());dismissInferenceRun();clearReview();inferenceSelection=null;inferenceCatalogKey='';renderInference();renderGates();});
-    el('inference-run').addEventListener('click',()=>openInferenceRun());
+    el('inference-run').addEventListener('pointerdown',event=>{
+      // Keep the duration input focused until this explicit Run intent can
+      // join parameter preparation; blur must not consume the first click.
+      if(event.button===0&&doc.activeElement===el('inference-duration')&&preparedParameterHold())event.preventDefault();
+    });
+    el('inference-run').addEventListener('click',()=>void requestInferenceRun());
     el('inference-arm').addEventListener('click',()=>openInferenceRun(true));
     el('inference-disarm').addEventListener('click',()=>{if(!el('inference-disarm').disabled)void send('cancel');});
     const operatorContext=()=>({runtime_nonce:state?.runtime?.runtime_nonce,epoch:state?.runtime?.command_epoch});
@@ -2361,7 +2376,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-run-dialog').addEventListener('close',()=>{if(!el('inference-run-dialog').open)dismissInferenceRun();});
     el('inference-results').addEventListener('click',()=>selectTab('results'));
     el('inference-seed').addEventListener('input',()=>{dismissInferenceRun();if(context.business==='inference'&&state?.workflow?.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);clearReview();renderGates();});
-    el('inference-duration').addEventListener('change',()=>{dismissInferenceRun();if(context.business==='inference'&&state?.workflow?.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);clearReview();renderGates();if(preparedParameterHold())void renewPreparedParameters();});
+    el('inference-duration').addEventListener('change',()=>{if(inferenceRunIntent?.duration_s!==Number(el('inference-duration').value))dismissInferenceRun();if(context.business==='inference'&&state?.workflow?.review?.id)invalidatedReviews.add(key()+'/'+state.workflow.review.id);clearReview();renderGates();if(preparedParameterHold()&&Number(el('inference-duration').value)!==inferenceInfo().operator_session.duration_s)void renewPreparedParameters();});
     el('inference-stall-enabled').addEventListener('change',()=>{dismissInferenceRun();clearReview();renderGates();});
     el('return-cup').addEventListener('click',()=>send('return_cup'));
     for(const id of ['return-offset-x','return-offset-y'])el(id).addEventListener('input',()=>{

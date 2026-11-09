@@ -2315,7 +2315,7 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
   h.app.destroy();
 }
 
-for(const change of ['steps','duration','denoise','stop']){
+for(const change of ['steps','duration','denoise','stop','duration-run']){
   const value=oneRunSnapshot(),info=value.workflow.inference,old='prepared-old',digest='a'.repeat(64),nextDigest='b'.repeat(64);
   Object.assign(value.runtime,{runtime_nonce:'connected-owner',stationary:true,stop_receipt:{accepted_monotonic_s:1}});
   value.workflow.id=old;value.workflow.busy=true;
@@ -2338,7 +2338,11 @@ for(const change of ['steps','duration','denoise','stop']){
   assert.equal(h.get('inference-denoise-steps').disabled,false);
   if(change==='steps'){h.get('inference-execute-steps').value='32';h.get('inference-execute-steps').events.input();h.get('inference-steps-apply').events.click();}
   else if(change==='denoise'){h.get('inference-denoise-steps').value='10';h.get('inference-denoise-steps').events.input();h.get('inference-denoise-apply').events.click();}
-  else{h.get('inference-duration').value='5';h.get('inference-duration').events.change();}
+  else if(change==='duration-run'){
+    h.get('inference-duration').value='5';h.document.activeElement=h.get('inference-duration');let prevented=false;
+    h.get('inference-run').events.pointerdown({button:0,preventDefault(){prevented=true;}});assert(prevented);
+    h.get('inference-run').events.click();h.get('inference-run').events.click();
+  }else{h.get('inference-duration').value='5';h.get('inference-duration').events.change();}
   if(change==='stop')void h.app.send('stop');
   let cursor=1;
   for(let turn=0;turn<80;turn++){
@@ -2355,7 +2359,7 @@ for(const change of ['steps','duration','denoise','stop']){
           assert(closed);assert.equal(body.expected_revision,2);assert.equal(body.execute_steps,32);
           value.inference_execution.execute_steps=32;value.inference_execution.revision=3;
         }else if(action==='inference_run'){
-          assert(closed);assert.equal(body.prepare_only,true);assert.equal(body.duration_s,change==='duration'?5:120);
+          assert(closed);assert.equal(body.prepare_only,true);assert.equal(body.duration_s,change.startsWith('duration')?5:120);
           assert.equal(body.expected_bundle_digest,change==='denoise'?nextDigest:digest);
           renewed=true;value.workflow.id='prepared-new';value.workflow.busy=true;
           info.operator_session={run_id:'prepared-new',duration_s:body.duration_s,seed:body.seed,expected_bundle_digest:body.expected_bundle_digest};
@@ -2369,7 +2373,16 @@ for(const change of ['steps','duration','denoise','stop']){
     if(timer){h.timeouts.delete(timer[0]);h.advance(100);timer[1].fn();await settle();}
   }
   assert.equal(posts[0],'cancel');assert.equal(renewed,change!=='stop',h.get('request-status').textContent);
-  assert.equal(modelApplied,change==='denoise');assert.equal(h.get('inference-run-dialog').open,false);
+  assert.equal(modelApplied,change==='denoise');assert.equal(h.get('inference-run-dialog').open,change==='duration-run');
+  if(change==='duration-run'){
+    assert.match(h.get('inference-run-title').textContent,/开始本轮推理/);
+    assert.match(h.get('inference-run-summary').textContent,/5 秒/);
+    h.get('inference-duration').events.change();assert.equal(h.get('inference-run-dialog').open,true,'the delayed blur of the already-applied value must not discard the retained Run intent');
+    h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();
+    h.get('inference-run-confirm').events.click();
+    const body=JSON.parse(h.requests.at(-1).options.body);assert.equal(body.prepare_only,undefined);assert.equal(body.duration_s,5);
+    assert.equal(posts.filter(x=>x==='cancel').length,1,'the explicit click prepares once, then asks for the ordinary Run confirmation');
+  }
   assert.match(h.get('inference-recording-status').textContent,/prepared-old.*后台/);
   if(change==='stop')assert(!posts.includes('inference_execution_settings'));
   h.app.destroy();
