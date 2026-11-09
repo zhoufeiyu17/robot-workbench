@@ -673,6 +673,14 @@ class ManagementTests(unittest.TestCase):
                         {'backend_attempt_pointer':'/trusted/backend/../current.json'},{'backend_attempt_pointer':'/trusted/backend/log.json'}):
             with self.assertRaises(ValueError):WorkbenchManager(dict(self.h['config'],**changes),services=self.h['services'],monitor=False)
 
+    def test_collection_unit_name_comes_from_trusted_deployment(self):
+        for unit in ('prometheus-web.service','collection-fixture.service'):
+            pin=dict(unit=unit,files={str(Path(self.directory.name)/'web.service'):'a'*64},
+                     status_url='http://127.0.0.1:18980/api/status')
+            h=self.harness('fake',config_overrides={'collection_handoff':pin})
+            self.assertEqual(h['manager'].config['collection_handoff'],pin)
+            self.assertEqual(h['manager'].config['device_id'],'cpu-device')
+
     def attempt_fixture(self,error="No module named 'robot_sim'"):
         root=(Path(self.directory.name)/'backend').resolve();output=root/'attempt-123';output.mkdir(parents=True)
         started=time.time_ns();identity=dict(pid=self.h['services']['workbench'].child.pid,start_ticks='123',

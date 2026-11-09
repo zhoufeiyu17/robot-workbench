@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 405,
-  "updated_at": "2026-11-09T08:01:26.284108+00:00",
+  "revision": 407,
+  "updated_at": "2026-11-09T08:53:33.711821+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "cf74ae3e91d3285491d4954e7d2c4207f7fea3e62057de5b2b3fc7dda837f1df",
+      "fingerprint": "adbe187999164930a6dd79d9428008ee4ed7e554a3892e24e97430357ec095ab",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -478,7 +478,7 @@
         "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
         "matches_file": true
       },
-      "fingerprint": "3491e8c38172d0b7ef7ddbb28ad6f9071d9e8588159aeadb51c7f175d8b59aa4",
+      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "f76266535ee47223a40a4316f0b132815cf8a7e6b3d0f0f4cd813ae1ee77eccc",
+      "fingerprint": "79ab6c75f822b974dfdb1556e2296a4a94da10d947b3a0800d1b8b02c9fdd87a",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "3491e8c38172d0b7ef7ddbb28ad6f9071d9e8588159aeadb51c7f175d8b59aa4"
+      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2533,18 +2533,18 @@
     },
     "robot_workbench/management.py": {
       "state": "verified",
-      "note": "ARX6 desktop cold acceptance and scoped CPU/ROS/UI regression passed; explicit automatic CAN takeover, early webpage, no repeated source/config scans.",
-      "next": "",
+      "note": "数采服务名由可信部署配置声明，公共校验只检查单位名格式；配置边界与正常交接检查通过，已去除机器编号特判。",
+      "next": "新部署使用相同配置契约",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T04:19:18.476770+00:00",
+      "updated_at": "2026-11-09T08:53:32.896784+00:00",
       "evidence": {
-        "path": ".evidence/arx6-startup-rebind-20261109-v1/delivery-acceptance.json",
-        "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
+        "path": ".evidence/portable-collection-services-20261109-v1/acceptance.json",
+        "sha256": "07f9b042a311f63c83787775e4ecce037e520868f613605baa919dfd8f110883",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "b70d453ef0f1581e05ca60d7fc1ab5dbbccbee1b40658fe536ee522da8bf084c",
+        "sha256": "2c55b3502940231280e71fe7ade3aad330d23070df6eb4089fd5adc93d00a8f9",
         "imports": [
           "robot_workbench/control_alerts.py",
           "robot_workbench/control_owner.py",
@@ -2572,8 +2572,8 @@
           }
         ]
       },
-      "fingerprint": "3491e8c38172d0b7ef7ddbb28ad6f9071d9e8588159aeadb51c7f175d8b59aa4",
-      "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
+      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
+      "verified_fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800"
     },
     "robot_workbench/maintenance.py": {
       "state": "verified",
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "22480ddb6d89541092354ffed07b53afeec7a623763e73aa9c82b2e67404fbcf",
+      "fingerprint": "317c372c4f5487c4ec1f40a1d9c3fe616c747ce7d41a98e408674c549a7b7b33",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3092,7 +3092,7 @@
           }
         ]
       },
-      "fingerprint": "3491e8c38172d0b7ef7ddbb28ad6f9071d9e8588159aeadb51c7f175d8b59aa4",
+      "fingerprint": "3aff0afd176752b584b038d6f2ea04ff06f8b087dc439f5977ff1f9595e6b800",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3879,7 +3879,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "0c8cf8b76dccb8add36708cdae417ea4c8ebece3faf199f996f85adcff450f9b"
+      "fingerprint": "2b2b5850b229ab2da27e26d4767b00908a3d50f7f040534e43b7177d4ec10cb1"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,16 +3937,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T03:45:54.551778+00:00",
-      "kind": "domain",
-      "ids": [
-        "infer-runtime",
-        "translation-run"
-      ],
-      "state": "implemented",
-      "note": "ARX13三段WAM各15步完整执行成功，源共1.5s，实际0.637/0.500/0.535s，正常Stop保持。中途Stop和最终产物/G34仍待收齐。"
-    },
     {
       "at": "2026-11-07T04:25:44.063491+00:00",
       "kind": "domain",
@@ -4867,9 +4857,18 @@
       ],
       "state": "implemented",
       "note": "已确认MODEL/TEACH紧凑录制、时间命名、直接Run停止后保留会话；相关CPU/ROS与UI检查通过。ARX6控制已释放；用户转ARX13，当前仅同步代码，实机后续验证。"
+    },
+    {
+      "at": "2026-11-09T08:53:32.896912+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/management.py"
+      ],
+      "state": "verified",
+      "note": "数采服务名由可信部署配置声明，公共校验只检查单位名格式；配置边界与正常交接检查通过，已去除机器编号特判。"
     }
   ],
   "unmapped_files": [],
-  "source_head": "a495368feb67b15150d979d8859d10be94c66c0e",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.91b60095443c"
+  "source_head": "d055b02e6bd784bda52c355307bf2107d9d8fd4a",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f908525dd697"
 }

@@ -268,8 +268,7 @@ class WorkbenchManager:
         if handoff is not None:
             url=urlsplit(handoff.get('status_url','')) if isinstance(handoff,dict) else None
             if (not isinstance(handoff,dict) or set(handoff)!={'unit','files','status_url'}
-                    or not (re.fullmatch(r'prometheus-arx[0-9]+-web\.service',str(handoff.get('unit')))
-                        or config.get('device_id')=='arx6'and handoff.get('unit')=='prometheus-web.service')
+                    or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(handoff.get('unit')))
                     or not isinstance(handoff['files'],dict) or not handoff['files']
                     or any(not Path(p).is_absolute()or not re.fullmatch('[a-f0-9]{64}',str(h))for p,h in handoff['files'].items())
                     or url.scheme!='http' or url.hostname!='127.0.0.1' or not url.port or url.path!='/api/status'
