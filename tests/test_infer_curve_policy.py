@@ -51,6 +51,29 @@ class InferCurvePolicyTests(unittest.TestCase):
         c=np.zeros((1,4,12));c[0,:,0]=[0,-4,4,0]
         lo,hi,_,_=_extrema_batched(c,[0,1]);self.assertAlmostEqual(hi[0],1.);self.assertAlmostEqual(lo[0],0.)
 
+    def test_full_chunk_brakes_preserve_prefix_and_all_polynomial_bounds(self):
+        from robot_workbench.motion_reference import prepare_brake_after,JOINTS
+        source,limits=self.fixture(32/30)
+        q=np.zeros((33,14));t=np.linspace(0,1,33)
+        q[:,list(JOINTS)]=.01*np.sin(t[:,None]*np.arange(1,13)[None,:])
+        q[:,[6,13]]=[.03,.04];source['device_targets14']=q.tolist()
+        reference=self.prepare(source,limits,planning_policy=dict(POLICY,max_execution_duration_s=32/30*4))
+        for fraction in (.1,.5,.9):
+            boundary=reference.duration_s*fraction
+            brake=prepare_brake_after(reference,boundary,limits,duration_s=.2,velocity_limit=1.,acceleration_limit=40.)
+            for times in np.array_split(np.linspace(0,boundary,97),4):
+                for old,new in zip(reference.sample(times),brake.sample(times)):
+                    np.testing.assert_allclose(old,new,rtol=1e-10,atol=1e-10)
+            scalar=_extrema(brake.coefficients,brake.breaks)
+            for old,new in zip(scalar,_extrema_batched(brake.coefficients,brake.breaks)):
+                np.testing.assert_allclose(old,new,rtol=1e-10,atol=1e-8)
+            self.assertAlmostEqual(brake.metadata['max_velocity_rad_s'],max(scalar[2]),places=9)
+            self.assertAlmostEqual(brake.metadata['max_acceleration_rad_s2'],max(scalar[3]),places=9)
+            _check_c2(brake.coefficients,brake.breaks)
+            narrow=limits.copy();narrow[0,1]=scalar[1][0]-1e-6
+            with self.assertRaises(ValueError):
+                prepare_brake_after(reference,boundary,narrow,duration_s=.2,velocity_limit=1.,acceleration_limit=40.)
+
     def test_overshoot_and_unknown_boundary_reject_instead_of_clipping_or_zeroing(self):
         source,limits=self.fixture();source['device_targets14'][1][0]=-.01936916448175907
         source['device_targets14'][0][0]=.00171661376953125

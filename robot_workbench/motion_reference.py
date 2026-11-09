@@ -517,7 +517,7 @@ def prepare_brake(initial, velocity, acceleration, limits, *, duration_s,
     t=float(duration_s);qj,vj,aj=q[list(JOINTS)],v[list(JOINTS)],a[list(JOINTS)]
     # Cubic velocity meets (v0,a0)->(0,0); its integral is the position.
     c=np.asarray([vj/(2*t**3)+aj/(4*t*t),-vj/(t*t)-2*aj/(3*t),aj/2,vj,qj])[None,:,:]
-    breaks=np.asarray([0.,t]);low,high,peak_v,peak_a=_extrema(c,breaks)
+    breaks=np.asarray([0.,t]);low,high,peak_v,peak_a=_extrema_batched(c,breaks)
     if (np.any(low<bounds[list(JOINTS),0]-1e-10)or np.any(high>bounds[list(JOINTS),1]+1e-10)
             or np.max(peak_v)>velocity_limit+1e-10 or np.max(peak_a)>acceleration_limit+1e-10):
         raise ValueError('normal brake infeasible within position/velocity/acceleration bounds')
@@ -558,7 +558,9 @@ def prepare_brake_after(reference, boundary_s, limits, **options):
     c=np.concatenate([prefix,pad(brake.coefficients)])
     breaks=np.r_[starts,boundary_s,boundary_s+brake.duration_s]
     jaws=np.vstack([reference.jaws[:len(starts)],brake.jaws])
-    bounds=np.asarray(limits,dtype=float);lo,hi,pv,pa=_extrema(c,breaks)
+    # Keep the full prefix proof within the live admission window, using the
+    # same complete polynomial extrema calculation as model preparation.
+    bounds=np.asarray(limits,dtype=float);lo,hi,pv,pa=_extrema_batched(c,breaks)
     if (np.any(lo<bounds[list(JOINTS),0]-1e-10)or np.any(hi>bounds[list(JOINTS),1]+1e-10)
             or max(pv)>options['velocity_limit']+1e-10 or max(pa)>options['acceleration_limit']+1e-10):
         raise ValueError('committed prefix and brake exceed declared bounds')
