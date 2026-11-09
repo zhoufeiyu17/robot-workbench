@@ -411,6 +411,10 @@ class Application:
                     if not 0<=time.time()-ref.source_time_ns/1e9<=workflow.operator_controls['event_max_age_s']:return
                     workflow.operator_last_seen=time.monotonic()
                     if message.event!='pedal_command':
+                        if value.get('connected')is False:
+                            workflow.operator_pedal_gesture=None
+                            workflow.operator_input_status=dict(state='unavailable',error='踏板已断开，等待同一踏板重连')
+                            return
                         if workflow.operator_input_status.get('state')in('waiting','unavailable'):
                             workflow.operator_input_status=dict(state='ready',source_instance_id=source['source_instance_id'])
                         return

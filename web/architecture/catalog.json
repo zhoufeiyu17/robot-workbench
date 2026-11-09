@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.a0d5d9932273",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.61a32a0f57d0",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -663,7 +663,7 @@
         }
       ],
       "native_home": "start_native_home(side) per arm, current authorized Owner generation; native interpolation and gains run on existing SDK feedback thread; side completion in raw feedback; complete native defaults include gripper opening",
-      "manual_hold": "set_damping_hold(manual=false,preserve_jaws=true)由SDK本地保留命令夹爪与增益，关节采用既有有界停止保持；随后新鲜静止反馈建立HOLD"
+      "manual_hold": "set_damping_hold(manual=false)以实测关节和夹爪开口建立有界停止保持；新鲜静止后begin恢复正常增益并建立HOLD"
     },
     {
       "id": "I07",
@@ -763,14 +763,14 @@
           "event_max_age_s (required with pedal)",
           "double_press_window_s (required with pedal)"
         ],
-        "online_protocol": "workbench.control_owner.v7; exact at attachment",
+        "online_protocol": "workbench.control_owner.v9; exact at attachment",
         "manual_start": {
           "preconditions": "Infer holder, prepared model and configured normal modes",
           "sequence": "initial HOLD -> TEACH -> measured HOLD -> END/seal -> next explicit Run",
           "model_calls_during_positioning": 0,
-          "jaws": "retain native jaw command and gains",
+          "jaws": "TEACH ramps native jaw kp/kd to zero for manual adjustment; HOLD anchors measured opening before normal gains return",
           "evidence": ".evidence/infer-pedal2-start-20261107-v1/progress.json",
-          "owner_protocol_change": false
+          "owner_protocol_change": true
         },
         "prepared_session": {
           "approved": true,
@@ -778,7 +778,7 @@
           "consumer": "business prepares the same recorded Run in HOLD; no MODEL request",
           "parameter_lifetime": "seed/duration/model/policy frozen for this control session; explicit session end precedes edits",
           "pedals": "1 HOLD;2 TEACH/HOLD;3 native Home; responses reference existing mode request IDs",
-          "recording": "one continuous capture includes manual placement, MODEL episodes and Home until explicit session end",
+          "recording": "MODEL and TEACH intervals only; HOLD and HOME excluded from effective video time; per-camera segments merged with continuous effective timestamps",
           "acceptance_clock": "original pedal occurred_at to Owner admission and first effective brake/gain/native-home step, wall ns"
         },
         "native_home": {
@@ -788,7 +788,7 @@
             "left",
             "right"
           ],
-          "recording": "same prepared capture stays open",
+          "recording": "prepared capture remains open; HOME contributes no effective recording interval",
           "normal_pedal_1": "wait for full native Home completion",
           "independent_Stop": "existing epoch revocation and SDK damping cancel future Home stages",
           "readiness": "exact v6 Owner plus pinned background-home SDK build verified before control"
@@ -814,7 +814,12 @@
             "run_id"
           ]
         },
-        "remaining_plan": ".evidence/infer-pedal2-start-20261107-v1/progress.json"
+        "remaining_plan": ".evidence/infer-pedal2-start-20261107-v1/progress.json",
+        "usb_reconnect": {
+          "source": "same configured stable evdev path; same ROS publisher and sequence",
+          "heartbeat": "source_tick.connected consumed by operator-input readiness; false clears incomplete gesture",
+          "reconnect": "reopen disconnected device, ignore held repeat, no synthetic action or new preparation"
+        }
       }
     },
     {
@@ -906,10 +911,11 @@
         "operation-job"
       ],
       "transport": "已批准：登记的本地Unix IPC，常驻记录服务持有writer；生产端内存有界入队，后台发送；业务断连不结束会话。既有Run/请求/策略字段及final_seq屏障保持。",
-      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
+      "compatibility": "Owner workbench.control_owner.v9 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
       "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
-      "lifecycle_update": "ARX6候选：仅MODEL/TEACH有效录制；HOLD/HOME无有效时间；ingress_closed继续与封存分离。部署验收见infer-active-recording-20261109-v1/progress.json"
+      "lifecycle_update": "仅MODEL/TEACH有效录制；HOLD/HOME无有效时间；ingress_closed与完整封存分离。",
+      "model_input_verification": "Live ingress stores original references and transform metadata; sealing verifies original sample coverage and exact image transforms once per involved saved segment. Missing originals or hash mismatch keep outcome incomplete."
     },
     {
       "id": "I12",
@@ -1028,7 +1034,7 @@
         "recording-quality"
       ],
       "transport": "I11返回health_source，Owner/业务/UI直接订阅记录器原始DataEvent。RPC只确认生命周期、真实writer退出与不可变封存覆盖；模型/非模型Run封存事件均从原控制ROS源进入结果索引。",
-      "compatibility": "Owner workbench.control_owner.v8 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
+      "compatibility": "Owner workbench.control_owner.v9 / recording workbench.recording-service.v6，连接时精确核验；历史文件按原schema读取",
       "consumers": [
         "guard",
         "lifecycle",
@@ -1036,7 +1042,8 @@
       ],
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
       "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
-      "lifecycle_update": "已发布；ARX13三轮HOLD及参数更改/完整录制通过，CPU延迟封存隔离通过；正式长时验收未完成"
+      "lifecycle_update": "运行中反馈取流健康，关闭后独立验证原始样本和导出；长时验收状态由开发Map证据维护。",
+      "model_input_verification": "Live ingress stores original references and transform metadata; sealing verifies original sample coverage and exact image transforms once per involved saved segment. Missing originals or hash mismatch keep outcome incomplete."
     },
     {
       "id": "I16",
@@ -2768,7 +2775,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "da30af0dd81175c910eacf67fab66b554514638d6d79713f3201a7f547e10bf9",
+        "fingerprint": "fbbcff9cda132dc5e535698345f4b247c5629b55090a305d5e26b1587e5bb3c1",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2892,7 +2899,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "65781a40ee63e92ae5c08c069d0141da8c13084db253cf02ee5d4c70690ded53",
+        "fingerprint": "d6a90ff1c5a75f339b2f74c1e6d8fe09012782446b672b2955dd11767a82014f",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3019,7 +3026,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "8958e7ddaffa856e65a5a88130635a3a61883bc13e19a4c1b322045eb76dcbc6",
+        "fingerprint": "ac8665ff60ebccd3479aa485587343e054a2f52f33de9d35a5c42b0346fd25f7",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3138,7 +3145,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "850b3ad396245694f886fbf7876d4d6efb0239ef31d127e3a2c706a5dd628209",
+        "fingerprint": "8d0e37164cbb6b32b6348f18da717cceda5ebfdd252c9bc427e91e174dfc8173",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3352,7 +3359,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "7c360bc071d3590099a21555683f3a1fe8c0fc828ccf342010d9363b6a9f2920",
+        "fingerprint": "4aa57eab5630ff23365b747dcee3afcde3ca903f875f81dcf61441e852f769a8",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3515,7 +3522,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "baa3429965c4105a592fbbf4d3b83d487db0540b9a31b73854c48e4f203f31eb",
+        "fingerprint": "86261e352da6bff69cbfc33107367c7265a9cb84a3d5a780e3e2e237f8ff6b9e",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3652,7 +3659,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "d7579e7dd166a9cea761b6ed742c04df8d0d5fb1ecf881b60d144733c1ccec51",
+        "fingerprint": "39b2cd37e8fb9a8565bd7592ac042da8804f7177d7eec9c2207a9e50f035b691",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3794,7 +3801,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "83098f7a3a02c9c5e437c60947ccc86d97aa0c61b34b6195e22790df62bbef3b",
+        "fingerprint": "319caeef8128b8def3754758007b165ac27da8a84f47858a1eefac387b07a296",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3920,7 +3927,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "91a830718fd8b4e444bff7f4f3a2aa8dfb40bf281493eb8f8327525228f6aeec",
+        "fingerprint": "48898e06fb6f0da7c49e69256abb2449b2a02e8e5e281944cb7bca3ab91e5592",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4049,7 +4056,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "b486d33dab3855ebfcab125d2eb139cf002d8a6c6b36f60e1c54bf2791663a23",
+        "fingerprint": "753ad083c99ed5c867f467753afa70f96de6127c26a61011eed47ca7458971e7",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4175,7 +4182,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "419e3a3f3c519afde57d1f0ea2d7fa94f43237062bdf559021b333d49815061d",
+        "fingerprint": "c4d7f3c724b2d9e91cae0c7eeeea5677e2101b0e2cee8af613dfbe2c25c44469",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10568,7 +10575,7 @@
     "approval": "用户确认按此实现封存解锁与参数更新",
     "evidence": ".evidence/infer-pedal2-start-20261107-v1/recording-lifecycle-final-acceptance.json",
     "protocols": {
-      "owner": "workbench.control_owner.v8",
+      "owner": "workbench.control_owner.v9",
       "recording": "workbench.recording-service.v6"
     },
     "background_seal_observer": {

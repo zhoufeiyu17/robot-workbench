@@ -197,7 +197,7 @@ class PrecisionStudyTest(unittest.TestCase):
         from robot_workbench.execution_settings import defaults
         policy=defaults();policy['speed_protection']['enabled']=False
         self.runtime.update_execution_settings(self.creds['research'],policy)
-        with self.assertRaisesRegex(ValueError,'0.8 rad/s'):study.execute('research',review)
+        with self.assertRaisesRegex(ValueError,'峰值保护开启且正在监测'):study.execute('research',review)
         policy['speed_protection']['enabled']=True;self.runtime.update_execution_settings(self.creds['research'],policy)
         with self.assertRaisesRegex(ValueError,'失效'):study.execute('research',review)
         artifact=study.config['references']['1.0'];Path(artifact['path']).write_bytes(b'changed')

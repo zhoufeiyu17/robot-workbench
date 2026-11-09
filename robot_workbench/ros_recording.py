@@ -16,13 +16,12 @@ import select
 import sys
 import threading
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
 from .ros_data import RosNode, StreamRef, json_text, json_value, source_descriptor,descriptor_message,RECORDING_HEALTH_FIELDS
 from .ros_inputs import RosInputs
-from .ros_inference import reconstruct_input
+from .ros_inference import reconstruct_image
 
 
 def capture_source(source, *, namespace, domain_id):
@@ -41,6 +40,47 @@ def _plain(value):
     if isinstance(value,(str,int,float,bool))or value is None:return value
     if isinstance(value,dict):return {k:_plain(v)for k,v in value.items()}
     return [_plain(v)for v in value]
+
+
+def verify_model_inputs(root,model_inputs,streams):
+    """After ingress closes, verify exact saved frames in one pass per segment."""
+    from rgbd_segments import iter_segment
+    wanted={};segments={}
+    for request,payload in model_inputs.items():
+        observation=payload['observation'];roles=observation['camera_roles'];frames=observation['frames']
+        rules=json_value(payload['preprocessing_json']);metadata=json_value(payload['metadata_json'])
+        dtype=np.dtype(metadata.get('model_state_dtype','float64'))
+        if dtype.kind!='f'or dtype.itemsize>8:raise ValueError('declared floating model state dtype required')
+        state=np.asarray(payload['model_state'],dtype=dtype)
+        if state.shape!=(14,)or not np.isfinite(state).all():
+            raise ValueError('finite floating model state14 required')
+        if len(roles)!=3 or len(set(roles))!=3 or len(frames)!=3 or set(rules)!=set(roles):
+            raise ValueError('three original model input transform roles required')
+        for role,raw in zip(roles,frames):
+            ref=StreamRef(**raw)
+            wanted.setdefault(ref.stream_id,{}).setdefault(ref,[]).append((request,role,rules[role]))
+    for stream,refs in wanted.items():
+        with (root/(stream+'.jsonl')).open()as journal:
+            for index,line in enumerate(journal):
+                if index>=streams[stream]['committed']or not refs:break
+                payload=json.loads(line)['payload'];raw=payload.get('metadata',{}).get('ros_reference')
+                if raw is None:continue
+                ref=StreamRef(**raw);checks=refs.pop(ref,None)
+                if checks is None:continue
+                frame=payload['frame_ref'];path=Path(frame['segment'])
+                if path.parts[:2]!=('camera',stream)or '..'in path.parts:raise ValueError('model frame belongs to another stream')
+                segments.setdefault(str(path.relative_to('camera')),{}).setdefault(frame['frame'],[]).append((ref,checks))
+        if refs:raise ValueError('model input references missing original '+stream+' sample')
+    for segment,frames in segments.items():
+        manifest=json.loads((root/'camera'/segment).read_text())
+        for index,(meta,rgb,_)in enumerate(iter_segment(root/'camera',segment,png=False)):
+            for ref,checks in frames.pop(index,[]):
+                if meta.get('ros_reference')!=ref.__dict__:raise ValueError('model input frame identity changed')
+                frame=dict(rgb=rgb,width=manifest['width'],height=manifest['height'])
+                for request,role,rule in checks:
+                    try:reconstruct_image(role,frame,rule)
+                    except ValueError as error:raise ValueError('model input '+request+': '+str(error))from error
+        if frames:raise ValueError('model input frame lies outside its recorded segment')
 
 
 def _recording_health_source(root,spec,identity):
@@ -126,7 +166,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     state=dict(state='preparing',prepared=False,ready=False,done=False,ingress_closed=False,capture_session_id=spec['capture_session_id'],
         worker_pid=os.getpid(),writer_identity=writer_identity,streams={},source_errors=errors,binding=None)
     def admit(ref,value,group=None,prefill=False):
-        source=sources[ref.stream_id];selected=None
+        source=sources[ref.stream_id]
         if source['kind']=='image':size=len(value['rgb'])+len(value.get('depth')or b'')+4096
         elif source['kind']=='state':size=len(json.dumps(value))+4096
         else:
@@ -135,15 +175,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if wire_size>spec['resource_budget']['message_bytes']:
                 errors[ref.stream_id]='ROS event exceeds the bound message size';return
             size=wire_size*4+4096
-            if source['kind']=='model_input':
-                try:selected=inputs.resolve_observation(value.observation)
-                except (LookupError,ValueError):pass  # Exact journal/cache lookup still runs when dequeued.
-                if selected is not None:
-                    # Pin the exact originals before slow preprocessing imports
-                    # can let the live ring evict them; charge the existing queue.
-                    size+=sum(len(frame['rgb'])+len(frame.get('depth')or b'')+4096 for frame in selected[1].values())
-                    size+=len(json.dumps(selected[0]))+4096
-        try:events.put_nowait((size,(ref,value,group,prefill,selected)))
+        try:events.put_nowait((size,(ref,value,group,prefill)))
         except queue.Full:errors.setdefault(ref.stream_id,'ROS recorder queue overflow; source data missing')
     def enqueue(ref,value):
         nonlocal control_gap_start
@@ -169,7 +201,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         raise ValueError('recording mode receipt belongs to another Owner')
                     opened=activity.observe(value.event,data,ref,value.run_id)
                     if previous_group is not None and (activity.current is None or activity.current['request_id']!=previous_group):
-                        events.put_nowait((0,(None,None,None,False,None)))
+                        events.put_nowait((0,(None,None,None,False)))
                     if opened:
                         # Retain only the bounded input-reference prefix. Export
                         # excludes these evidence frames from effective video time.
@@ -191,7 +223,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if activity is not None and activity.current is None and source['kind']=='image':
                 # Delayed transport can deliver an active tail after HOLD.
                 # Keep it by source time, then commit that paused tail too.
-                events.put_nowait((0,(None,None,None,False,None)))
+                events.put_nowait((0,(None,None,None,False)))
     raw=[s for s in sources.values()if s['kind']in('image','state')]
     inputs=RosInputs(ros,raw,on_sample=enqueue,max_samples=16,subscription_depth=16,include_depth=True)
     def message(stream,value):
@@ -274,30 +306,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             files[stream].write(_encode(row))
             if not received[stream]:first[stream]=ref
             received[stream]+=1;last[stream]=ref
-    class RecordedInputs:
-        def resolve_observation(self,observation,*,timeout=0.):
-            try:return inputs.resolve_observation(observation,timeout=timeout)
-            except ValueError as error:
-                if 'referenced ROS sample was evicted'not in str(error):raise
-                reference=StreamRef.from_message(observation.state);stream=reference.stream_id
-                if sources.get(stream,{}).get('kind')!='state'or stream not in files:raise
-                # ponytail: rare evicted-state lookup scans the journal; use a
-                # sparse disk index if long Runs make this scan costly.
-                saved=None
-                with file_locks[stream]:
-                    files[stream].flush()
-                    with (root/(stream+'.jsonl')).open()as journal_file:
-                        while line:=journal_file.readline(spec['resource_budget']['message_bytes']+1):
-                            if not line.endswith('\n'):raise ValueError('bounded original state journal row required')
-                            payload=json.loads(line)['payload']
-                            if payload['reference']==reference.__dict__:saved=payload['data'];break
-                if saved is None:raise
-                if len(observation.frames)!=len(observation.camera_roles)or len(set(observation.camera_roles))!=3:
-                    raise ValueError('observation camera role mapping is incomplete')
-                frames={role:inputs.resolve(ref,timeout=timeout)for role,ref in zip(observation.camera_roles,observation.frames)}
-                return saved,frames
-    recorded_inputs=RecordedInputs()
-    def write(ref,value,group=None,prefill=False,selected=None):
+    def write(ref,value,group=None,prefill=False):
         nonlocal artifact_index
         source=sources[ref.stream_id];previous=last.get(ref.stream_id)
         model_key=model_digest=None
@@ -328,8 +337,6 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         elif source['kind']=='model_input':
             payload=_plain(value)
             append(ref,payload)
-            reconstruct_input(value,recorded_inputs if selected is None else
-                SimpleNamespace(resolve_observation=lambda *args,**kwargs:selected))
         elif source['kind']=='model_result':
             directory=root/'model'/value.request_id;directory.mkdir(parents=True,exist_ok=True)
             if value.request_id in model_results:raise ValueError('duplicate model output identity')
@@ -410,7 +417,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         write_json(root/'finish-request.json',command);emit()
                     else:raise ValueError('ROS recording accepts lifecycle only; source data must arrive through ROS')
             for _ in range(128):
-                try:ref,value,group,prefill,selected=events.get_nowait()
+                try:ref,value,group,prefill=events.get_nowait()
                 except queue.Empty:break
                 if ref is None:
                     for source in raw:
@@ -430,9 +437,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                     # queue retains the backlog; a slow encoder cannot create
                     # an unbounded executor queue or serialize the other cameras.
                     collect_image(ref.stream_id,wait=True)
-                    pending_images[ref.stream_id]=encoders.submit(write,ref,value,group,prefill,selected)
+                    pending_images[ref.stream_id]=encoders.submit(write,ref,value,group,prefill)
                 else:
-                    try:write(ref,value,group,prefill,selected)
+                    try:write(ref,value,group,prefill)
                     except Exception as error:fault(ref.stream_id,error)
             for stream in list(pending_images):collect_image(stream)
             if terminal is not None:

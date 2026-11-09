@@ -110,7 +110,7 @@ class NormalBackend(shared.WindowBackend):
         return result
 
     def set_execution_gains(self,rows):
-        assert all(rows[s]['gripper_kp']==self.mode_gains[s]['gripper_kp']>0 for s in rows)
+        assert all(0<=rows[s]['gripper_kp']<=5. and 0<=rows[s]['gripper_kd']<=.2 for s in rows)
         self.gain_calls.append(deepcopy(rows));self.mode_gains=deepcopy(rows)
         return dict(returned=True,firmware_ack=False)
 
@@ -253,7 +253,8 @@ class NormalModeTests(unittest.TestCase):
         self.assertEqual(runner.native_pending,[],'normal HOLD must not accumulate legacy prepared-window acknowledgements')
         request,_=self.request('TEACH');self.completed(request)
         self.assertEqual(runner.mode,'TEACH');self.assertTrue(self.raw.gain_calls)
-        for row in self.raw.mode_gains.values():self.assertEqual(row['kp'],[0.]*6);self.assertEqual(row['gripper_kp'],5.)
+        for row in self.raw.mode_gains.values():
+            self.assertEqual(row['kp'],[0.]*6);self.assertEqual(row['gripper_kp'],0.);self.assertEqual(row['gripper_kd'],0.)
         with self.assertRaisesRegex(ValueError,'explicit HOLD'):self.request('MODEL')
         self.raw.position_bias[0]=0
         request,_=self.request('HOLD');self.completed(request)
@@ -479,12 +480,33 @@ class NormalModeTests(unittest.TestCase):
         self.assertTrue(any(name=='inference_mode_transition'and row.get('stage')=='manual_hold_returned'
                             for name,row in self.events))
 
+    def test_manual_jaws_reanchor_at_new_measured_openings_before_gains_restore(self):
+        self.setup_modes(initial_mode='HOLD')
+        request,_=self.request('TEACH');self.completed(request)
+        for row in self.raw.mode_gains.values():
+            self.assertEqual(row['gripper_kp'],0.);self.assertEqual(row['gripper_kd'],0.)
+        read=self.raw.read_calibration_state
+        def dragged():
+            state=read()
+            if self.runtime.owner.runner.mode=='TEACH':
+                self.raw.q[6]=state['qpos'][6]=.03
+                self.raw.q[13]=state['qpos'][13]=.04
+            return state
+        self.raw.read_calibration_state=dragged;self.advance(35)
+        from arx_env.joint_head_real_motion import feedback_to_command
+        expected=feedback_to_command(self.raw.q,self.raw.get_bimanual_joint_position_limits(),environment='fake')
+        request,_=self.request('HOLD');receipt=self.completed(request)
+        np.testing.assert_allclose(np.asarray(receipt['native_output']['q_sdk14'])[[6,13]],np.asarray(expected)[[6,13]],atol=1e-12)
+        for row in receipt['native_output']['gains'].values():
+            self.assertEqual(row['gripper_kp'],5.);self.assertEqual(row['gripper_kd'],.2)
+        self.assertEqual(self.requests,[])
+
     def test_stop_during_manual_hold_wait_prevents_late_begin(self):
         self.setup_modes(initial_mode='HOLD')
         request,_=self.request('TEACH');self.completed(request)
         request,_=self.request('HOLD');self.advance(2)
         self.assertEqual(self.runtime.owner.runner.normal_job['stage'],'MANUAL_HOLD')
-        self.assertTrue(all(self.raw.mode_gains[side]['gripper_kp']==5. for side in ('left','right')))
+        self.assertTrue(all(self.raw.mode_gains[side]['gripper_kp']>0 for side in ('left','right')))
         with patch.object(self.raw,'begin',wraps=self.raw.begin) as begin:
             self.runtime.request_stop();self.advance(100)
             begin.assert_not_called()

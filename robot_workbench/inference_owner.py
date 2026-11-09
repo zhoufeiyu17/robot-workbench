@@ -879,7 +879,8 @@ class InferenceRunner:
             kp,kd=gains('normal_X5',side)
             row['kp']=[0.]*6 if teach else kp
             row['kd']=(np.asarray(kd)*(self.normal_config['teach_kd_scale']if teach else 1.)).tolist()
-            if row['gripper_kp']<=0:raise ValueError('normal modes require positive retained jaw gains')
+            if row['gripper_kp']<=0:raise ValueError('normal HOLD requires positive jaw gains before TEACH')
+            if teach:row['gripper_kp']=row['gripper_kd']=0.
         return target
 
     def start_mode(self, request, feedback):
@@ -940,7 +941,9 @@ class InferenceRunner:
             # while remaining outside legal command limits. Use the existing
             # measured-position SDK stop before binding a normal reference.
             self._normal_epoch()
-            self.owner.backend.set_damping_hold(manual=False,preserve_jaws=True)
+            # TEACH releases the jaws too. Anchor the newly measured opening
+            # before begin restores normal position gains.
+            self.owner.backend.set_damping_hold(manual=False)
             stopped=self.owner.control_time()
             job.update(stage='MANUAL_HOLD',hold_return_source_s=stopped)
             self.stationary.reset();self.mode='BRAKE'
@@ -1257,6 +1260,7 @@ class InferenceRunner:
         rows=deepcopy(job['initial_gains'])
         for side,row in rows.items():
             for key in('kp','kd'):row[key]=[a+alpha*(b-a)for a,b in zip(row[key],job['target_gains'][side][key])]
+            for key in('gripper_kp','gripper_kd'):row[key]+=alpha*(job['target_gains'][side][key]-row[key])
         self.owner.command_gate();self.owner.backend.set_execution_gains(rows);self.owner.command_gate()
         return alpha>=1.
 

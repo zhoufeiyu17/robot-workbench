@@ -1318,7 +1318,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const doubleHint=Number.isFinite(doubleWindow)?`${doubleWindow}秒内双踩踏板1启动Infer`:'双踩踏板1启动Infer';
     setText('inference-teach',modelActive?'停止推理并位置保持 · 踏板2':operator?.kind==='teach'&&operator.status==='running'?'完成拖动并位置保持 · 踏板2':'重力补偿拖动 · 踏板2');
     setText('inference-operator-status',modelActive?'推理中单踩踏板1或2停止并保持，踏板3无动作。双踩1的第一脚停止，第二脚忽略。':operator?.request_id&&['running','failed'].includes(operator.status)?
-      `${operator.kind==='teach'?'人工起点':operator.kind==='hold'?'停止保持':'回零'}：${({waiting_inference_hold:'等待保持与录制准备',preparing_home:'准备轨迹及录制',homing:'执行中',native_homing:'SDK原生回零中，等待完成',holding:'已完成并保持',entering_teach:'进入重力补偿',teaching:'可人工拖动，再踩踏板2确认起点',locking_start:'制动并锚定当前位置',sealing_start:'保持已确认，正在封存定位过程',start_ready:'当前位置已保持，可从这里开始下一轮Infer',terminated:'已中断'})[operator.phase]||operator.status} · ${operator.error||operator.run_id||'准备保持与录制'} · SDK保留`:
+      `${operator.kind==='teach'?'人工起点':operator.kind==='hold'?'停止保持':'回零'}：${({waiting_inference_hold:'等待保持与录制准备',preparing_home:'准备轨迹及录制',homing:'执行中',native_homing:'SDK原生回零中，等待完成',holding:'已完成并保持',entering_teach:'进入重力补偿',teaching:'可人工拖动并手动开合夹爪，再踩踏板2保持当前位置与开口',locking_start:'制动并锚定当前位置',sealing_start:'保持已确认，正在封存定位过程',start_ready:'当前位置已保持，可从这里开始下一轮Infer',terminated:'已中断'})[operator.phase]||operator.status} · ${operator.error||operator.run_id||'准备保持与录制'} · SDK保留`:
       value.operator_session?`控制与录制已准备。保持后${doubleHint}，单踩1保持，踏板2切换拖动与保持，踏板3原生回零。`:
       `先在网页准备控制与录制，完成保持后${doubleHint}。踏板响应当前前台推理页面及控制归属。`);
     const mixed=['mixed366-nohistory','coffee999-xnorm'].some(prefix=>String(value.selected_model_id||model.id||'').startsWith(prefix));
@@ -1335,8 +1335,12 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     setText('inference-backend-status',inferenceBackendReason()||(String(value.selected_model_id||model.id).startsWith('wam-')?
       'WAM 使用原生关节与标定夹爪坐标，外参不参与转换；命令开度保留各侧 2 mm 裕量。执行前核验本次设备绑定。':
       'Torch 与 Triton 共用当前任务、设备映射、执行审阅及 Stop；切换模式后重新选择 checkpoint。'));
-    const seedKey=JSON.stringify([key(),serverInstance,state?.device?.id,state?.runtime?.runtime_nonce,value.selected_model_id||model.id]);
-    if(seedKey!==inferenceSeedKey){inferenceSeedKey=seedKey;el('inference-seed').value=Number.isInteger(value.seed)?value.seed:0;el('inference-duration').value=value.normal_modes_enabled&&value.reference_planning?'120':mixed?'0.5':'120';}
+    const seedKey=JSON.stringify([key(),serverInstance,state?.device?.id,state?.runtime?.runtime_nonce,value.selected_model_id||model.id,value.operator_session?.run_id]);
+    if(seedKey!==inferenceSeedKey){
+      inferenceSeedKey=seedKey;el('inference-seed').value=Number.isInteger(value.seed)?value.seed:0;
+      const duration=value.operator_session?.duration_s;
+      el('inference-duration').value=typeof duration==='number'&&Number.isFinite(duration)&&duration>0?String(duration):value.normal_modes_enabled&&value.reference_planning?'120':mixed?'0.5':'120';
+    }
     if(value.finite_chunk_count)el('inference-duration').value='0.5';
     const active=environmentAccess?.state?.active_job,modelOperation=active?.request?.action==='prepare_model'?active:null;
     const modelError=model.status==='error'&&!modelOperation,modelUnknown=!options().fresh||model.status==='unknown'&&!modelOperation;
@@ -2161,7 +2165,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(action==='stop'&&[...pending.values()].some(p=>p.action==='stop'&&p.context===key()))return;
     let requestId;try{requestId=newRequestId(crypto);}catch(error){notice(error.message);return;}
     const body={environment:context.environment,business:context.business,request_id:requestId,...extra};
-    if(context.business==='inference'&&['inference_prepare','inference_preview','execute','inference_run'].includes(action))try{body.seed=inferenceSeed();body.duration_s=inferenceDuration();}catch(error){notice(error.message);return;}
+    if(context.business==='inference'&&['inference_prepare','inference_preview','execute','inference_run'].includes(action))try{if(body.seed===undefined)body.seed=inferenceSeed();if(body.duration_s===undefined)body.duration_s=inferenceDuration();}catch(error){notice(error.message);return;}
     if(action==='return_cup'||action==='execute'&&activeReturnTask())try{body.offset_xy_mm=returnOffsets();}catch(error){notice(error.message);return;}
     if(action==='preview_batch'&&body.queue_revision===undefined)body.queue_revision=state?.workflow?.calibration_tools?.queue_revision;
     if(action==='fit_batch'&&body.batch_id===undefined)body.batch_id=state?.workflow?.calibration_tools?.fit_source_id;

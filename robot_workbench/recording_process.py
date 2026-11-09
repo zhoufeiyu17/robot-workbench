@@ -1764,6 +1764,11 @@ def _seal_capture(root,spec,extra_issue=None):
                             wanted.pop(key,None)
             for requests in wanted.values():
                 for request in sorted(requests):issues.append('model input '+request+' references missing original '+stream+' sample')
+        if not issues and model_indexes['model_input']:
+            from .ros_recording import verify_model_inputs
+            try:verify_model_inputs(root,model_indexes['model_input'],streams)
+            except (OSError,ValueError,KeyError,TypeError,RuntimeError)as error:
+                issues.append('model input validation: '+str(error))
     manifest=dict(schema='workbench.capture-manifest.v1',capture_session_id=spec['capture_session_id'],
         binding=binding,purpose_profile=spec['purpose_profile'],recording_outcome='incomplete' if issues else 'complete',
         control_terminal=finish['control_terminal'] if finish else None,streams=streams,issues=issues,files=files,

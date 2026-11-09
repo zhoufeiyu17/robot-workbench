@@ -488,7 +488,7 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             return result
 
         def set_execution_gains(self, rows):
-            """Bounded normal/teach transition; jaw gains remain exactly retained."""
+            """Bounded normal/teach transition, including passive manual jaws."""
             output=self.read_execution_output()
             if not isinstance(rows,dict)or set(rows)!={'left','right'}:raise ReferenceWindowRejected('both gain rows required')
             for side,row in rows.items():
@@ -499,13 +499,12 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                     raise ReferenceWindowRejected('numeric execution gain vectors required')
                 kp,kd=kp.astype(float),kd.astype(float)
                 cap_kp,cap_kd=motion_gains('normal_X5',side)
-                current=output['gains'][side]
+                config=self._controller_configs[side]
                 if (kp.shape!=(6,)or kd.shape!=(6,)or not np.isfinite(kp).all()or not np.isfinite(kd).all()
                         or np.any(kp<0)or np.any(kd<0)or np.any(kp>cap_kp)or np.any(kd>cap_kd)
-                        or current['gripper_kp']<=0
-                        or any(type(row[k])not in(int,float)or not math.isfinite(row[k])or row[k]!=current[k]
+                        or any(type(row[k])not in(int,float)or not math.isfinite(row[k])or not 0<=row[k]<=float(np.float32(getattr(config,'default_'+k)))
                                for k in('gripper_kp','gripper_kd'))):
-                    raise ReferenceWindowRejected('bounded normal gains and unchanged positive jaw gains required')
+                    raise ReferenceWindowRejected('bounded normal joint and jaw gains required')
             try:
                 for side,row in rows.items():
                     gain=self._arx5.Gain(6);gain.kp()[:]=row['kp'];gain.kd()[:]=row['kd']

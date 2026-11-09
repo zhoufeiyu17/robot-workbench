@@ -20,7 +20,7 @@ import threading
 import time
 
 LIMIT=4*1024*1024
-SCHEMA='workbench.control_owner.v8'
+SCHEMA='workbench.control_owner.v9'
 PROTOCOL_FEATURES=('action_chunk_v1','normal_modes_v1','normal_finish_v1','recording_context_v1',
                    'infer_reference_policy_v1','finite_sync_chunks_v1','sdk_execution_context_v1','normal_complete_segment_v1','control_policy_v1','capture_session_v1','observation_policy_v1')
 READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot','control_policy_snapshot'}
@@ -770,6 +770,7 @@ class ControlRuntimeClient:
     def _events(self):
         from .inference_owner import digest
         from .owner_inference import RemoteRunner,plain
+        next_state_poll=0.
         while not self.event_closed.is_set():
             with self.inference_lock:
                 try:
@@ -814,11 +815,14 @@ class ControlRuntimeClient:
                                 try:self._call('inference_result',session_id=session,request_id=identity,response=response,error=error)
                                 except (ValueError,ConnectionError):pass  # Revoked generation is never retried.
                             threading.Thread(target=query,name='business-model-query',daemon=True).start()
-                    value=self._call('inference_state');runner=self.runners.get(value['execution_instance_id'])
-                    if runner is not None and value['snapshot']is not None:runner.value=value['snapshot']
-                    if self.recording is not None:self._recording_facts()
-                    # Refresh state and recording health once per batch even
-                    # under continuous traffic, then drain without sleeping.
+                    # Catching up event batches must not multiply full state
+                    # copies/RPCs. Keep the existing20ms state cadence while
+                    # allowing the event cursor to drain without sleeping.
+                    if time.monotonic()>=next_state_poll:
+                        value=self._call('inference_state');runner=self.runners.get(value['execution_instance_id'])
+                        if runner is not None and value['snapshot']is not None:runner.value=value['snapshot']
+                        if self.recording is not None:self._recording_facts()
+                        next_state_poll=time.monotonic()+.02
                     if self.event_cursor<batch['latest']:continue
                 except Exception as error:self.recording_error=str(error)
             self.event_closed.wait(.02)

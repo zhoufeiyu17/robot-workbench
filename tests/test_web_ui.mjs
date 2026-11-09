@@ -2315,6 +2315,16 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
   h.app.destroy();
 }
 
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  Object.assign(info,{normal_modes_enabled:true,reference_planning:{},duration_s:600,operator_session:{run_id:'prepared600',duration_s:600}});
+  h.app.start();h.reply(0,value);await settle();assert.equal(h.get('inference-duration').value,'600');
+  h.get('inference-duration').value='10';value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-duration').value,'10','same-session polling keeps an unsubmitted duration draft');
+  info.operator_session={run_id:'next-prepared',duration_s:30};value.revision++;h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-duration').value,'30','a new prepared session shows its actual frozen duration');h.app.destroy();
+}
+
 for(const change of ['steps','duration','denoise','stop','duration-run']){
   const value=oneRunSnapshot(),info=value.workflow.inference,old='prepared-old',digest='a'.repeat(64),nextDigest='b'.repeat(64);
   Object.assign(value.runtime,{runtime_nonce:'connected-owner',stationary:true,stop_receipt:{accepted_monotonic_s:1}});

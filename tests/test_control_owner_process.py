@@ -20,6 +20,25 @@ def tearDownModule():
 
 
 class EventReadLockTest(unittest.TestCase):
+    def test_event_backlog_does_not_multiply_state_polling(self):
+        from robot_workbench.control_owner import ControlRuntimeClient
+        client=ControlRuntimeClient.__new__(ControlRuntimeClient)
+        client.event_closed=threading.Event();client.inference_lock=threading.RLock()
+        client.event_cursor=0;client.inference_callbacks=None;client.runners={};client.recording=None
+        now=[0.];reads=[];batches=[0]
+        def call(operation,**kwargs):
+            if operation=='events':
+                batches[0]+=1;now[0]+=.00005
+                if batches[0]==1000:client.event_closed.set()
+                return dict(incomplete=False,latest=1000,events=[dict(sequence=batches[0],event='native_window',value={})])
+            self.assertEqual(operation,'inference_state');reads.append(now[0])
+            return dict(execution_instance_id=None,snapshot=None)
+        client._call=call
+        with patch('robot_workbench.control_owner.time.monotonic',side_effect=lambda:now[0]):client._events()
+        self.assertEqual(client.event_cursor,1000)
+        self.assertGreaterEqual(len(reads),2);self.assertLessEqual(len(reads),3)
+        self.assertTrue(all(b-a>=.02 for a,b in zip(reads,reads[1:])))
+
     def test_fake_owner_clock_uses_published_simulation_time_without_wall_extrapolation(self):
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -162,7 +181,7 @@ def _owner_process(root,ready,closing,heartbeat=None,tripped=None,fixture_mode=N
         from test_mixed366_control import native_mapping_fixture
         _,mapping=native_mapping_fixture(Path(root)/'native');jaw.configure_mapping(mapping['path'])
     service=transport.ControlOwnerService(device,Path(root)/'service')
-    if fixture_mode=='slow_read_encoding':
+    if fixture_mode in('slow_read_encoding','ros_workflow'):
         original_read=service._read;delay_lock=threading.Lock()
         def delayed_read(operation,arguments):
             flag=Path(root)/'delay-read'
@@ -316,13 +335,17 @@ class ControlOwnerProcessTests(unittest.TestCase):
         fixture_mode=('large_events'if self._testMethodName.startswith('test_event_')else
                       'ros_workflow_wam'if self._testMethodName.startswith('test_wam32_')else
                       'ros_workflow_sim'if self._testMethodName=='test_ros_workflow_uses_simulation_clock_for_the_complete_run'else
-                      'ros_workflow'if self._testMethodName=='test_ros_workflow_runs_through_independent_owner_and_resident_recorder'else
+                      'ros_workflow'if self._testMethodName in('test_ros_workflow_runs_through_independent_owner_and_resident_recorder','test_ros_long_recording_keeps_inference_fresh_during_slow_status_reads')else
                       'ros_state'if self._testMethodName=='test_ros_state_projection_has_no_raw_feedback_on_control_rpc'else
                       'write_encoding_failure'if self._testMethodName=='test_successful_stop_encoding_failure_is_unknown'else
                       'slow_read_encoding'if self._testMethodName in ('test_read_encoder_delay_does_not_stall_tick_or_stop_and_preserves_sample_age','test_concurrent_state_readers_wait_outside_control_instead_of_failing')else None)
         self.process=self.context.Process(target=_owner_process,args=(self.temp.name,self.ready,self.closing,self.heartbeat,self.tripped,fixture_mode));self.process.start()
         self.addCleanup(self.cleanup)
         self.descriptor=self.ready.get(timeout=8);self.channel=ControlChannel(self.descriptor)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
+    def test_ros_long_recording_keeps_inference_fresh_during_slow_status_reads(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(long_session=120)
 
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
     def test_wam32_workflow_runs_through_independent_owner_and_resident_recorder(self):
@@ -433,7 +456,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(simulated=True)
 
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
-    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False,direct_run=False):
+    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False,direct_run=False,long_session=False):
         import numpy as np
         from types import SimpleNamespace
         from sensor_msgs.msg import Image
@@ -490,12 +513,13 @@ class ControlOwnerProcessTests(unittest.TestCase):
         closed=threading.Event();pause_frames=threading.Event();thread=None;flow=None
         try:
             publishers={};declarations=[]
+            width,height=(640,480)if long_session else(224,224)
             clock=client.control_inputs()['calibration_feedback']['source_clock_id']
             for role,name in CAMERAS.items():
                 descriptor=dict(device_id=parent.id,stream_id=name,source_instance_id='camera',source_clock_id=clock,
                     topic='/wb_process_state/'+name,message_type='sensor_msgs/msg/Image',kind='image',units='rgb8',
                     coordinate_frame=role,nominal_hz=30.,available=True,
-                    metadata=dict(width=224,height=224,serial=fixture.binding['camera_serials'][role],environment='fake'))
+                    metadata=dict(width=width,height=height,serial=fixture.binding['camera_serials'][role],environment='fake'))
                 declared=camera.publisher('sources/'+name,camera.types.SourceDescriptor,retained=True,depth=1)
                 declared.publish(descriptor_message(camera,descriptor));declarations.append(declared)
                 publishers[name]=camera.publisher(descriptor['topic'],Image)
@@ -504,7 +528,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     if pause_frames.is_set():continue
                     stamp=round(client.owner.control_time()*1e9)if simulated else time.monotonic_ns()
                     for publisher in publishers.values():
-                        image=Image(width=224,height=224,encoding='rgb8',step=672,data=bytes(224*224*3))
+                        image=Image(width=width,height=height,encoding='rgb8',step=width*3,data=bytes(width*height*3))
                         image.header.stamp.sec=stamp//10**9;image.header.stamp.nanosec=stamp%10**9;publisher.publish(image)
             thread=threading.Thread(target=frames);thread.start()
             model_options=dict(model_id=bundle['model_id'],model_bundle=bundle)if wam32 else{}
@@ -532,7 +556,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
             if wam32 and not stop_during_model and not expire_supply:
                 pause_frames.set();time.sleep(.15)
                 resume=threading.Timer(.1,pause_frames.clear);resume.start();self.addCleanup(resume.cancel)
-            duration=5. if normal32 else .5 if wam32 and not stop_during_model else 2.
+            duration=float(long_session)if long_session else 5. if normal32 else .5 if wam32 and not stop_during_model else 2.
             if direct_run:
                 from robot_workbench.service import Application
                 import uuid
@@ -584,6 +608,19 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 return
             review=flow.preview_episode(seed=1,duration_s=duration)
             flow.execute_review(review['preview']['token'])
+            if long_session:
+                from robot_workbench.service import Application
+                parent.workflows['inference']=flow;app=Application({'fake':parent})
+                poll_stop=threading.Event();page_errors=[];page_reads=[]
+                def slow_page():
+                    while not poll_stop.is_set():
+                        (Path(self.temp.name)/'delay-read').write_text('.65')
+                        try:page_reads.append(app.state('fake','inference')['server_wall_ns'])
+                        except Exception as error:page_errors.append(str(error));return
+                        poll_stop.wait(4.)
+                polling=threading.Thread(target=slow_page);polling.start()
+                def stop_page():poll_stop.set();polling.join(5)
+                self.addCleanup(stop_page)
             if normal32:
                 from robot_workbench.service import Application
                 app=Application.__new__(Application);app.lock=threading.RLock()
@@ -655,12 +692,24 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     time.sleep(.01)
                 stopped_submissions=stopped['actual_submission_count']
                 model_continue.set()
-            deadline=time.monotonic()+25
+            # Long captures finish control before the independent CPU video
+            # verification/export. Allow sealing time without relaxing motion.
+            deadline=time.monotonic()+(duration+600 if long_session else 25)
             while flow.current is None or flow.current.get('receipt')is None:
                 self.assertLess(time.monotonic(),deadline,dict(stage=flow.stage,message=flow.message,
                     recording_error=client.recording_error,current=flow.current.get('recording_error')if flow.current else None))
                 time.sleep(.02)
             run=flow.current;manifest=run['recorder'].manifest
+            if long_session:
+                stop_page();self.assertFalse(page_errors,page_errors)
+                self.assertEqual(run['receipt']['controller']['status'],'completed',run['receipt']['controller'])
+                self.assertGreater(len(page_reads),20)
+                self.assertGreater(len(model.requests),20)
+                self.assertGreater(run['runner'].snapshot()['elapsed_source_s'],duration-10.)
+                print('LONG_SESSION_RECEIPT '+json.dumps(dict(requested_s=duration,
+                    elapsed_s=run['runner'].snapshot()['elapsed_source_s'],model_calls=len(model.requests),
+                    page_reads=len(page_reads),image_shape=[height,width,3],recording_outcome=manifest['recording_outcome'],
+                    issues=manifest['issues'])),flush=True)
             self.assertEqual(run['receipt']['controller']['status'],'stopped'if stop_during_model or wam32 and not normal32 else'completed',run['receipt'])
             if normal32 and not operator_stop:
                 metrics=flow.snapshot()['inference']['metrics']

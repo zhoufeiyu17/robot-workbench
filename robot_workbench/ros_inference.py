@@ -41,27 +41,30 @@ def input_transforms(raw_images, prepared_images, *, black_head=False):
     return transforms
 
 
+def reconstruct_image(role,frame,rule):
+    from .inference_model import letterbox_rgb224
+    original=np.frombuffer(frame['rgb'],dtype=np.uint8).reshape(frame['height'],frame['width'],3)
+    if rule['kind']=='identity_rgb':actual=original
+    elif rule['kind']=='letterbox_rgb224':actual=letterbox_rgb224(original)
+    elif rule['kind']in('wam_bicubic256_wan_bf16','wam_zero_head_bicubic256_wan_bf16'):
+        from .wam import image_bits
+        if rule['kind']=='wam_zero_head_bicubic256_wan_bf16':
+            if role!='base_0_rgb':raise ValueError('WAM stall cover is only valid for the head camera')
+            original=np.zeros_like(original)
+        actual=image_bits(original)
+    else:raise ValueError('unknown model input transform')
+    if list(actual.shape)!=rule['shape'] or hashlib.sha256(actual.tobytes()).hexdigest()!=rule['sha256']:
+        raise ValueError('reconstructed model input differs from the actual input')
+    return actual
+
+
 def reconstruct_input(message, sources, *, timeout=0.):
     """Used by the recorder as well as tests; it never invokes a model."""
-    from .inference_model import letterbox_rgb224
     _, frames = sources.resolve_observation(message.observation, timeout=timeout)
     transforms = json_value(message.preprocessing_json); images={}
     if set(transforms) != set(frames): raise ValueError('model input transform roles differ')
     for role, frame in frames.items():
-        original=np.frombuffer(frame['rgb'],dtype=np.uint8).reshape(frame['height'],frame['width'],3)
-        rule=transforms[role]
-        if rule['kind']=='identity_rgb':actual=original
-        elif rule['kind']=='letterbox_rgb224':actual=letterbox_rgb224(original)
-        elif rule['kind']in('wam_bicubic256_wan_bf16','wam_zero_head_bicubic256_wan_bf16'):
-            from .wam import image_bits
-            if rule['kind']=='wam_zero_head_bicubic256_wan_bf16':
-                if role!='base_0_rgb':raise ValueError('WAM stall cover is only valid for the head camera')
-                original=np.zeros_like(original)
-            actual=image_bits(original)
-        else:raise ValueError('unknown model input transform')
-        if list(actual.shape)!=rule['shape'] or hashlib.sha256(actual.tobytes()).hexdigest()!=rule['sha256']:
-            raise ValueError('reconstructed model input differs from the actual input')
-        images[role]=actual
+        images[role]=reconstruct_image(role,frame,transforms[role])
     metadata=json_value(message.metadata_json);dtype=np.dtype(metadata.get('model_state_dtype','float64'))
     if dtype.kind!='f' or dtype.itemsize>8:raise ValueError('declared floating model state dtype required')
     state=np.asarray(message.model_state,dtype=dtype)

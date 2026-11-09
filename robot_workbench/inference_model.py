@@ -45,8 +45,12 @@ NOHISTORY_MODELS = {
 
 
 def native_runtime(bundle):
+    if not isinstance(bundle,dict):return False
+    schema=bundle.get('schema')
+    if schema in(MANIPULATION_SCHEMA,MIXED366_SCHEMA):return True
+    if not isinstance(schema,str)or not schema.startswith('workbench.wam.'):return False
     from .wam import SCHEMA as WAM_SCHEMA
-    return isinstance(bundle,dict) and bundle.get('schema')in(MANIPULATION_SCHEMA,MIXED366_SCHEMA,WAM_SCHEMA)
+    return schema==WAM_SCHEMA
 
 
 def validate_native_descriptor(bundle):
@@ -106,8 +110,9 @@ BASE566_PINS = dict(
 
 
 def model_family(model_id):
-    from .wam import is_model_id
-    if is_model_id(model_id):return 'wam'
+    if isinstance(model_id,str)and model_id.startswith('wam-'):
+        from .wam import is_model_id
+        if is_model_id(model_id):return 'wam'
     if model_id == BASE379_ID:return 'base379'
     if model_id in NOHISTORY_MODELS:return 'mixed366'
     if isinstance(model_id, str) and re.fullmatch(r'base566-epoch[0-9]{3,}-step[1-9][0-9]*', model_id):return 'base566'

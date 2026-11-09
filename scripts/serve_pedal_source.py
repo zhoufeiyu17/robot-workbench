@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 """One evdev reader publishing canonical ROS pedal events; never opens SDK/CAN."""
-import argparse,fcntl,hashlib,json,math,os,signal,sys,threading,time
+import argparse,errno,fcntl,hashlib,json,math,os,signal,sys,threading,time
 from pathlib import Path
 from types import SimpleNamespace
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+
+
+def read_reconnecting(reader,stopped,disconnected):
+    """Reopen the configured evdev path; keep the logical ROS source alive."""
+    while not stopped.is_set():
+        try:
+            reader()._run_evdev_backend()
+            return
+        except (OSError,RuntimeError)as error:
+            cause=error.__cause__ if isinstance(error,RuntimeError) else error
+            if not isinstance(cause,OSError)or cause.errno not in(errno.ENODEV,errno.ENOENT,errno.ENXIO,errno.EIO):raise
+            disconnected()
+            if stopped.wait(.25):return
 
 
 def main():
@@ -31,7 +44,7 @@ def main():
         coordinate_frame='operator',nominal_hz=float(profile['heartbeat_hz']),available=False,
         metadata=dict(continuous_window=True,reader_sha256=profile['reader_sha256'],confirm_presses=1,
             timestamp_basis='publisher_receipt; original_evdev_wall_time_in_occurred_at'))
-    stopped=threading.Event();mutex=threading.Lock();sequence=[0]
+    stopped=threading.Event();connected=threading.Event();mutex=threading.Lock();sequence=[0]
     def declare(available):
         source['available']=available;declared.publish(descriptor_message(ros,source))
         temporary=args.root/'source.tmp';temporary.write_text(json.dumps(source)+'\n');temporary.chmod(0o600);temporary.replace(args.root/'source.json')
@@ -42,7 +55,7 @@ def main():
             sequence[0]+=1;ref=StreamRef('pedal',instance,'host_wall',time.time_ns(),sequence[0])
             publisher.publish(ros.types.DataEvent(reference=ref.message(),run_id='',epoch=0,
                 event='source_tick'if command is None else'pedal_command',
-                payload_json=json_text({}if command is None else dict(command=int(command),occurred_at=occurred_at))))
+                payload_json=json_text(dict(connected=connected.is_set())if command is None else dict(command=int(command),occurred_at=occurred_at))))
     class Reader(PedalCommandPublisher):
         def __init__(self):
             # Reuse the pinned evdev loop and filter without its second ROS publisher.
@@ -51,13 +64,23 @@ def main():
             self.confirm_presses=1;self.confirm_window_s=defaults['confirm_window_s'].default;self.debounce_s=defaults['debounce_s'].default
             self.rclpy=SimpleNamespace(ok=lambda:not stopped.is_set(),spin_once=lambda *a,**k:None)
         def publish_command(self,cmd,*,occurred_at=None):publish(cmd,occurred_at=occurred_at)
-        def _mark_ready(self):declare(True)
+        @staticmethod
+        def _evdev_event_type(value):
+            # A held key's repeat after USB reconnect is not a new press.
+            return 'up'if value==0 else'down'if value==1 else''
+        def _mark_ready(self):
+            connected.set()
+            if not source['available']:declare(True)
+            publish()
+    def disconnected():
+        connected.clear();publish()
     def heartbeat():
         while not stopped.wait(1/profile['heartbeat_hz']):publish()
-    declare(False)
+    # The logical event source stays available while its USB connection waits.
+    declare(True)
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,lambda *_:stopped.set())
     thread=threading.Thread(target=heartbeat,daemon=True);thread.start()
-    try:Reader()._run_evdev_backend()
+    try:read_reconnecting(Reader,stopped,disconnected)
     finally:stopped.set();thread.join(2);declare(False);ros.close();lock.close()
 
 

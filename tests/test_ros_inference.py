@@ -197,9 +197,10 @@ class OwnerRosTests(unittest.TestCase):
             flow.lock=threading.RLock();flow.observation_lock=threading.Lock();flow.generation=1;flow.current=None
             flow.normal_modes=None;flow.ros_worker=None
             flow.event=None;flow._input_default_policy=policy;flow._sync_control_policy=lambda:None
-            flow.prepared=dict(binding_digest='binding',profile={'gripper':{'max_opening_mm':83.}},capture_instances=None)
+            flow.prepared=dict(binding_digest='binding',profile={'gripper':{'max_opening_mm':83.}},capture_instances=None,disabled_grippers=[])
             flow.observation_pairer=TimestampPairer();flow.cameras=SimpleNamespace()
-            flow._refresh_observation()
+            with patch.object(runtime,'control_inputs',side_effect=AssertionError('live ROS input must not wait on status RPC')):
+                flow._refresh_observation()
             self.assertNotIn('images',flow.cache['observation'],'workflow selection must not forward pixels')
             deadline=time.monotonic()+1
             while bridge.observation is None and time.monotonic()<deadline:time.sleep(.005)

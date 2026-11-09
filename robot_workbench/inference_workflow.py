@@ -22,6 +22,9 @@ from .sample_clock import clock_spec, sample_stamp, POLICY_DURATION_TOLERANCE_S
 from .wam import HORIZON as WAM_HORIZON
 
 CAMERAS = {'head':'base_0', 'left':'left_wrist_0', 'right':'right_wrist_0'}
+METRIC_EVENTS=frozenset(('prediction_received','prediction_discarded','prediction_requested',
+    'bounded_prediction_result','finite_chunk_prepared','bounded_prediction_prepared',
+    'finite_chunk_started','normal_model_segment_started','episode_started','episode_completed','episode_stopped'))
 
 
 class _Run(dict):
@@ -897,10 +900,14 @@ class InferenceWorkflow:
         if (run is None or message.run_id!=run['id']
                 or message.reference.source_instance_id!=run['owner'].runtime_nonce):return
         name=message.event[len('inference_'):]if message.event.startswith('inference_')else 'other_control_event'
-        value=json_value(message.payload_json)
         recovery=run.get('stall_recovery')
+        # Raw windows/feedback belong to the independent recorder. Decoding
+        # unused payloads on the image/state executor delays fresh inputs.
+        needed=name in METRIC_EVENTS or recovery is not None and name in('mode_transition','normal_model_segment_started','feedback')
+        if not needed and recovery is None:return
+        value=json_value(message.payload_json)if needed else {}
         if recovery is not None:recovery.event(name,value,message.reference.sequence)
-        if message.event.startswith('inference_')and name not in('prepare','finish'):self._metric_event(run,name,value)
+        if name in METRIC_EVENTS:self._metric_event(run,name,value)
 
     def _prepare_ros_model(self):
         from .ros_inference import RosModelWorker
@@ -943,19 +950,27 @@ class InferenceWorkflow:
     def _refresh_ros_observation(self,prepared,generation):
         from .ros_inputs import referenced_observation,observation_times
         from .observation_pairing import PairingPending
-        now,_,owner,_=self._feedback()
+        from .inference_owner import validate_gripper_feedback
         frame_streams={camera+'_rgb':camera for camera in CAMERAS.values()}
         frames,state,stamp,pairing=self.ros_inputs.paired(frame_streams,self.observation_pairer)
         feedback=self.ros_inputs.resolve(state)
+        latest,raw=self.ros_inputs.latest('state')
+        runtime=self.device.runtime
+        # The canonical state already carries the current Owner and epoch.
+        # A per-selection control RPC queues behind page/recording status reads
+        # and can stop fresh observations despite healthy incoming ROS samples.
+        if runtime is None or raw.get('runtime_nonce')!=runtime.nonce:
+            raise ValueError('ROS feedback belongs to another bound Owner')
+        owner={key:raw[key]for key in ('runtime_nonce','command_epoch')}
         if any(feedback.get(key)!=value for key,value in owner.items()):
             raise ValueError('paired ROS state belongs to a retired Owner epoch')
+        validate_gripper_feedback(tuple(prepared['disabled_grippers']),tuple(self.disabled_grippers),feedback)
         message=self.ros_inputs.observation(frames,state,run_id='',epoch=owner['command_epoch'],
             model_io_digest=self.client.conversion_id,source_time_ns=stamp,pairing=pairing)
         times=observation_times(message,feedback)
-        # Selection can observe samples newer than the earlier control RPC.
-        # Check at the current source time; never restamp the selected samples.
+        # Check original stamps against the live source clock, never restamp.
         now=(time.monotonic()if self.device.environment=='physical'else
-             max(now,self.ros_inputs.latest('state')[0].source_time_ns/1e9))
+             latest.source_time_ns/1e9)
         for rule,age,identity in [('G02',now-stamp/1e9,'ros_observation'),
                 ('G03',now-state.source_time_ns/1e9,'ros_paired_feedback'),
                 ('G04',(max(times)-min(times))/1e9,'ros_camera_span')]:
@@ -1069,8 +1084,19 @@ class InferenceWorkflow:
                 raise ValueError(f'固定研究轨迹起点偏差超过{DEFAULT_JOINT_TOLERANCE_RAD:g}rad，请先按已审阅的人工轨迹对齐')
         if self.action_chunks and not getattr(self.device.runtime,'remote_control_owner',False):
             raise ValueError('action chunks require the context-aware remote Owner execution path')
-        observation=self._observe(now,feedback,prepared['binding_digest'],owner_identity=owner_identity)
-        if observation is None:raise ValueError(self.cache_error or '等待新鲜三相机观测')
+        deadline=time.monotonic()+.5
+        while True:
+            observation=self._observe(now,feedback,prepared['binding_digest'],owner_identity=owner_identity)
+            if observation is not None:break
+            if time.monotonic()>=deadline:raise ValueError(self.cache_error or '等待新鲜三相机观测')
+            # Binding/status reads can outlive the observation selected just
+            # before them. Keep this one preview intent while fresh input arrives.
+            time.sleep(.005)
+            from .observation_pairing import PairingPending
+            try:self._refresh_observation()
+            except PairingPending:pass
+            now,feedback,owner_identity,limits=self._feedback()
+            if limits!=prepared['limits']:raise ValueError('设备限位已变化，请重新准备模型接入')
         captures={role:observation['frame_ids'][camera+'_rgb']['capture_instance_id'] for role,camera in CAMERAS.items()}
         source_clock=clock_spec(self.device.environment,source_clock_id=feedback.get('source_clock_id'))
         config=dict(model_id=self.selected_model_id,model_identity=deepcopy(self.model_identity),

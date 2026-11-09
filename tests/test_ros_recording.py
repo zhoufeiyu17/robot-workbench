@@ -146,6 +146,12 @@ class RosRecordingTests(unittest.TestCase):
     def test_model_input_cannot_seal_complete_without_its_exact_original_frame(self):
         self.record_run(False,missing_model_ref=True)
 
+    def test_delayed_model_input_uses_saved_originals_after_live_cache_eviction(self):
+        self.record_run(False,slow_preparation=True)
+
+    def test_saved_model_input_hash_is_verified_after_ingress_closes(self):
+        self.record_run(False,bad_model_hash=True)
+
     def test_failed_model_keeps_actual_input_error_result_and_original_sources(self):
         self.record_run(False,model_failure=True)
 
@@ -158,7 +164,7 @@ class RosRecordingTests(unittest.TestCase):
     def test_missing_pedal_tail_does_not_report_covered_cameras_as_missing(self):
         self.record_run(False,missing_pedal=True)
 
-    def record_run(self,use_run_adapter,*,failed_boundary=False,crash=False,depth=False,file_limit=False,include_metadata=False,missing_model_ref=False,model_failure=False,disconnect_client=False,replay_result=False,health_consumers=False,wam32=False,post_end_gap=False,stall=False,missing_pedal=False):
+    def record_run(self,use_run_adapter,*,failed_boundary=False,crash=False,depth=False,file_limit=False,include_metadata=False,missing_model_ref=False,model_failure=False,disconnect_client=False,replay_result=False,health_consumers=False,wam32=False,post_end_gap=False,stall=False,missing_pedal=False,slow_preparation=False,bad_model_hash=False):
         from sensor_msgs.msg import Image
         fixture=start_recording_fixture()
         nodes=[];closing=threading.Event();session=None;publisher_thread=None;model=None;capture=None;health_readers=[]
@@ -225,7 +231,9 @@ class RosRecordingTests(unittest.TestCase):
                     self.assertFalse(np.array_equal(prepared[1]['left_wrist_0_rgb'],prepared[1]['base_0_rgb']))
                 if model_failure:raise ValueError('synthetic model failure')
                 return dict(request_id=request['request_id'],action14=expected,audit={})
-            prepare=lambda obs:(wam.bf16_values(obs['device_state14']),wam.prepare_images(obs['images']))if wam32 else(np.asarray(obs['device_state14']),obs['images'])
+            def prepare(obs):
+                if slow_preparation:time.sleep(.8)
+                return (wam.bf16_values(obs['device_state14']),wam.prepare_images(obs['images']))if wam32 else(np.asarray(obs['device_state14']),obs['images'])
             model=RosModelWorker(infer,inputs,prepare,
                 predict,binding=binding)
             if stall:
@@ -448,6 +456,15 @@ class RosRecordingTests(unittest.TestCase):
                 resealed=_seal_capture(root,json.loads((root/'capture.json').read_text()))
                 self.assertEqual(resealed['recording_outcome'],'incomplete')
                 self.assertTrue(any('missing original head sample'in issue for issue in resealed['issues']),resealed['issues'])
+            if bad_model_hash:
+                from robot_workbench.recording_process import _seal_capture
+                path=root/'model_input.jsonl';rows=[json.loads(line)for line in path.read_text().splitlines()]
+                rules=json.loads(rows[0]['payload']['preprocessing_json']);rules[next(iter(rules))]['sha256']='0'*64
+                rows[0]['payload']['preprocessing_json']=json.dumps(rules)
+                path.write_text(''.join(json.dumps(row)+'\n'for row in rows))
+                resealed=_seal_capture(root,json.loads((root/'capture.json').read_text()))
+                self.assertEqual(resealed['recording_outcome'],'incomplete')
+                self.assertTrue(any('reconstructed model input differs'in issue for issue in resealed['issues']),resealed['issues'])
         finally:
             for reader in health_readers:reader.close()
             # A disconnected producer's done flag is not writer exit. Reattach

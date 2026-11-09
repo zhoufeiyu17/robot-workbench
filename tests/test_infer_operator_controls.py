@@ -7,6 +7,27 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 
 
+class PedalReconnectTests(unittest.TestCase):
+    def test_same_configured_reader_reopens_after_unplug_without_restarting_source(self):
+        import errno
+        from scripts.serve_pedal_source import read_reconnecting
+        stopped=threading.Event();attempts=[];disconnected=[]
+        class Reader:
+            def _run_evdev_backend(self):
+                attempts.append(len(attempts)+1)
+                if len(attempts)==1:raise OSError(errno.ENODEV,'unplugged')
+                if len(attempts)==2:
+                    try:raise FileNotFoundError(errno.ENOENT,'waiting for same by-id path')
+                    except OSError as error:raise RuntimeError('open failed')from error
+                stopped.set()
+        read_reconnecting(Reader,stopped,lambda:disconnected.append(True))
+        self.assertEqual(attempts,[1,2,3]);self.assertEqual(len(disconnected),2)
+        stopped.clear()
+        class Denied:
+            def _run_evdev_backend(self):raise PermissionError(errno.EACCES,'configuration error')
+        with self.assertRaises(PermissionError):read_reconnecting(Denied,stopped,lambda:None)
+
+
 class OperatorControlTests(unittest.TestCase):
     def fixture(self):
         from test_normal_complete_segment import CompleteNormalTests
@@ -125,14 +146,21 @@ class PedalSourceTests(unittest.TestCase):
         import hashlib
         with tempfile.TemporaryDirectory(prefix='pedal-cpu-')as folder:
             root=Path(folder);read_fd,write_fd=os.pipe();self.addCleanup(os.close,write_fd)
+            next_read,next_write=os.pipe();self.addCleanup(os.close,next_write)
+            device_path=root/'same-pedal'
             profile=dict(device_id='pedal_cpu',data_plane=dict(schema='workbench.ros-data-plane.v1',namespace='/operator_pedal_cpu',domain_id=127),
-                device='/proc/self/fd/'+str(read_fd),reader_root=str(reader_root),
+                device=str(device_path),reader_root=str(reader_root),
                 reader_sha256=hashlib.sha256((reader_root/'prometheus/input/pedal_publisher.py').read_bytes()).hexdigest(),rate_hz=100.,heartbeat_hz=10.)
             config=root/'config.json';config.write_text(json.dumps(profile));source_root=root/'source'
+            entry=root/'reader-entry.py'
+            entry.write_text('import signal,errno,runpy\ndef unplug(*args):raise OSError(errno.ENODEV,"synthetic evdev unplug")\nsignal.signal(signal.SIGUSR1,unplug)\nrunpy.run_path('+repr(str(ROOT/'scripts/serve_pedal_source.py'))+',run_name="__main__")\n')
             with(root/'source.log').open('w')as log:
-                process=subprocess.Popen([sys.executable,'-u','-B',str(ROOT/'scripts/serve_pedal_source.py'),'--profile',str(config),'--root',str(source_root)],pass_fds=(read_fd,),stdout=log,stderr=log)
-            os.close(read_fd)
-            self.addCleanup(lambda:process.poll()is None and process.terminate())
+                process=subprocess.Popen([sys.executable,'-u','-B',str(entry),'--profile',str(config),'--root',str(source_root)],pass_fds=(read_fd,next_read),stdout=log,stderr=log)
+            os.close(read_fd);os.close(next_read)
+            def stop_reader():
+                if process.poll()is None:process.terminate()
+                process.wait(5)
+            self.addCleanup(stop_reader)
             deadline=time.monotonic()+8
             while not(source_root/'source.json').exists()or not json.loads((source_root/'source.json').read_text())['available']:
                 self.assertIsNone(process.poll(),(root/'source.log').read_text());self.assertLess(time.monotonic(),deadline);time.sleep(.03)
@@ -146,7 +174,7 @@ class PedalSourceTests(unittest.TestCase):
                 operator_controls=dict(focus_timeout_s=8.,event_max_age_s=1.,double_press_window_s=.5))
             device.workflows['inference']=flow
             def operator(dev,workflow,action,body):
-                calls.append((action,body));mode[0]='TEACH'if action=='inference_teach'else'HOLD'
+                calls.append((action,body));mode[0]='TEACH'if action=='inference_teach'and mode[0]!='TEACH'else'HOLD'
                 return {'accepted':True}
             app._operator_action=operator
             # Physical deployments can expose ROS beyond loopback. The consumer
@@ -155,6 +183,11 @@ class PedalSourceTests(unittest.TestCase):
             def close_consumer():
                 flow.operator_input_closed.set();flow.operator_input_thread.join(3)
             self.addCleanup(close_consumer)
+            deadline=time.monotonic()+5
+            while getattr(flow,'operator_input_status',{}).get('state')!='unavailable':
+                self.assertIsNone(process.poll());self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+            self.assertTrue(flow.operator_input_thread.is_alive(),'a missing USB device must not retire its consumer')
+            device_path.symlink_to('/proc/self/fd/'+str(read_fd))
             deadline=time.monotonic()+5
             while getattr(flow,'operator_input_status',{}).get('state')!='ready':
                 self.assertLess(time.monotonic(),deadline,getattr(flow,'operator_input_status',{}));time.sleep(.02)
@@ -169,9 +202,9 @@ class PedalSourceTests(unittest.TestCase):
             session.bind(run_id='pedal-record',business_kind='inference',policy_hash='a'*64,
                 execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
             session.start()
-            def key(code,age=0):
+            def key(code,age=0,values=(1,0)):
                 stamp=time.time()-age;sec=int(stamp);usec=int((stamp-sec)*1e6)
-                os.write(write_fd,struct.pack('llHHI',sec,usec,1,code,1)+struct.pack('llHHI',sec,usec,1,code,0))
+                os.write(write_fd,b''.join(struct.pack('llHHI',sec,usec,1,code,value)for value in values))
             key(2);time.sleep(.3);self.assertEqual(calls,[],'unfocused pedal must not control the device')
             focus=dict(environment='fake',business='inference',request_id='focus-1',runtime_nonce='cpu-owner',epoch=1,client_id='page',active=True)
             app.action('inference_focus',focus)
@@ -209,6 +242,22 @@ class PedalSourceTests(unittest.TestCase):
             time.sleep(.3);key(2,age=3);time.sleep(.3);self.assertEqual(len(calls),count,'old physical events must not trigger control')
             app.action('inference_focus',dict(focus,request_id='blur',active=False));time.sleep(.3);key(4);time.sleep(.2)
             self.assertEqual(len(calls),count)
+            import signal
+            original_source=deepcopy(flow.operator_pedal_source)
+            device_path.unlink();process.send_signal(signal.SIGUSR1)
+            deadline=time.monotonic()+3
+            while flow.operator_input_status.get('state')!='unavailable':
+                self.assertIsNone(process.poll());self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            device_path.symlink_to('/proc/self/fd/'+str(next_read));write_fd=next_write
+            deadline=time.monotonic()+3
+            while flow.operator_input_status.get('state')!='ready':
+                self.assertIsNone(process.poll());self.assertLess(time.monotonic(),deadline,flow.operator_input_status);time.sleep(.01)
+            self.assertEqual(flow.operator_pedal_source,original_source,'USB reconnect must not replace the logical source or require reprepare')
+            app.action('inference_focus',dict(focus,request_id='focus-after-usb',active=True))
+            key(3,values=(2,));time.sleep(.3);self.assertEqual(len(calls),count,'held-key repeats after reconnect cannot synthesize a new command')
+            key(3);time.sleep(.3);self.assertEqual(mode[0],'TEACH')
+            key(3);time.sleep(.3);self.assertEqual(mode[0],'HOLD')
+            self.assertEqual(len(calls),count+2);count=len(calls)
             session.finish({},dict(status='completed'),source_endpoints={'pedal':dict(source_clock_id='host_wall',source_time=time.time())})
             self.assertTrue(session.done.wait(10),session.snapshot())
             manifest=json.loads((session.directory/'manifest.json').read_text())

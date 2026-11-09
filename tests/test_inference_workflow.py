@@ -107,6 +107,19 @@ class InferenceWorkflowTests(unittest.TestCase):
             consume.assert_called_once_with(message)
         flow.current=None
 
+    def test_input_executor_skips_unused_raw_payloads_but_keeps_recovery_sequences(self):
+        flow=self.workflow;run=dict(id='run',owner=self.device.runtime.owner)
+        ref=SimpleNamespace(source_instance_id=self.device.runtime.nonce,sequence=1)
+        message=SimpleNamespace(run_id='run',reference=ref,event='inference_native_window',payload_json='must not decode')
+        with patch.object(flow,'current',run),patch.object(flow,'_metric_event')as metric:
+            flow._ros_control_event(message);metric.assert_not_called()
+            recovery=Mock();run['stall_recovery']=recovery
+            flow._ros_control_event(message);recovery.event.assert_called_once_with('native_window',{},1)
+            message.event='inference_mode_transition';message.payload_json='{"target":"TEACH"}';ref.sequence=2
+            flow._ros_control_event(message);recovery.event.assert_called_with('mode_transition',{'target':'TEACH'},2)
+            message.event='inference_prediction_requested';message.payload_json='{}';ref.sequence=3
+            flow._ros_control_event(message);metric.assert_called_once_with(run,'prediction_requested',{})
+
     def test_page_permission_queries_skip_unrelated_run_snapshot_copies(self):
         from robot_workbench.service import CALIBRATION_TOOLS,COLLECTION_TOOLS,INFERENCE_TOOLS,HISTORY_ACTIONS
         actions=('cancel','mesh','select_result','install','generate_plan','execute',
@@ -207,6 +220,47 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.device.environment='physical';self.device.runtime.control_inputs=lambda **kwargs:inputs
         flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.ros_inputs=SimpleNamespace(latest=lambda stream:(reference,raw))
         with self.assertRaisesRegex(ValueError,'G03'):flow._feedback()
+
+    def test_live_ros_selection_does_not_wait_for_status_rpc_and_keeps_source_guards(self):
+        from robot_workbench.ros_data import StreamRef
+        self.prepare();flow=self.workflow
+        feedback=dict(self.feedback,command_epoch=3)
+        state=StreamRef('state','fixture-owner','test-clock',round(self.now*1e9),1)
+        frames={camera+'_rgb':StreamRef(camera,'capture-1','test-clock',round((self.now-.01)*1e9),1)for camera in CAMERAS.values()}
+        sources={ref.stream_id:dict(kind='image',source_instance_id=ref.source_instance_id,source_clock_id=ref.source_clock_id,
+            metadata={'serial':self.binding['camera_serials'][role]})for role,ref in zip(CAMERAS,frames.values())}
+        newest=[state,feedback.copy()];published=[]
+        def observation(frames,state,**fields):
+            return SimpleNamespace(state=state,frames=list(frames.values()),camera_roles=list(frames),**fields)
+        flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.observation_pairer=None
+        flow.ros_inputs=SimpleNamespace(sources=sources,latest=lambda stream:newest,
+            paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),{}),
+            resolve=lambda ref:feedback,observation=observation)
+        flow.ros_observations=SimpleNamespace(publish=published.append)
+        with patch.object(self.device.runtime,'control_inputs',side_effect=AssertionError('status RPC is stalled')):
+            flow._refresh_observation()
+            self.assertEqual(published[-1].epoch,3,'the canonical state epoch can advance before the page snapshot')
+            self.assertEqual(flow.cache['owner']['command_epoch'],3)
+            newest[0]=StreamRef('state','fixture-owner','test-clock',round((self.now+.2)*1e9),2)
+            with self.assertRaisesRegex(Exception,'G03'):flow._refresh_observation()
+            newest[0]=state;newest[1]['command_epoch']=4
+            with self.assertRaisesRegex(ValueError,'retired Owner epoch'):flow._refresh_observation()
+            newest[1]['runtime_nonce']='foreign-owner'
+            with self.assertRaisesRegex(ValueError,'another bound Owner'):flow._refresh_observation()
+        self.assertEqual(len(published),1,'invalid sources must not publish a substitute observation')
+
+    def test_preview_keeps_one_intent_when_binding_reads_outlive_first_observation(self):
+        self.prepare();observe=self.workflow._observe;calls=[]
+        def raced(*args,**kwargs):
+            if kwargs.get('owner_identity')is not None:
+                calls.append(True)
+                if len(calls)==1:return None
+            return observe(*args,**kwargs)
+        with patch.object(self.workflow,'_observe',side_effect=raced):
+            review=self.workflow.preview_episode(seed=7,duration_s=600.)
+        self.assertEqual(review['preview']['duration_s'],600.)
+        self.assertEqual(len(self.submitted),1,'a freshness wait cannot submit or replay a second preview')
+        self.assertGreater(len(calls),1)
 
     def test_finite_metrics_distinguish_returned_prepared_and_native_admitted(self):
         run={'config':{'finite_chunk_count':3},'metrics':dict(queries=0,returned_predictions=0,

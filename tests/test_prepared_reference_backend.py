@@ -39,7 +39,7 @@ class Base:
     def __init__(self,config):
         self.config=config;config.gripper_width_m=.082;config.teach_kd_scale=.1
         self.sides=('left','right');self._controllers={s:Controller()for s in self.sides}
-        self._controller_configs={s:NS(default_kp=np.array([80,70,70,30,30,20]),default_kd=np.array([2,2,2,1,1,.7]),interpolation_method='linear')for s in self.sides}
+        self._controller_configs={s:NS(default_kp=np.array([80,70,70,30,30,20]),default_kd=np.array([2,2,2,1,1,.7]),default_gripper_kp=5.,default_gripper_kd=.2,interpolation_method='linear')for s in self.sides}
         self._arx5=NS(JointState=State,Gain=Gain)
     def get_joint_position_limits(self,side):return np.asarray([[-3,3]]*6+[[0,.082]])
     def _require_connected(self):pass
@@ -164,22 +164,24 @@ class PreparedBackendTests(unittest.TestCase):
         samples['left'].p[0]=float('nan')
         with self.assertRaisesRegex(ValueError,'nonfinite calibration feedback'):backend.read_calibration_state()
 
-    def test_normal_teach_gain_write_preserves_jaws_and_refuses_invalid_values(self):
+    def test_normal_teach_gain_write_releases_jaws_and_refuses_invalid_values(self):
         from copy import deepcopy
         from robot_workbench.target_interpreter import gains
         from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRevoked
         module=ModuleType('arx_env.backends.arx5_backend');module.Arx5Backend=Base;module.Arx5BackendConfig=lambda **kw:NS(**kw)
         with patch.dict(sys.modules,{'arx_env.backends.arx5_backend':module}):
             b=hardware_backend(prepared_reference_enabled=True,target_interpreter_profile='normal_X5',native_reference_api='preserve_reference_v1')
-        current={s:dict(kp=gains('normal_X5',s)[0],kd=gains('normal_X5',s)[1],gripper_kp=5.,gripper_kd=.2)for s in('left','right')}
+        current={s:dict(kp=gains('normal_X5',s)[0],kd=gains('normal_X5',s)[1],gripper_kp=5.,gripper_kd=float(np.float32(.2)))for s in('left','right')}
         b.read_execution_output=lambda:dict(gains=deepcopy(current));b.command_guard=lambda:None
         written={}
         for side,c in b._controllers.items():
             c.set_gain=lambda g,side=side:written.__setitem__(side,dict(kp=g.kp().tolist(),kd=g.kd().tolist(),gripper_kp=getattr(g,'gripper_kp',0.),gripper_kd=getattr(g,'gripper_kd',0.)))
+        self.assertTrue(b.set_execution_gains(current)['returned'],'native float32 maximum gains must remain admissible')
         target=deepcopy(current)
-        for row in target.values():row['kp']=[0.]*6;row['kd']=[x*.1 for x in row['kd']]
+        for row in target.values():
+            row['kp']=[0.]*6;row['kd']=[x*.1 for x in row['kd']];row['gripper_kp']=row['gripper_kd']=0.
         self.assertTrue(b.set_execution_gains(target)['returned']);self.assertEqual(written,target)
-        for bad in (dict(target['left'],gripper_kp=0.),dict(target['left'],kp=[1000.]*6),
+        for bad in (dict(target['left'],gripper_kp=-.1),dict(target['left'],gripper_kp=5.1),dict(target['left'],gripper_kd=.21),dict(target['left'],kp=[1000.]*6),
                     dict(target['left'],kp=['bad']*6),dict(target['left'],kd=[True]*6)):
             written.clear()
             with self.assertRaises(ReferenceWindowRejected):b.set_execution_gains(dict(target,left=bad))
