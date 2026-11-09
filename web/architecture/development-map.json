@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 413,
-  "updated_at": "2026-11-09T11:13:46.080589+00:00",
+  "revision": 415,
+  "updated_at": "2026-11-09T11:23:08.567866+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -463,10 +463,10 @@
       "name": "运维事务与维护流程",
       "phase": "P2",
       "state": "implemented",
-      "note": "Public exit_workbench owns ordered stop/home/release/seal/service exit. exit_environment only composes collector Web restoration. Verified current exit result closes the manager normally after delivery; historic or unknown jobs cannot self-close. CPU process/HTTP and DOM checks passed.",
-      "next": "Publish manager/UI independently, then validate explicit full exit with operator; current control session must remain intact.",
+      "note": "Public exit verified after explicitly authorized protected retirement: all registered service subprocesses and manager exited; recorder sealed and original incomplete outcome preserved. No reconnect or successor startup. This does not qualify normal home/SDK-close exit.",
+      "next": "Fix HOLD reference expiry before reconnect; qualify normal-home exit in a later healthy session.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T10:47:43.386657+00:00",
+      "updated_at": "2026-11-09T11:23:07.753208+00:00",
       "files": [
         "robot_workbench/operations.py",
         "robot_workbench/management.py",
@@ -474,9 +474,9 @@
         "robot_workbench/sdk_quiesce.py"
       ],
       "evidence": {
-        "path": "tests/test_environment_exit.py",
-        "sha256": "1c3cdbf026fc08a1ad5101b47cd9312cdc2491bf73aaccde37731961ef81f9ea",
-        "matches_file": false
+        "path": ".evidence/exit-lifecycle-acceptance/result.json",
+        "sha256": "594f497d2e7067fe8e259c4454e2e56d60f984a59fe5772f5f8a37ffde4f1938",
+        "matches_file": true
       },
       "fingerprint": "2c0949ed4c7f196c219f694af11dc107b6d07f4c110fa501edd33185cc663886",
       "verified_fingerprint": null
@@ -3938,20 +3938,6 @@
   },
   "changes": [
     {
-      "at": "2026-11-07T04:25:46.780464+00:00",
-      "kind": "sc",
-      "ids": [
-        "SC05",
-        "SC06",
-        "SC08",
-        "SC09",
-        "SC10",
-        "SC11"
-      ],
-      "state": "implemented",
-      "note": "已补ARX13实际WAM有界输入/模型/轨迹/Stop/录制证据；仍按各SC完整验收集合保留其他业务和发布边界，不把单一WAM用例提升成全部SC通过。"
-    },
-    {
       "at": "2026-11-07T04:36:53.128137+00:00",
       "kind": "file",
       "ids": [
@@ -4857,9 +4843,18 @@
       ],
       "state": "implemented",
       "note": "Exit preflight rejects a disconnected SDK with an unretired runtime or unconfirmed release receipt; both standalone and composed exits share this boundary. 27 CPU cases passed."
+    },
+    {
+      "at": "2026-11-09T11:23:07.753326+00:00",
+      "kind": "domain",
+      "ids": [
+        "lifecycle-operation"
+      ],
+      "state": "implemented",
+      "note": "Public exit verified after explicitly authorized protected retirement: all registered service subprocesses and manager exited; recorder sealed and original incomplete outcome preserved. No reconnect or successor startup. This does not qualify normal home/SDK-close exit."
     }
   ],
   "unmapped_files": [],
-  "source_head": "f75aaf8a16eba98bd268d9140af7bac1105a3c18",
+  "source_head": "3f751aa841eb8564d0d459d5bc569f588672daeb",
   "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.4955d8784f3f"
 }
