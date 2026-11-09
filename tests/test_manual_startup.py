@@ -44,15 +44,16 @@ class ManualStartupTests(unittest.TestCase):
 
     def test_auto_connect_defers_collection_shutdown_to_the_existing_reclaim_operation(self):
         with TemporaryDirectory()as folder:
-            profile=Path(folder)/'manager.json';profile.write_text(json.dumps(dict(services={'control_owner':{}},
+            profile=Path(folder)/'manager.json';profile.write_text(json.dumps(dict(services={'control_owner':{},'cameras':{'unit':'registered-images.service'}},
                 control_lifecycle='managed',collection_handoff={'registered':True},device_id='cpu')))
-            config=dict(manager_profile=str(profile),connect_control=True,units=['robot-workbench-ui.service'],url='http://127.0.0.1:18868')
+            config=dict(manager_profile=str(profile),connect_control=True,units=['registered-images.service','robot-workbench-ui.service'],url='http://127.0.0.1:18868')
             state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':True})
-            with patch('scripts.start_registered_workbench.subprocess.run'),patch('scripts.start_registered_workbench.handoff_collection')as handoff,\
+            with patch('scripts.start_registered_workbench.subprocess.run')as service,patch('scripts.start_registered_workbench.handoff_collection')as handoff,\
                     patch('scripts.start_registered_workbench.acquire_control',return_value=dict(sdk_acquisitions=1,reused=False,job_id='takeover'))as acquire,\
                     patch('scripts.start_registered_workbench.http_json',side_effect=[state,state,{'workflow':{'manual_queue':{'available':True}}}]):
                 result=start(config)
             handoff.assert_not_called();acquire.assert_called_once_with(config);self.assertEqual(result['sdk_acquisitions'],1)
+            self.assertEqual([call.args[0][-1]for call in service.call_args_list],['robot-workbench-ui.service'],'camera opens only inside the subsequent verified handoff')
 
     def test_idle_collection_web_handoff_precedes_start_and_never_stops_active_collection(self):
         with TemporaryDirectory() as folder:

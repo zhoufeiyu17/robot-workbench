@@ -125,6 +125,12 @@ for(const workbench of [{state:'running',running:true},{state:'unknown',running:
   h.api.elements.profile.value='physical';h.api.elements.profile.fire('change');h.api.elements.check.fire('click');await settle();
   assert.equal(h.requests.length,1,'both profile resolution and dropdown navigation reject live-unreachable or unconfirmed shutdown');h.api.destroy();
 }
+{
+  const h=harness(),state=fixture();state.runtime.connected=true;
+  state.operations.connect_control={allowed:false,disabled_reason:'设备控制已经接入'};
+  h.reply(0,state);await settle();assert.equal(h.connect.textContent,'设备已接入');
+  assert.equal(h.connect.disabled,true);assert.match(h.connect.title,/已经接入/);h.api.destroy();
+}
 for(const completed of [true,false]){
   const h=harness();h.reply(0,fixture());await settle();h.exit.fire('click');
   assert.equal(h.api.elements.dialog.open,true);assert.equal(h.requests.length,1);

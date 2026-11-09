@@ -250,6 +250,35 @@ class StartupTest(unittest.TestCase):
                 with self.assertRaises(d.Blocked):d.handoff_collection(pin,'arx13',stop_active=True)
                 mutation.assert_not_called()
 
+    def test_handoff_releases_independent_camera_even_when_collector_web_is_stopped(self):
+        camera=dict(unit='collector-images@bench.service',files={'/cpu/camera.unit':'a'*64},
+            state_path='/cpu/camera.json',cameras={'head':'fixture-camera'})
+        pin=dict(unit='collector-web.service',files={'/cpu/web.unit':'b'*64},
+            status_url='http://127.0.0.1:8080/api/status',camera_owner=camera)
+        inactive=dict(ActiveState='inactive',MainPID='0',ControlPID='0',ControlGroup='')
+        active=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-camera-fixture')
+        owner=dict(pid=7,instance='source',profile={'cameras':camera['cameras']})
+        for web_running in (False,True):
+            with self.subTest(web_running=web_running):
+                def unit(value):return active if value['unit']==camera['unit']or web_running else inactive
+                idle=dict(robot_vin='cpu',manager_alive=False,orphan_alive=False,teleop=None,collect_status='idle')
+                with patch.object(d,'verify_unit',side_effect=unit),patch.object(d,'unit_state',return_value=inactive),\
+                        patch.object(d,'http_json',return_value=idle),patch('robot_workbench.camera_owner.read_owner',return_value=owner),\
+                        patch.object(d.subprocess,'run')as stop:
+                    result=d.handoff_collection(pin,'cpu')
+                self.assertTrue(result['camera_owner']['exit_verified'])
+                self.assertEqual([x.args[0][-1]for x in stop.call_args_list],
+                    ([pin['unit']]if web_running else[])+[camera['unit']])
+        with patch.object(d,'verify_unit',side_effect=lambda value:active if value['unit']==camera['unit']else inactive),\
+                patch('robot_workbench.camera_owner.read_owner',return_value=dict(owner,pid=8)),patch.object(d.subprocess,'run')as stop:
+            with self.assertRaisesRegex(d.Blocked,'identity/profile'):d.handoff_collection(pin,'cpu')
+            stop.assert_not_called()
+        with patch.object(d,'verify_unit',side_effect=lambda value:active if value['unit']==camera['unit']else inactive),\
+                patch('robot_workbench.camera_owner.read_owner',return_value=owner),patch.object(d,'unit_state',return_value=active),\
+                patch.object(d.time,'monotonic',side_effect=[0.,0.,1.]),patch.object(d.time,'sleep'),patch.object(d.subprocess,'run')as stop:
+            with self.assertRaisesRegex(d.Blocked,'camera exit unconfirmed'):d.handoff_collection(pin,'cpu',timeout=.1)
+            self.assertEqual(stop.call_count,1)
+
     def test_stopped_collection_without_episode_has_terminal_components_not_safe_result(self):
         pin=dict(unit='collector.service',files={'/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
         unit=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-cpu-fixture')

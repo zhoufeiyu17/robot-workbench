@@ -125,15 +125,63 @@ def collection_stopped(value):
         and components['robot']=='stopped'and all(state in ('waiting','stopped','disabled')for state in components.values()))
 
 
+def validate_collection_camera(pin):
+    if (not isinstance(pin,dict) or set(pin)!={'unit','files','state_path','cameras'}
+            or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(pin.get('unit')))
+            or not isinstance(pin['files'],dict)or not pin['files']
+            or any(not Path(p).is_absolute()or not re.fullmatch('[a-f0-9]{64}',str(h))for p,h in pin['files'].items())
+            or not isinstance(pin['state_path'],str)or not Path(pin['state_path']).is_absolute()or '..'in Path(pin['state_path']).parts
+            or not isinstance(pin['cameras'],dict)or not pin['cameras']
+            or any(not isinstance(k,str)or not k or not isinstance(v,str)or not v for k,v in pin['cameras'].items())):
+        raise ValueError('registered collection camera unit/state/profile required')
+
+
+def stop_collection_camera(pin, *, progress, timeout):
+    """Only after collector shutdown: normally stop its explicitly registered camera owner."""
+    validate_collection_camera(pin)
+    before=verify_unit(pin)
+    group=before.get('ControlGroup')
+    require(not group or group.startswith('/')and '..'not in Path(group).parts,'camera cgroup identity invalid')
+    processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'if group else None
+    def empty():return processes is None or not processes.exists()or not processes.read_text().strip()
+    if before['ActiveState']=='inactive'and before['MainPID']=='0':
+        require(empty(),'collection camera children remain; no new camera owner')
+        return dict(unit=pin['unit'],exit_verified=True,stop_requested=False)
+    require(before['ActiveState']=='active'and before['ControlPID']=='0'and before.get('SendSIGKILL')=='no'and bool(group),
+            'collection camera state or graceful-stop policy is uncertain')
+    from robot_workbench.camera_owner import read_owner
+    owner=read_owner(pin['state_path'])
+    require(owner['pid']==int(before['MainPID'])and owner['profile']['cameras']==pin['cameras'],
+            'collection camera owner identity/profile differs; nothing stopped')
+    require(verify_unit(pin)['MainPID']==before['MainPID'],'collection camera owner changed before stop')
+    progress('stopping_collection_cameras')
+    subprocess.run(['systemctl','--user','stop','--no-block',pin['unit']],check=True,timeout=10)
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        progress('waiting_collection_cameras_exit')
+        after=unit_state(pin['unit'])
+        if after['MainPID']=='0'and after['ActiveState']=='inactive'and empty():
+            return dict(unit=pin['unit'],source_instance_id=owner['instance'],previous_pid=owner['pid'],exit_verified=True,stop_requested=True)
+        time.sleep(.1)
+    raise Blocked('collection camera exit unconfirmed; no force kill or new camera owner')
+
+
 def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,**k:None, timeout=240):
     """Use the registered collection shutdown; never kill a PID or edit its environment."""
-    require(isinstance(pin,dict) and set(pin)=={'unit','files','status_url'},'registered collection unit/files/status URL required')
+    require(isinstance(pin,dict) and set(pin)in ({'unit','files','status_url'},{'unit','files','status_url','camera_owner'}),'registered collection unit/files/status URL required')
+    if 'camera_owner'in pin:validate_collection_camera(pin['camera_owner'])
     url=urlsplit(pin['status_url'])
     require(url.scheme=='http' and url.hostname=='127.0.0.1' and url.port and url.path=='/api/status'
             and not url.query and not url.fragment and not url.username,'collection status must be the registered loopback API')
     before=verify_unit({k:pin[k]for k in ('unit','files')})
     if before['ActiveState']=='inactive' and before['MainPID']=='0':
-        return dict(unit=pin['unit'],status='already_stopped',exit_verified=True,stop_requested=False)
+        group=before.get('ControlGroup')
+        if group:
+            require(group.startswith('/')and '..'not in Path(group).parts,'collection cgroup identity missing')
+            processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'
+            require(not processes.exists()or not processes.read_text().strip(),'collection children remain; no camera handoff')
+        camera=stop_collection_camera(pin['camera_owner'],progress=progress,timeout=timeout)if 'camera_owner'in pin else None
+        return dict(unit=pin['unit'],status='already_stopped',exit_verified=True,stop_requested=False,camera_owner=camera)
     require(before['ActiveState']=='active' and before['ControlPID']=='0','collection service state is uncertain')
     require(before.get('SendSIGKILL')=='no','collection Web stop must not force-kill surviving hardware children')
     def observe():
@@ -174,7 +222,8 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
     require(isinstance(group,str)and group.startswith('/')and'..'not in Path(group).parts,'collection cgroup identity missing')
     processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'
     require(not processes.exists()or not processes.read_text().strip(),'collection children remain; no SDK acquire')
-    return dict(unit=pin['unit'],status='stopped',exit_verified=True,stop_requested=requested,
+    camera=stop_collection_camera(pin['camera_owner'],progress=progress,timeout=timeout)if 'camera_owner'in pin else None
+    return dict(unit=pin['unit'],status='stopped',exit_verified=True,stop_requested=requested,camera_owner=camera,
                 collection_session_id=session,normal_hardware_stop=(value.get('collection')or{}).get('safe_ok'),
                 previous_collection_phase=(value.get('collection')or{}).get('phase'),
                 previous_collection_error=(value.get('collection')or{}).get('error'),
@@ -235,7 +284,7 @@ def dependencies(path, root, files):
     def walk(value, key=''):
         if key == 'backend_attempt_pointer':
             return  # Launcher-owned current-attempt receipt changes after every restart.
-        if any(word in key.lower() for word in ('token', 'secret', 'password', 'descriptor', 'state_root', 'output', 'identity_path')):
+        if any(word in key.lower() for word in ('token', 'secret', 'password', 'descriptor', 'state_root', 'state_path', 'output', 'identity_path')):
             return
         if isinstance(value, dict):
             for k, v in value.items():
@@ -634,9 +683,14 @@ def start(m, managed, *, handoff=False, timeout=40):
     if before['control_owner']['state']=='stopped':old_owner_files(m)  # Validate before any collection handoff.
     for conflict in m['conflicts']:
         row=unit_state(conflict['unit'])
-        if row['ActiveState']=='inactive' and row['MainPID']=='0':continue
-        require(row['ActiveState']=='active' and row['ControlPID']=='0', 'collection service state is uncertain')
-        require(handoff, 'collection webpage active; stop collection then explicitly use --handoff-collection')
+        if row['ActiveState']=='inactive' and row['MainPID']=='0':
+            if 'camera_owner'not in conflict:continue
+            camera=unit_state(conflict['camera_owner']['unit'])
+            if camera['ActiveState']=='inactive'and camera['MainPID']=='0':continue
+            require(camera['ActiveState']=='active'and camera['ControlPID']=='0','collection camera service state is uncertain')
+        else:
+            require(row['ActiveState']=='active' and row['ControlPID']=='0', 'collection service state is uncertain')
+        require(handoff, 'collection services active; stop collection then explicitly use --handoff-collection')
         require(not live or live['runtime']['connected'] is False and live['runtime']['state']=='DISCONNECTED', 'control is connected/faulted; do not change collection ownership')
         handoffs.append(handoff_collection(conflict,m['device_id'],stop_active=True))
         paused.append(conflict['unit']);actions.append('paused '+conflict['unit'])

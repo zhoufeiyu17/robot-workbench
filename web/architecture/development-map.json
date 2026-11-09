@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 419,
-  "updated_at": "2026-11-09T12:03:19.687185+00:00",
+  "revision": 422,
+  "updated_at": "2026-11-09T12:53:21.987056+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -454,7 +454,7 @@
         "sha256": "4388b97d65185b0ee65437d8e7519490344706d9d4d60a6dd7023892fd0c7a02",
         "matches_file": true
       },
-      "fingerprint": "80c9f6e14cb37ae5bd71f76bef7c62236bf2653fd93d477bca53210ad535e768",
+      "fingerprint": "41acf82cafcf59b134f225a0a5fcdc2cbd5fe1ef31aa78204c04618b473d9cc5",
       "verified_fingerprint": "0c798424b444ef37849a3ff76030d99a5480b087f267ee24486799876082212e"
     },
     {
@@ -463,10 +463,10 @@
       "name": "运维事务与维护流程",
       "phase": "P2",
       "state": "implemented",
-      "note": "Normal low-speed home, SDK close, recorder sealing, all owned-service exits and manager-last shutdown passed. Full cold desktop startup then returned ready with cameras, manual planning, model, recorder and pedal bound.",
-      "next": "Keep prepared HOLD for user pedal validation; no automatic model trajectory.",
+      "note": "Independent collection camera ownership is part of the configured handoff. Web connect and desktop takeover wait for its verified normal exit before opening workbench cameras. Real conflict-to-connect, normal exit/collector restore and full cold return passed.",
+      "next": "User refreshed-page and physical pedal validation; keep prepared HOLD.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T12:03:17.891379+00:00",
+      "updated_at": "2026-11-09T12:49:23.149216+00:00",
       "files": [
         "robot_workbench/operations.py",
         "robot_workbench/management.py",
@@ -474,11 +474,11 @@
         "robot_workbench/sdk_quiesce.py"
       ],
       "evidence": {
-        "path": ".evidence/hold-exit-acceptance/result.json",
-        "sha256": "f185bf9ea367949104669f4124acea220f9ab1b0b9dfdc18d5864018bffa1cbb",
+        "path": ".evidence/camera-handoff-acceptance/result.json",
+        "sha256": "4d8d3f33e6519c15ded56782fdf35a58969542a2858d46eb68e76d937f3dae40",
         "matches_file": true
       },
-      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
+      "fingerprint": "741633a4d3f355d169abd0ecb32ccb529c789f63946ee89e60ea9134c10385c7",
       "verified_fingerprint": null
     },
     {
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "c48338d6f0f6c5b642190b1465c248115ce70b3c4094af68f45e54aa8f97da6b",
+      "fingerprint": "6a3f5d9a0f34302716e425ed6c3c060fe90a0af9124aa12299c2bb584c039722",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -2345,7 +2345,7 @@
           }
         ]
       },
-      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f"
+      "fingerprint": "741633a4d3f355d169abd0ecb32ccb529c789f63946ee89e60ea9134c10385c7"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2544,7 +2544,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "f0b682284abbffb1567bdfb64ded7aef07c2f4e565014e91e1b359ae9d7f5f49",
+        "sha256": "133ec72acf00cfcfad807328c2b17bfe0067b4a6be987f5fcd20bb0971a2f14f",
         "imports": [
           "robot_workbench/control_alerts.py",
           "robot_workbench/control_owner.py",
@@ -2572,7 +2572,7 @@
           }
         ]
       },
-      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
+      "fingerprint": "741633a4d3f355d169abd0ecb32ccb529c789f63946ee89e60ea9134c10385c7",
       "verified_fingerprint": null
     },
     "robot_workbench/maintenance.py": {
@@ -3043,7 +3043,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "700a84177f45593fc034e18f0de84f0fa7da439b8654c4261e26bff331d281f2",
+        "sha256": "c3dd781368d9a81508550a98a726d28665abbbb91c387002909b8822d0b67940",
         "imports": [
           "robot_workbench/state_contract.py",
           "scripts/workbench_deploy.py"
@@ -3056,7 +3056,7 @@
           }
         ]
       },
-      "fingerprint": "dcf295d17fca61a9bf082edbf9363d066013bb710b6efe1074f73caed68d58b5",
+      "fingerprint": "629b41ddbe3cbd0e7732c52a308ab669d998503be17528eb8e7f0b315555802b",
       "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
     },
     "scripts/workbench_deploy.py": {
@@ -3072,8 +3072,9 @@
       },
       "source": {
         "exists": true,
-        "sha256": "b562a80e8e83ea7bf77510516ad1027d0ab13fb539264c0a7d630be43719c609",
+        "sha256": "ef827acd2cb073eb59d63dd3ecc7ee285c87bd525f6f1a85a0043453034f1ea7",
         "imports": [
+          "robot_workbench/camera_owner.py",
           "robot_workbench/control_owner.py",
           "robot_workbench/docker_model_service.py",
           "robot_workbench/machine_profile.py",
@@ -3092,7 +3093,7 @@
           }
         ]
       },
-      "fingerprint": "6c0e4fdd9858ad8f70d081d51dd168bca4baef2036741deaadb02e0e865ee53f",
+      "fingerprint": "741633a4d3f355d169abd0ecb32ccb529c789f63946ee89e60ea9134c10385c7",
       "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
     },
     "scripts/serve_inference_model.py": {
@@ -3879,7 +3880,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "277e5d37f6cf0a06d8218a71162c3a105cf4720e220b3fd67fb831248a8cc136"
+      "fingerprint": "1e47a3dfdfd640e57d84a799861588595b35148f59e69997425bf035d1542771"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -3937,15 +3938,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T07:14:43.773128+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/wam.py"
-      ],
-      "state": "active",
-      "note": "已清除E03专属生产常量与128token假设；通用checkpoint CPU/HTTP/目录/规划86项通过。E04_2双后端真实GPU32×14已通过；新版ROS组合与发布核验进行中。"
-    },
     {
       "at": "2026-11-07T07:27:43.518868+00:00",
       "kind": "file",
@@ -4852,9 +4844,18 @@
       ],
       "state": "implemented",
       "note": "Ordinary WAM loading reuses registered large-weight digests with path/size/manifest checks and strict loading. Small artifacts and runtime code still receive content verification. CPU regressions and actual model cold loading passed."
+    },
+    {
+      "at": "2026-11-09T12:49:23.149349+00:00",
+      "kind": "domain",
+      "ids": [
+        "lifecycle-operation"
+      ],
+      "state": "implemented",
+      "note": "Independent collection camera ownership is part of the configured handoff. Web connect and desktop takeover wait for its verified normal exit before opening workbench cameras. Real conflict-to-connect, normal exit/collector restore and full cold return passed."
     }
   ],
   "unmapped_files": [],
-  "source_head": "cf86e6eb597a78fd19766341e4a5de952ff3939e",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.2504a4fe8f89"
+  "source_head": "710ff55ddf5864888cbe705f08f72b4b36480808",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.1e8a917ea8ab"
 }

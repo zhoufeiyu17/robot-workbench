@@ -47,6 +47,7 @@ export function mountPhysicalEndpoint({document:doc,fetch:request,location=globa
   function dismiss(){review=null;support.checked=false;if(dialog.open)dialog.close();}
   function gates(){
     controlAlerts?.setRecoveryGate(permission('recover_control'));
+    if(connect)connect.textContent=!stale&&state?.runtime?.connected===true?'设备已接入':'接入设备';
     check.disabled=busy||stale||!state?.csrf;profile.disabled=busy;address.disabled=busy;compute.disabled=busy;
     for(const [button,name]of [[connect,'connect_control'],[recover,'recover_control'],[exit,'exit_workbench']])if(button){const gate=permission(name);button.disabled=!gate.allowed;button.title=gate.allowed?'':gate.reason;}
     retry.hidden=!uncertain;retry.disabled=busy||stale||!compatible()||!same(uncertain?.expected_target,state?.target);

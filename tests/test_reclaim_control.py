@@ -50,6 +50,14 @@ class ReclaimControlTests(unittest.TestCase):
                 handoff.assert_called_once();m._request_control_stop.assert_not_called()
                 self.assertFalse(value['reclaim']['old_motion_resumed'])
 
+    def test_web_connect_handoff_failure_precedes_any_sdk_or_camera_start(self):
+        m=self.manager();m.check=Mock(return_value=None);m.service_action=Mock()
+        with patch.object(workbench_deploy,'handoff_collection',side_effect=workbench_deploy.Blocked('camera exit unconfirmed'))as handoff:
+            with self.assertRaisesRegex(workbench_deploy.Blocked,'camera exit unconfirmed'):
+                WorkbenchManager._run(m,'connect_control',dict(request_id='connect',expected_target=m.target(),arms_supported=True),Mock())
+        handoff.assert_called_once();self.assertFalse(handoff.call_args.kwargs['stop_active'])
+        m.service_action.assert_not_called()
+
     def test_healthy_connection_requires_fresh_stop_then_reuses_it(self):
         m=self.manager(connected=True)
         with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),patch.object(workbench_deploy,'handoff_collection',return_value={'exit_verified':True}),patch('robot_workbench.management.json_request'):

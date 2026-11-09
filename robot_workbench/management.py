@@ -49,7 +49,7 @@ def _operation_step_refs(action,phase):
         'releasing_faulted_control','connecting_control','acknowledging_recoverable_fault','releasing_control',
         'stopping_current_control','waiting_control_stop','preparing_exit_home','returning_home',
         'waiting_exit_home','waiting_recording_seal','waiting_home_stop','stopping_environment','restoring_collection_web',
-        'waiting_collection_web','checking_collection_handoff','stopping_collection','waiting_collection_exit',
+        'waiting_collection_web','stopping_collection_cameras','waiting_collection_cameras_exit','checking_collection_handoff','stopping_collection','waiting_collection_exit',
         'model_start_failed','model_prepare_failed','camera_start_failed','backend_start_failed',
         'camera_reset_unknown','camera_reset_recovery_unknown',
         'stopping_collection_web','waiting_collection_web_exit','waiting_control_owner','recovering_workbench_control'}
@@ -268,13 +268,16 @@ class WorkbenchManager:
         handoff=config.get('collection_handoff')
         if handoff is not None:
             url=urlsplit(handoff.get('status_url','')) if isinstance(handoff,dict) else None
-            if (not isinstance(handoff,dict) or set(handoff)!={'unit','files','status_url'}
+            if (not isinstance(handoff,dict) or set(handoff)not in ({'unit','files','status_url'},{'unit','files','status_url','camera_owner'})
                     or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(handoff.get('unit')))
                     or not isinstance(handoff['files'],dict) or not handoff['files']
                     or any(not Path(p).is_absolute()or not re.fullmatch('[a-f0-9]{64}',str(h))for p,h in handoff['files'].items())
                     or url.scheme!='http' or url.hostname!='127.0.0.1' or not url.port or url.path!='/api/status'
                     or url.query or url.fragment or url.username):
                 raise ValueError('pinned collection user unit and loopback status API required')
+            if 'camera_owner'in handoff:
+                from scripts.workbench_deploy import validate_collection_camera
+                validate_collection_camera(handoff['camera_owner'])
         self.machine_profile=MachineProfile(config);self.deployment=Deployment(ROOT,self.services)
         self.deployment.bind_configuration(config)
         self.root=Path(config['state_root']);self.root.mkdir(parents=True,exist_ok=True)
@@ -657,9 +660,9 @@ class WorkbenchManager:
             if action not in ('prepare_environment','restart_workbench','connect_control'):return '工作台后端不可达，请先恢复工作台'
             if h.get('services',{}).get('workbench',{}).get('running') is not False:return '后端进程仍存活但HTTP不可达，不能确认SDK已释放'
             return None
-        if h.get('busy') or h.get('runtime',{}).get('automatic_enabled'):return '当前业务仍在执行，请先停止任务并等待收尾'
         runtime=h.get('runtime',{})
         if action=='connect_control' and runtime.get('connected') is True:return '设备控制已经接入'
+        if h.get('busy') or runtime.get('automatic_enabled'):return '当前业务仍在执行，请先停止任务并等待收尾'
         if action in COMPUTE_RESTARTS and not h.get('collection',{}).get('installation_identity'):
             return '当前固定配置无已验证parts/installation_identity，不支持单角色重启'
         if action in ('release_control','verify_hold','prepare_collection',*COMPUTE_RESTARTS) and runtime.get('connected') is not True:return '请先接入设备控制'
@@ -1356,6 +1359,12 @@ class WorkbenchManager:
         if action=='reclaim_control':return self.reclaim_control(request,progress)
         if action=='recover_control' and self.recovery_requires_support(request) and request.get('arms_supported')is not True:
             raise OperationError('support_required','当前需要释放重接；未确认支撑，不执行恢复。')
+        handed=None
+        if action=='connect_control'and self.environment=='physical'and self.config.get('collection_handoff'):
+            from scripts.workbench_deploy import handoff_collection
+            progress('checking_collection_handoff')
+            handed=handoff_collection(self.config['collection_handoff'],self.config['device_id'],
+                stop_active=False,progress=progress,timeout=min(240.,self.timeouts['operation']))
         before=self.target();parameters=request.get('parameters') or {}
         before['dependencies']=self.dependency_evidence(action,self.health_cache,parameters)
         if action!='status_check':progress('checking_service_dependencies',detail=dict(dependencies=before['dependencies']))
@@ -1506,6 +1515,7 @@ class WorkbenchManager:
                     self.wait_backend(progress,started_service=result['started_backend'])
                     result['backend']=self.state()['server_instance_id']
             result.update(action=action,before=before,requested_capabilities=sorted(wanted),preserved_services=preserved)
+            if handed is not None:result['collection_handoff']=handed
             if observation_backend_start is not None:result['observation_backend_start']=observation_backend_start
         if action=='restart_workbench':result['model_binding']=self.complete_publication(binding,progress)
         return result

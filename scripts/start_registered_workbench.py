@@ -88,6 +88,8 @@ def start(config):
     for unit in units:
         require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(unit)),'registered workbench unit required')
         if unit in external_units:continue
+        # Takeover owns the collector handoff before opening shared USB devices.
+        if takeover and unit==(manager['services'].get('cameras')or{}).get('unit'):continue
         subprocess.run(['systemctl','--user','start',unit],check=True,timeout=30)
     url=config['url'];deadline=time.monotonic()+30
     while time.monotonic()<deadline:

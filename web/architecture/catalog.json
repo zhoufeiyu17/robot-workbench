@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.2504a4fe8f89",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.1e8a917ea8ab",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -850,7 +850,7 @@
       "producer": "ui",
       "consumer": "lifecycle",
       "status": "implemented",
-      "current": "桌面 connect_control=true 复用 reclaim_control，启动即确认接入；保留 target/request/job 和真实核验。失效相机订阅通过一次 rebind_cameras 恢复，unknown 不重放。 网页先打开并显示准备进度；源码/配置身份仅启动时捕获，不重复扫描或按文件漂移阻塞。",
+      "current": "桌面 connect_control=true 复用 reclaim_control，启动即确认接入；保留 target/request/job 和真实核验。失效相机订阅通过一次 rebind_cameras 恢复，unknown 不重放。 网页先打开并显示准备进度；源码/配置身份仅启动时捕获，不重复扫描或按文件漂移阻塞。 数采独立相机Owner以可选collection_handoff.camera_owner登记unit/files/state_path/cameras；Web已停仍核验并正常退出该来源。网页接入与桌面接管共用交接，先退出旧来源后打开工作台相机。",
       "target": "复用job_id作为操作身份；按已确认用例编排阶段与恢复，结果未核验时不重放。",
       "fields": [
         "job_id（现有操作身份） / use_case_id / request_id",
@@ -858,7 +858,8 @@
         "current step / step evidence / actual state",
         "outcome / unknown_reason / allowed_next_actions",
         "run_id / deployment_revision / artifact refs",
-        "可选detail.step_refs：现有UCxx-Sxx/SCxx-Sxx步骤ID；引用不构成完成证明"
+        "可选detail.step_refs：现有UCxx-Sxx/SCxx-Sxx步骤ID；引用不构成完成证明",
+        "collection_handoff.camera_owner：unit/files登记服务；state_path与cameras核对来源PID、心跳及相机身份；回执保存退出证明"
       ],
       "clock": "步骤开始、完成和超时使用host monotonic；持久化记录附wall timestamp。",
       "units": "状态、版本、明确的动作参数与逐步证明。",
@@ -2767,7 +2768,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "db772e1f557fd6763e9c5d9af53cc29aebad48527121ab8a0ef1e8011c7b48c8",
+        "fingerprint": "94c26c6280b7dcc593e35bcaab54f9fc3f98330fcefc5392cd1208f927425a13",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2891,7 +2892,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "799c66a1d92c9f39c095489c3494e28a08e461c8ce743537fb5a4fd6d8d3deb3",
+        "fingerprint": "0eeae1113172f62d3f3c0bc0c4425ae48c6a5cf008c42ff6a62f99dc956b171d",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3018,7 +3019,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "98aba043f25b70a3c7b97b6b074ae073293a1aa3a4844ad73547846e283a5d1a",
+        "fingerprint": "1b280b02989ab763551b065864167bba3e8b577cab01dc4d11f5ce4fe3490502",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3137,7 +3138,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "c98f5b122cd94fe06bdc134a4f6728f6c3e56abc98419fd98acf17d8a6483bee",
+        "fingerprint": "c97b65e56ec58c6735e7b9bd0a7b1d690aeaec6f11591059b4e1c908172ee428",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3651,7 +3652,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "e735b8f01665fc1ca2537849b58342e7582eab4d969d86c78cfd0fc21f3e36be",
+        "fingerprint": "934b8a976132e6590b08fc8a38007c4ec2e582cc3fdcb133fd31778c8a9a9d3e",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
