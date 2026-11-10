@@ -20,10 +20,10 @@ import threading
 import time
 
 LIMIT=4*1024*1024
-SCHEMA='workbench.control_owner.v9'
+SCHEMA='workbench.control_owner.v10'
 PROTOCOL_FEATURES=('action_chunk_v1','normal_modes_v1','normal_finish_v1','recording_context_v1',
                    'infer_reference_policy_v1','finite_sync_chunks_v1','sdk_execution_context_v1','normal_complete_segment_v1','control_policy_v1','capture_session_v1','observation_policy_v1')
-READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot','control_policy_snapshot'}
+READS={'inspect','snapshot','inputs','receipt','events','inference_state','settings_snapshot','control_policy_snapshot','pipeline_timing'}
 
 
 def collection_recording_root(owner_root):return Path(owner_root)/'collection-raw'
@@ -166,6 +166,8 @@ class ControlChannel:
                 or socket_info.st_uid!=os.getuid()or socket_info.st_mode&0o077):raise ValueError('private owned control socket required')
 
     def call(self,operation,*,expected_nonce=None,timeout=None,**arguments):
+        from .pipeline_timing import timing
+        began=time.monotonic_ns()
         request_id=secrets.token_hex(16)
         body=dict(schema=SCHEMA,instance_id=self.instance,token=self.token,request_id=request_id,
             operation=operation,expected_nonce=expected_nonce,arguments=arguments)
@@ -176,7 +178,8 @@ class ControlChannel:
             submitted=True;connection.sendall(raw)
             with connection.makefile('rb')as stream:reply=stream.readline(LIMIT+1)
             if not reply or len(reply)>LIMIT:raise OSError('bounded control reply missing')
-            result=json.loads(reply)
+            decoding=time.monotonic_ns();result=json.loads(reply)
+            timing.record('control_rpc.decode.'+operation,decoding,reply_bytes=len(reply))
             if not isinstance(result,dict)or result.get('request_id')!=request_id:raise OSError('control reply request identity differs')
             if result.get('ok')is not True:
                 if result.get('error_type')=='PermissionError':raise PermissionError(result['error'])
@@ -190,7 +193,9 @@ class ControlChannel:
             if submitted and operation not in READS:
                 raise ControlCallUnknown(request_id,error)from None
             raise ConnectionError('control service unavailable: '+str(error))from None
-        finally:connection.close()
+        finally:
+            connection.close()
+            if operation!='pipeline_timing':timing.record('control_rpc.total.'+operation,began)
 
 
 class _ControlActor:
@@ -368,6 +373,10 @@ class ControlOwnerService:
 
     def _read(self,operation,args):
         runtime=self.device.runtime
+        if operation=='pipeline_timing':
+            from .pipeline_timing import timing
+            if set(args)-{'after','limit'}:raise ValueError('unknown timing query')
+            return timing.snapshot(**args)
         if operation=='inspect':return self.inspect()
         if operation=='snapshot':return self.inspect(args.get('business'))
         if operation=='inputs':
@@ -384,9 +393,11 @@ class ControlOwnerService:
             if runtime is None:raise ValueError('control Owner not acquired')
             return runtime.control_policy_snapshot(args['business'])
         if operation=='inference_state':
+            if set(args)-{'receipt_view'}or args.get('receipt_view','full')not in('full','status','none'):
+                raise ValueError('known inference status projection required')
             runner=runtime.owner.runner if runtime else None
             return dict(execution_instance_id=getattr(runtime.owner,'execution_instance_id',None)if runtime else None,
-                snapshot=runner.snapshot()if getattr(runner,'is_inference',False)else None)
+                snapshot=runner.snapshot(receipt_view=args.get('receipt_view','full'))if getattr(runner,'is_inference',False)else None)
         if operation=='receipt':
             with self.lock:
                 value=self.requests.get(args.get('request_id'))
@@ -825,7 +836,7 @@ class ControlRuntimeClient:
                     # copies/RPCs. Keep the existing20ms state cadence while
                     # allowing the event cursor to drain without sleeping.
                     if time.monotonic()>=next_state_poll:
-                        value=self._call('inference_state');runner=self.runners.get(value['execution_instance_id'])
+                        value=self._call('inference_state',receipt_view='status');runner=self.runners.get(value['execution_instance_id'])
                         if runner is not None and value['snapshot']is not None:runner.value=value['snapshot']
                         if self.recording is not None:self._recording_facts()
                         next_state_poll=time.monotonic()+.02

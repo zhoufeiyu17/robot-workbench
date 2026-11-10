@@ -309,9 +309,27 @@ class RosNode:
         return self.publishers[key]
 
     def subscribe(self, topic, message_type, callback, *, retained=False, depth=32,reliable=True):
-        def receive(message):
+        from .pipeline_timing import timing
+        consumer=self.node.get_name()
+        def receive(message, info=None):
+            began=time.monotonic_ns();wall=time.time_ns();outcome='ok'
+            ref=getattr(message,'reference',None)
+            header=getattr(message,'header',None)
+            source_stamp=(int(header.stamp.sec)*10**9+int(header.stamp.nanosec))if header is not None else getattr(ref,'source_time_ns',None)
+            identity=dict(consumer=consumer,topic=topic,
+                request_id=getattr(message,'request_id',None),observation_id=getattr(message,'observation_id',None),
+                stream_id=getattr(ref,'stream_id',None),source_time_ns=source_stamp,
+                source_instance_id=getattr(ref,'source_instance_id',None))
+            received=getattr(info,'received_timestamp',0)
+            if type(received)is int and received>0 and 0<=wall-received<=60_000_000_000:
+                timing.record('ros.middleware_to_callback.'+message_type.__name__,began-(wall-received),
+                    ended_ns=began,**identity)
             try: callback(message)
-            except Exception as error: self.errors.append(str(error))
+            except Exception as error:
+                outcome='error';self.errors.append(str(error))
+            finally:
+                timing.record('ros.callback.'+message_type.__name__,began,outcome=outcome,
+                    rmw_received_wall_ns=received or None,**identity)
         sub = self.node.create_subscription(message_type, topic, receive, self.qos(retained=retained, depth=depth,reliable=reliable))
         self.subscriptions.append(sub); return sub
 

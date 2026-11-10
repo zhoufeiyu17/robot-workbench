@@ -8,6 +8,7 @@ export PYTHONPATH="$ROOT:$ROOT/calibration:$ROOT/calibration/infra:$ROOT/calibra
 sh calibration/scripts/check.sh
 python tests/test_owner_clock.py
 python tests/test_ros_data.py
+python tests/test_pipeline_timing.py
 python tests/test_ros_inputs.py
 python tests/test_ros_inference.py
 python tests/test_ros_recording.py

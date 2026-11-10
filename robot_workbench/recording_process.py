@@ -1580,6 +1580,13 @@ class _CaptureCamera:
 def _seal_capture(root,spec,extra_issue=None):
     """Verify the on-disk prefix and sequence barrier; never alter event files."""
     from .inference_trace import write_json
+    from .pipeline_timing import timing
+    seal_started=time.monotonic_ns()
+    def phase(name,started=None):
+        if started is not None:timing.record('recording.seal.'+name,started,capture_session_id=spec['capture_session_id'])
+        try:write_json(root/'pipeline-timing.json',dict(stage=name,seal_started_ns=seal_started,timing=timing.snapshot(limit=64)))
+        except OSError:timing.record('diagnostics.write_failed',time.monotonic_ns(),outcome='error')
+    phase('verify_streams')
     finish_path=root/'finish.json';binding_path=root/'binding.json'
     finish=json.loads(finish_path.read_text()) if finish_path.exists() else None
     binding=json.loads(binding_path.read_text()) if binding_path.exists() else None
@@ -1606,6 +1613,7 @@ def _seal_capture(root,spec,extra_issue=None):
         except ValueError as error:issues.append(str(error))
     with (root/gap_name).open('x') as gap_file,(root/segment_name).open('x') as segment_index:
         for descriptor in spec['source_descriptors']:
+            stream_started=time.monotonic_ns()
             issue_start=len(issues)
             identity=descriptor['stream_id'];path=root/(identity+'.jsonl')
             last=count=valid_bytes=missing=0;digest=hashlib.sha256();tail_error=None;times=[]
@@ -1708,8 +1716,10 @@ def _seal_capture(root,spec,extra_issue=None):
             if segment_frames is not None:
                 if frame_index!=segment_manifest['frame_count']:issues.append(identity+': unindexed segment frames')
                 segment_frames.close()
+            timing.record('recording.seal.stream.'+identity,stream_started)
         gap_file.flush();os.fsync(gap_file.fileno())
         segment_index.flush();os.fsync(segment_index.fileno())
+    phase('verify_streams',seal_started);proof_started=time.monotonic_ns()
     index=root/'artifacts.jsonl'
     if index.exists():
         with index.open() as stream:
@@ -1773,6 +1783,7 @@ def _seal_capture(root,spec,extra_issue=None):
             try:verify_model_inputs(root,model_indexes['model_input'],streams,probe_cache=probe_cache)
             except (OSError,ValueError,KeyError,TypeError,RuntimeError)as error:
                 issues.append('model input validation: '+str(error))
+    phase('verify_model_inputs',proof_started)
     manifest=dict(schema='workbench.capture-manifest.v1',capture_session_id=spec['capture_session_id'],
         binding=binding,purpose_profile=spec['purpose_profile'],recording_outcome='incomplete' if issues else 'complete',
         control_terminal=finish['control_terminal'] if finish else None,streams=streams,issues=issues,files=files,
@@ -1782,14 +1793,19 @@ def _seal_capture(root,spec,extra_issue=None):
     if activity is not None:manifest['recording_activity']=deepcopy(finish['recording_activity'])
     if activity_policy is not None and activity is None:manifest['playback_error']='recording activity timeline unavailable; unfiltered replay prohibited'
     elif any('source_ref' in source for source in spec['source_descriptors']):
+        export_started=time.monotonic_ns();phase('export_playback')
         try:
             from segmented_playback import export_capture
             playback=export_capture(root,manifest,root/f'replay-r{revision:06d}',probe_cache=probe_cache)
             manifest['playback']=playback
             files.update({path:{key:pin[key] for key in ('size_bytes','sha256')} for path,pin in playback['files'].items()})
         except Exception as error:manifest['playback_error']=str(error)
+        finally:phase('export_playback',export_started)
+    timing.record('recording.seal.total',seal_started,capture_session_id=spec['capture_session_id'])
+    manifest['pipeline_timing']=timing.snapshot(limit=0)
     write_json(root/f'manifest-r{revision:06d}.json',manifest)
     write_json(root/'manifest.json',manifest)
+    phase('complete')
     return manifest
 
 

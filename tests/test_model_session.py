@@ -113,6 +113,8 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result['audit']['worker_request_id'],'visible-id')
         self.assertEqual(result['audit']['transport']['request_id'],'visible-id')
         self.assertNotIn(capability,json.dumps(result['audit']))
+        from robot_workbench.pipeline_timing import timing
+        self.assertNotIn(capability,json.dumps(timing.snapshot(limit=512)))
         self.assertNotIn(capability,json.dumps(self.a.status()))
         self.assertNotIn(capability,log.read_text())
         self.clock[0]=32.

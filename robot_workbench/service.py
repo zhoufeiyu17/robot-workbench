@@ -1989,6 +1989,14 @@ def handler(app):
                 self.close_connection=True;return self.send(409,{'error':'GET request body is not supported'})
             path=urlsplit(self.path);query=parse_qs(path.query)
             try:
+                if path.path=='/api/inference-diagnostics':
+                    if (set(query)-{'environment','after','owner_after','limit'}or 'environment'not in query
+                            or any(len(v)!=1 for v in query.values())):
+                        raise ValueError('one explicit environment and bounded diagnostic cursors required')
+                    flow=app.device(query['environment'][0]).workflows.get('inference')
+                    if flow is None:raise ValueError('推理业务未配置')
+                    options={k:int(query[k][0])for k in ('after','owner_after','limit')if k in query}
+                    return self.send(200,flow.pipeline_diagnostics(**options))
                 if path.path=='/api/inference-recordings':
                     if set(query)!={'environment','business'}or any(len(v)!=1 for v in query.values())or query['business'][0]!='inference':
                         raise ValueError('one explicit inference environment required')
@@ -2005,7 +2013,8 @@ def handler(app):
                         if key in query:
                             if len(query[key]) != 1:raise ValueError('one history cursor value required')
                             paging[key] = int(query[key][0])
-                    return self.send(200,app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0],**paging))
+                    from .state_contract import page_state
+                    return self.send(200,page_state(app.state(query.get('environment',['fake'])[0],query.get('business',['calibration'])[0],**paging)))
                 if path.path=='/api/control-policy':
                     if set(query)!={'environment','business'} or any(len(values)!=1 for values in query.values()):
                         raise ValueError('one environment and business required')

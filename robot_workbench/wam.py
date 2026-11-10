@@ -608,6 +608,8 @@ def _torch_runner(root,paths,bundle):
 
 def _worker(registry,connection,parent_pid):
     import importlib.machinery,importlib.util,io,os,sys,time
+    try:timing_boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:timing_boot_id=None
     try:
         root,paths=verify_registry(registry)
         bundle=descriptor(registry);torch=_torch();stats=load_normalization(paths['stats'],expected_sha256=bundle['artifacts']['stats']['sha256'])
@@ -660,7 +662,11 @@ def _worker(registry,connection,parent_pid):
                     seed=request['seed'],preprocessing=preprocessing_identity(bundle),
                     timing=dict(host_prepare_s=model_started-start,engine_wall_s=model_finished-model_started,
                         output_to_host_s=output_ready-model_finished,denormalize_s=decoded-output_ready,
-                        total_wall_s=decoded-start,measurement='host wall; engine stage includes CUDA synchronization'),command_publication=False))))
+                        total_wall_s=decoded-start,measurement='host wall; engine stage includes CUDA synchronization'),
+                    timing_points=dict(clock='host_monotonic_ns',boot_id=timing_boot_id,pid=os.getpid(),
+                        host_start_ns=round(start*1e9),engine_start_ns=round(model_started*1e9),
+                        engine_end_ns=round(model_finished*1e9),host_output_ns=round(output_ready*1e9),decoded_ns=round(decoded*1e9)),
+                    command_publication=False))))
     except BaseException as error:
         import traceback
         traceback.print_exc()

@@ -729,6 +729,12 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 self.assertEqual(run['runner'].snapshot()['actual_submission_count'],stopped_submissions,
                     'late WAM output produced an SDK submission after confirmed Stop')
             self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
+            diagnostics=flow.pipeline_diagnostics(limit=0)
+            self.assertEqual(diagnostics['owner']['status'],'observed')
+            self.assertIn('control.tick',diagnostics['owner']['data']['stages'])
+            self.assertIn('model.resolve_sources',diagnostics['business']['stages'])
+            self.assertTrue(any(row.get('data',{}).get('stage')=='complete'for row in diagnostics['recording']))
+            self.assertIn('recording.seal.total',manifest['pipeline_timing']['stages'])
             self.assertEqual(manifest['binding']['execution_owner']['owner_pid'],self.process.pid)
             self.assertNotEqual(run['recorder'].session.process.pid,self.process.pid)
             self.assertTrue(manifest['model_inputs']);self.assertEqual(set(manifest['model_inputs']),set(manifest['model_results']))

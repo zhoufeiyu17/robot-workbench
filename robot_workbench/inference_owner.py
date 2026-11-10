@@ -1238,6 +1238,8 @@ class InferenceRunner:
         raise ValueError('unknown normal transition stage')
 
     def _pause_for_supply(self,reason):
+        from .pipeline_timing import timing
+        timing.fault(reason,run_id=self.execution_instance_id,epoch=self._epoch)
         self.loop.stop(reason)
         if self.normal_job and self.normal_job['stage']=='RESUMING':
             self._resume_supply_failed(reason)
@@ -1251,6 +1253,8 @@ class InferenceRunner:
                 runtime_nonce=self.owner.runtime_nonce,epoch=self.owner.epoch,request_id=secrets.token_hex(16),mode='HOLD',target='HOLD'))
 
     def _resume_supply_failed(self,reason):
+        from .pipeline_timing import timing
+        timing.fault(reason,run_id=self.execution_instance_id,epoch=self._epoch)
         self.loop.stop(reason);self.prepared_reference=self.target_interpreter.reference
         self.normal_job.update(stage='RESUME_HOLD_CHECK',supply_error=str(reason),hold_check_started_s=self.owner.control_time())
         self._mode_event('model_supply_failed_retaining_hold',mode='HOLD')
@@ -1718,6 +1722,8 @@ class InferenceRunner:
 
     def _prepare_native_response(self,response,request):
         """Model-query worker only. No SDK calls, no Owner state mutation."""
+        from .pipeline_timing import timing
+        measured_start=time.monotonic_ns()
         import numpy as np
         from .motion_reference import prepare_reference_process
         response_at=self.owner.control_time();conversion_started=time.perf_counter()
@@ -1749,6 +1755,8 @@ class InferenceRunner:
             model_id=self.config.get('model_id'),calibration_profile_digest=self.config.get('calibration_profile_digest'))
         if self.config.get('task')in ('coffee','lid_handoff'):source['active_arms']=['left','right']
         preparation_started=time.perf_counter()
+        prepared_start=time.monotonic_ns()
+        timing.record('planning.validate_convert',measured_start,ended_ns=prepared_start,request_id=request['request_id'])
         options=dict(source_sha256=digest(dict(request_id=request['request_id'],targets=converted)))
         policy=self.config.get('reference_planning')
         if policy is not None:
@@ -1778,6 +1786,7 @@ class InferenceRunner:
                     velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])
         from .owner_inference import reference_wire
         self._record('reference',dict(request_id=request['request_id'],reference=reference_wire(reference)))
+        timing.record('planning.reference_and_brake_reserve',prepared_start,request_id=request['request_id'])
         return dict(response,_prepared_reference=reference,_preparation_timing=dict(
             response_received_source_s=response_at,prepared_source_s=self.owner.control_time(),
             validation_and_conversion_wall_s=preparation_started-conversion_started,
@@ -1995,7 +2004,14 @@ class InferenceRunner:
             self.mode='FAULT'
             return self.status
 
-    def snapshot(self):
+    def snapshot(self, *, receipt_view='full'):
+        if receipt_view not in ('full','status','none'):raise ValueError('explicit inference receipt view required')
+        receipts={}
+        if receipt_view=='full':receipts=deepcopy(self.mode_receipts)
+        elif receipt_view=='status':
+            receipts={identity:{key:deepcopy(value)for key,value in row.items()
+                if type(value)in(str,int,float,bool,type(None))or key in('native_output','hold_target')}
+                for identity,row in self.mode_receipts.items()}
         return dict(self.loop.snapshot(), runner_status=self.status, recording_error=self.recording_error,
                     model_pending=(self.bounded_worker.is_alive()if self.normal_planned and self.bounded_worker else self.loop._query_pending),
                     normal_model_segment=deepcopy(self.normal_segment),
@@ -2008,7 +2024,7 @@ class InferenceRunner:
                     preparation_complete=self.preparation_complete,mode=self.mode,
                     transition_stage=(self.normal_job['stage']if self.normal_job else
                         'AWAITING_RECORDING_GATE'if getattr(self,'normal_supply_exhausted',False)and self.mode=='MODEL'else None),
-                    mode_receipts=deepcopy(self.mode_receipts),mode_session_id=self.mode_session_id,
+                    mode_receipts=receipts,mode_receipt_view=receipt_view,mode_session_id=self.mode_session_id,
                     finish_capability=dict(configured=bool(self.config.get('_normal_finish')),
                         completed=self.finish_completed,
                         kind=(self.config.get('_normal_finish')or{}).get('kind'),

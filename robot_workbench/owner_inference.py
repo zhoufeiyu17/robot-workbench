@@ -173,10 +173,16 @@ class OwnerInference:
         self.ros_node.subscribe('observations',self.ros_node.types.Observation,self._receive_ros_observation)
 
     def _receive_ros_observation(self,message):
+        from .pipeline_timing import timing
+        now=time.monotonic_ns()
+        timing.record('owner.observation_receive',now,observation_id=message.observation_id,
+            state_source_ns=message.state.source_time_ns,epoch=message.epoch)
         with self.lock:self.ros_pending_observation=message
         self._resolve_ros_observation()
 
     def _resolve_ros_observation(self):
+        from .pipeline_timing import timing
+        began=time.monotonic_ns();outcome='ok'
         with self.lock:message=self.ros_pending_observation
         if message is None:return
         from .ros_inputs import referenced_observation,observation_times
@@ -198,6 +204,7 @@ class OwnerInference:
                 if self.ros_pending_observation is message:
                     self.observation=observation;self.ros_error=None;self.ros_pending_observation=None
         except (ValueError,LookupError,KeyError)as error:
+            outcome='waiting'if isinstance(error,LookupError)else'rejected'
             with self.lock:
                 if self.ros_pending_observation is not message:return
                 changed=self.ros_error!=str(error)
@@ -207,6 +214,9 @@ class OwnerInference:
                 import logging
                 logging.getLogger(__name__).warning('ROS observation epoch=%s state_sequence=%s rejected: %s',
                     message.epoch,message.state.sequence,error)
+        finally:
+            timing.record('owner.observation_resolve',began,outcome=outcome,
+                observation_id=message.observation_id,state_source_ns=message.state.source_time_ns,epoch=message.epoch)
 
     def _ros_observe(self,now):
         # No DDS calls or waits on the control tick: read the resolved view only.
@@ -218,7 +228,11 @@ class OwnerInference:
         if self.ros_inputs.caches['state'].error:return None
         for rule,stamp,identity in [('G02',observation['source_time'],'model_observation'),
                 ('G03',observation['feedback_sample_time_s'],'paired_feedback')]:
-            if self._input_decision(rule,stamp,now,identity)['verdict']=='reject':return None
+            decision=self._input_decision(rule,stamp,now,identity)
+            from .pipeline_timing import timing
+            timing.record('owner.guard.'+rule,time.monotonic_ns(),outcome='ok'if decision['verdict']=='pass'else'rejected',
+                observation_id=message.observation_id,age_s=now-stamp,limit_s=decision['limit'],epoch=message.epoch)
+            if decision['verdict']=='reject':return None
         if self._input_decision('G04',observation['source_time'],now,'camera_span',
                 observed=observation.pop('camera_span_s'))['verdict']=='reject':return None
         observation.pop('feedback_sample_time_s')

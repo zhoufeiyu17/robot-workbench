@@ -13,6 +13,7 @@ import time
 import numpy as np
 
 from .ros_data import StreamRef, descriptor_message, json_text, json_value
+from .pipeline_timing import timing
 
 
 def input_transforms(raw_images, prepared_images, *, black_head=False):
@@ -123,6 +124,7 @@ class RosModelWorker:
             return dict(self.sequences)
 
     def _receive(self, request):
+        received=time.monotonic_ns()
         from rosidl_runtime_py.convert import message_to_ordereddict
         # CDR includes alignment padding, so serializing equal messages need
         # not produce equal bytes. Idempotency follows the declared values.
@@ -149,15 +151,19 @@ class RosModelWorker:
             if (request.observation.run_id,request.observation.epoch)!=identity[:2]:
                 self.results.publish(self._error(request,'observation belongs to another Run or epoch'));return
             self.pending=identity;self.pending_fingerprint=fingerprint
-            self.thread=threading.Thread(target=self._run,args=(deepcopy(request),identity,fingerprint),name='ros-model-call',daemon=True)
+            self.thread=threading.Thread(target=self._run,args=(deepcopy(request),identity,fingerprint,received),name='ros-model-call',daemon=True)
             self.thread.start()
 
-    def _run(self, request, identity, fingerprint):
+    def _run(self, request, identity, fingerprint, received=None):
+        began=time.monotonic_ns();ids=dict(request_id=request.request_id,run_id=request.run_id,
+            observation_id=request.observation.observation_id,epoch=request.epoch)
+        timing.record('model.dispatch',received or began,ended_ns=began,**ids)
         result=None
         try:
             if request.valid_until_source_time_ns<=self.clock():raise ValueError('model request observation expired')
             feedback,frames=self.sources.resolve_observation(request.observation,
                 timeout=max(0.,(request.valid_until_source_time_ns-self.clock())/1e9))
+            resolved=time.monotonic_ns();timing.record('model.resolve_sources',began,ended_ns=resolved,**ids)
             from .ros_inputs import referenced_observation
             observation=referenced_observation(request.observation,self.sources.sources,feedback,
                 frames=frames,state_to_device=self.state_to_device)
@@ -172,6 +178,7 @@ class RosModelWorker:
             state=np.asarray(state)
             if state.shape!=(14,) or state.dtype.kind!='f' or not np.isfinite(state).all():raise ValueError('model adapter returned invalid state14')
             transforms=input_transforms(images,prepared_images,black_head=bool(decision and decision['head_black']))
+            transformed=time.monotonic_ns();timing.record('model.preprocess_and_proof',resolved,ended_ns=transformed,**ids)
             self.inputs.publish(self.ros.types.ModelInput(reference=self._reference('model_input'),request_id=request.request_id,run_id=request.run_id,epoch=request.epoch,
                 observation=request.observation,model_state=state.tolist(),preprocessing_json=json_text(transforms),
                 metadata_json=json_text(dict(binding=self.binding,seed=seed,task=request.task,model_state_dtype=str(state.dtype),
@@ -180,11 +187,24 @@ class RosModelWorker:
             with self.lock:
                 if self.current!=identity[:2]:raise ValueError('model request revoked before inference')
             if request.valid_until_source_time_ns<=self.clock():raise ValueError('observation expired before inference')
+            call_started=time.monotonic_ns()
             value=self.predict(dict(request_id=request.request_id,seed=seed,task=request.task,
                 run_id=request.run_id,epoch=request.epoch,clock_domain=request.observation.state.source_clock_id,
                 valid_until_source_time=request.valid_until_source_time_ns/1e9,
                 observation=observation,applied_history=np.asarray(request.applied_history).reshape(-1,14)),
                 (state,prepared_images))
+            call_ended=time.monotonic_ns();timing.record('model.request_roundtrip',call_started,ended_ns=call_ended,**ids)
+            reported=value.get('audit')or{}
+            points=reported.get('timing_points')if isinstance(reported,dict)else None
+            if isinstance(points,dict)and points.get('clock')=='host_monotonic_ns'and points.get('boot_id')==timing.boot_id and timing.boot_id:
+                for name,left,right in [('host_prepare','host_start_ns','engine_start_ns'),('engine','engine_start_ns','engine_end_ns'),
+                        ('output_to_host','engine_end_ns','host_output_ns'),('denormalize','host_output_ns','decoded_ns')]:
+                    timing.record('model.worker.'+name,points.get(left),ended_ns=points.get(right),worker_pid=points.get('pid'),**ids)
+            durations=reported.get('timing')if isinstance(reported,dict)else None
+            for name,duration in (durations.items()if isinstance(durations,dict)else()):
+                if isinstance(name,str)and name.endswith('_s')and type(duration)in(int,float)and np.isfinite(duration)and duration>=0:
+                    timing.record('model.reported.'+name,call_ended-round(duration*1e9),ended_ns=call_ended,
+                        timestamp_basis='reported_duration_anchored_at_reply; not_exact_stage_boundaries',**ids)
             action=np.asarray(value['action14'])
             audit=dict(value.get('audit')or{},ros_model_call_s=(self.clock()-started)/1e9)
             if decision is not None:audit['stall_recovery']=decision
@@ -205,7 +225,9 @@ class RosModelWorker:
                 self.completed[identity]=(fingerprint,result)
                 while len(self.completed)>256:self.completed.popitem(last=False)
                 self.pending=None
-            self.results.publish(result)
+            published=time.monotonic_ns();self.results.publish(result)
+            timing.record('model.result_publish',published,**ids)
+            timing.record('model.total',began,outcome='error'if result.error else'ok',reason=result.error[:256]or None,**ids)
 
     def close(self):
         with self.lock:self.closed=True;self.current=None

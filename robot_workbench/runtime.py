@@ -197,7 +197,7 @@ class Runtime:
                     result['capabilities'] = ['collection_execution_v2',
                         'workbench_trajectory_v1', 'shared_manual_trajectory_v1', 'calibration_capture_ack_v1',
                         'calibration_capture_window_v2', 'single_arm_home', 'both_home_simultaneous', 'policy_inference_v1','research_control_v1']
-                    result['inference'] = (self.runner.snapshot() if getattr(self.runner, 'is_inference', False) else None)
+                    result['inference'] = (self.runner.snapshot(receipt_view='none') if getattr(self.runner, 'is_inference', False) else None)
                     result['inference_configured'] = runtime.inference_factory is not None
                     result['inference_configuration_revision'] = runtime.inference_revision
                     interpreter=getattr(self.runner,'target_interpreter',None)
@@ -942,6 +942,11 @@ class Runtime:
                     return_bookkeeping_s=call['returned_monotonic_s']-backend_returned,
                     total_wall_s=call['returned_monotonic_s']-entered)
                 elapsed=call['total_wall_s']
+                from .pipeline_timing import timing
+                timing.record('sdk.'+name,round(entered*1e9),ended_ns=round(call['returned_monotonic_s']*1e9),
+                    epoch=call.get('epoch'),runtime_nonce=self.nonce,call_id=call['id'],
+                    backend_ns=round(call['backend_wall_s']*1e9),
+                    admission_wait_ns=round(call.get('admission_lock_wait_s',0)*1e9))
                 if self.owner is not None and (elapsed>=.01 or failure_timing is not None)and name not in('connect','close'):
                     details={k:result[k]for k in('feedback_read_timing','sdk_worker_read_timing','sdk_client_read_timing','sdk_reference_timing')if isinstance(result,dict)and k in result}
                     if failure_timing is not None:details['sdk_reference_timing']=failure_timing
@@ -1513,6 +1518,13 @@ class Runtime:
                 self.tick_lock.release()
 
     def tick(self):
+        from .pipeline_timing import timing
+        began=time.monotonic_ns();previous=getattr(self,'_timing_tick_ns',None);self._timing_tick_ns=began
+        if previous is not None:timing.record('control.tick_interval',previous,ended_ns=began)
+        try:return self._tick()
+        finally:timing.record('control.tick',began)
+
+    def _tick(self):
         with self.lock:
             if not self.tick_lock.acquire(blocking=False):
                 raise RuntimeError('only one control tick may run at a time')

@@ -316,6 +316,25 @@ class NormalModeTests(unittest.TestCase):
         self.assertEqual(state['mode'],'HOLD');self.assertTrue(state['mode_receipts']['ipc-pause']['completed'])
         self.assertEqual(client.submit(credential,command),state['mode_receipts']['ipc-pause'])
 
+    def test_status_poll_omits_heavy_history_without_changing_idempotent_result(self):
+        import json
+        from copy import deepcopy
+        self.setup_modes();client,credential=self.setup_ipc();owner=self.runtime.owner;runner=owner.runner
+        command=dict(action='normal_mode',session_id=runner.mode_session_id,runtime_nonce=owner.runtime_nonce,
+            request_id='compact-pause',epoch=owner.epoch,mode='HOLD',target='HOLD')
+        client.submit(credential,command);self.completed(command)
+        receipt=runner.mode_receipts['compact-pause'];receipt['feedback']={'samples':[0.]*7000}
+        for n in range(28):runner.mode_receipts['history-'+str(n)]=deepcopy(receipt)
+        full=client._call('inference_state')['snapshot']
+        status=client._call('inference_state',receipt_view='status')['snapshot']
+        self.assertEqual(status['mode'],'HOLD');self.assertTrue(status['mode_receipts']['compact-pause']['completed'])
+        self.assertLess(len(json.dumps(status)),len(json.dumps(full))//5)
+        self.assertNotIn('feedback',status['mode_receipts']['compact-pause'])
+        self.assertEqual(self.runtime.fact_snapshot()['inference']['mode_receipts'],{})
+        self.assertEqual(client.submit(credential,command),full['mode_receipts']['compact-pause'])
+        self.assertIn('feedback',runner.mode_receipts['compact-pause'])
+        with self.assertRaises(ValueError):client._call('inference_state',receipt_view='unbounded')
+
     def test_terminal_hold_is_not_a_noop_and_cannot_resume_finished_episode(self):
         for terminal in('END','DISCARD'):
             with self.subTest(terminal=terminal):

@@ -20,6 +20,7 @@ from .inference_transport import MODEL_ID, RemoteBaseClient, ModelSelectionChang
 from .inference_history import InferenceHistory
 from .sample_clock import clock_spec, sample_stamp, POLICY_DURATION_TOLERANCE_S
 from .wam import HORIZON as WAM_HORIZON
+from .pipeline_timing import timing
 
 CAMERAS = {'head':'base_0', 'left':'left_wrist_0', 'right':'right_wrist_0'}
 METRIC_EVENTS=frozenset(('prediction_received','prediction_discarded','prediction_requested',
@@ -759,7 +760,14 @@ class InferenceWorkflow:
 
     def _refresh_observation(self):
         # Preview preparation and the cache thread must not publish out of order.
-        with self.observation_lock:return self._refresh_observation_locked()
+        began=time.monotonic_ns();outcome='ok';reason=None
+        try:
+            with self.observation_lock:
+                timing.record('observation.lock_wait',began)
+                return self._refresh_observation_locked()
+        except Exception as error:
+            outcome='rejected';reason=str(error)[:256];raise
+        finally:timing.record('observation.refresh',began,outcome=outcome,reason=reason)
 
     def _wait_observation(self):
         from .observation_pairing import PairingPending
@@ -902,6 +910,13 @@ class InferenceWorkflow:
         if (run is None or message.run_id!=run['id']
                 or message.reference.source_instance_id!=run['owner'].runtime_nonce):return
         name=message.event[len('inference_'):]if message.event.startswith('inference_')else 'other_control_event'
+        if name=='guard_decision'and any('"'+rule+'"'in message.payload_json for rule in('G07','G08')):
+            decision=json_value(message.payload_json)
+            if decision.get('rule_id')in('G07','G08')and decision.get('verdict')=='reject':
+                timing.fault('supply guard '+decision['rule_id'],run_id=message.run_id,epoch=message.epoch)
+        if name in ('normal_pause_required','model_supply_failed_retaining_hold'):
+            failure=json_value(message.payload_json)
+            timing.fault(failure.get('reason','model supply failed'),run_id=message.run_id,epoch=message.epoch)
         recovery=run.get('stall_recovery')
         # Raw windows/feedback belong to the independent recorder. Decoding
         # unused payloads on the image/state executor delays fresh inputs.
@@ -954,7 +969,9 @@ class InferenceWorkflow:
         from .observation_pairing import PairingPending
         from .inference_owner import validate_gripper_feedback
         frame_streams={camera+'_rgb':camera for camera in CAMERAS.values()}
+        began=time.monotonic_ns()
         frames,state,stamp,pairing=self.ros_inputs.paired(frame_streams,self.observation_pairer)
+        paired=time.monotonic_ns()
         feedback=self.ros_inputs.resolve(state)
         latest,raw=self.ros_inputs.latest('state')
         runtime=self.device.runtime
@@ -969,6 +986,11 @@ class InferenceWorkflow:
         validate_gripper_feedback(tuple(prepared['disabled_grippers']),tuple(self.disabled_grippers),feedback)
         message=self.ros_inputs.observation(frames,state,run_id='',epoch=owner['command_epoch'],
             model_io_digest=self.client.conversion_id,source_time_ns=stamp,pairing=pairing)
+        identity=dict(observation_id=message.observation_id,epoch=owner['command_epoch'],
+            state_source_ns=state.source_time_ns,source_time_ns=stamp,
+            **{ref.stream_id+'_stamp_ns':ref.source_time_ns for ref in frames.values()})
+        timing.record('observation.pair',began,ended_ns=paired,**identity)
+        timing.record('observation.resolve_and_build',paired,**identity)
         times=observation_times(message,feedback)
         # Check original stamps against the live source clock, never restamp.
         now=(time.monotonic()if self.device.environment=='physical'else
@@ -977,6 +999,8 @@ class InferenceWorkflow:
                 ('G03',now-state.source_time_ns/1e9,'ros_paired_feedback'),
                 ('G04',(max(times)-min(times))/1e9,'ros_camera_span')]:
             decision=self._input_guard(rule,age,stamp/1e9,now,identity)
+            timing.record('observation.guard.'+rule,time.monotonic_ns(),outcome='ok'if decision['verdict']=='pass'else'rejected',
+                observation_id=message.observation_id,age_s=age,limit_s=decision['limit'],state_source_ns=state.source_time_ns)
             if decision['verdict']=='reject':
                 raise PairingPending(f"{rule}: waiting for a fresh ROS selection (observed={decision['observed']}, limit={decision['limit']})")
         value=referenced_observation(message,self.ros_inputs.sources,feedback,state_to_device=lambda raw:device_state(
@@ -997,7 +1021,9 @@ class InferenceWorkflow:
                     # Publish only after the same-owner, fresh state has advanced
                     # the worker binding; a request cannot authorize its own epoch.
                     self.ros_worker.bind(run['id'],owner['command_epoch'])
-                self.ros_observations.publish(message)
+                published=time.monotonic_ns();self.ros_observations.publish(message)
+                timing.record('observation.publish',published,observation_id=message.observation_id,
+                    epoch=owner['command_epoch'],state_source_ns=state.source_time_ns)
 
     def _cache_loop(self):
         while not self.cache_stop.is_set():
@@ -1746,6 +1772,40 @@ class InferenceWorkflow:
 
     def results(self):
         return self.results_page()['results']
+
+    def pipeline_diagnostics(self, *, after=0, owner_after=0, limit=128):
+        """Independent bounded read; do not construct all business/UI snapshots."""
+        local=timing.snapshot(after=after,limit=limit)
+        if type(owner_after)is not int or owner_after<0:raise ValueError('nonnegative Owner timing cursor required')
+        runtime=self.device.runtime
+        owner=dict(status='unavailable',reason='no connected Owner')
+        if runtime is not None and getattr(runtime,'remote_control_owner',False):
+            try:owner=dict(status='observed',data=runtime.channel.call('pipeline_timing',
+                expected_nonce=runtime.nonce,after=owner_after,limit=limit,timeout=1.))
+            except (OSError,ValueError,ConnectionError)as error:owner=dict(status='unavailable',reason=str(error)[:256])
+        with self.lock:
+            run=self.current;recorders=dict(self.pending_captures)
+            if run and run.get('recorder'):recorders[run['id']]=run['recorder']
+            context=dict(run_id=run['id']if run else None,model_id=self.selected_model_id,
+                backend=self.selected_spec.get('backend'),observation_error=self.cache_error)
+        recordings=[]
+        for run_id,recorder in list(recorders.items())[-8:]:
+            session=getattr(getattr(recorder,'capture',None),'session',None)or getattr(recorder,'session',None)
+            directory=getattr(session,'directory',None)
+            if directory is None:continue
+            path=Path(directory)/'pipeline-timing.json'
+            try:
+                with path.open('rb')as stream:raw=stream.read(512*1024+1)
+                if len(raw)>512*1024:raise ValueError('recording timing reply exceeds bound')
+                recordings.append(dict(run_id=run_id,data=json.loads(raw)))
+            except FileNotFoundError:recordings.append(dict(run_id=run_id,status='unavailable'))
+            except (OSError,ValueError)as error:recordings.append(dict(run_id=run_id,status='unavailable',reason=str(error)[:256]))
+        return dict(schema='workbench.inference-diagnostics.v1',context=context,business=local,owner=owner,
+            recording=recordings,semantics=dict(camera_source='publisher host stamp after capture, not sensor exposure',
+                delivery='publish return to callback includes transport, DDS/executor queue and scheduling; may overlap publish',
+                middleware='RMW received timestamp only when supplied; no inferred packet-arrival timestamp',
+                control='SDK return confirms software call only, not physical motor acknowledgement',
+                clocks='join monotonic_ns only within the same boot_id; source stamps retain their declared clock'))
 
     def results_page(self, *, before=None, after=None):
         return self.history.page(before=before, after=after)

@@ -6,6 +6,19 @@ from .execution_settings import FEEDBACK_TIMEOUT_S
 CONTROL_STATES = {'READY', 'STOPPED_DAMPING_HOLD', 'MANUAL_TAKEOVER'}
 
 
+def page_state(value):
+    """The UI polls current state, not the Owner's historical deduplication ledger."""
+    result=dict(value)
+    for path in (('runtime','inference'),('workflow','inference','normal_mode'),
+                 ('workflow','business_task','inference','normal_mode')):
+        node=result
+        for key in path:
+            if not isinstance(node.get(key),dict):break
+            node[key]=dict(node[key]);node=node[key]
+        else:node.pop('mode_receipts',None)
+    return result
+
+
 def control_healthy(value):
     value = value or {}
     age = value.get('sample_age_s')

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+from robot_workbench.pipeline_timing import timing
 
 PROFILE_KEYS = ('topic_prefix', 'width', 'height', 'ir_width', 'ir_height', 'fps', 'enable_ir', 'qos_depth')
 
@@ -88,6 +89,7 @@ def run_owner(state, args):
             command.extend(['--' + key, str(getattr(args, key))])
     command.extend(['--enable_ir' if args.enable_ir else '--no-enable_ir', '--ready_file', str(ready)])
     child = None;ros=None;source_publishers={}
+    timing_boot_id=timing.boot_id
     if getattr(args,'ros_namespace',None):
         from robot_workbench.ros_data import RosNode
         if not getattr(args,'device_id',None):raise ValueError('ROS camera source requires explicit device_id')
@@ -104,6 +106,8 @@ def run_owner(state, args):
                 topic=args.topic_prefix+'/'+camera+'_rgb/image_raw',message_type='sensor_msgs/msg/Image',
                 kind='image',units='rgb8',coordinate_frame=camera,nominal_hz=float(args.fps),available=available,
                 metadata=dict(serial=serial,width=args.width,height=args.height,environment='physical',
+                    timing_topic=args.topic_prefix+'/'+camera+'/clock',
+                    timing_boot_id=timing_boot_id,
                     timestamp_basis='publisher_host_after_capture'))))
     try:
         atomic(state, dict(value, heartbeat=time.monotonic()))
@@ -142,6 +146,7 @@ def observe_owner(state, args):
     if not args.ros_namespace or not args.device_id:
         raise ValueError('existing source registration requires namespace and device ID')
     expected=profile(args);source=read_owner(state,expected);publishers={};stopped=False
+    timing_boot_id=timing.boot_id
     ros=RosNode('existing_camera_sources',namespace=args.ros_namespace,
         domain_id=int(expected['ros_domain']),localhost_only=False)
     def declare(available):
@@ -153,6 +158,8 @@ def observe_owner(state, args):
                 topic=expected['topic_prefix']+'/'+camera+'_rgb/image_raw',message_type='sensor_msgs/msg/Image',
                 kind='image',units='rgb8',coordinate_frame=camera,nominal_hz=float(expected['fps']),available=available,
                 metadata=dict(serial=serial,width=expected['width'],height=expected['height'],environment='physical',
+                    timing_topic=expected['topic_prefix']+'/'+camera+'/clock',
+                    timing_boot_id=timing_boot_id,
                     timestamp_basis='publisher_host_after_capture'))))
     def stop(*_):
         nonlocal stopped

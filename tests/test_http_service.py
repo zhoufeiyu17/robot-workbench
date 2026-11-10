@@ -21,6 +21,41 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_page_state_keeps_current_mode_without_triplicating_historical_receipts(self):
+        state=self.app.state('fake','inference')
+        ledger={str(n):dict(request_id=str(n),status='completed',feedback={'samples':[0.]*7000},
+                            sdk_window_admission={'samples':[0.]*1000})for n in range(29)}
+        mode=dict(mode='HOLD',transition_stage=None,runner_status='READY',mode_receipts=ledger)
+        state['runtime']['inference']=dict(mode)
+        state['workflow']['inference']={'normal_mode':dict(mode)}
+        state['workflow']['business_task']={'inference':{'normal_mode':dict(mode)}}
+        self.assertGreater(len(json.dumps(state)),2*1024*1024)
+        with patch.object(self.app,'state',return_value=state):
+            raw=self.http.open(self.url+'/api/state?environment=fake&business=inference').read()
+        self.assertLess(len(raw),64*1024)
+        actual=json.loads(raw)
+        for row in (actual['runtime']['inference'],actual['workflow']['inference']['normal_mode'],
+                    actual['workflow']['business_task']['inference']['normal_mode']):
+            self.assertEqual(row['mode'],'HOLD');self.assertNotIn('mode_receipts',row)
+        self.assertIs(state['runtime']['inference']['mode_receipts'],ledger)
+        self.assertEqual(len(ledger),29)
+
+    def test_timing_read_is_bounded_and_does_not_build_state_or_connect(self):
+        from robot_workbench.inference_workflow import InferenceWorkflow
+        flow=InferenceWorkflow.__new__(InferenceWorkflow)
+        flow.device=self.device;flow.lock=threading.RLock();flow.current=None
+        flow.pending_captures={};flow.selected_model_id='fixture';flow.selected_spec={'backend':'torch'};flow.cache_error=None
+        self.device.workflows['inference']=flow
+        url=self.url+'/api/inference-diagnostics?environment=fake&limit=0'
+        with patch.object(self.app,'state',side_effect=AssertionError('full state snapshot forbidden')):
+            result=json.loads(self.http.open(url).read())
+        self.assertEqual(result['schema'],'workbench.inference-diagnostics.v1')
+        self.assertEqual(result['business']['events'],[])
+        self.assertEqual(result['owner']['status'],'unavailable')
+        self.assertIsNone(self.device.runtime)
+        for suffix in ('&extra=1','&after=-1','&limit=513','&environment=physical'):
+            with self.assertRaises(HTTPError):self.http.open(url+suffix)
+
     def test_recording_file_management_is_confirmed_scoped_and_never_connects_sdk(self):
         from test_inference_history import HistoryTests
         fixture=HistoryTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)

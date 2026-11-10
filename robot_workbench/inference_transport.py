@@ -632,12 +632,22 @@ class RemoteBaseClient:
 
     def infer(self, request, *, prepared_input=None):
         if self.identity is None:raise ValueError('explicit remote model preparation required')
+        from .pipeline_timing import timing
+        from .model_session import _CAPABILITY
+        pinned=_CAPABILITY.fullmatch(request['request_id'])
+        timing_request=pinned[2]if pinned else request['request_id']
         if model_family(self.model_id)=='mixed366':
             if self.task is None or request.get('task',self.task)!=self.task:raise ValueError('request differs from bound training task')
             request=dict(request,task=self.task)
+        began=time.monotonic_ns()
         payload = request_packet(request, self.adapter, self.conversion_id, self.model_id, self.model_bundle, prepared_input=prepared_input)
+        timing.record('model.packet_encode',began,request_id=timing_request,bytes=len(payload))
         decisions=[]
-        metadata, arrays = decode_packet(self._request('/infer', payload, kind='application/x-npz',guard_receipts=decisions), {'action14'}, self.model_id)
+        began=time.monotonic_ns()
+        reply=self._request('/infer', payload, kind='application/x-npz',guard_receipts=decisions)
+        timing.record('model.http_roundtrip',began,request_id=timing_request)
+        began=time.monotonic_ns();metadata, arrays = decode_packet(reply, {'action14'}, self.model_id)
+        timing.record('model.packet_decode',began,request_id=timing_request,bytes=len(reply))
         keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'audit'}
         if model_family(self.model_id) in ('base566','mixed366','wam'):keys.add('expected_bundle_digest')
         if native_runtime(self.model_bundle):keys.add('backend')

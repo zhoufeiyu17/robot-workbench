@@ -112,7 +112,7 @@ Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 - 原生回零的插值阶段和增益由 SDK 后台反馈／输出线程推进。Owner 持续读取反馈、维护监督心跳并记录过程。SDK 方法返回、目标命令到位和实测残差分别保留证据。
 - 用户于本日最终批准关节到位误差、审阅／启动／准备漂移以及静止位置跨度统一为 2°。静止窗口为 0.3 秒。物理关节反馈越界容差为 5°。角度在代码和接口中使用 rad，夹爪使用其已登记的毫米／SDK单位。各业务到位设置及 Infer 准备漂移通过唯一 ControlPolicy 提交并回读。
 - 人工拖动收尾使用 set_damping_hold(manual=false)，以实测关节位置和夹爪开口建立合法停止保持目标。取得新鲜静止证据后，Owner 使用现有 begin 和 TargetInterpreter 恢复正常增益并建立固定 HOLD。原始反馈、修正值和实际 SDK 调用进入同一录制。
-- 在线 Owner 协议为 workbench.control_owner.v9，连接时精确核验，包含 TEACH 夹爪被动开合及退出后的实测锚定语义；录制生命周期使用显式 ingress_closed。preserve_jaws 是停止保持调用的可选布尔字段，默认 false；需要保留已有夹爪命令的维护调用仍可使用 true，人工拖动结束使用 false 取得新开口，再恢复正常位置保持。其消费者为 SDK 适配器。
+- 在线 Owner 协议为 workbench.control_owner.v10，连接时精确核验，包含 TEACH 夹爪被动开合及退出后的实测锚定语义；录制生命周期使用显式 ingress_closed。preserve_jaws 是停止保持调用的可选布尔字段，默认 false；需要保留已有夹爪命令的维护调用仍可使用 true，人工拖动结束使用 false 取得新开口，再恢复正常位置保持。其消费者为 SDK 适配器。
 
 WAM 静止恢复 trick 由用户安排在踏板开发、上线和验收之后。其目标入口为默认未勾选的复选框，具体实现与验收另行记录。
 
@@ -191,6 +191,74 @@ WAM模型描述升级为 `workbench.wam.v2`，显式携带 `inference_options.de
 模型目录提供受包能力约束的配置身份；网页按去噪草稿过滤同一checkpoint，不把所有配置重复列入checkpoint菜单。应用继续使用既有 `prepare_model(model_id, expected_bundle_digest)` 操作，不新增控制RPC。SO从已固定的基础YAML生成本次运行配置并加载，Torch前向消费同一个绑定值；两者统一在Run之间重新准备后生效。草稿未应用时不能以旧配置执行Run。Owner与SDK不接收去噪参数，录制从模型绑定与审计保存实际步数及配置摘要。WAM观测/结果新鲜度2.5秒、实时state年龄及其余保护不变。
 
 验证入口为 `.evidence/infer-parameters-20261107-v1/progress.json`：包括实际CPU ROS/Owner/常驻记录器的1/15/32步完整用例、两后端实际GPU1/10步去噪、线上策略提交及模型配置应用回执。候选、实际部署与真机运动验收分开记录；本轮参数发布后不自动执行机器人动作。
+
+### 2026-11-10 推理链路耗时诊断（用户已要求，实际发布按回执）
+
+高频状态与完整历史分开：普通 Runtime 快照不携带模式历史；业务的 `inference_state`
+轮询显式使用 `receipt_view=status`，只保留标量处理状态以及已有消费者需要的 native_output／hold_target。
+默认显式读取仍可取完整内容，`receipt_view=full/status/none` 在 Owner 校验；实际模式账本、
+重复请求的完整返回和录制原始事件均保留。生产者与消费者统一升级 Owner v10，连接时拒绝旧端。
+`/api/state` 只返回页面所需当前模式和切换阶段，删除三条展示路径中重复的 mode_receipts，
+不修改内部状态或扩大原状态响应上限。短暂忙导致的执行前拒绝记为已知失败、可重试；后端拒绝维护准入时，
+须核实原实例已无活动维护再清理票据。失联、丢失回复、释放不明仍保持未知，不自动重放。
+
+夹爪停止适配的实测上限由用户指定为 `Arx5BackendConfig.gripper_feedback_upper_m=0.085`；
+只替换该实测上限检查，SDK命令尺度、标定、原到位误差及原始读数不变，不新增投影处理。
+
+只读 `GET /api/inference-diagnostics?environment=physical&limit=128` 返回
+`workbench.inference-diagnostics.v1`：`context` 关联当前 Run／模型；`business` 为业务进程测量；
+`owner` 通过独立只读 `pipeline_timing` RPC 查询控制进程；`recording` 读取当前和近期录制的
+有界 `pipeline-timing.json`。该入口不构造完整页面状态，不调用模型、连接设备或修改策略。
+`after`／`owner_after` 分别分页两个进程的事件序号；`limit` 为 0–512，0 只返回统计。
+未知参数、重复参数、负游标和越界数量拒绝。生产进程未加载该诊断能力时明确返回 unavailable，
+不能把缺测当成耗时为零。
+
+各进程返回 `workbench.pipeline-timing.v1`、独立 `instance_id`、PID、boot_id、单调时钟和采样墙钟。
+事件以原始帧 `source_time_ns`／source instance、Observation ID、request ID、Run ID 和 epoch 关联。
+`sequence` 是诊断游标，`source_sequence` 是原始数据序号，不混用。每进程最多8192条事件、128类阶段，
+每阶段分位数只统计最近256次；次数／均值／最大值自进程启动累计。环形覆盖由 `cursor_gap` 明示。
+真实供给失败保留最近4个故障窗口，每个至多2048条先前事件；可按故障的 oldest_sequence 分页读取。
+进程重启会清空内存窗口，录制文件中的测量保留；需要跨重启保留时应先导出该只读响应。
+
+| 阶段 | 测量边界与限制 |
+| --- | --- |
+| 相机采集与发布 | 使用源声明的 timing_topic 和同机 boot_id，关联原始 frame clock；分别测量 wait_for_frames、接收后至整组RGB/IR发布返回。不是传感器曝光到主机的硬件延迟。 |
+| 传输与回调 | 发布返回至同帧回调包含DDS传输、排队及线程调度；发布和消费可能重叠，signed_gap_ns保留负值，不能解释为负传输耗时。运行时提供RMW接收时间时另测中间件到回调；未提供时不编造。 |
+| 接收与配对 | 分别记录publisher查询、解码、缓存写入、观测锁等待、配对、引用解析、G02/G03/G04实际裁决及发布；源时间和配对规则不变。 |
+| Owner | 分别记录观测到达、引用解析、G02/G03裁决、tick间隔及执行耗时；与原始Observation ID关联。 |
+| 模型 | 分别测量回调派发、源引用解析、预处理及输入证明、NPZ编码、HTTP往返、解码和结果发布；WAM返回同机worker的准备／GPU同步执行／回传／反归一化时间点。旧duration-only数据明确标记为回包锚定，不能当精确阶段时间点。 |
+| 轨迹与SDK | 转换校验、参考轨迹及制动余量准备分别记录；SDK调用保留排队等待、backend耗时和返回总时长。SDK软件返回不代表电机物理到位。 |
+| 录制 | 队列等待、编码写入、journal刷新、逐流校验、模型输入证明和回放导出分别记录；封存阶段写入原Run的有界诊断文件，不读取大权重。 |
+
+统计只用于诊断，不参与新鲜度裁决、不修改原时间戳或用新帧替换引用帧。事件只含有界标量与身份，
+不含图像、动作数组、命令行或凭据；模型会话能力串在传输测量中还原为原请求ID。诊断文件写入失败
+只计诊断错误，不改变录制完整性裁决。实际原生ROS验证与部署入口见开发Map的告警与测量诊断职责域。
+
+```mermaid
+sequenceDiagram
+    participant C as Camera publisher
+    participant D as DDS and executor
+    participant B as Business inputs / pairing
+    participant O as Owner
+    participant M as Model worker
+    participant S as SDK
+    participant R as Recorder
+    C->>C: wait_for_frames → receive → RGB/IR publish return
+    C->>D: Original image + frame clock (same source stamp)
+    D->>B: Callback entry → decode → cache
+    B->>B: Latest common 30 Hz selection → original-state age guard
+    B->>O: Observation ID + original frame/state references
+    O->>O: Resolve references → G02/G03 → zero-speed supply deadline
+    O->>M: Request ID + Observation ID + Run/epoch
+    M->>M: Preprocess/proof → HTTP → worker/GPU → decode
+    M->>O: Same request ID, action and stage timings
+    O->>O: Validate/convert → reference + brake reserve
+    O->>S: Submit registered window; measure SDK software return
+    C-->>R: Independent original-frame subscriber
+    O-->>R: Original control events and mode boundaries
+    M-->>R: Model input/result references
+    R->>R: Queue → encode/write → verify → playback export
+```
 
 ### 2026-11-08 Checkpoint 目录发现（已发布并验收）
 

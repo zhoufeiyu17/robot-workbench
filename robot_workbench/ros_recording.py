@@ -111,6 +111,7 @@ def _recording_health_source(root,spec,identity):
 
 
 def capture_worker(root, spec, remaining=b'', *, recover=False):
+    from .pipeline_timing import timing
     from .recording_process import _CaptureEvents, _capture_file, _encode, _seal_capture, _archive_capture_payload
     from .inference_trace import write_json
     from rgbd_segments import SegmentWriter
@@ -144,6 +145,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     def fault(stream,reason):
         with lock:errors.setdefault(stream,str(reason))
     def flush_files(status):
+        began=time.monotonic_ns()
         counts={};descriptors=[]
         for stream in list(files):
             with file_locks[stream]:
@@ -156,6 +158,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         if artifact_fd is not None:os.fsync(artifact_fd)
         for fd in descriptors:os.fsync(fd)
         write_json(root/'status.json',status)
+        timing.record('recording.journal_flush',began)
+        try:write_json(root/'pipeline-timing.json',dict(stage=status['state'],timing=timing.snapshot(limit=64)))
+        except OSError:timing.record('diagnostics.write_failed',time.monotonic_ns(),outcome='error')
         return counts
     def collect_image(stream,wait=False):
         future=pending_images.get(stream)
@@ -175,7 +180,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if wire_size>spec['resource_budget']['message_bytes']:
                 errors[ref.stream_id]='ROS event exceeds the bound message size';return
             size=wire_size*4+4096
-        try:events.put_nowait((size,(ref,value,group,prefill)))
+        try:events.put_nowait((size,(ref,value,group,prefill,time.monotonic_ns())))
         except queue.Full:errors.setdefault(ref.stream_id,'ROS recorder queue overflow; source data missing')
     def enqueue(ref,value):
         nonlocal control_gap_start
@@ -201,7 +206,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         raise ValueError('recording mode receipt belongs to another Owner')
                     opened=activity.observe(value.event,data,ref,value.run_id)
                     if previous_group is not None and (activity.current is None or activity.current['request_id']!=previous_group):
-                        events.put_nowait((0,(None,None,None,False)))
+                        events.put_nowait((0,(None,None,None,False,time.monotonic_ns())))
                     if opened:
                         # Retain only the bounded input-reference prefix. Export
                         # excludes these evidence frames from effective video time.
@@ -223,7 +228,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if activity is not None and activity.current is None and source['kind']=='image':
                 # Delayed transport can deliver an active tail after HOLD.
                 # Keep it by source time, then commit that paused tail too.
-                events.put_nowait((0,(None,None,None,False)))
+                events.put_nowait((0,(None,None,None,False,time.monotonic_ns())))
     raw=[s for s in sources.values()if s['kind']in('image','state')]
     inputs=RosInputs(ros,raw,on_sample=enqueue,max_samples=16,subscription_depth=16,include_depth=True)
     def message(stream,value):
@@ -298,6 +303,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             except Exception as error:
                 fault('health',error);health_failed.set();return
     def append(ref,payload):
+        began=time.monotonic_ns()
         stream=ref.stream_id
         with file_locks[stream]:
             if stream not in files:files[stream]=(root/(stream+'.jsonl')).open('x')
@@ -306,7 +312,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             files[stream].write(_encode(row))
             if not received[stream]:first[stream]=ref
             received[stream]+=1;last[stream]=ref
+        timing.record('recording.append.'+stream,began,source_time_ns=ref.source_time_ns,source_sequence=ref.sequence)
     def write(ref,value,group=None,prefill=False):
+        began=time.monotonic_ns()
         nonlocal artifact_index
         source=sources[ref.stream_id];previous=last.get(ref.stream_id)
         model_key=model_digest=None
@@ -356,6 +364,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         else:append(ref,dict(reference=ref.__dict__,data=_plain(value)))
         written_groups[ref.stream_id]=group
         if model_key is not None:recorded_models[model_key]=model_digest
+        timing.record('recording.encode_write.'+ref.stream_id,began,source_time_ns=ref.source_time_ns,source_sequence=ref.sequence)
     pending=bytearray(remaining)
     try:
         health_node,health_source,health_publisher,health_declared=_recording_health_source(root,spec,writer_identity)
@@ -417,8 +426,10 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         write_json(root/'finish-request.json',command);emit()
                     else:raise ValueError('ROS recording accepts lifecycle only; source data must arrive through ROS')
             for _ in range(128):
-                try:ref,value,group,prefill=events.get_nowait()
+                try:ref,value,group,prefill,queued_ns=events.get_nowait()
                 except queue.Empty:break
+                timing.record('recording.queue_wait',queued_ns,stream_id=ref.stream_id if ref else None,
+                    source_time_ns=ref.source_time_ns if ref else None)
                 if ref is None:
                     for source in raw:
                         stream=source['stream_id']

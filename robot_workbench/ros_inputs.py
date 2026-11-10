@@ -4,6 +4,7 @@ This module never republishes a camera frame or a state sample. Model requests
 refer to samples in these bounded histories; a missing sample is an error.
 """
 from copy import deepcopy
+from collections import OrderedDict
 import hashlib
 import math
 import re
@@ -12,6 +13,7 @@ import threading
 import time
 
 from .ros_data import MAX_CACHE_SAMPLES, MAX_METADATA_BYTES, SampleCache, StreamRef, descriptor_value, json_text, json_value, source_descriptor
+from .pipeline_timing import timing
 
 
 def observation_times(message, feedback):
@@ -107,6 +109,8 @@ class RosInputs:
         from sensor_msgs.msg import Image
         from rclpy.qos import ReliabilityPolicy
         self.ros = ros; self.sources = {}; self.caches = {}; self.writers = {}; self.on_sample = on_sample
+        self.consumer=ros.node.get_name()
+        self.clock_samples={};self.image_arrivals={}
         self.reliability={};self.depth_for={};self.rgb_for={};self.pending_rgbd=set();self.last_pairs={}
         self.raw_caches={};self.metadata_caches={};self.metadata_writers={};self.pending_metadata=set();self.gaps={}
         descriptors=list(descriptors)
@@ -150,6 +154,14 @@ class RosInputs:
                 raise ValueError('raw ROS publisher differs from registered source')
             self.sources[stream] = source
             self.caches[stream] = SampleCache(source, max_samples=max_samples, max_bytes=max_bytes)
+            clock_topic=source['metadata'].get('timing_topic')
+            if source['metadata'].get('timing_boot_id')!=timing.boot_id:clock_topic=None
+            if clock_topic is not None:
+                if not isinstance(clock_topic,str)or not re.fullmatch(r'/[A-Za-z_][A-Za-z0-9_/]*',clock_topic):
+                    raise ValueError('absolute camera timing topic required')
+                from std_msgs.msg import String
+                self.clock_samples[stream]=OrderedDict();self.image_arrivals[stream]=OrderedDict()
+                ros.subscribe(clock_topic,String,lambda msg,s=stream:self._receive_clock(s,msg),depth=32)
             topic=source['metadata'].get('metadata_topic')
             if topic is not None:
                 if source['kind']!='image'or source['metadata'].get('pixel_format')=='depth16le'or not isinstance(topic,str)or not re.fullmatch(r'/[A-Za-z_][A-Za-z0-9_/]*',topic):
@@ -182,8 +194,10 @@ class RosInputs:
                 cache.error='ROS source declaration changed; explicit rebind required';cache.changed.notify_all()
 
     def _receive(self, stream, message):
+        began=time.monotonic_ns()
         source, cache = self.sources[stream], self.caches[stream]
         publishers = self.ros.node.get_publishers_info_by_topic(source['topic'])
+        timing.record('input.publisher_lookup.'+stream,began)
         if len(publishers) != 1:
             cache.error = 'raw source has ambiguous ROS publishers'; raise ValueError(cache.error)
         writer = bytes(publishers[0].endpoint_gid)
@@ -195,7 +209,19 @@ class RosInputs:
             self.writers[stream] = writer
         elif writer != previous:
             cache.error = 'raw ROS publisher restarted; explicit source rebind required'; raise ValueError(cache.error)
+        decoded=time.monotonic_ns()
         reference, value, size = (image_sample if source['kind']=='image' else state_sample)(message, source)
+        identity=dict(consumer=self.consumer,stream_id=stream,source_instance_id=reference.source_instance_id,
+            source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
+        timing.record('input.decode.'+stream,decoded,**identity)
+        if source['kind']=='image':
+            if source['source_clock_id']=='host_wall':
+                age=time.time_ns()-reference.source_time_ns
+                timing.record('camera.source_to_decoded.'+stream,time.monotonic_ns()-age,**identity)
+            if stream in self.image_arrivals:
+                self.image_arrivals[stream][reference.source_time_ns]=began
+                while len(self.image_arrivals[stream])>128:self.image_arrivals[stream].popitem(last=False)
+                self._join_timing(stream,reference.source_time_ns)
         if stream in self.raw_caches:
             raw=self.raw_caches[stream]
             if reference in raw.samples:value['metadata']['subscriber_receive_ns']=raw.get(reference)['metadata']['subscriber_receive_ns']
@@ -213,6 +239,37 @@ class RosInputs:
             old = cache.get(reference)
             if source['kind']=='image':value['metadata']['subscriber_receive_ns']=old['metadata']['subscriber_receive_ns']
         self._accept_sample(stream,reference,value,size)
+
+    def _receive_clock(self,stream,message):
+        # Diagnostics never change sample readiness, timestamps, or cache identity.
+        try:
+            if len(message.data)>8192:raise ValueError('camera timing message too large')
+            row=json_value(message.data)
+            if row.get('kind')!='frame':return
+            stamp=row['stamp_ns'];data=row['data'];received=data['recv_mono_ns'];published=data['publish_done_mono_ns']
+            if (type(stamp)is not int or type(received)is not int or type(published)is not int
+                    or not 0<received<=published<=time.monotonic_ns()):
+                raise ValueError('camera timing clock is not this host monotonic clock')
+            self.clock_samples[stream][stamp]=(received,published)
+            while len(self.clock_samples[stream])>128:self.clock_samples[stream].popitem(last=False)
+            wake=data.get('loop_wake_mono_ns')
+            if type(wake)is int and 0<wake<=received:
+                timing.record('camera.capture_wait.'+stream,wake,ended_ns=received,stream_id=stream,source_time_ns=stamp)
+            timing.record('camera.publisher.'+stream,received,ended_ns=published,stream_id=stream,source_time_ns=stamp)
+            self._join_timing(stream,stamp)
+        except (ValueError,KeyError,TypeError)as error:
+            now=time.monotonic_ns();timing.record('camera.timing_invalid',now,outcome='error',stream_id=stream,reason=str(error)[:256])
+
+    def _join_timing(self,stream,stamp):
+        clock=self.clock_samples[stream].get(stamp);arrival=self.image_arrivals[stream].get(stamp)
+        if clock is None or arrival is None:return
+        # Publish return is not a send timestamp: delivery may overlap publishing.
+        timing.record('camera.source_to_callback.'+stream,clock[0],ended_ns=arrival,
+            stream_id=stream,source_time_ns=stamp)
+        timing.record('camera.publish_return_to_callback.'+stream,min(clock[1],arrival),ended_ns=arrival,
+            stream_id=stream,source_time_ns=stamp,publish_return_overlapped=arrival<clock[1],
+            signed_gap_ns=arrival-clock[1])
+        self.clock_samples[stream].pop(stamp,None);self.image_arrivals[stream].pop(stamp,None)
 
     def _receive_metadata(self,stream,message):
         source=self.sources[stream];cache=self.caches[stream]
@@ -265,8 +322,10 @@ class RosInputs:
         self._accept_sample(stream,ref,value,len(value['rgb'])+4096)
 
     def _accept_sample(self,stream,reference,value,size):
+        began=time.monotonic_ns()
         cache=self.caches[stream]
         if not cache.put(reference,value,size):return
+        timing.record('input.cache_put.'+stream,began,source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
         if stream in self.depth_for:
             self.pending_rgbd.add(reference)
             if sum(r.stream_id==stream for r in self.pending_rgbd)>cache.max_samples:
