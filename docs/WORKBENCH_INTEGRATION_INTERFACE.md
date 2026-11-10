@@ -196,7 +196,7 @@ WAM模型描述升级为 `workbench.wam.v2`，显式携带 `inference_options.de
 
 Infer 启动 registry 使用唯一绝对路径 `catalog_root`。每个包位于
 `<catalog_root>/<checkpoint>/<backend>/manifest.json`，复用现有 registry 的模型身份、资产根、
-文件大小和SHA256、统计量、任务文本、模型配置、运行时及去噪能力字段。目录后端与manifest声明须一致。
+文件大小和制品身份、统计量、任务文本、模型配置、运行时及去噪能力字段。目录后端与manifest声明须一致。
 目录模式排除同时配置 `additional_registries`。manifest须为当前用户所有的私有普通文件，
 包目录链接及越界资产明确拒绝。
 
@@ -206,7 +206,16 @@ Infer 启动 registry 使用唯一绝对路径 `catalog_root`。每个包位于
 
 扫描读取有界元数据并检查资产存在及大小。WAM同族checkpoint复用通用描述与既有Torch/SO加载器，
 支持现有已核验Pi加载器的包继续使用Torch/Triton。未支持的模型族、后端、缺失文件、重复身份及无效
-manifest显示具体原因。加载操作复核所选描述和完整资产内容，旧目录摘要失效时拒绝该准备请求。
+manifest显示具体原因。加载操作复核所选描述、文件大小与必要的小制品内容，旧目录摘要失效时拒绝该准备请求；大型权重不做例行全量哈希。
+
+2026-11-10 用户批准取消权重 SHA256 的硬性依赖。已有摘要继续使用 `workbench.wam.v2`；
+无摘要的包使用 `workbench.wam.v3`，明确令 `artifacts.checkpoint.sha256=null`，由
+`checkpoint_source.{receipt_sha256,bytes}` 绑定真实的小型来源回执与权重大小。
+部署 registry 的 `checkpoint_path` 必须与 `workbench.model-source.v1` 回执中的模型ID、step、
+路径及文件大小一致。仅大型权重文件允许无摘要；统计量、文本、配置、来源回执与运行代码仍校验真实摘要。
+目录负责可见性与元数据检查，加载器负责来源一致性和实际加载，worker身份原样报告来源信息，
+业务模型绑定及录制保存该描述；Owner只消费动作契约和既有绑定身份。元数据校验不声称证明权重字节完整性，
+Torch严格加载与SO固定引擎加载的证据分别保留，禁止伪造摘要。
 
 业务侧每5秒自动刷新目录，现有“刷新 checkpoint”入口保留。目录轮询独立于模型健康读取。
 新增、删除或替换包只更新候选列表，当前已加载模型继续使用绑定时的冻结描述。UI按模型家族、

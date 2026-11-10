@@ -49,14 +49,14 @@ def native_runtime(bundle):
     schema=bundle.get('schema')
     if schema in(MANIPULATION_SCHEMA,MIXED366_SCHEMA):return True
     if not isinstance(schema,str)or not schema.startswith('workbench.wam.'):return False
-    from .wam import SCHEMA as WAM_SCHEMA
-    return schema==WAM_SCHEMA
+    from .wam import SCHEMAS as WAM_SCHEMAS
+    return schema in WAM_SCHEMAS
 
 
 def validate_native_descriptor(bundle):
     """Public checkpoint/implementation identities; host paths stay in the adapter registry."""
-    from .wam import SCHEMA as WAM_SCHEMA,validate_descriptor
-    if isinstance(bundle,dict)and bundle.get('schema')==WAM_SCHEMA:
+    from .wam import SCHEMAS as WAM_SCHEMAS,validate_descriptor
+    if isinstance(bundle,dict)and bundle.get('schema')in WAM_SCHEMAS:
         return validate_descriptor(bundle)
     required={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime'}
     if not native_runtime(bundle) or set(bundle)!=required:

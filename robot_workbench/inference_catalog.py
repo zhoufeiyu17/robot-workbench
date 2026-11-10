@@ -214,7 +214,7 @@ class RegisteredCatalog:
             relative = Path(item['path'])
             if (relative.is_absolute() or '..' in relative.parts or str(relative) in paths
                     or type(item.get('bytes')) is not int or item['bytes'] < 0
-                    or not _SHA.fullmatch(str(item.get('sha256')))):
+                    or not _SHA.fullmatch(str(item.get('sha256')))and not(wam.is_model_id(identity)and wam.metadata_weight(registry,item))):
                 raise ValueError('invalid or duplicate registered artifact path/size/hash')
             paths.add(str(relative))
             path = (root / relative).resolve(strict=True)

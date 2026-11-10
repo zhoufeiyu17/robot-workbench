@@ -22,11 +22,58 @@ PINS=dict(checkpoint='1'*64,stats=hashlib.sha256((ROOT/'tests/fixtures/wam-e03-n
 
 
 class WamInputWorkflowTests(unittest.TestCase):
+    def test_source_manifest_identity_does_not_invent_a_weight_hash(self):
+        from robot_workbench.inference_model import native_runtime,validate_native_descriptor
+        value=self.descriptor();value.update(schema=wam.SOURCE_SCHEMA,
+            checkpoint_source={'receipt_sha256':hashlib.sha256(b'fixture provenance').hexdigest(),'bytes':12000000000})
+        value['artifacts']['checkpoint']['sha256']=None
+        self.assertTrue(native_runtime(value));self.assertEqual(validate_native_descriptor(value),value)
+        identity=wam.worker_identity(value);self.assertIsNone(identity['checkpoint_sha256'])
+        self.assertEqual(identity['checkpoint_source'],value['checkpoint_source'])
+        missing=deepcopy(value);missing.pop('checkpoint_source')
+        with self.assertRaises(ValueError):wam.validate_descriptor(missing)
+        legacy=deepcopy(value);legacy.pop('checkpoint_source');legacy['schema']=wam.SCHEMA
+        with self.assertRaises(ValueError):wam.validate_descriptor(legacy)
+
+    def test_unhashed_weight_requires_matching_source_size_and_model_identity(self):
+        import json
+        from unittest.mock import patch
+        with TemporaryDirectory()as temp:
+            root=Path(temp).resolve();files=[];pins={}
+            for name in ('checkpoint.pt','stats.json','context.pt','model_config.json','engine.py',
+                         'phoenix_encoder.pt','csvae.pt','Wan2.2_VAE.safetensors'):
+                p=root/name;p.write_bytes(name.encode())
+                if name in('checkpoint.pt','phoenix_encoder.pt'):
+                    with p.open('r+b')as stream:stream.truncate(64*1024*1024+1)
+                    digest=None
+                else:digest=hashlib.sha256(p.read_bytes()).hexdigest()
+                files.append(dict(path=name,bytes=p.stat().st_size,sha256=digest));pins[name]=digest
+            size=files[0]['bytes'];proof=dict(schema='workbench.model-source.v1',model_id=MODEL_ID,step=3190,
+                checkpoint_path='checkpoint.pt',files={row['path']:{'bytes':row['bytes']}for row in files if row['sha256']is None})
+            path=root/'source-receipt.json';path.write_text(json.dumps(proof));proof_sha=hashlib.sha256(path.read_bytes()).hexdigest()
+            files.append(dict(path=path.name,bytes=path.stat().st_size,sha256=proof_sha))
+            source={'receipt_sha256':proof_sha,'bytes':size}
+            registry=dict(root=str(root),files=files,machine_id_sha256='host',gpu_uuid='GPU-fixture',checkpoint_path='checkpoint.pt',checkpoint_source=source)
+            registry['bundle_sha256']=hashlib.sha256(json.dumps(sorted(files,key=lambda r:r['path']),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            bundle=dict(schema=wam.SOURCE_SCHEMA,model_id=MODEL_ID,step=3190,checkpoint_source=source,
+                artifacts={k:{'sha256':pins[v]}for k,v in dict(checkpoint='checkpoint.pt',stats='stats.json',context='context.pt',model_config='model_config.json').items()},runtime={'engine_sha256':pins['engine.py']})
+            def sha(p):
+                if str(p)=='/etc/machine-id':return'host'
+                self.assertNotEqual(Path(p).name,'checkpoint.pt')
+                return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+            with patch('robot_workbench.mixed366.sha',side_effect=sha),patch.object(wam,'descriptor',return_value=bundle):
+                self.assertEqual(wam.verify_registry(registry)[1]['checkpoint'],root/'checkpoint.pt')
+                changed=deepcopy(bundle);changed['step']=3191
+                with patch.object(wam,'descriptor',return_value=changed),self.assertRaisesRegex(ValueError,'source identity'):
+                    wam.verify_registry(registry)
+                with(root/'checkpoint.pt').open('r+b')as stream:stream.truncate(size-1)
+                with self.assertRaisesRegex(ValueError,'artifact changed'):wam.verify_registry(registry)
+
     def test_registry_uses_large_weight_metadata_but_checks_small_content_and_sizes(self):
         import json
         from unittest.mock import patch
         with TemporaryDirectory()as temp:
-            root=Path(temp);files=[];pins={}
+            root=Path(temp).resolve();files=[];pins={}
             for name in ('checkpoint.pt','stats.json','context.pt','model_config.json','engine.so',
                          'phoenix_encoder.pt','csvae.pt','Wan2.2_VAE.safetensors'):
                 p=root/name;p.write_bytes(name.encode())

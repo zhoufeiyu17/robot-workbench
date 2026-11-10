@@ -10,6 +10,8 @@ import numpy as np
 _SOURCE_SHA256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 SCHEMA='workbench.wam.v2'
+SOURCE_SCHEMA='workbench.wam.v3'
+SCHEMAS=(SCHEMA,SOURCE_SCHEMA)
 NATIVE_SCHEMA='workbench.wam-native-coordinates.v1'
 HORIZON=32
 HZ=30
@@ -159,14 +161,22 @@ def validate_inference_options(options,capabilities):
 def validate_descriptor(value):
     fields={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime','normalization_json',
             'inference_options','inference_capabilities'}
-    if (not isinstance(value,dict)or set(value)!=fields or value['schema']!=SCHEMA or not is_model_id(value['model_id'])
+    sourced=isinstance(value,dict)and value.get('schema')==SOURCE_SCHEMA
+    if sourced:fields.add('checkpoint_source')
+    if (not isinstance(value,dict)or set(value)!=fields or value['schema']not in SCHEMAS or not is_model_id(value['model_id'])
             or value['epoch']is not None or type(value['step'])is not int or value['step']<=0
             or int(value['model_id'].rsplit('-step',1)[1])!=value['step']or value['backend']not in('torch','anyinfer')):
         raise ValueError('explicit generic WAM checkpoint/backend descriptor required')
     artifacts=value['artifacts']
     if (not isinstance(artifacts,dict)or set(artifacts)!=ARTIFACT_KINDS
-            or any(not isinstance(v,dict)or set(v)!={'sha256'}or not re.fullmatch('[a-f0-9]{64}',str(v['sha256']))for v in artifacts.values())):
+            or any(not isinstance(v,dict)or set(v)!={'sha256'}or not(k=='checkpoint'and sourced and v['sha256']is None)
+                and not re.fullmatch('[a-f0-9]{64}',str(v['sha256']))for k,v in artifacts.items())):
         raise ValueError('WAM checkpoint/config/normalization/context pins required')
+    if sourced:
+        source=value['checkpoint_source']
+        if (not isinstance(source,dict)or set(source)!={'receipt_sha256','bytes'}or type(source['bytes'])is not int
+                or source['bytes']<=0 or not re.fullmatch('[a-f0-9]{64}',str(source['receipt_sha256']))):
+            raise ValueError('explicit source receipt and checkpoint size required when weight SHA256 is absent')
     raw=value['normalization_json']
     if not isinstance(raw,str)or len(raw.encode())>16384 or hashlib.sha256(raw.encode()).hexdigest()!=artifacts['stats']['sha256']:
         raise ValueError('WAM original normalization payload SHA256 differs')
@@ -189,7 +199,8 @@ def worker_identity(bundle):
         checkpoint_sha256=pins['checkpoint'],stats_sha256=pins['stats'],context_sha256=pins['context'],
         model_config_sha256=pins['model_config'],model_bundle_sha256=value['model_bundle_sha256'],runtime=value['runtime'],
         action_horizon=HORIZON,history_steps=0,action_hz=HZ,inference_steps=value['inference_options']['denoise_steps'],
-        strict_load=native,load_validation='strict_pytorch_checkpoint'if native else'pinned_anyinfer_engine',command_publication=False)
+        strict_load=native,load_validation='strict_pytorch_checkpoint'if native else'pinned_anyinfer_engine',command_publication=False,
+        **(dict(checkpoint_source=value['checkpoint_source'])if value['schema']==SOURCE_SCHEMA else{}))
 
 
 def _torch():
@@ -355,8 +366,10 @@ def descriptor(registry,*,denoise_steps=None):
         denoise_steps=registry.get('selected_inference_options',{}).get('denoise_steps',
             (capabilities or{}).get('denoise_steps',{}).get('default'))
     options=validate_inference_options(dict(denoise_steps=denoise_steps),capabilities)
-    return validate_descriptor(dict(schema=SCHEMA,model_id=registry['model_id'],epoch=None,step=registry.get('step'),backend=backend,
+    source=registry.get('checkpoint_source')if pins['checkpoint']is None else None
+    return validate_descriptor(dict(schema=SOURCE_SCHEMA if source is not None else SCHEMA,model_id=registry['model_id'],epoch=None,step=registry.get('step'),backend=backend,
         artifacts={k:dict(sha256=v)for k,v in pins.items()},model_bundle_sha256=registry['bundle_sha256'],
+        **(dict(checkpoint_source=deepcopy(source))if source is not None else{}),
         normalization_json=path.read_text(),inference_options=options,inference_capabilities=deepcopy(capabilities),
         runtime=dict(adapter='wam_torch_client.v2'if backend=='torch'else'wam_anyinfer_client.v2',
                      engine_sha256=registry.get('engine_sha256'),python_abi='cp312',torch_version=MODEL_TORCH_VERSION)))
@@ -371,7 +384,7 @@ def variants(registry):
 def verify_registry(registry):
     """Host/manifest and lightweight content checks; large weights use size and strict loading."""
     from .mixed366 import sha
-    root=Path(registry['root']).resolve(strict=True);files=registry['files'];paths={}
+    root=Path(registry['root']).resolve(strict=True);files=registry['files'];paths={};registered_paths=set()
     if registry.get('machine_id_sha256')!=sha('/etc/machine-id')or not str(registry.get('gpu_uuid','')).startswith('GPU-'):
         raise ValueError('registered WAM host/GPU identity required')
     canonical=json.dumps(sorted(files,key=lambda r:r['path']),sort_keys=True,separators=(',',':')).encode()
@@ -380,20 +393,47 @@ def verify_registry(registry):
         path=(root/row['path']).resolve(strict=True)
         if not path.is_relative_to(root)or not path.is_file()or path.stat().st_size!=row['bytes']:
             raise ValueError('WAM registered artifact changed: '+row['path'])
+        registered_paths.add(path)
         large_weight=path.suffix.lower()in ('.pt','.pth','.ckpt','.safetensors','.bin')and row['bytes']>64*1024*1024
         # Reuse the registered digest for large weights, then strictly load them.
         # Runtime code, manifests and small artifacts still receive content checks.
+        if row.get('sha256')is None and not metadata_weight(registry,row):
+            raise ValueError('missing artifact identity: '+row['path'])
         if not large_weight and sha(path)!=row['sha256']:
             raise ValueError('WAM registered artifact changed: '+row['path'])
-        paths.setdefault(row['sha256'],[]).append(path)
+        if row['sha256']is not None:paths.setdefault(row['sha256'],[]).append(path)
     bundle=descriptor(registry)
     required={**{k:v['sha256']for k,v in bundle['artifacts'].items()},'engine':bundle['runtime']['engine_sha256']}
+    checkpoint=None
+    if bundle.get('schema')==SOURCE_SCHEMA:
+        proof=paths.get(bundle['checkpoint_source']['receipt_sha256'],[])
+        if len(proof)!=1 or proof[0].stat().st_size>8*1024**2:raise ValueError('one bounded original source receipt required')
+        source=json.loads(proof[0].read_text());relative=registry.get('checkpoint_path')
+        if (source.get('schema')!='workbench.model-source.v1'or source.get('model_id')!=bundle['model_id']
+                or source.get('step')!=bundle['step']or source.get('checkpoint_path')!=relative):
+            raise ValueError('checkpoint source identity differs from the selected model')
+        for row in files:
+            if row['sha256']is None and source.get('files',{}).get(row['path'],{}).get('bytes')!=row['bytes']:
+                raise ValueError('unhashed weight differs from its source receipt')
+        rows=[row for row in files if row['path']==relative]
+        if len(rows)!=1 or rows[0]['bytes']!=bundle['checkpoint_source']['bytes']:
+            raise ValueError('checkpoint size differs from its declared source')
+        checkpoint=root/relative
+        required.pop('checkpoint')
     if any(len(paths.get(digest,[]))!=1 for digest in required.values()):raise ValueError('unique original WAM artifacts required')
     selected={name:paths[digest][0]for name,digest in required.items()}
+    if checkpoint is not None:selected['checkpoint']=checkpoint
     weights=selected['checkpoint'].parent
     for name in ('phoenix_encoder.pt','csvae.pt','Wan2.2_VAE.safetensors'):
-        if not any(p==weights/name for values in paths.values()for p in values):raise ValueError('missing registered WAM encoder: '+name)
+        if weights/name not in registered_paths:raise ValueError('missing registered WAM encoder: '+name)
     return root,selected
+
+
+def metadata_weight(registry,row):
+    """No synthetic digest: large weights may use a declared source receipt."""
+    return (isinstance(registry.get('checkpoint_source'),dict)and row.get('sha256')is None
+        and type(row.get('bytes'))is int and row['bytes']>64*1024**2
+        and Path(row['path']).suffix.lower()in('.pt','.pth','.ckpt','.safetensors','.bin'))
 
 
 class Client:
