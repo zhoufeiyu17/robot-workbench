@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 470,
-  "updated_at": "2026-11-10T19:37:25.115666+00:00",
+  "revision": 473,
+  "updated_at": "2026-11-10T19:49:39.494627+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -148,10 +148,10 @@
       "name": "模型输入装配",
       "phase": "P3",
       "state": "verified",
-      "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test.",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance.",
       "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:24.244141+00:00",
+      "updated_at": "2026-11-10T19:49:37.762224+00:00",
       "files": [
         "robot_workbench/inference_workflow.py",
         "robot_workbench/inference_evidence.py",
@@ -160,8 +160,8 @@
         "rule_based_workbench/real_observation.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "fingerprint": "e8cd89eb16ff2ceb645cb336e83674b4622f38b14ff3c42bb53e116ba87b20b2",
@@ -173,10 +173,10 @@
       "name": "模型身份、会话与传输",
       "phase": "P1",
       "state": "verified",
-      "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test.",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance.",
       "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:24.244138+00:00",
+      "updated_at": "2026-11-10T19:49:37.762220+00:00",
       "files": [
         "robot_workbench/inference_transport.py",
         "robot_workbench/model_session.py",
@@ -189,8 +189,8 @@
         "robot_workbench/ros_inference.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "fingerprint": "d2ff47120be37e96268094bceac180cd07355f5d7d6d0b66ce1239682529ca82",
@@ -202,10 +202,10 @@
       "name": "Torch / Triton 模型执行",
       "phase": "P3",
       "state": "verified",
-      "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test.",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance.",
       "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:24.244005+00:00",
+      "updated_at": "2026-11-10T19:49:37.762069+00:00",
       "files": [
         "robot_workbench/mixed366.py",
         "robot_workbench/mixed366_runtime.py",
@@ -215,8 +215,8 @@
         "robot_workbench/wam_mem.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "fingerprint": "f22e42b41ad2cf264411909494eaacd9cd51c45f3ebb9bfbbe3db3df374ad213",
@@ -307,10 +307,10 @@
       "name": "控制事件与模型产物接入",
       "phase": "P3",
       "state": "verified",
-      "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test.",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance.",
       "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:24.244144+00:00",
+      "updated_at": "2026-11-10T19:49:37.762227+00:00",
       "files": [
         "robot_workbench/inference_trace.py",
         "robot_workbench/inference_evidence.py",
@@ -321,8 +321,8 @@
         "robot_workbench/ros_recording.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "fingerprint": "76ed4fb325baf4d5d8c6537d0a92bd5d1b6666f2074869972e441f247a1f1340",
@@ -386,10 +386,10 @@
       "name": "页面 API 与业务编排",
       "phase": "P2",
       "state": "verified",
-      "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test.",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance.",
       "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:24.244146+00:00",
+      "updated_at": "2026-11-10T19:49:37.762230+00:00",
       "files": [
         "robot_workbench/service.py",
         "robot_workbench/workflows.py",
@@ -397,8 +397,8 @@
         "robot_workbench/inference_workflow.py"
       ],
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "fingerprint": "2c9e9fcf0a5bcf7f8ebd8a865190847d383e55ac2be919e913393040626e53d3",
@@ -1147,13 +1147,13 @@
     },
     "robot_workbench/inference_workflow.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392712+00:00",
+      "updated_at": "2026-11-10T19:49:38.658368+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -1229,13 +1229,13 @@
     },
     "robot_workbench/inference_transport.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392710+00:00",
+      "updated_at": "2026-11-10T19:49:38.658365+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -1268,13 +1268,13 @@
     },
     "robot_workbench/model_session.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392707+00:00",
+      "updated_at": "2026-11-10T19:49:38.658362+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -1304,13 +1304,13 @@
     },
     "robot_workbench/inference_model.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392717+00:00",
+      "updated_at": "2026-11-10T19:49:38.658375+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -1334,13 +1334,13 @@
     },
     "robot_workbench/inference_catalog.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392719+00:00",
+      "updated_at": "2026-11-10T19:49:38.658377+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -2091,13 +2091,13 @@
     },
     "robot_workbench/service.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392716+00:00",
+      "updated_at": "2026-11-10T19:49:38.658373+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -2670,13 +2670,13 @@
     },
     "robot_workbench/device_bootstrap.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392721+00:00",
+      "updated_at": "2026-11-10T19:49:38.658379+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -3588,13 +3588,13 @@
     },
     "robot_workbench/ros_inference.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392714+00:00",
+      "updated_at": "2026-11-10T19:49:38.658370+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -3859,13 +3859,13 @@
     },
     "robot_workbench/wam.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392724+00:00",
+      "updated_at": "2026-11-10T19:49:38.658381+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "verified_fingerprint": "76ed4fb325baf4d5d8c6537d0a92bd5d1b6666f2074869972e441f247a1f1340",
@@ -3986,13 +3986,13 @@
     },
     "robot_workbench/wam_mem.py": {
       "state": "verified",
-      "note": "Software qualified and published:actual GPU memory/output oracle,MODELTEACH isolation,explicitrecording and deletion;no physicalMODELcommands.Userphysical acceptance remains.",
-      "next": "User physical pedal/gripper and model task validation.",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits.",
+      "next": "User physical acceptance.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-10T19:37:23.392578+00:00",
+      "updated_at": "2026-11-10T19:49:38.658196+00:00",
       "evidence": {
-        "path": ".evidence/wam-mem-20261110-v1/progress.json",
-        "sha256": "aca7439f11c3d33d74f034928b8052fe1ce2a19a4e721e8e26df6540a5c291ef",
+        "path": ".evidence/wam-mem-20261110-v1/acceptance.json",
+        "sha256": "41dd1bded27d72e4eee44322a28c196fc7f25e9b5ce2bac529d17e0a8c1c1240",
         "matches_file": true
       },
       "source": {
@@ -4013,24 +4013,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T19:39:11.873412+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/inference_workflow.py"
-      ],
-      "state": "implemented",
-      "note": "目录扫描/刷新及冻结身份CPU资格通过，当前在线服务等待更新窗口"
-    },
-    {
-      "at": "2026-11-07T19:39:12.924147+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/inference_transport.py"
-      ],
-      "state": "implemented",
-      "note": "目录扫描/刷新及冻结身份CPU资格通过，当前在线服务等待更新窗口"
-    },
     {
       "at": "2026-11-07T20:51:26.880823+00:00",
       "kind": "domain",
@@ -4960,9 +4942,40 @@
       ],
       "state": "verified",
       "note": "Retained/fresh/clear WAM-MEM and default-off recording published;GPUoracle and3x10sTEACH+58.92sMODEL isolated qualification passed.Syntheticrecording save/delete passed;SDKdisconnected foruser test."
+    },
+    {
+      "at": "2026-11-10T19:49:37.762231+00:00",
+      "kind": "domain",
+      "ids": [
+        "infer-runtime",
+        "infer-session",
+        "input-assembly",
+        "evidence-ingress",
+        "ui-api"
+      ],
+      "state": "verified",
+      "note": "Retained/fresh/clear memory and default-off recordings published;frozen acceptance covers GPU bitwiseoracle,three10stakeovers,58.92sMODEL,save/deleteand late-reset fences.SDK remainsdisconnected foruser physical acceptance."
+    },
+    {
+      "at": "2026-11-10T19:49:38.658383+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/wam_mem.py",
+        "robot_workbench/model_session.py",
+        "robot_workbench/inference_transport.py",
+        "robot_workbench/inference_workflow.py",
+        "robot_workbench/ros_inference.py",
+        "robot_workbench/service.py",
+        "robot_workbench/inference_model.py",
+        "robot_workbench/inference_catalog.py",
+        "robot_workbench/device_bootstrap.py",
+        "robot_workbench/wam.py"
+      ],
+      "state": "verified",
+      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits."
     }
   ],
   "unmapped_files": [],
-  "source_head": "a9c24bef2fded76964fabb961ad9a769027eebbd",
+  "source_head": "c34e85fd6e2467368ea977ed43a9417963f500bb",
   "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.bfe39b544852"
 }
