@@ -22,6 +22,43 @@ class CompleteNormalTests(unittest.TestCase):
     def setup_reviewed(self,duration=.5):
         self.setup_modes(recording=True,finish_kind='dagger_reset_v1',initial_mode='HOLD',reviewed=True,reviewed_duration_s=duration)
 
+    def check_endpoint_delta(self,changes,accepted):
+        from unittest.mock import patch
+        self.setup_reviewed();runner=self.runtime.owner.runner
+        request,_=self.request('MODEL');self.completed(request)
+        self.until(lambda:runner.normal_segment['status']=='verifying_endpoint')
+        read=runner._normal_output
+        def output():
+            value=read()
+            for field,axis,delta in changes:value[field][axis]+=delta
+            return value
+        with patch.object(runner,'_normal_output',side_effect=output):
+            for _ in range(20):
+                self.advance()
+                if runner.normal_segment['status']=='completed'or runner.status=='FAULT':break
+            else:self.fail('endpoint did not reach a decision')
+        if accepted:
+            self.assertEqual(runner.normal_segment['status'],'completed');self.assertNotEqual(runner.status,'FAULT')
+        else:
+            self.assertEqual(runner.status,'FAULT');self.assertIn('native endpoint mismatch',runner.reason)
+            self.assertTrue(any(name=='inference_normal_model_endpoint_mismatch'for name,_ in self.events))
+
+    def test_native_endpoint_accepts_declared_joint_and_jaw_position_velocity_errors(self):
+        self.check_endpoint_delta([(field,axis,9e-7 if axis in (6,13)else 9e-6)
+            for field in ('q_sdk14','dq_sdk14')for axis in range(14)],True)
+
+    def test_native_endpoint_rejects_joint_position_above_tolerance(self):
+        self.check_endpoint_delta([('q_sdk14',0,1.1e-5)],False)
+
+    def test_native_endpoint_rejects_joint_velocity_above_tolerance(self):
+        self.check_endpoint_delta([('dq_sdk14',7,1.1e-5)],False)
+
+    def test_native_endpoint_rejects_jaw_position_above_tolerance(self):
+        self.check_endpoint_delta([('q_sdk14',6,1.1e-6)],False)
+
+    def test_native_endpoint_rejects_jaw_velocity_above_tolerance(self):
+        self.check_endpoint_delta([('dq_sdk14',13,1.1e-6)],False)
+
     def test_production_model_continues_fresh_segments_without_raw_gate_transitions(self):
         self.setup_reviewed(40.);runner=self.runtime.owner.runner
         request,_=self.request('MODEL');self.completed(request)

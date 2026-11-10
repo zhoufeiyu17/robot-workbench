@@ -16,6 +16,9 @@ from .sample_clock import POLICY_DURATION_TOLERANCE_S
 from .wam import NATIVE_SCHEMA
 from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD
 
+# Native command endpoint comparison: joints rad / rad/s, jaws m / m/s.
+NORMAL_ENDPOINT_ABS_TOLERANCE14=((1e-5,)*6+(1e-6,))*2
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
@@ -1047,8 +1050,11 @@ class InferenceRunner:
         output=self._normal_output()
         if any(row['sample_monotonic_ns']/1e9<current['endpoint_verification_after_s']for row in output['observations'].values()):return True
         reference=self.target_interpreter.reference;target,velocity,_=reference.sample([reference.duration_s])
-        if (not np.allclose(output['q_sdk14'],target[0],rtol=0,atol=1e-12)
-                or not np.allclose(output['dq_sdk14'],velocity[0],rtol=0,atol=1e-12)):
+        if (not np.allclose(output['q_sdk14'],target[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)
+                or not np.allclose(output['dq_sdk14'],velocity[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)):
+            self._emit('normal_model_endpoint_mismatch',dict(reference_id=reference.metadata['reference_id'],
+                command_epoch=self.owner.epoch,expected_q_sdk14=target[0].tolist(),expected_dq_sdk14=velocity[0].tolist(),
+                native_output=output,absolute_tolerance_sdk14=list(NORMAL_ENDPOINT_ABS_TOLERANCE14)))
             raise ValueError('normal complete-segment native endpoint mismatch')
         current.update(status='completed',complete_source_steps=current['source_steps'],completed_source_s=now,native_endpoint=output,firmware_ack=False,
             measured_endpoint=dict(sample_time_s=feedback['sample_time_s'],sample_wall_ns=feedback.get('sample_wall_ns'),

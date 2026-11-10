@@ -707,7 +707,16 @@
       "status": "implemented",
       "transport": "Owner 的只读反馈快照及事件通道；相机/state模块订阅这些事实。",
       "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。 用户已批准按部署版本恢复raw_state_enabled可选接线；getter时间区间和各臂独立SDK时钟分别保留。",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。"
+      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
+      "normal_native_endpoint_comparison": {
+        "scope": "normal complete-segment native output command versus planned endpoint; not physical tracking tolerance",
+        "joint_position_atol_rad": 1e-05,
+        "joint_velocity_atol_rad_s": 1e-05,
+        "jaw_position_atol_m": 1e-06,
+        "jaw_velocity_atol_m_s": 1e-06,
+        "rtol": 0,
+        "failure": "retain original native output, expected endpoint and tolerance in mismatch event; existing fault path unchanged"
+      }
     },
     {
       "id": "I08",
