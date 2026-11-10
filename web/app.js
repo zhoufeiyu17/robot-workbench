@@ -1845,7 +1845,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     pausePair();recordingFilesBusy=true;renderRecordingFiles();setText('recording-files-status','正在删除所选任务…');
     try{
       const response=await request('/api/actions/inference_delete_recordings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
-        body:JSON.stringify({...context,request_id:crypto.randomUUID(),run_ids:intent.run_ids,confirmed:true})}),value=await response.json();
+        body:JSON.stringify({...context,request_id:newRequestId(crypto),run_ids:intent.run_ids,confirmed:true})}),value=await response.json();
       if(!response.ok)throw Error(value.error||'删除失败');
       if(intent.context!==key()||intent.server!==serverInstance)return;
       recordingFiles=recordingFiles.filter(row=>!value.deleted_run_ids.includes(row.run_id));recordingSelection.clear();
