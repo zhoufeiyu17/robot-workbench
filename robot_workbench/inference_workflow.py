@@ -1747,6 +1747,13 @@ class InferenceWorkflow:
     def results_page(self, *, before=None, after=None):
         return self.history.page(before=before, after=after)
 
+    def recording_files(self,run_ids=None):
+        with self.lock:
+            run=self.current;active=[]
+            if run and(run.get('ended_wall')is None or run.get('recorder')and not run['recorder'].done.is_set()):
+                active.append(run['id'])
+        return self.history.recordings(active=active)if run_ids is None else self.history.delete_recordings(run_ids,active=active)
+
     def media(self, identity):
         if getattr(self,'capture_results',None) is not None and identity.startswith('capture-'):
             return self.capture_results.media('inference',identity)

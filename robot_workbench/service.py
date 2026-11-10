@@ -1407,6 +1407,14 @@ class Application:
                 if previous['body'] != body or previous['action'] != action:
                     raise ValueError('同一请求身份不可绑定不同操作')
                 return previous['response']
+        if action=='inference_delete_recordings':
+            if business!='inference'or set(body)!={'environment','business','request_id','run_ids','confirmed'}or body['confirmed']is not True:
+                raise ValueError('explicit inference recording selection and deletion confirmation required')
+            flow=device.workflows.get('inference')
+            if flow is None:raise ValueError('推理业务未配置')
+            result=flow.recording_files(body['run_ids'])
+            with self.lock:self.requests[key]=dict(body=original_body,action=action,response=result)
+            return result
         if action in ('inference_hold','inference_home','inference_teach'):
             flow=device.workflows.get('inference')
             if flow is None:raise ValueError('inference workflow is not configured')
@@ -1979,6 +1987,12 @@ def handler(app):
                 self.close_connection=True;return self.send(409,{'error':'GET request body is not supported'})
             path=urlsplit(self.path);query=parse_qs(path.query)
             try:
+                if path.path=='/api/inference-recordings':
+                    if set(query)!={'environment','business'}or any(len(v)!=1 for v in query.values())or query['business'][0]!='inference':
+                        raise ValueError('one explicit inference environment required')
+                    flow=app.device(query['environment'][0]).workflows.get('inference')
+                    if flow is None:raise ValueError('推理业务未配置')
+                    return self.send(200,dict(recordings=flow.recording_files()))
                 if path.path=='/api/triton/catalog' or path.path.startswith('/api/triton/jobs/'):
                     if set(query)!={'environment'} or len(query['environment'])!=1:raise ValueError('one explicit environment required')
                     job_id=path.path.removeprefix('/api/triton/jobs/') if path.path.startswith('/api/triton/jobs/') else None

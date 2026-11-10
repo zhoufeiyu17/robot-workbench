@@ -444,6 +444,7 @@ class CaptureResults:
         run,business,revision=(event[k]for k in('execution_instance_id','business_kind','seal_revision'))
         if (not isinstance(run,str)or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',run)or business not in self.histories
                 or type(revision)is not int or revision<0):raise ValueError('known capture Run/revision required')
+        if self.histories[business].deleted(run):return False
         path=self._checked_ref(event['receipt_ref'])
         run_root=self.root/(('inference-'if business=='inference'else'')+run)
         if path!=run_root/f'receipt-r{revision:06d}.json':raise ValueError('receipt belongs to another Run/revision')

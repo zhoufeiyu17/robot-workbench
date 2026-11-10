@@ -1,5 +1,6 @@
 """Bounded disk index, old-data preservation and stable read-only pages; CPU only."""
 import gc
+import fcntl
 import json
 from pathlib import Path
 import sqlite3
@@ -27,6 +28,46 @@ class HistoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name); self.history = InferenceHistory(self.root)
+
+    def capture(self,run,*,done=True):
+        directory=self.root/('inference-'+run)/'capture'/'capture-test';directory.mkdir(parents=True)
+        (directory/'capture.json').write_text('{}')
+        (directory/'binding.json').write_text(json.dumps(dict(run_id=run,business_kind='inference')))
+        (directory/'status.json').write_text(json.dumps(dict(done=done,ingress_closed=done,state='complete'if done else'recording')))
+        (directory/'writer.lock').touch();video=directory/'video.mp4';video.write_bytes(b'video')
+        (directory/'raw-frame.bin').write_bytes(b'original')
+        result=dict(id=run+'-video',run_id=run,kind='replay')
+        self.history.append([(result,video)])
+        return directory,result,video
+
+    def test_recording_delete_protects_active_writers_and_scopes_the_whole_batch(self):
+        first,_,_=self.capture('first');second,_,_=self.capture('second',done=False)
+        with self.assertRaises(ValueError):self.history.delete_recordings(['first','second'])
+        self.assertTrue(first.is_dir());self.assertEqual(self.history.page()['total_runs'],2)
+        with self.assertRaises(ValueError):self.history.delete_recordings(['first'],active=['first'])
+        with (first/'writer.lock').open('r+')as writer:
+            fcntl.flock(writer,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError,'写入进程'):self.history.delete_recordings(['first'])
+        for run in ('../outside','/absolute'):
+            with self.assertRaises(ValueError):self.history.delete_recordings([run])
+        outside=self.root/'outside';outside.mkdir();(self.root/'inference-link').symlink_to(outside,target_is_directory=True)
+        with self.assertRaises(ValueError):self.history.delete_recordings(['link'])
+        self.assertTrue(outside.is_dir());self.assertTrue(second.is_dir())
+
+    def test_deleted_recordings_cannot_return_from_late_index_updates_or_restart(self):
+        first,row,video=self.capture('first');second,_,_=self.capture('second')
+        result=self.history.delete_recordings(['first','second'])
+        self.assertEqual(result['deleted_run_ids'],['first','second']);self.assertEqual(result['failed'],[])
+        self.assertFalse(first.parent.parent.exists());self.assertFalse(second.parent.parent.exists())
+        self.history.append([(row,video)])
+        restored=InferenceHistory(self.root);self.assertTrue(restored.deleted('first'))
+        self.assertEqual(restored.page()['total_runs'],0);self.assertIsNone(restored.media(row['id']))
+        third,_,_=self.capture('third')
+        with patch('robot_workbench.inference_history.shutil.rmtree',side_effect=OSError('disk busy')):
+            self.assertEqual(self.history.delete_recordings(['third'])['failed'][0]['run_id'],'third')
+        (third/'binding.json').unlink()
+        self.assertTrue(self.history.recordings()[0]['deletable'])
+        self.assertEqual(self.history.delete_recordings(['third'])['deleted_run_ids'],['third'])
 
     def test_pages_keep_whole_runs_and_do_not_shift_when_new_results_arrive(self):
         self.history.append(rows(self.root, 1, 30))
@@ -123,6 +164,9 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse((self.root / (DATABASE+'-journal')).exists())
 
     def test_retained_python_index_memory_stays_flat_as_disk_history_grows(self):
+        # Warm CPython's process-global path-component intern table before
+        # measuring index retention; other imported suites change its resize point.
+        for number in range(1,4201):Path(f'run-{number}/head.mp4').parts
         tracemalloc.start(); self.addCleanup(tracemalloc.stop)
         payload = 'metadata' * 256
         self.history.append(rows(self.root,1,200,payload=payload)); self.history.page(); gc.collect()

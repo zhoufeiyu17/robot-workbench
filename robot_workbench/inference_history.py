@@ -3,9 +3,12 @@
 The original v1 JSON is retained after a transactional, streaming import. Only
 this business service opens the index; the control Owner never depends on it.
 """
-from contextlib import closing
+from contextlib import closing, ExitStack
+import fcntl
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
 import re
 
@@ -15,7 +18,7 @@ PAGE_BYTES = 768 * 1024
 ENTRY_BYTES = 256 * 1024
 RUN_BYTES = 512 * 1024
 RUN_RESULTS = 8
-SCHEMA = 1
+SCHEMA = 2
 
 
 def _finite(value):
@@ -132,7 +135,7 @@ def entries(root):
     root = Path(root); path = root / DATABASE
     if path.exists() or path.is_symlink():
         with closing(_connect(path, readonly=True)) as db:
-            if db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA:
+            if db.execute('PRAGMA user_version').fetchone()[0] not in (1,SCHEMA):
                 raise ValueError('unknown or incomplete inference history database')
             if db.execute('PRAGMA journal_mode').fetchone()[0] != 'delete' or (root / (DATABASE + '-journal')).exists():
                 raise ValueError('inference history must be idle with a standalone DELETE-journal index before preservation')
@@ -150,6 +153,10 @@ class InferenceHistory:
         self.root.mkdir(parents=True, exist_ok=True)
         with closing(_connect(self.path)) as db, db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
+            if version==1:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('CREATE TABLE IF NOT EXISTS deleted_runs (id TEXT PRIMARY KEY)')
+                db.execute('PRAGMA user_version=2');version=SCHEMA
             if version == SCHEMA:
                 if database==DATABASE:_check_legacy(db, self.root)
                 return
@@ -164,17 +171,19 @@ class InferenceHistory:
             db.execute('CREATE TABLE IF NOT EXISTS results (seq INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, run INTEGER NOT NULL REFERENCES runs(seq), result TEXT NOT NULL, path TEXT)')
             db.execute('CREATE INDEX IF NOT EXISTS results_run ON results(run, seq)')
             db.execute('CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS deleted_runs (id TEXT PRIMARY KEY)')
             legacy = self.root / 'history.json'
             legacy_pin = _legacy_pin(self.root)if database==DATABASE else None
             if database==DATABASE and (legacy.exists() or legacy.is_symlink()):self._append(db, legacy_entries(legacy))
             if database==DATABASE and _legacy_pin(self.root) != legacy_pin:raise ValueError('legacy inference history changed during import')
             db.execute('INSERT INTO metadata(key,value) VALUES (?,?)', ('legacy', json.dumps(legacy_pin)))
-            db.execute('PRAGMA user_version=1')
+            db.execute('PRAGMA user_version=2')
 
     @staticmethod
     def _append(db, rows):
         for entry in rows:
             identity, run, raw, relative, size = checked_entry(entry)
+            if db.execute('SELECT 1 FROM deleted_runs WHERE id=?',(run,)).fetchone():continue
             db.execute('INSERT OR IGNORE INTO runs(id) VALUES (?)', (run,))
             seq, total, count = db.execute('SELECT seq, bytes, count FROM runs WHERE id=?', (run,)).fetchone()
             if total + size > RUN_BYTES or count >= RUN_RESULTS:
@@ -192,6 +201,80 @@ class InferenceHistory:
             row=db.execute('SELECT result FROM results WHERE id=?',(identity,)).fetchone()
         return json.loads(row[0])if row else None
 
+    def deleted(self,run):
+        with closing(_connect(self.path,readonly=True))as db:
+            return db.execute('SELECT 1 FROM deleted_runs WHERE id=?',(run,)).fetchone()is not None
+
+    def _recording(self,run,active):
+        if not isinstance(run,str)or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',run):
+            raise ValueError('explicit recording Run identity required')
+        path=self.root/('inference-'+run)
+        if path.is_symlink()or not path.is_dir()or path.resolve().parent!=self.root.resolve():
+            raise ValueError('recording must belong to this inference output root')
+        captures=sorted((path/'capture').glob('capture-*'))
+        reason='当前任务仍在录制或收尾'if run in active else None
+        if self.deleted(run):
+            if (path/'capture').is_symlink()or any(p.is_symlink()for p in captures):
+                raise ValueError('录制目录身份不符')
+            return dict(run_id=run,started_wall_ns=None,state='deleting',deletable=reason is None,reason=reason),path,captures
+        states=[];stamp=None
+        try:
+            if (path/'capture').is_symlink()or not captures:raise ValueError('录制状态尚未确认')
+            for capture in captures:
+                if capture.is_symlink()or not capture.is_dir():raise ValueError('录制目录身份不符')
+                for name in ('binding.json','status.json','capture.json','writer.lock'):
+                    item=capture/name
+                    if item.is_symlink()or not item.is_file():raise ValueError('录制状态尚未确认')
+                binding=json.loads((capture/'binding.json').read_text())
+                if binding.get('run_id')!=run or binding.get('business_kind')!='inference':
+                    raise ValueError('录制归属不符')
+                state=json.loads((capture/'status.json').read_text());states.append(state.get('state','unknown'))
+                if not(state.get('done')is True and state.get('ingress_closed')is True):
+                    reason=reason or '录制或封存尚未结束'
+                created=(capture/'capture.json').stat().st_mtime_ns
+                stamp=min(stamp,created)if stamp else created
+        except (OSError,ValueError,TypeError)as error:reason=reason or str(error)
+        return dict(run_id=run,started_wall_ns=stamp,state=states[-1]if states else'unknown',
+            deletable=reason is None,reason=reason),path,captures
+
+    def recordings(self,*,active=()):
+        # Explicit file-manager refresh only; never scan recording directories in state polling.
+        rows=[]
+        for path in self.root.iterdir():
+            if path.name.startswith('inference-')and path.is_dir():
+                try:rows.append(self._recording(path.name[len('inference-'):],active)[0])
+                except ValueError:continue
+        return sorted(rows,key=lambda row:(row['started_wall_ns']or 0,row['run_id']),reverse=True)
+
+    def delete_recordings(self,run_ids,*,active=()):
+        if (not isinstance(run_ids,list)or not 1<=len(run_ids)<=100
+                or any(not isinstance(run,str)for run in run_ids)or len(set(run_ids))!=len(run_ids)):
+            raise ValueError('select one to100 distinct recording Runs')
+        with ExitStack()as locks:
+            paths=[]
+            for run in run_ids:
+                row,path,captures=self._recording(run,active)
+                if not row['deletable']:raise ValueError(row['reason'])
+                for capture in captures:
+                    if not(capture/'writer.lock').exists()and self.deleted(run):continue
+                    fd=os.open(capture/'writer.lock',os.O_RDWR|os.O_NOFOLLOW);locks.callback(os.close,fd)
+                    try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    except BlockingIOError:raise ValueError('录制写入进程尚未退出，不能删除')from None
+                paths.append(path)
+            # Commit the tombstones first: late index notifications must never
+            # resurrect deleted Runs, including after a process restart.
+            with closing(_connect(self.path))as db,db:
+                db.execute('BEGIN IMMEDIATE')
+                for run in run_ids:
+                    db.execute('INSERT OR IGNORE INTO deleted_runs(id)VALUES(?)',(run,))
+                    db.execute('DELETE FROM results WHERE run IN(SELECT seq FROM runs WHERE id=?)',(run,))
+                    db.execute('DELETE FROM runs WHERE id=?',(run,))
+            deleted=[];failed=[]
+            for run,path in zip(run_ids,paths):
+                try:shutil.rmtree(path);deleted.append(run)
+                except OSError as error:failed.append(dict(run_id=run,error=str(error)))
+            return dict(deleted_run_ids=deleted,failed=failed,filesystem_free_bytes=shutil.disk_usage(self.root).free)
+
     def replace_capture_run(self,rows,*,preserve_other_results=False):
         """One atomic latest-seal projection; immutable prior artifacts stay on disk."""
         entries=[dict(result=row,path=str(path.relative_to(self.root))if path is not None else None)for row,path in rows]
@@ -202,6 +285,7 @@ class InferenceHistory:
         if type(revision)is not int or revision<0:raise ValueError('nonnegative seal revision required')
         with closing(_connect(self.path))as db,db:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM deleted_runs WHERE id=?',(run,)).fetchone():return False
             existing=db.execute('SELECT seq FROM runs WHERE id=?',(run,)).fetchone()
             if existing:
                 old=[json.loads(row[0])for row in db.execute('SELECT result FROM results WHERE run=?',(existing[0],))]

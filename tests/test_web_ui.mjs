@@ -2397,3 +2397,22 @@ for(const change of ['steps','duration','denoise','stop','duration-run']){
   if(change==='stop')assert(!posts.includes('inference_execution_settings'));
   h.app.destroy();
 }
+
+{
+  const h=harness({business:'inference'});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('results');
+  h.get('recording-files').open=true;h.get('recording-files').events.toggle();
+  const read=h.requests.at(-1);assert.match(read.url,/api\/inference-recordings/);
+  read.resolve(response({recordings:[{run_id:'saved-one',started_wall_ns:1794280000000000000,state:'complete',deletable:true},{run_id:'saved-two',state:'incomplete',deletable:true},{run_id:'active',state:'recording',deletable:false,reason:'录制尚未结束'}]}));await settle();
+  assert.equal(h.get('recording-files-list').querySelectorAll('input')[2].disabled,true);
+  h.get('recording-files-select').events.click();h.get('recording-files-delete').events.click();
+  assert.equal(h.get('recording-files-confirm').open,true);assert.equal(h.get('recording-files-selection').children.length,2);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'selection and preview never delete');
+  h.get('recording-files-cancel').events.click();assert.equal(h.get('recording-files-confirm').open,false);
+  h.get('recording-files-delete').events.click();h.get('recording-files-confirm-delete').events.click();
+  const deletion=h.requests.at(-1);assert.match(deletion.url,/inference_delete_recordings$/);
+  assert.deepEqual(JSON.parse(deletion.options.body).run_ids,['saved-one','saved-two']);assert.equal(JSON.parse(deletion.options.body).confirmed,true);
+  deletion.resolve(response({deleted_run_ids:['saved-one','saved-two'],failed:[]}));await settle();
+  assert.match(h.get('recording-files-status').textContent,/已删除 2 条/);assert.equal(h.get('recording-files-list').children.length,1);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,1,'deletion never starts control or automatically retries');
+  h.app.destroy();
+}

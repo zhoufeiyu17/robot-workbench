@@ -21,6 +21,24 @@ from robot_workbench.service import Application,Device,protocol_fake,serve,loopb
 
 
 class HTTPTest(unittest.TestCase):
+    def test_recording_file_management_is_confirmed_scoped_and_never_connects_sdk(self):
+        from test_inference_history import HistoryTests
+        fixture=HistoryTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        fixture.capture('saved');fixture.capture('active',done=False)
+        history=fixture.history
+        self.device.workflows['inference']=SimpleNamespace(recording_files=lambda run_ids=None:
+            history.recordings()if run_ids is None else history.delete_recordings(run_ids))
+        url=self.url+'/api/inference-recordings?environment=fake&business=inference'
+        listing=json.loads(self.http.open(url).read())['recordings']
+        self.assertEqual({r['run_id']for r in listing},{'saved','active'})
+        with self.assertRaises(HTTPError):self.action('inference_delete_recordings',business='inference',run_ids=['saved'],confirmed=False)
+        with self.assertRaises(HTTPError):self.action('inference_delete_recordings',business='calibration',run_ids=['saved'],confirmed=True)
+        with self.assertRaises(HTTPError):self.action('inference_delete_recordings',business='inference',run_ids=['saved','active'],confirmed=True)
+        code,result=self.action('inference_delete_recordings',business='inference',run_ids=['saved'],confirmed=True)
+        self.assertEqual(code,200);self.assertEqual(result['deleted_run_ids'],['saved'])
+        self.assertEqual([r['run_id']for r in json.loads(self.http.open(url).read())['recordings']],['active'])
+        self.assertIsNone(self.device.runtime)
+
     def test_inference_page_reuses_its_snapshot_for_action_permissions(self):
         from test_inference_workflow import InferenceWorkflowTests
         fixture=InferenceWorkflowTests('runTest');fixture.setUp()

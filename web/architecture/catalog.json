@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f41a9c998023",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.815e0ecb98cf",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -847,7 +847,21 @@
       ],
       "status": "implemented",
       "transport": "独立CaptureSession CPU writer封存 → CaptureRun结束回调 → 既有SQLite结果索引；旧产物保持原读取路径。",
-      "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。"
+      "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。",
+      "file_management": {
+        "status": "approved",
+        "scope": "Inference recordings, one complete Run or up to100 explicitly selected Runs per request",
+        "list": "GET /api/inference-recordings?environment=...&business=inference; explicit refresh outside state polling",
+        "delete": "POST /api/actions/inference_delete_recordings; environment/business/request_id/run_ids/confirmed=true",
+        "consumers": {
+          "UI": "Date/status selection and exact permanent-deletion confirmation; scope is bound to device and server identity",
+          "InferenceHistory": "Verify owned root, terminal capture and exited writer locks; remove complete Run directory and SQLite rows",
+          "CaptureResults": "Honor durable deleted-Run tombstones so late seal notifications cannot restore history"
+        },
+        "boundary": "Reject active, sealing, unknown ownership, symlink roots and still-held writer locks; do not acquire/release SDK or start other services",
+        "compatibility": "SQLite history schema2 migrates schema1 transactionally; immutable recording schemas and media formats unchanged",
+        "failure": "Preflight every selected Run before mutation; return per-Run removal failures for explicit retry; tombstone remains durable"
+      }
     },
     {
       "id": "I10",
@@ -2775,7 +2789,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "1368f00d8ddef625601f0ecae305336d103edf7893523451ad77976764329df3",
+        "fingerprint": "91964a2502cda8c3f9c33ddf7cd909a20ba543390927e9a388ea83713717fe36",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2899,7 +2913,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "6582def04eeddef2543bf3b5b35d2cb8e59de6a96434a8bd465c8396861bb962",
+        "fingerprint": "2ca78992aa59bc451bc330c31509cbee2b7ce78c96cc0994ee5bf21a158b5ed9",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3026,7 +3040,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "7af74d6bc6c06cfc7eea8b2051c0dc38e5fdf9690ccbdcd9760ef05b59708a95",
+        "fingerprint": "f331b3f96ea03b22bc373c6e9e08bab0fd09bcdbec750a7ac4071510c970c6f9",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3145,7 +3159,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "8c250fb14cd6d526e0a7624cab73452f2ba2eff26ef0257508a64675a3717e91",
+        "fingerprint": "35b635ea13eabb929160e70fb2b00d39994a13ac199c578781c7710751d30f1e",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3359,7 +3373,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "f7120d01e94e8452b9e149cabe90221d2fa502115c6ba5203534c72c9608d7c3",
+        "fingerprint": "3e926568859f57119e0580e948334fb03da303938ebf2c5ccda51a2ee7731dbc",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3522,7 +3536,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "d3622e148401621ab2932fa75bf61691a46102ef0b90fb46340da299dae9c6d7",
+        "fingerprint": "813581066fd4410817e2586ee0385b7888e7b0782c9fcf7ed0924eca992e1334",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3659,7 +3673,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "38b907977be62d5679dfc6c59315fe591161c2df78fc2fb927a08ba280fc58b9",
+        "fingerprint": "b5845fb5d6614bcc22ecd46a2a0b7d9bb613a24a385b78da41bbfb99b9cb2101",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3801,7 +3815,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "2f9d0be98fe63b47c1511d9ef4a2697ee2387de76f3940a0614ece0bb1fe36f4",
+        "fingerprint": "5c13c300f2dad7740787d14e09ada36c3a0736d2f204fe0cce7c5747e6ead5f4",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3927,7 +3941,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "9dcb75e7c7507c5032938febb92ac986bcb7a150275c32e35eb4d93d18edcc89",
+        "fingerprint": "a3c82fed90974d05884c6b83061b17d8ccfd4748a537734a32e0dab9e2c87b05",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4056,7 +4070,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "7b6856eb5febd0d0f09c17ec03f6aee71b7b223057d7b440f7373f29c92c447e",
+        "fingerprint": "11b41bd315bc7873039b7651a59dbcac8a2c92e30d157273983c550187fe8bd6",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4182,7 +4196,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "4b000e000333a55160c9fe3e019ef19c50d48b27bc7e68ded80a812d12eb647d",
+        "fingerprint": "e383071357edacd6930c9e7e9baf91c3b4e73636f5e62310b9609cbb71f27039",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },

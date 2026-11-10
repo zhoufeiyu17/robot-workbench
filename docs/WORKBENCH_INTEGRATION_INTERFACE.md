@@ -838,6 +838,19 @@ Runtime的normal recording＋listener拒绝、独立Stop API、native Guard、SD
 - I10：现有阶段`detail`增加可选`step_refs`，引用已批准的UC/SC步骤。原phase、job/request身份及旧回执不变；未知阶段不编造引用。摘要过大时仍保留有界步骤引用，完整证据留在原操作回执。界面链接到架构Map；步骤引用和阶段时间戳本身均不构成完成证明，实际结果仍依据后置核验。
 - UC09/P4：两种正常回零形状均使用现有`calibration`人工轨迹和冻结策略，录制用途固定`data_required`。`exit_home_keep_jaws`仅决定轨迹/夹爪构造。回零速度仍为0.1 rad/s，不改策略数值；使用当前标定的跟踪、到位和实测速度设置。执行、静止及本Run录制结束均确认后才允许正常释放，异常或Stop不重放旧动作。`research`自身仍要求显式选择用途。
 
+### 推理录制文件管理（2026-11-10 用户确认）
+
+I09 的文件管理以整条 Infer Run 为删除单位，包含全部相机视频、原始帧及关联推理结果。
+页面显式刷新 `GET /api/inference-recordings?environment=...&business=inference`，返回
+`run_id/started_wall_ns/state/deletable/reason`；普通状态轮询不扫描录制目录。
+单选或最多 100 条多选后，页面展示具体任务并确认永久删除，再提交
+`POST /api/actions/inference_delete_recordings`，字段为
+`environment/business/request_id/run_ids/confirmed=true`。页面的选择与确认绑定设备和服务实例。
+后端先核验整批目录归属、封存终态和 writer 锁；活动任务、封存未结束、仍有 writer 或身份未知时拒绝。
+SQLite 历史索引 schema 2 从 schema 1 事务迁移，先持久化删除标记并撤销结果索引，再删除 Run 目录；
+迟到封存通知和服务重启不能恢复已删除结果。文件删除失败逐项返回，可在刷新后显式重试。
+该接口不接入或释放 SDK，不启动模型、相机或控制服务，也不删除其他业务的结果。
+
 ### 2026-11-06 常驻记录服务（CPU候选）
 
 来源：用户要求保留原图的常驻进程设计，并批准薄入口、受管`recording`角色及本地Unix IPC；未授权真机发布。

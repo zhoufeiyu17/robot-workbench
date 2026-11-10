@@ -211,6 +211,8 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   let replayVideos=[],pairedCamera='',pairedPosition=0,pairedStarted=0,pairedPlaying=false,pairedRate=1,pairVersion=0;
   const historySelections=new Map();let historyRun='';
   let resultsCursor=null,resultsBrowsing=false;
+  let recordingFiles=[],recordingFilesContext='',recordingFilesBusy=false,recordingDeleteIntent=null;
+  const recordingSelection=new Set();
   let deletionKey='';const confirmedDeletions=new Set();
   let previewView='target',meshCamera='head',meshCandidate='',meshAnchor='',meshOptionsKey='',meshStateKey='',previewRenderer=null;
   let meshCatalog=null,meshCatalogRequest=null;
@@ -1803,6 +1805,54 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       }
     }
   }
+  const recordingContext=()=>JSON.stringify([key(),serverInstance,state?.device?.id]);
+  function renderRecordingFiles(){
+    const box=el('recording-files-list');box.replaceChildren();
+    for(const row of recordingFiles){
+      const label=make('label',null,'check-label'),input=make('input');input.type='checkbox';input.checked=recordingSelection.has(row.run_id);
+      input.disabled=recordingFilesBusy||!row.deletable;
+      input.addEventListener('change',()=>{if(input.checked)recordingSelection.add(row.run_id);else recordingSelection.delete(row.run_id);renderRecordingFiles();});
+      label.append(input,make('span',`${recordingTaskTime(row.started_wall_ns)||'时间未知'} · ${row.run_id.slice(0,8)} · ${statusText(row.state)}${row.reason?' · '+row.reason:''}`));box.append(label);
+    }
+    el('recording-files-delete').disabled=recordingFilesBusy||!recordingSelection.size||recordingSelection.size>100;
+    el('recording-files-delete').textContent=`删除所选任务${recordingSelection.size?'（'+recordingSelection.size+'）':''}`;
+    el('recording-files-refresh').disabled=recordingFilesBusy;el('recording-files-select').disabled=recordingFilesBusy||!recordingFiles.some(row=>row.deletable);
+  }
+  async function loadRecordingFiles(){
+    if(context.business!=='inference'||recordingFilesBusy)return;
+    const own=recordingContext();recordingFilesBusy=true;renderRecordingFiles();
+    setText('recording-files-status','正在读取录制文件列表…');
+    try{
+      const response=await request('/api/inference-recordings?'+new URLSearchParams(context),{cache:'no-store'}),value=await response.json();
+      if(!response.ok)throw Error(value.error||'文件列表读取失败');
+      if(own!==recordingContext())return;
+      recordingFiles=value.recordings;recordingFilesContext=own;recordingSelection.clear();
+      setText('recording-files-status',recordingFiles.length?`共 ${recordingFiles.length} 条录制任务`:'没有录制文件。');
+    }catch(error){if(own===recordingContext())setText('recording-files-status',error.message);}
+    finally{recordingFilesBusy=false;renderRecordingFiles();}
+  }
+  function reviewRecordingDeletion(){
+    if(recordingFilesBusy||recordingFilesContext!==recordingContext()||!recordingSelection.size||recordingSelection.size>100)return;
+    recordingDeleteIntent={context:key(),server:serverInstance,run_ids:[...recordingSelection]};
+    const list=el('recording-files-selection');list.replaceChildren();
+    for(const id of recordingDeleteIntent.run_ids){const row=recordingFiles.find(item=>item.run_id===id);list.append(make('li',`${recordingTaskTime(row?.started_wall_ns)||'时间未知'} · ${id.slice(0,8)}`));}
+    el('recording-files-confirm').showModal();
+  }
+  async function deleteRecordingFiles(){
+    const intent=recordingDeleteIntent;recordingDeleteIntent=null;el('recording-files-confirm').close();
+    if(!intent||intent.context!==key()||intent.server!==serverInstance||recordingFilesBusy||!online)return;
+    pausePair();recordingFilesBusy=true;renderRecordingFiles();setText('recording-files-status','正在删除所选任务…');
+    try{
+      const response=await request('/api/actions/inference_delete_recordings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
+        body:JSON.stringify({...context,request_id:crypto.randomUUID(),run_ids:intent.run_ids,confirmed:true})}),value=await response.json();
+      if(!response.ok)throw Error(value.error||'删除失败');
+      if(intent.context!==key()||intent.server!==serverInstance)return;
+      recordingFiles=recordingFiles.filter(row=>!value.deleted_run_ids.includes(row.run_id));recordingSelection.clear();
+      setText('recording-files-status',`已删除 ${value.deleted_run_ids.length} 条任务。${value.failed.length?'部分文件未删除，请刷新后重试：'+value.failed.map(row=>row.error).join('；'):''}`);
+      historySelections.delete(historyKey());resultsCursor=null;void poll();
+    }catch(error){if(intent.context===key())setText('recording-files-status','删除结果未确认：'+error.message+'；请刷新列表核对，不会自动重试。');}
+    finally{recordingFilesBusy=false;renderRecordingFiles();}
+  }
   function renderHistoryPaging(){
     const page=state?.results_page;
     el('inference-history-pages').hidden=!page;
@@ -1820,6 +1870,11 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   }
   function renderResults() {
     renderHistoryPaging();
+    el('recording-files').hidden=context.business!=='inference';
+    if(recordingFilesContext&&recordingFilesContext!==recordingContext()){
+      recordingFiles=[];recordingFilesContext='';recordingSelection.clear();recordingDeleteIntent=null;
+      el('recording-files').open=false;el('recording-files-confirm').close();renderRecordingFiles();setText('recording-files-status','');
+    }
     const deletion=state?.workflow?.deletion_preview;
     el('delete-tools').hidden=context.business!=='calibration';el('deletion-preview').hidden=context.business!=='calibration'||!deletion;
     const nextDeletionKey=JSON.stringify([key(),deletion?.id]);
@@ -2405,6 +2460,13 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-history-older').addEventListener('click',()=>browseInferenceHistory('before'));
     el('inference-history-newer').addEventListener('click',()=>browseInferenceHistory('after'));
     el('inference-history-latest').addEventListener('click',()=>browseInferenceHistory(null));
+    el('recording-files').addEventListener('toggle',()=>{if(el('recording-files').open)void loadRecordingFiles();});
+    el('recording-files-refresh').addEventListener('click',()=>void loadRecordingFiles());
+    el('recording-files-select').addEventListener('click',()=>{recordingSelection.clear();for(const row of recordingFiles.filter(row=>row.deletable).slice(0,100))recordingSelection.add(row.run_id);renderRecordingFiles();});
+    el('recording-files-delete').addEventListener('click',reviewRecordingDeletion);
+    el('recording-files-confirm-delete').addEventListener('click',()=>void deleteRecordingFiles());
+    el('recording-files-confirm').addEventListener('cancel',()=>{recordingDeleteIntent=null;});
+    el('recording-files-cancel').addEventListener('click',()=>{recordingDeleteIntent=null;el('recording-files-confirm').close();});
     el('collection-replay-toggle').addEventListener('click',playPair);
     el('collection-replay-time').addEventListener('input',()=>seekPair(Number(el('collection-replay-time').value)||0));
     el('collection-replay-speed').addEventListener('change',()=>{const value=Number(el('collection-replay-speed').value);if(![.25,.5,1,2].includes(value))return;pairedPosition=pairTime();pairedStarted=clock.now();pairedRate=value;for(const node of pair())node.playbackRate=value;});
