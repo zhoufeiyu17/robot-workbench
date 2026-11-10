@@ -139,6 +139,7 @@ def cpu_fixture(kind,port,environment,model_port):
                 value['stop_requested']=True
                 return self.send(200,{'stopped':True,'origin':self.headers['Origin'],'host':self.headers['Host']})
             if action=='ops_maintenance_begin':
+                if value.get('begin_busy'):return self.send(409,{'error':'业务忙，维护未准入'})
                 if body['request_id'] in value['begin_cache']:return self.send(200,value['begin_cache'][body['request_id']])
                 if value['maintenance']:return self.send(409,{'error':'existing fixture maintenance'})
                 value['maintenance']=dict(token='private-maintenance-'+instance,purpose=body['purpose'],status='ready',active_action=None,body=body,target=target())
@@ -251,6 +252,37 @@ class CpuProcessService:
 
 
 class ManagementTests(unittest.TestCase):
+    def test_backend_busy_rejection_clears_only_confirmed_unentered_window(self):
+        manager=self.h['manager'];self.configure(begin_busy=True)
+        code,job,_=self.start('prepare_model');self.assertEqual(code,200,job)
+        result=self.wait_job(job)
+        self.assertEqual(result['status'],'failed',result)
+        self.assertEqual(result['error']['code'],'maintenance_admission_rejected')
+        self.assertIsNone(manager.window);self.assertFalse(manager.unresolved())
+        self.assertFalse(json_request(self.h['services']['workbench'].port,'/fixture')['loaded'])
+        self.configure(begin_busy=False)
+        self.assertTrue(manager.snapshot()['operations']['prepare_model']['allowed'])
+        _,second,_=self.start('prepare_model');self.assertEqual(self.wait_job(second)['status'],'succeeded')
+
+    def test_busy_at_run_entry_is_retryable_without_maintenance_recovery(self):
+        manager=self.h['manager'];original=manager._run
+        before=json_request(self.h['services']['workbench'].port,'/fixture')['events']
+        def busy_on_entry(action,request,progress):
+            with patch.object(manager,'check',return_value='当前业务仍在执行，请先停止任务并等待收尾'):
+                return original(action,request,progress)
+        with patch.object(manager,'_run',side_effect=busy_on_entry):
+            code,job,_=self.start('prepare_model');self.assertEqual(code,200,job)
+            result=self.wait_job(job)
+        self.assertEqual(result['status'],'failed',result)
+        self.assertEqual(result['error']['code'],'precondition_changed')
+        self.assertEqual(manager.unresolved(),[])
+        self.assertIsNone(manager.window)
+        self.assertEqual(json_request(self.h['services']['workbench'].port,'/fixture')['events'],before)
+        self.assertTrue(manager.snapshot()['operations']['prepare_model']['allowed'])
+        code,second,_=self.start('prepare_model');self.assertEqual(code,200,second)
+        self.assertEqual(self.wait_job(second)['status'],'succeeded')
+        self.assertFalse(manager.unresolved())
+
     def test_actual_business_manager_and_page_environment_client(self):
         from robot_workbench.service import Application, protocol_fake, serve as serve_business
         device=protocol_fake(Path(self.directory.name)/'actual-business')

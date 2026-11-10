@@ -827,13 +827,19 @@ class WorkbenchManager:
         window=dict(environment=self.environment,device_id=self.config['device_id'],backend_instance=state['server_instance_id'],expected_target=target,begin_body=body,token=None,backend_exit_verified=False,
             affected_services=affected_services)
         self.save_window(window)
-        value=json_request(self.port,'/api/maintenance/begin',body,timeout=self.timeouts['state'],
-            headers={'Origin':'http://127.0.0.1:'+str(self.port),'X-CSRF-Token':state['csrf']})
+        try:
+            value=json_request(self.port,'/api/maintenance/begin',body,timeout=self.timeouts['state'],
+                headers={'Origin':'http://127.0.0.1:'+str(self.port),'X-CSRF-Token':state['csrf']})
+        except BackendRejection as error:
+            # A rejection is retryable only after the original backend confirms
+            # no maintenance remains. Lost replies still retain the window.
+            self.finish_window(inspect_runtime=True)
+            raise OperationError('maintenance_admission_rejected',str(error)) from None
         token=value.get('token')
         if not isinstance(token,str) or not token:raise OperationError('maintenance_unknown','维护准入没有返回有效凭证')
         self.save_window(dict(window,token=token))
         try:
-            if value.get('status')!='ready':raise ValueError(value.get('error') or '维护准入未就绪')
+            if value.get('status')!='ready':raise OperationError('maintenance_admission_rejected',value.get('error') or '维护准入未就绪')
             yield token
         except Exception as error:
             try:self.finish_window()
@@ -1349,7 +1355,7 @@ class WorkbenchManager:
         self.refresh()
         if self.target()!=request['expected_target']:raise OperationError('target_changed','执行前目标身份已变化，请重新审阅')
         reason=self.check(action,request)
-        if reason:raise ValueError(reason)
+        if reason:raise OperationError('precondition_changed',reason)
         if action in ('exit_workbench','exit_environment'):
             result=(self.exit_workbench if action=='exit_workbench'else self.exit_environment)(request,progress)
             self.exit_request_id=request['request_id']
