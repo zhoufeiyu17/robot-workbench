@@ -40,7 +40,7 @@ export function meshRows(state){
 }
 
 const BUSINESS = {calibration: '标定', collection: '数采', inference:'推理 / Infer',research:'控制研究'};
-const INFERENCE_BACKENDS={pi:[['torch','Torch'],['triton','Triton']],wam:[['torch','Torch'],['anyinfer','SO 算子加速']]};
+const INFERENCE_BACKENDS={pi:[['torch','Torch'],['triton','Triton']],wam:[['torch','Torch'],['anyinfer','SO 算子加速']],'wam-mem':[['torch','Torch']]};
 const ENVIRONMENT = {fake: 'Fake · 开发设备', physical: 'Physical · 物理设备'};
 export function recordingTaskTime(wallNs,timeZone){
   if(!Number.isFinite(wallNs)||wallNs<=0)return null;
@@ -73,7 +73,7 @@ export function countedProgress(value) {
 }
 
 export function inferenceChoice(row){return row?.runtime_schema?row.bundle_digest:row?.id||row?.model_id||'';}
-export function inferenceFamily(row){return String(row?.id||row?.model_id||'').startsWith('wam-')?'wam':'pi';}
+export function inferenceFamily(row){const id=String(row?.id||row?.model_id||'');return id.startsWith('wam-mem-')?'wam-mem':id.startsWith('wam-')?'wam':'pi';}
 export function inferenceModes(rows,backend,family,denoiseSteps){return(rows||[]).filter(row=>(row.backend||'torch')===backend&&(!family||inferenceFamily(row)===family)
   &&(!row.inference_options||row.inference_options.denoise_steps===(denoiseSteps??row.inference_capabilities?.denoise_steps?.default)));}
 
@@ -674,7 +674,13 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(inferenceParameterUpdate)inferenceError='正在应用参数并重新准备控制；Stop仍可使用';
     gate('inference-preview','inference_preview',inferenceError);
     gate('inference-refresh','inference_refresh');gate('inference-run','inference_run',inferenceError);
+    el('inference-memory-fresh').disabled=el('inference-run').disabled;el('inference-memory-continue').disabled=el('inference-run').disabled;
+    gate('inference-memory-clear','inference_memory_clear');
+    const temporal=inferenceFamilySelection()==='wam-mem';
+    el('inference-run').hidden=temporal;el('inference-memory-fresh').hidden=!temporal;el('inference-memory-continue').hidden=!temporal;el('inference-memory-tools').hidden=!temporal;
+    el('inference-recording-enabled').disabled=!!inferenceParameterUpdate||state?.workflow?.busy===true&&!preparedParameterHold();
     gate('inference-arm','inference_run',inferenceInfo().operator_session?'控制会话已准备':inferenceError);
+    setText('inference-disarm',inferenceInfo().recording_enabled?'结束控制会话并封存':'结束控制会话');
     el('inference-disarm').disabled=!inferenceInfo().operator_session||!options().fresh||options().pending;
     gate('inference-hold','inference_hold');gate('inference-home','inference_home');gate('inference-teach','inference_teach');
     el('inference-home-confirm').disabled=!el('inference-home-clearance').checked||!permission('inference_home').allowed
@@ -1101,10 +1107,11 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(reset||settingContext!==inferenceStepsContext){inferenceStepsDirty=false;inferenceStepsRevision=null;inferenceStepsContext=settingContext;}
     if(value&&!inferenceStepsDirty){el('inference-execute-steps').value=String(value.execute_steps);inferenceStepsRevision=value.revision;}
     const input=el('inference-execute-steps'),steps=Number(input.value),horizon=value?.action_horizon??60,stale=value&&inferenceStepsRevision!==value.revision;
-    input.max=String(horizon);
+    const temporal=inferenceFamily({id:state?.workflow?.inference?.selected_model_id})==='wam-mem';
+    input.min=temporal?'32':'1';input.max=String(horizon);
     const gate=preparedParameterHold()?{allowed:!inferenceParameterUpdate,reason:'正在应用参数并重新准备'}:permission('inference_execution_settings');
     input.disabled=!value||!gate.allowed;
-    el('inference-steps-apply').disabled=!value||!gate.allowed||!inferenceStepsDirty||stale||!Number.isInteger(steps)||steps<1||steps>horizon;
+    el('inference-steps-apply').disabled=!value||!gate.allowed||!inferenceStepsDirty||stale||!Number.isInteger(steps)||steps<1||steps>horizon||temporal&&steps!==32;
     el('inference-steps-reset').disabled=!value;
     setText('inference-steps-effective',value?`下一轮生效：执行 ${value.execute_steps} / ${horizon} 步（${(value.execute_steps/30).toFixed(2)} 秒动作）。`+
       (stale?'设置已被更新；请重新读取后修改。':inferenceStepsDirty?'草稿未保存。':'')+(!gate.allowed?' '+gate.reason:''):'当前环境未配置推理服务。');
@@ -1135,7 +1142,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const session=inferenceInfo().operator_session;
     const update={context:key(),server:serverInstance,nonce:state.runtime.runtime_nonce,run:session.run_id,
       model:model?.id||model?.model_id||inferenceModelId(),digest:model?.bundle_digest||inferenceDigest(),seed,duration,
-      trick:el('inference-stall-enabled').checked,stop:null,stopBound:false,
+      trick:el('inference-stall-enabled').checked,recording:el('inference-recording-enabled').checked,stop:null,stopBound:false,
       applicationGeneration:inferenceInfo().run_context?.application_generation};
     inferenceParameterUpdate=update;
     const stopIdentity=()=>state?.runtime?.stop_receipt?.accepted_monotonic_s??null;
@@ -1174,7 +1181,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       if(inferenceModelId()!==update.model||inferenceDigest()!==update.digest)throw Error('所选模型已变化，未重新准备控制');
       const result=await send('inference_run',{prepare_only:true,physical_clearance:true,scene_reset:true,
         model_id:update.model,expected_bundle_digest:update.digest,expected_context:inferenceInfo().run_context,
-        state_wall_ns:state.server_wall_ns,seed:update.seed,duration_s:update.duration,wam_stall_recovery:update.trick},'parameter-renewal');
+        state_wall_ns:state.server_wall_ns,seed:update.seed,duration_s:update.duration,wam_stall_recovery:update.trick,recording_enabled:update.recording},'parameter-renewal');
       if(!result)throw Error('新控制会话的准备请求未确认');
       await waitFor(()=>{
         const request=state.workflow?.request;
@@ -1211,19 +1218,19 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       &&row.inference_options?.denoise_steps===inferenceDenoiseValue());
   }
   function renderInferenceDenoise(){
-    const info=inferenceInfo(),wam=inferenceFamilySelection()==='wam',backend=inferenceBackend();
-    const row=(info.models||[]).find(row=>(row.id||row.model_id)===info.selected_model_id&&row.backend===backend)
-      ||(info.backend===backend&&info.inference_capabilities?info:null)
-      ||(info.models||[]).find(row=>inferenceFamily(row)==='wam'&&row.backend===backend);
+    const info=inferenceInfo(),family=inferenceFamilySelection(),wam=family!=='pi',backend=inferenceBackend();
+    const row=(info.models||[]).find(row=>(row.id||row.model_id)===info.selected_model_id&&inferenceFamily(row)===family&&row.backend===backend)
+      ||(inferenceFamily({id:info.selected_model_id})===family&&info.backend===backend&&info.inference_capabilities?info:null)
+      ||(info.models||[]).find(row=>inferenceFamily(row)===family&&row.backend===backend);
     const bounds=row?.inference_capabilities?.denoise_steps,input=el('inference-denoise-steps');
-    const identity=JSON.stringify([key(),serverInstance,info.selected_model_id,backend]);
-    const actual=info.backend===backend?info.inference_options?.denoise_steps:undefined;
+    const identity=JSON.stringify([key(),serverInstance,info.selected_model_id,family,backend]);
+    const actual=inferenceFamily({id:info.selected_model_id})===family&&info.backend===backend?info.inference_options?.denoise_steps:undefined;
     if(identity!==inferenceDenoiseContext){inferenceDenoiseContext=identity;inferenceDenoiseDirty=false;}
     if(!inferenceDenoiseDirty&&bounds)input.value=String(actual??bounds.default);
     if(actual===inferenceDenoiseValue())inferenceDenoiseDirty=false;
     el('inference-denoise-tools').hidden=!wam;
     if(bounds){input.min=String(bounds.minimum);input.max=String(bounds.maximum);}
-    input.disabled=!wam||!bounds||!!state?.workflow?.busy&&!preparedParameterHold()||!options().fresh||!!environmentAccess?.state?.active_job||!!inferenceParameterUpdate;
+    input.disabled=!wam||!bounds||bounds.minimum===bounds.maximum||!!state?.workflow?.busy&&!preparedParameterHold()||!options().fresh||!!environmentAccess?.state?.active_job||!!inferenceParameterUpdate;
     const desired=inferenceDenoiseRow();
     el('inference-denoise-apply').disabled=input.disabled||!desired||environmentAccess?.permission('prepare_model').allowed!==true&&!preparedParameterHold()
       ||desired.bundle_digest===info.bundle_digest&&info.model_ready===true;
@@ -1242,7 +1249,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   const inferenceModelId=()=>inferenceInfo().selected_model_id||inferenceInfo().model?.id;
   const inferenceDigest=()=>inferenceInfo().bundle_digest||inferenceInfo().model?.bundle_digest;
   const inferenceBackend=()=>el('inference-backend').value||'torch';
-  const inferenceFamilySelection=()=>el('inference-family').value==='wam'?'wam':'pi';
+  const inferenceFamilySelection=()=>Object.hasOwn(INFERENCE_BACKENDS,el('inference-family').value)?el('inference-family').value:'pi';
   const inferenceBackendLabel=()=>INFERENCE_BACKENDS[inferenceFamilySelection()].find(([id])=>id===inferenceBackend())?.[1]||inferenceBackend();
   function setInferenceBackends(preferred){
     const select=el('inference-backend'),rows=INFERENCE_BACKENDS[inferenceFamilySelection()];select.replaceChildren();
@@ -1252,13 +1259,13 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   }
   const inferenceBackendReason=()=>{
     if(inferenceFamilySelection()!==inferenceFamily({id:inferenceModelId()})||inferenceBackend()!==(inferenceInfo().backend||inferenceInfo().model?.backend||'torch'))
-      return '请先选择并加载 '+(inferenceFamilySelection()==='wam'?'WAM':'π')+' / '+inferenceBackendLabel()+' 的 checkpoint';
-    if(inferenceFamilySelection()==='wam'&&inferenceDenoiseDirty&&inferenceDenoiseValue()!==inferenceInfo().inference_options?.denoise_steps)
+      return '请先选择并加载 '+(inferenceFamilySelection()==='pi'?'π':inferenceFamilySelection()==='wam-mem'?'WAM-MEM':'WAM')+' / '+inferenceBackendLabel()+' 的 checkpoint';
+    if(inferenceFamilySelection()!=='pi'&&inferenceDenoiseDirty&&inferenceDenoiseValue()!==inferenceInfo().inference_options?.denoise_steps)
       return '请先应用去噪配置并等待模型准备完成';
     return '';
   };
   const inferenceRunBinding=()=>JSON.stringify([key(),serverInstance,state?.device?.id,inferenceInfo().run_context,
-    inferenceModelId(),inferenceDigest(),inferenceFamilySelection(),inferenceBackend(),el('inference-seed').value,el('inference-duration').value,el('inference-stall-enabled').checked]);
+    inferenceModelId(),inferenceDigest(),inferenceFamilySelection(),inferenceBackend(),el('inference-seed').value,el('inference-duration').value,el('inference-stall-enabled').checked,el('inference-recording-enabled').checked]);
   function dismissInferenceRun(){
     inferenceRunIntent=null;el('inference-run-clearance').checked=false;el('inference-run-confirm').disabled=true;
     if(el('inference-run-dialog').open)el('inference-run-dialog').close();
@@ -1271,16 +1278,17 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-run-confirm').disabled=!el('inference-run-clearance').checked;
   }
   let inferenceRunOpening=false;
-  async function requestInferenceRun(){
+  async function requestInferenceRun(memoryStart='continue'){
     if(inferenceRunOpening)return;
     inferenceRunOpening=true;
     try{
-      if(preparedParameterHold()&&Number(el('inference-duration').value)!==inferenceInfo().operator_session.duration_s
+      if(preparedParameterHold()&&(Number(el('inference-duration').value)!==inferenceInfo().operator_session.duration_s
+          ||el('inference-recording-enabled').checked!==(inferenceInfo().operator_session.recording_enabled??inferenceInfo().recording_enabled??false))
           &&!await renewPreparedParameters())return;
-      openInferenceRun();
+      openInferenceRun(false,memoryStart);
     }finally{inferenceRunOpening=false;}
   }
-  function openInferenceRun(prepareOnly=false){
+  function openInferenceRun(prepareOnly=false,memoryStart='continue'){
     if(inferenceBackendReason()){notice(inferenceBackendReason());return;}
     const gate=permission('inference_run');if(!gate.allowed){notice(gate.reason);return;}
     let seed,duration;try{seed=inferenceSeed();duration=inferenceDuration();}catch(error){notice(error.message);return;}
@@ -1288,18 +1296,21 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(!value.run_context||!inferenceModelId()||!inferenceDigest()){notice('等待当前模型和控制上下文核验');return;}
     const steps=state?.inference_execution?.execute_steps??value.execute_steps??15,maxSegment=Number((steps/30*4).toFixed(3));
     inferenceRunIntent={binding:inferenceRunBinding(),model_id:inferenceModelId(),expected_bundle_digest:inferenceDigest(),
-      expected_context:JSON.parse(JSON.stringify(value.run_context)),seed,duration_s:duration};
+      expected_context:JSON.parse(JSON.stringify(value.run_context)),seed,duration_s:duration,recording_enabled:el('inference-recording-enabled').checked};
+    if(inferenceFamilySelection()==='wam-mem')inferenceRunIntent.memory_start=memoryStart;
     if(inferenceFamilySelection()==='wam')inferenceRunIntent.wam_stall_recovery=el('inference-stall-enabled').checked;
     if(prepareOnly)inferenceRunIntent.prepare_only=true;
-    setText('inference-run-title',prepareOnly?'准备控制与踏板':'开始本轮推理');
+    setText('inference-run-title',prepareOnly?'准备控制与踏板':inferenceFamilySelection()==='wam-mem'?(memoryStart==='fresh'?'无状态开始 Infer':'保留记忆开始 Infer'):'开始本轮推理');
     setText('inference-run-summary',`${value.model?.label||inferenceModelId()} · 随机种子 ${seed} · ${duration} 秒。`+
       (value.finite_chunk_count?`连续${value.finite_chunk_count}轮，每轮完整执行15步模型轨迹，源时长0.5秒；可减速至最多${value.reference_planning?.max_execution_duration_s??2}秒。每轮重新观测和推理，等待另计；完成后Stop，异常即停。`:
        value.normal_modes_enabled&&value.reference_planning?`本轮最长运行 ${duration} 秒，包含观测、推理、准备、段间等待与运动；每段完整${steps}点，下一整段放不下时保持并正常结束。可随时Stop。`:duration===.5?'取得实时预测后执行0.5秒并自动Stop；执行节奏可能受速度/加速度约束而放慢。':`每次执行 ${steps} / ${state?.inference_execution?.action_horizon??60} 步。`)+
       '设备控制须已接入；本轮仅申请推理执行准入，不连接或恢复设备。');
-    if(prepareOnly)setText('inference-run-summary',`准备当前位置保持与录制服务；只录制推理和拖动阶段，等待时间不计入有效时长。模型 ${value.model?.label||inferenceModelId()}，种子 ${seed}，每轮最长 ${duration} 秒。准备完成后从保持状态双踩踏板1或点击 Run 开始推理。保持中应用参数会自动结束旧Run取流并重新准备。`);
+    if(prepareOnly)setText('inference-run-summary',`准备当前位置保持与踏板；录制按本次选择执行。模型 ${value.model?.label||inferenceModelId()}，种子 ${seed}，每轮最长 ${duration} 秒。准备完成后从保持状态双踩踏板1或点击 Run 开始推理。保持中应用参数会自动结束旧Run取流并重新准备。`);
     if(inferenceRunIntent.wam_stall_recovery)setText('inference-run-summary',el('inference-run-summary').textContent+' 已启用WAM静止恢复，触发时顶部输入黑屏并逐块随机采样，实际输入和种子随本轮录制。');
-    setText('inference-run-details',prepareOnly?'确认后建立当前位置保持并预热录制；MODEL／TEACH 片段会合成连续回放。等待后续 Run 或双踩踏板1启动模型。':
+    setText('inference-run-details',prepareOnly?'确认后建立当前位置保持，等待后续 Run 或双踩踏板1启动模型。开启录制时，MODEL／TEACH 片段会合成连续回放。':
       '确认后核验当前控制与业务依赖，按所选时长开始推理。停止按钮始终可用。');
+    if(inferenceFamilySelection()==='wam-mem')setText('inference-run-details',el('inference-run-details').textContent+(memoryStart==='fresh'?' 本次进入推理时清空记忆；本阶段后续推理保留记忆。':' 保留已有记忆，包括人工接管期间的真实观测；空记忆时从当前观测开始。'));
+    setText('inference-run-details',el('inference-run-details').textContent+(inferenceRunIntent.recording_enabled?' 本轮已开启录制，将保存推理与人工接管片段。':' 本轮未开启录制，不保存推理结果和视频，不进行后台封存。'));
     setText('inference-run-clearance-label',prepareOnly?'工作区可安全保持。我确认准备控制与踏板，后续双踩踏板1可启动模型。':
       '场景已复位、工作区无人。我允许本轮模型执行。');
     setText('inference-run-confirm',prepareOnly?'确认并准备':'确认并开始');
@@ -1308,9 +1319,10 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   }
   function renderInference(){
     const value=state?.workflow?.inference||{},model=value.model||{},metrics=value.metrics||{},outcome=value.outcome||{},audit=value.audit||{};
+    const memory=value.memory;setText('inference-memory-status',memory?memory.error?'记忆更新失败：'+memory.error:`${memory.empty?'当前记忆为空':`记忆已接纳 ${memory.observations??0} 次观测，其中人工接管 ${memory.manual_observations??0} 次`}；清空仅在 HOLD 下可用。`:'准备控制会话后建立记忆；人工接管只写入真实观测，不生成模型动作。');
     const background=value.background_recordings||[];
-    const activity=value.operator_session?state?.runtime?.recording?.recording_activity:null;
-    const activityText=activity?`${activity.active_mode?'正在录制 '+activity.active_mode:'等待中，不录制'} · 有效录制 ${Number(activity.effective_duration_s).toFixed(1)} 秒`:'';
+    const activity=value.recording_enabled&&value.operator_session?state?.runtime?.recording?.recording_activity:null;
+    const activityText=value.recording_enabled===false?'本轮录制已关闭，不保存结果和视频。':activity?`${activity.active_mode?'正在录制 '+activity.active_mode:'等待中，不录制'} · 有效录制 ${Number(activity.effective_duration_s).toFixed(1)} 秒`:'';
     setText('inference-recording-status',[activityText,...background.map(row=>`Run ${row.run_id}：${row.ingress_closed?'取流已关闭，后台校验与导出中':'正在确认尾部落盘'}${row.error?' · '+row.error:''}`)].filter(Boolean).join('；'));
     const steps=state?.inference_execution?.execute_steps??value.execute_steps??15,maxSegment=Number((steps/30*4).toFixed(3));
     const operator=value.operator_task;
@@ -1320,9 +1332,9 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const doubleHint=Number.isFinite(doubleWindow)?`${doubleWindow}秒内双踩踏板1启动Infer`:'双踩踏板1启动Infer';
     setText('inference-teach',modelActive?'停止推理并位置保持 · 踏板2':operator?.kind==='teach'&&operator.status==='running'?'完成拖动并位置保持 · 踏板2':'重力补偿拖动 · 踏板2');
     setText('inference-operator-status',modelActive?'推理中单踩踏板1或2停止并保持，踏板3无动作。双踩1的第一脚停止，第二脚忽略。':operator?.request_id&&['running','failed'].includes(operator.status)?
-      `${operator.kind==='teach'?'人工起点':operator.kind==='hold'?'停止保持':'回零'}：${({waiting_inference_hold:'等待保持与录制准备',preparing_home:'准备轨迹及录制',homing:'执行中',native_homing:'SDK原生回零中，等待完成',holding:'已完成并保持',entering_teach:'进入重力补偿',teaching:'可人工拖动并手动开合夹爪，再踩踏板2保持当前位置与开口',locking_start:'制动并锚定当前位置',sealing_start:'保持已确认，正在封存定位过程',start_ready:'当前位置已保持，可从这里开始下一轮Infer',terminated:'已中断'})[operator.phase]||operator.status} · ${operator.error||operator.run_id||'准备保持与录制'} · SDK保留`:
-      value.operator_session?`控制与录制已准备。保持后${doubleHint}，单踩1保持，踏板2切换拖动与保持，踏板3原生回零。`:
-      `先在网页准备控制与录制，完成保持后${doubleHint}。踏板响应当前前台推理页面及控制归属。`);
+      `${operator.kind==='teach'?'人工起点':operator.kind==='hold'?'停止保持':'回零'}：${({waiting_inference_hold:'等待当前位置保持',preparing_home:'准备轨迹及录制',homing:'执行中',native_homing:'SDK原生回零中，等待完成',holding:'已完成并保持',entering_teach:'进入重力补偿',teaching:'可人工拖动并手动开合夹爪，再踩踏板2保持当前位置与开口',locking_start:'制动并锚定当前位置',sealing_start:'保持已确认，正在封存定位过程',start_ready:'当前位置已保持，可从这里开始下一轮Infer',terminated:'已中断'})[operator.phase]||operator.status} · ${operator.error||operator.run_id||'准备当前位置保持'} · SDK保留`:
+      value.operator_session?`控制会话已准备，录制${value.recording_enabled?'开启':'关闭'}。保持后${doubleHint}，单踩1保持，踏板2切换拖动与保持，踏板3原生回零。`:
+      `先在网页准备控制与踏板，完成保持后${doubleHint}。踏板响应当前前台推理页面及控制归属。`);
     const mixed=['mixed366-nohistory','coffee999-xnorm'].some(prefix=>String(value.selected_model_id||model.id||'').startsWith(prefix));
     setText('inference-task',String(value.selected_model_id||model.id||'').startsWith('wam-')?'任务上下文：随 checkpoint 绑定的训练文本缓存':value.task?'当前控机任务：'+({coffee:'咖啡制作',lid_handoff:'盖盖与交接'}[value.task]||value.task)+'（训练原文 prompt）':'');
     setText('inference-duration-help',value.finite_chunk_count?`每轮0.5秒指模型源轨迹的15步，完整执行可减速至${value.reference_planning?.max_execution_duration_s??2}秒；共${value.finite_chunk_count}轮，推理等待另计。`:
@@ -2410,15 +2422,17 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-denoise-apply').addEventListener('click',()=>{if(!el('inference-denoise-apply').disabled){const row=inferenceDenoiseRow();void renewPreparedParameters(()=>prepareInferenceRow(row),{model:row});}});
     el('inference-backend').addEventListener('change',()=>{dismissInferenceRun();clearReview();inferenceSelection=null;inferenceCatalogKey='';renderInference();renderGates();});
     el('inference-family').addEventListener('change',()=>{setInferenceBackends(inferenceBackend());dismissInferenceRun();clearReview();inferenceSelection=null;inferenceCatalogKey='';renderInference();renderGates();});
-    el('inference-run').addEventListener('pointerdown',event=>{
+    for(const id of ['inference-run','inference-memory-fresh','inference-memory-continue'])el(id).addEventListener('pointerdown',event=>{
       // Keep the duration input focused until this explicit Run intent can
       // join parameter preparation; blur must not consume the first click.
       if(event.button===0&&doc.activeElement===el('inference-duration')&&preparedParameterHold())event.preventDefault();
     });
-    el('inference-run').addEventListener('click',()=>void requestInferenceRun());
+    for(const id of ['inference-run','inference-memory-fresh','inference-memory-continue'])el(id).addEventListener('click',()=>void requestInferenceRun(id==='inference-memory-fresh'?'fresh':'continue'));
     el('inference-arm').addEventListener('click',()=>openInferenceRun(true));
     el('inference-disarm').addEventListener('click',()=>{if(!el('inference-disarm').disabled)void send('cancel');});
     const operatorContext=()=>({runtime_nonce:state?.runtime?.runtime_nonce,epoch:state?.runtime?.command_epoch});
+    el('inference-recording-enabled').addEventListener('change',()=>{dismissInferenceRun();renderGates();});
+    el('inference-memory-clear').addEventListener('click',()=>{if(!el('inference-memory-clear').disabled)void send('inference_memory_clear',operatorContext());});
     el('inference-hold').addEventListener('click',()=>{if(!el('inference-hold').disabled)void send('inference_hold',operatorContext());});
     el('inference-teach').addEventListener('click',()=>{if(!el('inference-teach').disabled)void send('inference_teach',operatorContext());});
     el('inference-home').addEventListener('click',()=>{if(!el('inference-home').disabled){operatorHomeIdentity=operatorIdentity();operatorHomeContext=operatorContext();el('inference-home-clearance').checked=false;el('inference-home-dialog').showModal();renderGates();}});

@@ -846,7 +846,7 @@ def _attach_physical_businesses(profile,deployment,tokens,start_cameras,event):
         installed_provider=profile_provider
         def selected_profile_provider():
             from .inference_model import model_family
-            if model_family(deployment.inference.selected_model_id)=='wam':
+            if model_family(deployment.inference.selected_model_id)in('wam','wam-mem'):
                 from .wam import native_binding
                 return native_binding(profile)
             return installed_provider()

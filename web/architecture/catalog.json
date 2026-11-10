@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.eefeec17b3d7",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.bfe39b544852",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -953,7 +953,7 @@
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
       "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
       "lifecycle_update": "仅MODEL/TEACH有效录制；HOLD/HOME无有效时间；ingress_closed与完整封存分离。",
-      "model_input_verification": "Live ingress stores original references and transform metadata; sealing verifies original sample coverage and exact image transforms once per involved saved segment. Missing originals or hash mismatch keep outcome incomplete."
+      "model_input_verification": "Live ingress stores original references and transform metadata. Routine sealing verifies native state, transform metadata, original sample coverage and input/result correspondence; pixel reconstruction is an explicit deep audit and is reported as not_requested by default. Missing original samples keep outcome incomplete. Writer codec proofs are retained for the Run and reused only after current content digest verification. Replay exports use three parallel single-thread codec workers."
     },
     {
       "id": "I12",
@@ -1081,7 +1081,7 @@
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
       "recording_protocol": "workbench.recording-service.v6；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
       "lifecycle_update": "运行中反馈取流健康，关闭后独立验证原始样本和导出；长时验收状态由开发Map证据维护。",
-      "model_input_verification": "Live ingress stores original references and transform metadata; sealing verifies original sample coverage and exact image transforms once per involved saved segment. Missing originals or hash mismatch keep outcome incomplete."
+      "model_input_verification": "Live ingress stores original references and transform metadata. Routine sealing verifies native state, transform metadata, original sample coverage and input/result correspondence; pixel reconstruction is an explicit deep audit and is reported as not_requested by default. Missing original samples keep outcome incomplete. Writer codec proofs are retained for the Run and reused only after current content digest verification. Replay exports use three parallel single-thread codec workers."
     },
     {
       "id": "I16",
@@ -2813,7 +2813,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "2ee6befd5dad0555421e71207d2846f348ccb2147600766505ff095637d63571",
+        "fingerprint": "380ab390e01fab48365a78e7ec568090e82a134a309071d5e68f21d6700f0373",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2937,7 +2937,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "9bf731380690a15d3be9652a98055a465d1e04b8a71f0a06556b57b7aa93ea4f",
+        "fingerprint": "09117453b8f8d023c084b6bf1030f5bc74e24bbed4fe67120fd6f50a5af86572",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3064,7 +3064,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "67cc95b29405924ffd1aa2f8aa230aee1d10216be56d7dd32d39b6a527916f30",
+        "fingerprint": "3beb48569668264d57ecf1df7931fb16f13203f7c8a7da482be1f5bf70d0680b",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3183,7 +3183,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "3f11c799405967f579eea74458281727a7d9b0ea0ba0a07c0f23fb865cabe9b5",
+        "fingerprint": "b4bd710aafce74eaad219784a48b80178d2dc9a4b06b2874f4364a1d4a8b3796",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3397,7 +3397,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "36f8459a4c9c3515e9bca8c6f3b9962fcdc633af17670a9c76098839c5758ff5",
+        "fingerprint": "9635cde4c09f9c915ccd12b23dfa4d47bd15d28aa26954d4e533664ab686ba33",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3560,7 +3560,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "117f43e20aa73e5fd13bea17d49114c09de69639300eab55bb7ebf623a474d07",
+        "fingerprint": "a17f1f86c22d6082d93fbe72f9cd18fe402154aab336866c4878707326c26b61",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3697,7 +3697,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "af346084e54227fcc75a3fe9d60d77875ebb4f2e47736c4fb9f11cc0f5c0470c",
+        "fingerprint": "a2b7cee70cc169bd8e6fd4e82b5e88b1b4d47ff43575210245b139164f9afd2c",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3839,7 +3839,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "2c13331957c191c52187612c5816c0871c61820d3a3b4f2f332764c7bc47fd80",
+        "fingerprint": "0a3d84e1ad8af44f00f34c9aaead461e456b1cad3743ed2a2d1fbcad326da6a1",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3965,7 +3965,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "c79816ef2cff67b5e5ae4933f051a36542e2651b37abbb9ade5297bb61b8ea2b",
+        "fingerprint": "17c5de6b8a2ec4266ce0d82c21ce4fbf433fc6414a405348695dffb009ded5a8",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4094,7 +4094,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "e83a8fe0eb6ae5e1b6e163a8cef30d706062542ec35375127685a57bbfba2755",
+        "fingerprint": "667f53eba5811a8b2094d77503dcbad746244ee5804eaadb5fdb9105fbd8f0a4",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4220,7 +4220,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "0fcc72d05d63972b0fd3089b0a141b3484b6a44cc667e931f88f4c21c9c7ea23",
+        "fingerprint": "b4d0cb9dd499a7342056cb847b5f0e0d547fc1f281fe708738c0e08998cd2a5d",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10620,6 +10620,36 @@
       "status": "published",
       "behavior": "观察期限不伪造封存终态，等待常驻服务实际结果；关闭取流后的新Run准入不等待导出",
       "evidence": ".evidence/infer-pedal2-start-20261107-v1/background-seal-acceptance.json"
+    }
+  },
+  "wam_memory": {
+    "status": "software_qualified_and_published",
+    "family": "wam-mem",
+    "backend": [
+      "torch"
+    ],
+    "denoise_steps": 2,
+    "input": "original uint8 HWC RGB plus native joint14;normalization and resizing inside Policy",
+    "output": "absolute32x14 native targets at30Hz;complete32-action chunks",
+    "memory_phase1": "Fresh start clears once perMODEL phase;within-phase decisions retain memory",
+    "ui_phase1": "Three controls:fresh start,retained start andHOLD-onlyclear",
+    "phase2": "Retained start preserves MODEL/TEACH observation memory;HOLD clear removes memory,anchor,times,pending controls;lease revision rejects old requests/results",
+    "qualification": "CPU/HTTP/nativeROS and actual GPU memory oracle plus isolated actuator MODEL/TEACH/full pipeline passed;physicaltask and pedalacceptance remain user checks",
+    "sources": [
+      "robot_workbench/wam_mem.py",
+      "tests/test_wam_mem.py"
+    ],
+    "memory_protocol": "workbench.wam-memory-phase.v2",
+    "manual_observations": "Resolve exact paired ROS references off the selection thread;32/30s cadence plus takeover tail;non-reference context commit with no action generation",
+    "action_context": "Predictions and SDK future-window admissions are never fabricated as executed controls;executed-control context remains disabled",
+    "recording": "Explicit perRun opt-in,defaultfalse;no capture or Run result files whenoff;recording selection retains a healthy same-model/device memory lease",
+    "memory_evidence": "ModelInput metadata operation=memory_observe and ModelResult memory_only=true with0x14 actions;complete input/result coverage when recording is selected",
+    "observability": "Bounded latest memory counters/source references on state and pipeline diagnostics;phase_epoch identifies last committed observation,control_epoch the current mode;no tensor/history dump",
+    "interfaces": {
+      "request_context": "memory_protocol.v2:lease-derived session,clock,epoch,revision andfresh/continue intent;old epoch/revision rejected",
+      "manual_update": "POST /memory/observe:paired original input,no predictedactions;operation stored distinctly in ModelInput/Result",
+      "clear": "leased /prepare memory_clear;HOLD-gated workbench action;serialize afterinflight work and fence its late response",
+      "run_recording": "inference_run.recording_enabled defaultsfalse;control_session_open andrecording_open are separate outcome facts"
     }
   }
 }

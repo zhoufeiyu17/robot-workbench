@@ -231,7 +231,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             metadata={'serial':self.binding['camera_serials'][role]})for role,ref in zip(CAMERAS,frames.values())}
         newest=[state,feedback.copy()];published=[]
         def observation(frames,state,**fields):
-            return SimpleNamespace(state=state,frames=list(frames.values()),camera_roles=list(frames),**fields)
+            return SimpleNamespace(observation_id='cpu-observation',state=state,frames=list(frames.values()),camera_roles=list(frames),**fields)
         flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.observation_pairer=None
         flow.ros_inputs=SimpleNamespace(sources=sources,latest=lambda stream:newest,
             paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),{}),
@@ -327,7 +327,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             self.assertIn('sampling',binding['action_contract'])
             self.workflow._control_policy_parameters=dict(model={'reference_supply_timeout_s':.3},
                 observation={'maximum_age_s':.4,'state_max_age_s':.1,'max_camera_span_s':.1},execution={'prepare_drift_joint_rad':.003,'prepare_drift_jaw_mm':1.})
-            self.workflow.preview_episode()
+            self.workflow.preview_episode(recording_enabled=True)
             config=runtime.configure_remote_inference.call_args.args[0]
             callbacks=runtime.configure_remote_inference.call_args.kwargs
             self.assertEqual(config['action_chunk_binding'],binding)
@@ -366,7 +366,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             old_owner=SimpleNamespace(state={'control_owner':{}},_call=Mock())
             runtime.configure_remote_inference=lambda *args,**kwargs:ControlRuntimeClient.configure_remote_inference(old_owner,*args,**kwargs)
             self.submitted.clear()
-            with self.assertRaisesRegex(ValueError,'protocol version mismatch'):self.workflow.preview_episode()
+            with self.assertRaisesRegex(ValueError,'protocol version mismatch'):self.workflow.preview_episode(recording_enabled=True)
             old_owner._call.assert_not_called();self.assertEqual(self.submitted,[])
         finally:
             self.workflow.close();server.shutdown();server.server_close();thread.join(2);server.model_service.close()
@@ -474,10 +474,11 @@ class InferenceWorkflowTests(unittest.TestCase):
         config,factory=self.configured[-1]
         with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):
             runner=factory(self.owner,None,self.feedback,config)
-        capture=SimpleNamespace(ingress_closed=False,done=threading.Event(),_finishing=True,error=None,
+        capture=SimpleNamespace(ingress_closed=False,done=threading.Event(),_finishing=True,error=None,close=lambda:None,
             snapshot=lambda:{'state':'sealing'})
         self.workflow.recording_backend='capture_session_v1'
         self.workflow.current['recorder']=capture
+        self.workflow.current['config']['recording_backend']='capture_session_v1'
         self.workflow.pending_captures[self.workflow.current['id']]=capture
         runner.status='STOPPED';runner.value.update(recording_pending=True)
         self.assertTrue(self.workflow.snapshot()['busy'])
@@ -812,7 +813,7 @@ class InferenceWorkflowTests(unittest.TestCase):
 
     def test_sealed_manifest_failure_is_never_displayed_as_valid_data(self):
         runner=Runner();runner.status='READY';runner.value.update(runner_status='READY',recording_pending=False)
-        self.workflow.current=dict(id='failed-data',runner=runner,config={'seed':0,'duration_s':40},metrics={},started_wall=None,ended_wall=None,
+        self.workflow.current=dict(id='failed-data',runner=runner,config={'seed':0,'duration_s':40,'recording_enabled':True},metrics={},started_wall=None,ended_wall=None,
             recording_error=None,receipt={'recording':{'manifest':{'capture_status':'incomplete',
                 'validation':{'status':'failed','problems':['feedback does not cover complete command duration']}}}},audit={})
         self.assertEqual(self.workflow.snapshot()['outcomes']['data'],'invalid')
@@ -1006,19 +1007,28 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertEqual(self.workflow.generation,generation)
 
     def test_recording_disabled_uses_existing_runner_without_recorder(self):
-        self.workflow.recording_enabled=False
+        self.workflow.recording_backend='capture_session_v1'
+        self.workflow.capture_factory=Mock(side_effect=AssertionError('recording was not selected'))
         self.prepare()
         result=self.workflow.action('inference_preview',{'seed':13,'duration_s':40})
         config,factory=self.configured[-1]
         with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):
             runner=factory(self.owner,None,self.feedback,config)
         self.assertFalse(config['recording_enabled'])
+        self.assertNotIn('recording_backend',config)
+        self.assertFalse(self.workflow.current['directory'].exists())
+        self.workflow.capture_factory.assert_not_called()
         self.assertIsNone(runner.kwargs['record'])
         self.assertIsNone(runner.kwargs['record_prepared'])
         self.assertIsNone(self.owner.recording)
         self.assertIn('录制已关闭',result['summary'])
         self.assertEqual(self.workflow.snapshot()['outcomes']['data'],'not_applicable')
         self.assertFalse(self.workflow.snapshot()['inference']['recording_enabled'])
+        runner.status='RUNNING';runner.value['recording_pending']=False
+        self.workflow.snapshot();self.assertIsNone(self.workflow.current['ended_wall'])
+        runner.status='STOPPED';stopped=self.workflow.snapshot()
+        self.assertIsNotNone(self.workflow.current['ended_wall'])
+        self.assertFalse(stopped['busy']);self.assertTrue(stopped['inference']['recording_ingress_closed'])
 
     def test_discarded_predictions_report_no_motion_reason_and_recover_on_acceptance(self):
         self.prepare();self.workflow.preview_episode()
@@ -1055,13 +1065,13 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertIn('执行已撤销',self.workflow.snapshot()['message'])
         runner.status='STOPPED';runner.value.update(recording_pending=False,reason='operator_stop')
         snapshot=self.workflow.snapshot()
-        self.assertEqual(snapshot['status'],'stopped');self.assertEqual(snapshot['message'],'operator_stop')
+        self.assertEqual(snapshot['status'],'stopped');self.assertIn('operator_stop',snapshot['message'])
         self.assertEqual(snapshot['inference']['metrics']['discard_reasons'],
             {'stale_observation':2,'revoked_generation':1})
         self.assertIsNone(snapshot['inference']['metrics']['last_observation_age_source_s'])
 
     def test_shared_recording_actual_events_persist_results_without_a_plan(self):
-        self.prepare();self.workflow.action('inference_preview',{'seed':13,'duration_s':1})
+        self.prepare();self.workflow.action('inference_preview',{'recording_enabled':True,'seed':13,'duration_s':1})
         config,factory=self.configured[-1]
         with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):
             runner=factory(self.owner,None,self.feedback,config)
@@ -1129,7 +1139,7 @@ class InferenceWorkflowTests(unittest.TestCase):
                 source_clock_id=feedback['source_clock_id'],clock_domain='simulation',
                 source_time_ns=round((feedback['sample_time_s']-.02)*1e9),host_receive_ns=time.time_ns(),frame_number=1,depth_frame_number=1))
         self.cameras.latest_rgbd.side_effect=latest
-        self.prepare();result=self.workflow.action('inference_preview',{'seed':4})
+        self.prepare();result=self.workflow.action('inference_preview',{'recording_enabled':True,'seed':4})
         self.assertIsNone(harness.runtime.owner.runner)
         def export(raw,output,**kwargs):Path(output).mkdir();return {'files':{}}
         with patch('robot_workbench.recording_process.ProcessRecordingSession',Recorder),patch('robot_workbench.recording_process.export_playback_process',side_effect=export):
@@ -1164,7 +1174,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         clock=dict(environment='fake',clock_domain='simulation',source_clock_id=h.backend.source_clock_id)
         runner=SimpleNamespace(status='VERIFYING');self.owner.runner=runner
         run=_Run(id=self.owner.execution_instance_id,directory=Path(self.temp.name)/'actual-camera-run',
-            config={'clock':clock,'duration_s':40},prepared=dict(profile=self.profile,binding=binding),owner=self.owner,
+            config={'clock':clock,'duration_s':40,'recording_enabled':True},prepared=dict(profile=self.profile,binding=binding),owner=self.owner,
             runner=runner,recorder=None,recording_error=None,event_bytes=0,feedback_count=0)
         owner=dict(owner_pid=123,command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce)
         payload=dict(clock=clock,execution_owner=owner,preparation_deadline_monotonic=time.monotonic()+1)
@@ -1248,7 +1258,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         service=h.service('physical',camera_serials=binding['camera_serials']);self.workflow.cameras=service
         runner=SimpleNamespace(status='VERIFYING');self.owner.runner=runner
         run=_Run(id=self.owner.execution_instance_id,directory=self.workflow.output/'physical-one-second',
-            config={'clock':clock_spec('physical'),'duration_s':1.,'calibration_profile_digest':binding['calibration_profile_digest'],
+            config={'clock':clock_spec('physical'),'duration_s':1.,'recording_enabled':True,'calibration_profile_digest':binding['calibration_profile_digest'],
                     'conversion_id':'c'*64},prepared=dict(profile=self.profile,binding=binding),
             owner=self.owner,runner=runner,recorder=None,recording_error=None,event_bytes=0,feedback_count=0)
         owner=dict(owner_pid=123,command_epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce)
@@ -1337,7 +1347,7 @@ class InferenceWorkflowTests(unittest.TestCase):
     def test_physical_recording_rejects_explicit_nonphysical_raw_clock_instead_of_relabeling(self):
         from robot_workbench.sample_clock import clock_spec
         self.device.environment='physical'
-        recorder=Mock();run=dict(recorder=recorder,feedback_count=0,source={'clock':clock_spec('physical')},
+        recorder=Mock();run=dict(config={'recording_enabled':True},recorder=recorder,feedback_count=0,source={'clock':clock_spec('physical')},
             execution_owner=dict(owner_pid=123,command_epoch=2,runtime_nonce='fixture-owner'))
         for change in ({'clock_domain':'simulation'},{'clock_domain':None},{'source_clock_id':'not-physical'},{'environment':'fake'},
                        {'simulation_only':True},{'sample_wall_ns':None}):
@@ -1348,7 +1358,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         recorder.append_feedback.assert_not_called();self.assertEqual(run['feedback_count'],0)
 
     def test_revoked_preparation_cannot_replace_new_owner_recording(self):
-        self.prepare();self.workflow.action('inference_preview',{'seed':3})
+        self.prepare();self.workflow.action('inference_preview',{'recording_enabled':True,'seed':3})
         config,factory=self.configured[-1]
         with patch('robot_workbench.inference_workflow.make_inference_runner',side_effect=Runner):runner=factory(self.owner,None,self.feedback,config)
         self.owner.runner=runner;run=self.workflow.current;replacement=object()

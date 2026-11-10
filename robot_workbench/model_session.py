@@ -98,6 +98,7 @@ class PinnedModelService:
 
     def prepare(self,metadata):
         if not isinstance(metadata,dict):raise ValueError('model session metadata must be an object')
+        if metadata.get('operation')=='memory_clear':return self._memory_clear(metadata)
         if 'session_protocol'not in metadata:return self._change(lambda:self.service.prepare(metadata))
         with self._gate:
             self._expire()
@@ -114,9 +115,12 @@ class PinnedModelService:
                 if current.get('status')!='ready'or not current.get('loaded'):raise ValueError('model must already be ready before acquire')
                 if metadata['binding']!=binding(current):raise ValueError('model binding mismatch')
                 if any(row['session_id']==session for row in self._pins.values()):raise ValueError('client session already acquired')
+                from .inference_model import model_family
+                if model_family(current['model_id'])=='wam-mem'and self._pins:
+                    raise ValueError('WAM-MEM has one exclusive memory session')
                 if len(self._pins)>=64:raise ValueError('model session capacity reached')
                 token=secrets.token_hex(16)
-                self._pins[token]=dict(session_id=session,binding=deepcopy(metadata['binding']),renewed_at=self.clock(),
+                self._pins[token]=dict(session_id=session,binding=deepcopy(metadata['binding']),renewed_at=self.clock(),memory_revision=0,memory_clears={},
                     guard=_lease_guard(self.ttl,identity=metadata['binding']))
             elif operation=='renew':
                 if set(metadata)!={'session_protocol','operation','token'}:raise ValueError('invalid renew fields')
@@ -137,7 +141,37 @@ class PinnedModelService:
                 absent=self._pins.pop(token,None)is None
                 return dict(session_protocol=PROTOCOL,released=True,model_unloaded=False,already_released=absent)
 
-    def infer(self,payload):
+    def _memory_clear(self,metadata):
+        import hashlib
+        from .wam_mem import MEMORY_PROTOCOL,validate_phase,is_model_id
+        if (set(metadata)!={'session_protocol','operation','token','request_id','epoch','clock_domain','revision'}
+                or metadata['session_protocol']!=PROTOCOL or not is_model_id(self.service.model_id)):
+            raise ValueError('explicit leased temporal reset required')
+        token=metadata['token'];identity=metadata['request_id']
+        if not isinstance(identity,str)or not re.fullmatch('[A-Za-z0-9_-]{1,90}',identity):raise ValueError('bounded reset request required')
+        context=validate_phase(dict(protocol=MEMORY_PROTOCOL,session_id=hashlib.sha256(str(token).encode()).hexdigest(),
+            epoch=metadata['epoch'],clock_domain=metadata['clock_domain'],start='continue',revision=metadata['revision']))
+        with self._gate:
+            pin=self._check(token)
+            cached=pin['memory_clears'].get(identity)
+            if cached is not None:
+                if cached[0]!=context:raise ValueError('reset identity reused with different context')
+                return deepcopy(cached[1])
+            if self._closed or self._mutating:raise ValueError('model memory operation busy')
+            if pin['memory_revision']!=context['revision']:raise ValueError('obsolete memory revision')
+            self._mutating=True;pin['memory_revision']+=1
+        try:
+            result=self.service.memory_clear(dict(request_id=identity,memory=context,seed=0))
+            with self._gate:
+                self._check(token)
+                if result['audit']['memory']['revision']!=pin['memory_revision']:raise ValueError('memory reset receipt differs')
+                pin['memory_clears'][identity]=(deepcopy(context),deepcopy(result))
+                while len(pin['memory_clears'])>32:pin['memory_clears'].pop(next(iter(pin['memory_clears'])))
+            return result
+        finally:
+            with self._gate:self._mutating=False
+
+    def infer(self,payload,*,memory_only=False):
         from .inference_transport import CAMS,decode_packet,encode_packet
         model_id=self.service.model_id
         metadata,arrays=decode_packet(payload,{'model_state14','model_history',*CAMS},model_id)
@@ -147,18 +181,34 @@ class PinnedModelService:
             if self._closed:raise ValueError('model service closed')
             if self._mutating:raise ValueError('model operation busy')
             self._expire()
-            if token:self._check(token)
+            if token:pin=self._check(token)
             elif self._pins:raise ValueError('model pinned; an acquired session is required')
+            from .inference_model import model_family
+            if model_family(model_id)=='wam-mem':
+                from .wam_mem import validate_phase
+                context=validate_phase(metadata.get('memory'))
+                if not token or context['session_id']!=pin['session_id']:
+                    raise ValueError('memory context differs from the acquired model session')
+                if context['revision']!=pin['memory_revision']:raise ValueError('obsolete memory revision')
             if getattr(self.service,'active',None)is not None:raise ValueError('model diagnostic task busy')
             self._inflight+=1
         try:
             if token:
                 # No capability in worker logs, status, audit or IPC. Only the
                 # authenticated request/response envelope carries the v1 prefix.
-                metadata['request_id']=match[2];payload=encode_packet(metadata,arrays)
-            result=self.service.infer(payload)
+                metadata['request_id']=match[2]
+                if model_family(model_id)=='wam-mem':
+                    import hashlib
+                    # Reuse the lease identity without exposing its capability.
+                    # Reacquiring an expired logical session starts new memory.
+                    metadata['memory']=dict(metadata['memory'],session_id=hashlib.sha256(token.encode()).hexdigest())
+                payload=encode_packet(metadata,arrays)
+            result=self.service.infer(payload,memory_only=True)if memory_only else self.service.infer(payload)
             if token:
-                with self._gate:self._check(token)
+                with self._gate:
+                    self._check(token)
+                    if model_family(model_id)=='wam-mem'and context['revision']!=pin['memory_revision']:
+                        raise ValueError('memory reset while result was pending')
                 response,values=decode_packet(result,{'action14'},model_id)
                 response['request_id']=wire_id
                 result=encode_packet(response,values)
@@ -195,6 +245,7 @@ class PinnedModelClient:
         self.client,self.session_id=client,session_id
         self.token=None;self.auto_renew=auto_renew;self.error=None;self.ttl=0.;self.renewed_at=0.
         self.model_binding=None;self.action_contract=None
+        self.memory_revision=0;self.memory_flow=None;self.memory_clears={}
         self._stop=threading.Event();self._thread=None
 
     def __getattr__(self,name):return getattr(self.client,name)
@@ -253,19 +304,34 @@ class PinnedModelClient:
             self.error=str(error)
             raise
 
-    def infer(self,request,*,prepared_input=None):
+    def infer(self,request,*,prepared_input=None,memory_only=False):
         if not self.healthy():raise self._unhealthy_error('model session is not healthy')
         token=self.token;original=request['request_id']
         if not isinstance(original,str)or not original or len(token+'_'+original)>128:raise ValueError('bounded session request identity required')
         wire_id=token+'_'+original
         try:
             call=dict(request,request_id=wire_id)
-            reply=self.client.infer(call) if prepared_input is None else self.client.infer(call,prepared_input=prepared_input)
+            if memory_only:reply=self.client.infer(call,prepared_input=prepared_input,memory_only=True)
+            else:reply=self.client.infer(call) if prepared_input is None else self.client.infer(call,prepared_input=prepared_input)
         except Exception as error:raise _session_error(error,token)from None
         if self.token!=token or not self.healthy():raise self._unhealthy_error('model session expired or replaced while inference was pending')
         if reply.get('request_id')!=wire_id:raise ValueError('model result identity mismatch')
         result=dict(_redact(reply,token),request_id=original)
         if isinstance(result.get('audit'),dict):result['audit']['session_guard']=_redact(deepcopy(self.lease_decision),token)
+        return result
+
+    def memory_clear(self,request_id,*,epoch,clock_domain):
+        if not self.healthy():raise self._unhealthy_error('model session is not healthy')
+        if request_id in self.memory_clears:
+            previous,result=self.memory_clears[request_id]
+            if previous!=(epoch,clock_domain):raise ValueError('reset identity reused with different context')
+            return deepcopy(result)
+        result=self._rpc('/prepare',dict(session_protocol=PROTOCOL,operation='memory_clear',token=self.token,
+            request_id=request_id,epoch=epoch,clock_domain=clock_domain,revision=self.memory_revision),timeout=120)
+        if result.get('request_id')!=request_id:raise ValueError('memory clear request differs')
+        self.memory_revision=result['audit']['memory']['revision']
+        self.memory_clears[request_id]=((epoch,clock_domain),deepcopy(result))
+        while len(self.memory_clears)>32:self.memory_clears.pop(next(iter(self.memory_clears)))
         return result
 
     def _unhealthy_error(self,message):
@@ -284,6 +350,10 @@ class PinnedModelClient:
         # Freeze caller metadata/arrays before a blocking call; a new observation
         # or mode must never relabel an older prediction.
         request=deepcopy(request);model_binding=deepcopy(self.model_binding)
+        if model_family(self.client.model_id)=='wam-mem':
+            from .wam_mem import MEMORY_PROTOCOL
+            request['memory']=dict(protocol=MEMORY_PROTOCOL,session_id=self.session_id,epoch=epoch,
+                clock_domain=clock_domain,start=request.get('memory_start','fresh'),revision=self.memory_revision)
         observed=request['observation']['source_time']
         if (type(observed)not in(int,float)or not math.isfinite(observed)
                 or type(valid_until_source_time)not in(int,float)or not math.isfinite(valid_until_source_time)
@@ -303,6 +373,7 @@ class PinnedModelClient:
             execution_authorized=False)
 
     def close(self):
+        if self.memory_flow is not None:self.memory_flow.close();self.memory_flow=None
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=min(self.ttl/3,2.,self.client.timeout)+1.)

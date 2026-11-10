@@ -12,8 +12,9 @@ def main():
     from robot_workbench.mixed366 import Service
     from robot_workbench.inference_transport import ModelService,serve_model
     registry=json.loads(a.registry.read_text())
-    from robot_workbench import wam
-    service=(wam.model_service(registry)if wam.is_model_id(registry.get('model_id')) else Service(registry))
+    from robot_workbench import wam,wam_mem
+    service=(wam_mem.model_service(registry)if wam_mem.is_model_id(registry.get('model_id'))else
+             wam.model_service(registry)if wam.is_model_id(registry.get('model_id'))else Service(registry))
     server=serve_model(service,token_file=a.token_file,port=a.port)
     for sig in [signal.SIGINT,signal.SIGTERM]:signal.signal(sig,lambda *_:threading.Thread(target=server.shutdown,daemon=True).start())
     try:server.serve_forever()

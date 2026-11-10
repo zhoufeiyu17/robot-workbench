@@ -47,6 +47,7 @@ NOHISTORY_MODELS = {
 def native_runtime(bundle):
     if not isinstance(bundle,dict):return False
     schema=bundle.get('schema')
+    if schema=='workbench.wam-mem.v1':return True
     if schema in(MANIPULATION_SCHEMA,MIXED366_SCHEMA):return True
     if not isinstance(schema,str)or not schema.startswith('workbench.wam.'):return False
     from .wam import SCHEMAS as WAM_SCHEMAS
@@ -56,6 +57,9 @@ def native_runtime(bundle):
 def validate_native_descriptor(bundle):
     """Public checkpoint/implementation identities; host paths stay in the adapter registry."""
     from .wam import SCHEMAS as WAM_SCHEMAS,validate_descriptor
+    if isinstance(bundle,dict)and bundle.get('schema')=='workbench.wam-mem.v1':
+        from .wam_mem import validate_descriptor as validate_memory
+        return validate_memory(bundle)
     if isinstance(bundle,dict)and bundle.get('schema')in WAM_SCHEMAS:
         return validate_descriptor(bundle)
     required={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime'}
@@ -110,6 +114,9 @@ BASE566_PINS = dict(
 
 
 def model_family(model_id):
+    if isinstance(model_id,str)and model_id.startswith('wam-mem-'):
+        from .wam_mem import is_model_id
+        if is_model_id(model_id):return 'wam-mem'
     if isinstance(model_id,str)and model_id.startswith('wam-'):
         from .wam import is_model_id
         if is_model_id(model_id):return 'wam'
@@ -123,22 +130,30 @@ def action_contract(model_id=BASE379_ID, bundle=None):
     """Describe existing model values; no device mapping or execution schedule."""
     model_spec(model_id, bundle)
     family = model_family(model_id)
-    return dict(schema='workbench.model-action14.v1', shape=[32 if family=='wam'else 60, 14],
+    return dict(schema='workbench.model-action14.v1', shape=[32 if family in('wam','wam-mem')else 60, 14],
         axes=[f'{side}_{axis}' for side in ('left', 'right')
               for axis in ('j1', 'j2', 'j3', 'j4', 'j5', 'j6', 'jaw')],
         units=(['rad'] * 6 + ['m']) * 2, action_type='absolute_position',
-        coordinate_domain='recorded_native_state14' if family in ('mixed366','wam') else 'training_model_state14',
-        jaw_semantics='recorder_endpoint_coordinate' if family in ('mixed366','wam') else
+        coordinate_domain='recorded_native_state14' if family in ('mixed366','wam','wam-mem') else 'training_model_state14',
+        jaw_semantics='recorder_endpoint_coordinate' if family in ('mixed366','wam','wam-mem') else
             ('continuous_sum_two_finger_travel' if family == 'base566' else 'legacy_model_jaw_coordinate'),
         normalized=False, device_mapping_applied=False,
-        sampling=dict(nominal_period_s=1/30, time_origin='observation_source_time'if family=='wam'else'unassigned',
-            first_sample_offset_s=1/30 if family=='wam'else None,
-            basis='materialized_next_observation'if family=='wam'else'existing_workbench_nominal_grid', execution_timestamps=False),
-        history_steps=0 if family in ('mixed366','wam') else 60)
+        sampling=dict(nominal_period_s=1/30, time_origin='observation_source_time'if family in('wam','wam-mem')else'unassigned',
+            first_sample_offset_s=1/30 if family in('wam','wam-mem')else None,
+            basis='materialized_next_observation'if family in('wam','wam-mem')else'existing_workbench_nominal_grid', execution_timestamps=False),
+        history_steps=0 if family in ('mixed366','wam','wam-mem') else 60)
 
 
 def model_spec(model_id=BASE379_ID, bundle=None):
     """A checkpoint varies only within the frozen Base566 training/IO family."""
+    if model_family(model_id)=='wam-mem':
+        from .wam_mem import validate_descriptor
+        value=validate_descriptor(bundle)
+        if value['model_id']!=model_id:raise ValueError('WAM-MEM descriptor identity differs')
+        return dict(id=model_id,schema=value['schema'],epoch=None,step=value['step'],prompt=value['prompt'],
+            pins={k:v.get('sha256')for k,v in value['artifacts'].items()},backend='torch',
+            inference_options=value['inference_options'],inference_capabilities=value['inference_capabilities'],
+            memory_protocol=value['memory_protocol'],label=f"WAM-MEM · step_{value['step']:06d} · 2步去噪 · 32步输出")
     if model_family(model_id)=='wam':
         from .wam import validate_descriptor,SCHEMA
         value=validate_descriptor(bundle)
@@ -186,6 +201,9 @@ def model_spec(model_id=BASE379_ID, bundle=None):
 
 
 def worker_identity(model_id=BASE379_ID, bundle=None):
+    if model_family(model_id)=='wam-mem':
+        from .wam_mem import worker_identity as identity
+        return identity(bundle)
     if model_family(model_id)=='wam':
         from .wam import worker_identity as identity
         return identity(bundle)

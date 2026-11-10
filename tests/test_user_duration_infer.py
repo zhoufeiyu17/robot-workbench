@@ -89,7 +89,7 @@ class UserDurationInferTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 result,calls,error=self.run_episode(operator_stop_at=phase)
                 self.assertIsNone(error);self.assertEqual(calls,[])
-                self.assertTrue(result['operator_stopped']);self.assertTrue(result['recording_open'])
+                self.assertTrue(result['operator_stopped']);self.assertTrue(result['control_session_open']);self.assertFalse(result['recording_open'])
 
     def test_waits_for_first_remote_owner_snapshot_without_weakening_identity(self):
         result,calls,error=self.run_episode(pending_snapshot=True)

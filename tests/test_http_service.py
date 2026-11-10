@@ -357,7 +357,8 @@ class HTTPTest(unittest.TestCase):
                 self.generation+=1;generation=self.generation
                 self.step('bind')
                 return dict(generation=generation)
-            def preview_episode(self,seed=0,duration_s=40):
+            def preview_episode(self,seed=0,duration_s=40,recording_enabled=False):
+                self.recording_selected=recording_enabled
                 self.step('preview');self.last_review=dict(token='cpu-episode-token',seed=seed,duration_s=duration_s)
                 return {'preview':dict(self.last_review)}
             def execute_review(self,token,physical_clearance=True):
@@ -429,9 +430,18 @@ class HTTPTest(unittest.TestCase):
             self.action('inference_run',business='inference',**dict(self.infer_run_body(),duration_s=duration))
             job=self.wait_infer_job('completed');self.assertEqual(job['result']['duration_s'],duration)
 
+    def test_run_recording_is_explicit_opt_in(self):
+        flow,calls,_,_=self.infer_run_fixture();self.connect()
+        self.action('inference_run',business='inference',**self.infer_run_body())
+        self.wait_infer_job('completed');self.assertIs(flow.recording_selected,False)
+        self.action('inference_run',business='inference',**dict(self.infer_run_body(),recording_enabled=True))
+        self.wait_infer_job('completed');self.assertIs(flow.recording_selected,True)
+        with self.assertRaises(HTTPError):
+            self.action('inference_run',business='inference',**dict(self.infer_run_body(),recording_enabled='true'))
+
     def test_one_second_run_rejects_a_wrong_duration_review_before_confirmation(self):
         flow,calls,_,_=self.infer_run_fixture();self.connect();original=flow.preview_episode
-        def wrong(seed=0,duration_s=40):return original(seed,duration_s=40)
+        def wrong(seed=0,duration_s=40,recording_enabled=False):return original(seed,duration_s=40,recording_enabled=recording_enabled)
         flow.preview_episode=wrong
         self.action('inference_run',business='inference',**dict(self.infer_run_body(),duration_s=1))
         job=self.wait_infer_job('failed');self.assertIn('时长',job['error']);self.assertEqual(calls,['bind','preview'])

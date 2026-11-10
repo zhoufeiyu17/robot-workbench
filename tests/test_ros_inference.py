@@ -148,9 +148,30 @@ class OwnerRosTests(unittest.TestCase):
             configuration=dict(model_id='cpu',disabled_grippers=[],conversion_identity={'mapping':{}},
                 camera_capture_instances={r:'camera'for r in CAMERAS},camera_serials={r:r for r in CAMERAS},
                 data_plane=plane,action_chunk_binding=binding)
-            with patch('robot_workbench.inference_workflow.calibrated_adapter',return_value=(object(),{})):
-                bridge=OwnerInference(service,configuration,dict(profile={'gripper':{'max_opening_mm':83.}},
-                    reference=None,preloaded_prediction=None,feedforward=None))
+            positions=[0.]*14;positions[6]=.03;positions[13]=.04
+            def publish(sequence):
+                now=time.monotonic_ns()
+                for stream,publisher in publishers.items():
+                    if stream=='state':
+                        from robot_workbench.ros_data import json_text
+                        reference=StreamRef('state','owner','owner_clock',now,sequence)
+                        publisher.publish(source.types.RobotState(reference=reference.message(),positions=positions,
+                            velocities=[0.]*14,efforts=[],metadata_json=json_text(dict(sample_time_s=now/1e9,
+                                sample_wall_ns=time.time_ns(),command_epoch=1,runtime_nonce='owner'))))
+                    else:
+                        msg=Image(height=2,width=2,encoding='rgb8',step=6,data=bytes(range(12)))
+                        msg.header.stamp.sec=now//10**9;msg.header.stamp.nanosec=now%10**9;publisher.publish(msg)
+            initial_stop=threading.Event();initial_sequence=[0]
+            def initial_samples():
+                while not initial_stop.wait(.01):
+                    initial_sequence[0]+=1;publish(initial_sequence[0])
+            initial_thread=threading.Thread(target=initial_samples);initial_thread.start()
+            try:
+                with patch('robot_workbench.inference_workflow.calibrated_adapter',return_value=(object(),{})):
+                    bridge=OwnerInference(service,configuration,dict(profile={'gripper':{'max_opening_mm':83.}},
+                        reference=None,preloaded_prediction=None,feedforward=None))
+            finally:initial_stop.set();initial_thread.join(1)
+            first_sequence=initial_sequence[0]+1
             model_inputs=RosInputs(model_node,rows);used=[]
             convert=lambda raw:device_state(raw['qpos'],disabled_grippers=(),right_gripper_device_mm=83.)
             def predict(request,prepared):
@@ -171,25 +192,12 @@ class OwnerRosTests(unittest.TestCase):
             deadline=time.monotonic()+5
             while (any(p.get_subscription_count()<1 for p in publishers.values()) or
                    observation_publisher.get_subscription_count()!=1 or worker.results.get_subscription_count()!=1)and time.monotonic()<deadline:time.sleep(.01)
-            positions=[0.]*14;positions[6]=.03;positions[13]=.04
-            def publish(sequence):
-                now=time.monotonic_ns()
-                for stream,publisher in publishers.items():
-                    if stream=='state':
-                        from robot_workbench.ros_data import json_text
-                        reference=StreamRef('state','owner','owner_clock',now,sequence)
-                        publisher.publish(source.types.RobotState(reference=reference.message(),positions=positions,
-                            velocities=[0.]*14,efforts=[],metadata_json=json_text(dict(sample_time_s=now/1e9,
-                                sample_wall_ns=time.time_ns(),command_epoch=1,runtime_nonce='owner'))))
-                    else:
-                        msg=Image(height=2,width=2,encoding='rgb8',step=6,data=bytes(range(12)))
-                        msg.header.stamp.sec=now//10**9;msg.header.stamp.nanosec=now%10**9;publisher.publish(msg)
-            publish(1)
+            publish(first_sequence)
             deadline=time.monotonic()+2
             while (not all(c.history()for c in model_inputs.caches.values())or not bridge.ros_inputs.caches['state'].samples)and time.monotonic()<deadline:time.sleep(.005)
-            time.sleep(.04);publish(2)
+            time.sleep(.04);publish(first_sequence+1)
             deadline=time.monotonic()+1
-            while (model_inputs.latest('state')[0].sequence!=2 or bridge.ros_inputs.latest('state')[0].sequence!=2)and time.monotonic()<deadline:time.sleep(.005)
+            while (model_inputs.latest('state')[0].sequence!=first_sequence+1 or bridge.ros_inputs.latest('state')[0].sequence!=first_sequence+1)and time.monotonic()<deadline:time.sleep(.005)
             # Exercise the actual workflow source selector, not a hand-built message.
             flow=object.__new__(InferenceWorkflow);flow.device=service.device;flow.ros_plane=plane
             flow.ros_inputs=model_inputs;flow.ros_observations=observation_publisher
@@ -212,7 +220,7 @@ class OwnerRosTests(unittest.TestCase):
             entered=threading.Event();release=threading.Event();self.addCleanup(release.set)
             original_receive=bridge.ros_inputs._receive
             def delayed_receive(stream,message):
-                if message.reference.sequence==3:entered.set();release.wait(1)
+                if message.reference.sequence==first_sequence+2:entered.set();release.wait(1)
                 return original_receive(stream,message)
             def state_message(sequence):
                 stamp=time.monotonic_ns()
@@ -220,18 +228,18 @@ class OwnerRosTests(unittest.TestCase):
                     positions=positions,velocities=[0.]*14,efforts=[],metadata_json=json_text(dict(sample_time_s=stamp/1e9,
                         sample_wall_ns=time.time_ns(),command_epoch=1,runtime_nonce='owner')))
             bridge.ros_inputs._receive=delayed_receive
-            publishers['state'].publish(state_message(3));self.assertTrue(entered.wait(1))
+            publishers['state'].publish(state_message(first_sequence+2));self.assertTrue(entered.wait(1))
             pending=deepcopy(observation['ros_observation'])
-            for sequence in range(4,15):
+            for sequence in range(first_sequence+3,first_sequence+14):
                 row=state_message(sequence);publishers['state'].publish(row)
-                if sequence==8:pending.state=row.reference
+                if sequence==first_sequence+7:pending.state=row.reference
                 time.sleep(.001)
             bridge._receive_ros_observation(pending);self.assertIsNone(bridge.observation)
             release.set()
             deadline=time.monotonic()+.4
             while bridge.observation is None and time.monotonic()<deadline:time.sleep(.005)
             observation=bridge._ros_observe(time.monotonic());self.assertIsNotNone(observation,bridge.ros_error)
-            self.assertEqual(observation['ros_observation'].state.sequence,8)
+            self.assertEqual(observation['ros_observation'].state.sequence,first_sequence+7)
             self.assertNotIn('images',observation,'Owner must not consume camera payloads')
             result=bridge.predict(dict(request_id='request',seed=1,observation=observation,applied_history=[]))
             self.assertEqual(result['action14'].shape,(60,14));self.assertEqual(len(used),1)

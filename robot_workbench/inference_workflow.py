@@ -33,8 +33,10 @@ class _Run(dict):
 
 
 def calibrated_adapter(profile, sdk_limits, *, model_id=MODEL_ID, disabled_grippers=()):
-    if model_family(model_id)=='wam':
+    if model_family(model_id)in('wam','wam-mem'):
         from .wam import Adapter,validate_native_profile
+        if model_family(model_id)=='wam-mem':
+            from .wam_mem import Adapter
         from arx_env.joint_head_jaw_mapping import mapping_identity
         native=validate_native_profile(profile)['identity']
         if disabled_grippers or mapping_identity().get('native_calibration_id')!=native:
@@ -118,7 +120,7 @@ class InferenceWorkflow:
         self.ros_node=self.ros_inputs=self.ros_worker=None
         self.reference_planning=None
         if reference_planning is not None:
-            if not action_chunks or model_family(model_id)not in('mixed366','wam') or reference_trajectory is not None:
+            if not action_chunks or model_family(model_id)not in('mixed366','wam','wam-mem') or reference_trajectory is not None:
                 raise ValueError('reference planning requires recorded-native live action chunks')
             from .motion_reference import infer_reference_policy
             self.reference_planning=infer_reference_policy(reference_planning)
@@ -349,6 +351,7 @@ class InferenceWorkflow:
 
     def set_execution_steps(self, value, expected_revision):
         value=execution_steps(value,horizon=WAM_HORIZON if str(getattr(self,'selected_model_id','')).startswith('wam-') else 60)
+        if model_family(self.selected_model_id)=='wam-mem'and value!=32:raise ValueError('WAM-MEM 每次完整执行32步')
         if self.finite_chunk_count is not None and value!=15:raise ValueError('当前验证固定每轮完整15步')
         with self.lock:
             if self.snapshot()['busy']:raise ValueError('请等待本轮推理或处理结束')
@@ -608,6 +611,8 @@ class InferenceWorkflow:
         try:
             if self.device.runtime is None or self.device.runtime.holder!='inference':
                 raise ValueError('请先连接设备并交接给推理业务')
+            if model_family(self.selected_model_id)=='wam-mem'and(self.ros_plane is None or self.normal_modes is None):
+                raise ValueError('WAM-MEM requires paired ROS observations and shared MODEL/TEACH modes')
             profile,binding=self._binding()
             if self.ros_plane is not None:self._bind_ros_sources(binding)
             _,_,_,limits=self._feedback()
@@ -615,7 +620,19 @@ class InferenceWorkflow:
             conversion=dict(device_id=self.device.id,environment=self.device.environment,binding=binding,mapping=mapping,
                 disabled_grippers=list(self.disabled_grippers))
             client=self._new_client(adapter,conversion);identity=client.prepare(ready_only=True)
-            if callable(getattr(client,'pin',None)):
+            previous=self.client;reused=False
+            if model_family(self.selected_model_id)=='wam-mem'and previous is not None:
+                from .model_session import binding as model_binding_fact
+                same=(getattr(previous,'healthy',lambda:False)()and previous.conversion_id==client.conversion_id
+                    and previous.model_binding==model_binding_fact(client.status())
+                    and (self.prepared or{}).get('dependencies')==self._device_dependencies()
+                    and (self.ros_inputs is None or getattr(getattr(previous,'memory_flow',None),'clock_domain',None)
+                        ==self.ros_inputs.sources['state']['source_clock_id'])
+                    and (self.ros_inputs is None or all(((self.prepared or{}).get('capture_instances')or{}).get(camera+'_rgb')
+                        ==self.ros_inputs.sources[camera]['source_instance_id']for camera in CAMERAS.values())))
+                if same:client.close();client=previous;reused=True
+                else:previous.close();self.client=None;self._memory_model_sequences=None
+            if not reused and callable(getattr(client,'pin',None)):
                 client=client.pin('workbench-'+self.instance_id+'-'+str(generation))
             chunk_binding=None
             if self.action_chunks:
@@ -644,7 +661,7 @@ class InferenceWorkflow:
                 if chunk_binding is not None:self.prepared['action_chunk_binding']=chunk_binding
                 self.cache=None;self.support_cache=None;self.current=None
                 self.status='ready';self.stage='inference.idle';self.message='模型已绑定设备，等待新鲜三相机后准备执行审阅。'
-            if old is not None:old.close()
+            if old is not None and old is not client:old.close()
             if self.ros_plane is not None:self._prepare_ros_model()
             self._start_cache()
             return dict(message=self.message,model_ready=True,device_bound=True,generation=generation)
@@ -655,12 +672,12 @@ class InferenceWorkflow:
         finally:
             with self.lock:self.busy=False
 
-    def preview_episode(self, seed=0, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False):
+    def preview_episode(self, seed=0, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False,recording_enabled=False):
         if type(seed) is not int or not 0<=seed<2**32:raise ValueError('本轮需要有效 uint32 随机种子')
         duration_s=episode_duration(duration_s)
         if self.finite_chunk_count is not None and duration_s!=.5:raise ValueError('每轮模型源轨迹固定0.5秒15步')
         self._wait_observation()
-        return self._preview(seed,duration_s,reference_feedforward_sha256,wam_stall_recovery=wam_stall_recovery)
+        return self._preview(seed,duration_s,reference_feedforward_sha256,wam_stall_recovery=wam_stall_recovery,recording_enabled=recording_enabled)
 
     def execute_review(self, token, physical_clearance=True):
         with self.lock:
@@ -672,7 +689,7 @@ class InferenceWorkflow:
         from integration import _digest, validate_profile
         profile, binding = self.profile_provider()
         profile, binding = deepcopy(profile), deepcopy(binding)
-        if model_family(self.selected_model_id)=='wam':
+        if model_family(self.selected_model_id)in('wam','wam-mem'):
             from .wam import validate_native_profile,NATIVE_SCHEMA
             validate_native_profile(profile)
             expected=dict(schema=NATIVE_SCHEMA,robot_id=self.device.id,camera_serials=profile['camera_serials'],
@@ -872,7 +889,12 @@ class InferenceWorkflow:
         from .ros_inputs import RosInputs
         from .observation_pairing import TimestampPairer
         runtime=self.device.runtime
-        if self.ros_worker is not None:self.ros_worker.close();self.ros_worker=None
+        memory=getattr(self.client,'memory_flow',None)
+        if memory is not None:memory.rebind_hold()
+        if self.ros_worker is not None:
+            self.ros_worker.close()
+            self._memory_model_sequences=(dict(self.ros_worker.sequences)if model_family(self.selected_model_id)=='wam-mem'else None)
+            self.ros_worker=None
         if self.ros_node is not None:self.ros_node.close();self.ros_node=None
         plane=self.ros_plane
         node=RosNode('infer_input_'+self.instance_id[:12],namespace=plane['namespace'],
@@ -898,8 +920,12 @@ class InferenceWorkflow:
                     if (len(writers)!=1 or bytes(writers[0].endpoint_gid)!=control_gid or any(getattr(message.reference,key)!=control[key]
                             for key in ('stream_id','source_instance_id','source_clock_id'))):
                         raise ValueError('bound control event source changed; rebind required')
+                    memory=getattr(self.client,'memory_flow',None)
+                    if memory is not None and not memory.control_event(message.reference.sequence):return
                     self._ros_control_event(message)
                 except Exception as error:
+                    memory=getattr(self.client,'memory_flow',None)
+                    if memory is not None:memory.source_error(error)
                     with self.lock:run=self.current
                     if run is not None and run.get('stall_recovery')is not None:
                         run['stall_recovery'].reset('control_source_error')
@@ -915,6 +941,8 @@ class InferenceWorkflow:
         if (run is None or message.run_id!=run['id']
                 or message.reference.source_instance_id!=run['owner'].runtime_nonce):return
         name=message.event[len('inference_'):]if message.event.startswith('inference_')else 'other_control_event'
+        memory=getattr(self.client,'memory_flow',None)
+        if memory is not None and name=='mode_transition':memory.mode_event(json_value(message.payload_json))
         if name=='guard_decision'and any('"'+rule+'"'in message.payload_json for rule in('G07','G08')):
             decision=json_value(message.payload_json)
             if decision.get('rule_id')in('G07','G08')and decision.get('verdict')=='reject':
@@ -934,6 +962,17 @@ class InferenceWorkflow:
     def _prepare_ros_model(self):
         from .ros_inference import RosModelWorker
         prepared,client,adapter=self.prepared,self.client,self.adapter
+        if model_family(self.selected_model_id)=='wam-mem'and client.memory_flow is None:
+            from .wam_mem import MemorySession
+            def resolve_memory(observation):
+                # The observation cache holds references, not camera payloads.
+                # Resolve exactly those samples off the ROS selection thread.
+                _,frames=self.ros_inputs.resolve_observation(observation['ros_observation'],timeout=.2)
+                images={role:np.frombuffer(frame['rgb'],dtype=np.uint8).reshape(frame['height'],frame['width'],3)
+                    for role,frame in frames.items()}
+                return dict(observation,images=images)
+            client.memory_flow=MemorySession(client,adapter,self.ros_inputs.sources['state']['source_clock_id'],resolve=resolve_memory,
+                record=lambda request,prepared,call:self.ros_worker.memory_observation(request,prepared,call))
         binding=prepared.get('action_chunk_binding')
         if binding is None:raise ValueError('ROS model requests require the pinned action chunk binding')
         def intervention(request):
@@ -945,6 +984,7 @@ class InferenceWorkflow:
             if not self._binding_current(prepared):raise ValueError('ROS model binding retired')
             started=time.monotonic()
             try:
+                if getattr(client,'memory_flow',None)is not None:return client.memory_flow.infer(request,prepared_input=prepared_input)
                 return client.infer_chunk(request,epoch=request['epoch'],clock_domain=request['clock_domain'],
                     valid_until_source_time=request['valid_until_source_time'],prepared_input=prepared_input)
             finally:
@@ -959,6 +999,8 @@ class InferenceWorkflow:
             clock_id=self.ros_inputs.sources['state']['source_clock_id'],
             state_to_device=lambda raw:device_state(raw['qpos'],disabled_grippers=self.disabled_grippers,
                 right_gripper_device_mm=prepared['profile']['gripper']['max_opening_mm']))
+        if model_family(self.selected_model_id)=='wam-mem'and getattr(self,'_memory_model_sequences',None):
+            self.ros_worker.sequences.update(self._memory_model_sequences)
         self.ros_worker.source_descriptors(self.device.id)
 
     def _ros_capture_sources(self):
@@ -1026,6 +1068,8 @@ class InferenceWorkflow:
                     # Publish only after the same-owner, fresh state has advanced
                     # the worker binding; a request cannot authorize its own epoch.
                     self.ros_worker.bind(run['id'],owner['command_epoch'])
+                    memory=getattr(self.client,'memory_flow',None)
+                    if memory is not None:memory.offer(dict(value,run_id=run['id']),owner['command_epoch'])
                 published=time.monotonic_ns();self.ros_observations.publish(message)
                 timing.record('observation.publish',published,observation_id=message.observation_id,
                     epoch=owner['command_epoch'],state_source_ns=state.source_time_ns)
@@ -1087,15 +1131,16 @@ class InferenceWorkflow:
         with self.lock:self.seed=seed
         return self.bind_device()
 
-    def _preview(self, seed, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False):
+    def _preview(self, seed, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False,recording_enabled=False):
         duration_s=episode_duration(duration_s)
+        if type(recording_enabled)is not bool:raise ValueError('explicit recording selection required')
         if type(wam_stall_recovery)is not bool:raise ValueError('WAM trick requires an explicit boolean')
         if wam_stall_recovery and not self.wam_stall_recovery_available:raise ValueError('当前部署未开放 Trick，请使用普通推理')
         if wam_stall_recovery and (model_family(self.selected_model_id)!='wam' or self.ros_plane is None
                 or self.normal_modes is None or self.reference_planning is None
                 or self.recording_backend!='capture_session_v1'):
             raise ValueError('WAM trick requires the WAM ROS complete-segment workflow and resident recorder')
-        if self.ros_plane is not None and self.recording_backend=='capture_session_v1':
+        if recording_enabled and self.ros_plane is not None and self.recording_backend=='capture_session_v1':
             from .recording_process import require_recording_protocol
             require_recording_protocol()
         if self.finite_chunk_count is not None and duration_s!=.5:raise ValueError('每轮模型源轨迹固定0.5秒15步')
@@ -1139,10 +1184,10 @@ class InferenceWorkflow:
             calibration_profile_digest=prepared['binding']['calibration_profile_digest'],camera_serials=prepared['binding']['camera_serials'],
             camera_capture_instances=captures,camera_service_instance_id=getattr(self.cameras,'descriptor',{}).get('instance_id'),clock=source_clock,
             duration_s=duration_s,control_hz=30,execute_steps=self.execute_steps,seed=seed,collision_check=False,position_projection=True,
-            motion_audit='record_only',maximum_observation_age_s=2.5 if model_family(self.selected_model_id)=='wam' else .5,recording_enabled=self.recording_enabled,
+            motion_audit='record_only',maximum_observation_age_s=2.5 if model_family(self.selected_model_id)in('wam','wam-mem') else .5,recording_enabled=recording_enabled and self.recording_backend is None,
             velocity_limits=[2.]*6+[None]+[2.]*6+[None],acceleration_limits=[5.]*6+[None]+[5.]*6+[None])
         config['disabled_grippers']=list(self.disabled_grippers)
-        if self.recording_backend is not None:config['recording_backend']=self.recording_backend
+        if recording_enabled and self.recording_backend is not None:config['recording_backend']=self.recording_backend
         if self.ros_plane is not None:config['data_plane']=deepcopy(self.ros_plane)
         if self.reference_planning is not None:config['reference_planning']=deepcopy(self.reference_planning)
         if self.finite_chunk_count is not None:config['finite_chunk_count']=self.finite_chunk_count
@@ -1160,7 +1205,7 @@ class InferenceWorkflow:
             if key in policy_parameters.get('execution', {}):config[key] = policy_parameters['execution'][key]
         if self.normal_finish_policy is not None:
             config.update(normal_finish_kind=self.normal_finish_kind,normal_finish_policy=deepcopy(self.normal_finish_policy))
-        if model_family(self.selected_model_id)in('mixed366','wam'):config['task']=self.task
+        if model_family(self.selected_model_id)in('mixed366','wam','wam-mem'):config['task']=self.task
         shared_profile=getattr(self.device.runtime.owner,'shared_target_profile',None)
         if shared_profile:
             config.update(target_interpreter_profile=shared_profile,target_execution='shared_reference_windows')
@@ -1247,13 +1292,14 @@ class InferenceWorkflow:
             with self.lock:current_run=self.current
             capture=current_run.get('recorder') if current_run and current_run['config'].get('recording_backend')=='capture_session_v1' else None
             if capture is not None:capture.model_begin(request['request_id'],request['observation']['source_time'])
+            if not recording_enabled and capture is None:return infer()
             if model_family(self.selected_model_id)!='mixed366' and capture is None:return infer()
             timing=dict(clock='host_monotonic_ns',callback_started_ns=time.monotonic_ns())
             state,images=adapter.model_input(request['observation'])
             timing['input_adapted_ns']=time.monotonic_ns()
             try:self.input_evidence.input(request['request_id'],state,images,dict(request_id=request['request_id'],seed=request['seed'],
                 task=config.get('task'),model_id=config['model_id'],conversion=prepared['conversion'],
-                model_bundle=getattr(client,'model_bundle',None),history_steps=0 if model_family(self.selected_model_id)in('mixed366','wam') else 60,
+                    model_bundle=getattr(client,'model_bundle',None),history_steps=0 if model_family(self.selected_model_id)in('mixed366','wam','wam-mem') else 60,
                 observation={k:v for k,v in request['observation'].items()if k!='images'}))
             except Exception as error:
                 if capture is None:raise
@@ -1296,12 +1342,12 @@ class InferenceWorkflow:
             runner=make_inference_runner(owner,proxy,initial,configuration,predict=reference.infer if reference is not None else predict,
                 observe=lambda now,fb:self._observe(now,fb,prepared['binding_digest'],configuration['camera_capture_instances']),adapter=adapter,
                 support=self._support,event=lambda name,value:callback('_metric_event',name,value),
-                record=(lambda name,value:callback('_record_event',name,value)) if configuration['recording_enabled'] or self.recording_backend else None,
-                record_prepared=recording_prepared if configuration['recording_enabled'] or self.recording_backend else None,
+                record=(lambda name,value:callback('_record_event',name,value)) if configuration['recording_enabled'] or configuration.get('recording_backend') else None,
+                record_prepared=recording_prepared if configuration['recording_enabled'] or configuration.get('recording_backend') else None,
                 preloaded_prediction=reference.infer(dict(request_id='reference-'+self.reference_pin['sha256'])) if reference is not None and compiled is None else None,
                 prepared_reference=compiled,feedforward_profile=feedforward,reference_executor=self.reference_executor)
             run['runner']=runner
-            if self.recording_backend:
+            if configuration.get('recording_backend'):
                 runner.control_policy=deepcopy(run['control_policy']);runner.guard_policy=deepcopy(run['control_policy'])
             return runner
         runtime=self.device.runtime
@@ -1312,7 +1358,7 @@ class InferenceWorkflow:
             reference=ReferencePredictions(self.reference,adapter,self.reference_pin)if self.reference is not None else None
             def created(owner,runner,configuration,control_policy=None):
                 run=new_run(owner,configuration,control_policy);run['runner']=runner
-                if self.recording_backend:runtime.attach_recording(run['recorder'])
+                if configuration.get('recording_backend'):runtime.attach_recording(run['recorder'])
             def current_call(method,*args):
                 with self.lock:run=self.current
                 if run is None:raise ValueError('inference execution not attached to this business')
@@ -1338,13 +1384,13 @@ class InferenceWorkflow:
             if self.generation!=generation:raise ValueError('本轮推理准备已撤销')
             self.seed=seed;self.duration_s=duration_s;self.current=None;self.status='awaiting_review';self.stage='inference.review';self.message='请核对整轮执行摘要并确认一次。'
         summary=(self.selected_spec['label']+f'；本轮 {duration_s:g} 个设备源时间秒，随机种子 '+str(seed)+
-            f'。每次预测{WAM_HORIZON if model_family(self.selected_model_id)=="wam" else 60}步、连续执行{config["execute_steps"]}步后重新观测；全轮只确认一次。位置/速度/加速度仅审计记录，'
+            f'。每次预测{WAM_HORIZON if model_family(self.selected_model_id)in("wam","wam-mem") else 60}步、连续执行{config["execute_steps"]}步后重新观测；全轮只确认一次。位置/速度/加速度仅审计记录，'
             '位置越界显式投影并保留原始与实际目标，速度/加速度不改速；不检查碰撞。录像绑定当前三相机与标定。'
             '任务成功仅依据末段稳定托盘支撑；停止仍可随时请求。')
         if shared_profile:
             summary=summary.replace('位置/速度/加速度仅审计记录，','模型原始点的动态审计仅记录，').replace(
                 '速度/加速度不改速；','连续参考另受规划速度/加速度约束，实际时长以参考摘要为准；')
-        if not self.recording_enabled:summary=summary.replace('录像绑定当前三相机与标定。','本轮录制已关闭，不生成 RGB-D 数据或过程视频；保留控制事件日志。')
+        if not recording_enabled:summary=summary.replace('录像绑定当前三相机与标定。','本轮录制已关闭，不保存推理结果和视频，不进行后台封存。')
         if config.get('bounded_live_prediction'):
             summary=('实时'+self.task+'推理；先保持并取得新鲜模型预测，再执行0.5秒并Stop撤销未来目标。'
                 '首个预测点对应观测后1/30秒；双臂与夹爪按训练原始坐标转换。'
@@ -1416,6 +1462,7 @@ class InferenceWorkflow:
         """Dedicated InferenceRunner data thread only; never called from Owner.tick."""
         if name=='finish':
             with self.lock:run['ended_wall']=time.monotonic()
+        if not(run['config'].get('recording_enabled')or run['config'].get('recording_backend')):return
         if run.get('config',{}).get('recording_backend')=='capture_session_v1':
             run['recorder'].record(name,value)
             failed=getattr(run.get('runner'),'_recording_failure',None)
@@ -1629,7 +1676,8 @@ class InferenceWorkflow:
             if type(seed) is not int or not 0<=seed<2**32:raise ValueError('本轮需要有效 uint32 随机种子')
             duration_s=episode_duration(body.get('duration_s',120))
             if self.device.runtime is None or self.device.runtime.holder!='inference':raise ValueError('请先连接设备并交接给推理业务')
-            return self._prepare(seed) if action=='inference_prepare' else self._preview(seed,duration_s,body.get('reference_feedforward_sha256'))
+            return self._prepare(seed) if action=='inference_prepare' else self._preview(seed,duration_s,body.get('reference_feedforward_sha256'),
+                recording_enabled=body.get('recording_enabled',False))
         if action=='execute':
             return self.execute_review(body['token'],physical_clearance=body.get('physical_clearance') is True)
         if action=='cancel':
@@ -1641,6 +1689,17 @@ class InferenceWorkflow:
 
     def request_normal_mode(self,body):
         return self._submit_normal_request('normal_mode',body,{'mode','target'})
+
+    def begin_memory(self,start='continue'):
+        memory=getattr(self.client,'memory_flow',None)
+        if memory is not None:memory.begin(start)
+        elif model_family(self.selected_model_id)=='wam-mem':raise ValueError('时序模型尚未绑定记忆会话')
+
+    def clear_memory(self,request_id,epoch):
+        memory=getattr(self.client,'memory_flow',None)
+        if memory is None:raise ValueError('当前没有 WAM-MEM 记忆会话')
+        result=memory.clear(request_id,epoch)
+        return dict(message='当前时序记忆已清空，下一次观测从空状态开始',memory=result['audit']['memory'])
 
     def request_operator_stop(self,request_id):
         """One operator intent; the existing Run worker joins HOLD and END."""
@@ -1690,6 +1749,11 @@ class InferenceWorkflow:
             evidence=self.input_evidence.snapshot()if self.input_evidence is not None else dict(pending=0,error=None,source='resident_ros_recorder')
             run=self.current;value=run['runner'].snapshot() if run and run['runner'] else {}
             active=value.get('runner_status') in ('ARMED','PREPARING','RUNNING','VERIFYING','SETTLING') or bool(value.get('transition_stage'))
+            if (run and run['ended_wall']is None and run.get('recorder')is None
+                    and value.get('runner_status')in('READY','STOPPED','FAULT')):
+                # No recorder callback exists in opt-out Runs. The Owner's
+                # terminal status retires the Run; normal MODEL->HOLD stays RUNNING.
+                run['ended_wall']=time.monotonic()
             saving=bool(value.get('recording_pending'))
             status='running' if active or saving else self.status
             stage='inference.execute' if active else 'inference.saving' if saving else self.stage
@@ -1717,14 +1781,15 @@ class InferenceWorkflow:
             recording_error=(run['recording_error'] or value.get('recording_error')) if run else None
             sealed=(run['receipt'].get('recording') or {}).get('manifest',{}) if run and run['receipt'] else {}
             data='invalid' if recording_error or sealed and sealed.get('capture_status')!='complete' else 'recording' if saving or active else 'valid' if sealed.get('capture_status')=='complete' else 'not_started'
-            if self.recording_backend:
+            run_recording=bool(run and(run['config'].get('recording_enabled')or run['config'].get('recording_backend')))
+            if run and run['config'].get('recording_backend'):
                 recorder=run.get('recorder') if run else None
                 saving=bool(recorder and not recorder.done.is_set())
                 data='recording' if saving else (run['receipt']['artifact_status'] if run and run.get('receipt') else 'not_started')
-            elif not self.recording_enabled:data='not_applicable';message+=' 本轮录制已关闭。'
+            elif not run_recording:data='not_applicable';message+=' 本轮录制已关闭。'
             if evidence['error']:message+=' 原始推理证据写入失败：'+evidence['error']
             primary='inference_prepare' if self.prepared is None else 'execute' if self.status=='awaiting_review' else 'inference_preview'
-            ingress_closed=bool(run and getattr(run.get('recorder'),'ingress_closed',False))
+            ingress_closed=bool(run and(not run_recording or getattr(run.get('recorder'),'ingress_closed',False)))
             busy=self.busy or active or saving and not ingress_closed
             if saving and ingress_closed and not active:message='控制已保持，旧录像正在后台校验与导出；可准备下一轮。'
             operator_task=deepcopy(getattr(self,'operator_task',{}))
@@ -1749,7 +1814,8 @@ class InferenceWorkflow:
                     inference_options=deepcopy(self.selected_spec.get('inference_options')),
                     inference_capabilities=deepcopy(self.selected_spec.get('inference_capabilities')),
                     catalog_error=self.catalog_error,bundle_digest=self.selected_bundle_digest,generation=self.generation,
-                    model_ready=model_ready,control_ready=control_ready,recording_enabled=bool(self.recording_enabled or self.recording_backend),
+                    model_ready=model_ready,control_ready=control_ready,recording_enabled=run_recording,
+                    memory=(self.client.memory_flow.snapshot()if getattr(self.client,'memory_flow',None)is not None else None),
                     recording_backend=self.recording_backend,
                     recording_ingress_closed=ingress_closed,
                     background_recordings=[dict(run_id=identity,ingress_closed=getattr(capture,'ingress_closed',False),
@@ -1793,7 +1859,8 @@ class InferenceWorkflow:
             run=self.current;recorders=dict(self.pending_captures)
             if run and run.get('recorder'):recorders[run['id']]=run['recorder']
             context=dict(run_id=run['id']if run else None,model_id=self.selected_model_id,
-                backend=self.selected_spec.get('backend'),observation_error=self.cache_error)
+                backend=self.selected_spec.get('backend'),observation_error=self.cache_error,
+                memory=(self.client.memory_flow.snapshot()if getattr(self.client,'memory_flow',None)is not None else None))
         recordings=[]
         for run_id,recorder in list(recorders.items())[-8:]:
             session=getattr(getattr(recorder,'capture',None),'session',None)or getattr(recorder,'session',None)

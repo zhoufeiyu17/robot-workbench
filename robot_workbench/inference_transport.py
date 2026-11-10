@@ -160,9 +160,10 @@ def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bun
     metadata = dict(protocol=PROTOCOL, model_id=model_id, conversion_id=conversion_id,
         request_id=request['request_id'], seed=request['seed'], source_time=request['observation']['source_time'],
         frame_ids=request['observation'].get('frame_ids', {}))
-    if model_family(model_id) in ('base566','mixed366','wam'):metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
+    if model_family(model_id) in ('base566','mixed366','wam','wam-mem'):metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
     if native_runtime(model_bundle):metadata['backend']=model_bundle['backend']
     if model_family(model_id)=='mixed366':metadata['task']=request['task']
+    if model_family(model_id)=='wam-mem':metadata['memory']=deepcopy(request.get('memory'))
     arrays = dict(model_state14=np.asarray(state), model_history=np.asarray(request['applied_history']), **images)
     _validate_request(metadata, arrays, model_id, model_bundle)
     return encode_packet(metadata, arrays)
@@ -174,7 +175,10 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
     if model_family(model_id)=='mixed366':
         keys.add('task')
         if metadata.get('task') not in model_spec(model_id,model_bundle)['tasks']:raise ValueError('task is not registered for this checkpoint')
-    if model_family(model_id) in ('base566','mixed366','wam'):keys.add('expected_bundle_digest')
+    if model_family(model_id) in ('base566','mixed366','wam','wam-mem'):keys.add('expected_bundle_digest')
+    if model_family(model_id)=='wam-mem':
+        from .wam_mem import validate_phase
+        keys.add('memory');validate_phase(metadata.get('memory'))
     if native_runtime(model_bundle):
         keys.add('backend')
         if metadata.get('backend')!=model_bundle['backend']:raise ValueError('model backend differs from prepared runtime')
@@ -192,7 +196,7 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
         raise ValueError('exact model-domain state, history and three RGB images required')
     _finite(arrays['model_state14'], (14,), 'model state')
     history = arrays['model_history']
-    if history.ndim != 2 or history.shape[1] != 14 or len(history) > (0 if model_family(model_id)in('mixed366','wam')else 60):
+    if history.ndim != 2 or history.shape[1] != 14 or len(history) > (0 if model_family(model_id)in('mixed366','wam','wam-mem')else 60):
         raise ValueError('model history must have shape (0..60,14)')
     _finite(history, history.shape, 'model history')
     for name in CAMS:
@@ -201,6 +205,9 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
             if image.dtype!=np.uint16 or image.shape!=(256,256,3):raise ValueError('WAM input requires256x256x3 WAN BF16 bit patterns')
             values=(image.astype(np.uint32)<<16).view(np.float32)
             if not np.isfinite(values).all()or np.any(np.abs(values)>1):raise ValueError('WAM input has invalid BF16 image values')
+        elif model_family(model_id)=='wam-mem':
+            if image.dtype!=np.uint8 or image.ndim!=3 or image.shape[2]!=3 or min(image.shape[:2])<=0:
+                raise ValueError('WAM-MEM needs original uint8 RGB HWC')
         elif image.dtype != np.uint8 or image.shape != ((480,640,3)if model_family(model_id)=='mixed366'else(224,224,3)):
             raise ValueError('preprocessed model RGB must be uint8 (224,224,3)')
     if model_family(model_id)=='wam':
@@ -360,6 +367,7 @@ class ModelService:
                         images={name:np.zeros((480,640,3)if model_family(self.model_id)=='mixed366'else(224,224,3),np.uint8) for name in CAMS}))
                 if model_family(self.model_id)=='mixed366':warm_request['task']='coffee'
                 if model_family(self.model_id)=='wam':warm_request['observation']['images']={name:np.zeros((256,256,3),np.uint16)for name in CAMS}
+                if model_family(self.model_id)=='wam-mem':warm_request['_warmup']=True
                 warm=self.client.infer(warm_request)
                 prediction=_finite(warm['action14'],tuple(action_contract(self.model_id,self.model_bundle)['shape']),'warmup model action')
                 self._set(status='ready', loaded=True, worker_identity=deepcopy(identity),
@@ -375,14 +383,15 @@ class ModelService:
         finally:
             self._set(busy=False);self.lock.release()
 
-    def infer(self, payload):
+    def infer(self, payload, *, memory_only=False):
         metadata, arrays = decode_packet(payload, {'model_state14', 'model_history', *CAMS}, self.model_id)
         _validate_request(metadata, arrays, self.model_id, self.model_bundle)
+        if memory_only and model_family(self.model_id)!='wam-mem':raise ValueError('memory observation requires WAM-MEM')
         if not self.lock.acquire(blocking=False):
             raise ValueError('model worker busy; inference was not queued')
         try:
             _identity(metadata, self.model_id)
-            if (model_family(self.model_id) in ('base566','mixed366','wam')
+            if (model_family(self.model_id) in ('base566','mixed366','wam','wam-mem')
                     and metadata['expected_bundle_digest'] != model_bundle_digest(self.model_id,self.model_bundle)):
                 raise ValueError('selected checkpoint bundle identity changed')
         except Exception:
@@ -397,15 +406,21 @@ class ModelService:
                     source_time=metadata['source_time'], frame_ids=metadata['frame_ids']),
                 applied_history=arrays['model_history'])
             if model_family(self.model_id)=='mixed366':request['task']=metadata['task']
+            if model_family(self.model_id)=='wam-mem':request['memory']=deepcopy(metadata['memory'])
+            if memory_only:request['memory_operation']='observe'
             started = time.monotonic()
             result = self.client.infer(request)
             if result.get('request_id') != metadata['request_id']:
                 raise ValueError('worker response identity mismatch')
-            action = _finite(result['action14'], tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
+            if memory_only:
+                if 'action14'in result:raise ValueError('observation-only memory must not generate actions')
+                action=np.empty((0,14),np.float32)
+            else:action = _finite(result['action14'], tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
             response = {key: metadata[key] for key in ('protocol', 'model_id', 'conversion_id', 'request_id')}
             if 'expected_bundle_digest' in metadata:response['expected_bundle_digest'] = metadata['expected_bundle_digest']
             if 'backend'in metadata:response['backend']=metadata['backend']
             response['audit'] = result.get('audit', {})
+            if model_family(self.model_id)=='wam-mem':self._set(memory=deepcopy(response['audit']['memory']))
             if model_family(self.model_id)=='mixed366':
                 response['audit']=dict(response['audit'],task=metadata['task'])
             encoded = encode_packet(response, dict(action14=action))
@@ -418,6 +433,19 @@ class ModelService:
             raise
         finally:
             self._set(busy=False, current_request_id=None);self.lock.release()
+
+    def memory_clear(self,request):
+        if model_family(self.model_id)!='wam-mem':raise ValueError('memory control requires WAM-MEM')
+        if not self.lock.acquire(timeout=120):raise TimeoutError('memory clear waiting for current model call')
+        try:
+            if not self.status()['loaded']:raise ValueError('model must be loaded')
+            result=self.client.infer(dict(request,memory_operation='clear',applied_history=[]))
+            self._set(memory=deepcopy(result['audit']['memory']))
+            return result
+        except Exception as error:
+            self.client.close();self._set(status='error',loaded=False,error=str(error))
+            raise
+        finally:self.lock.release()
 
     def close(self):
         with self.lock:
@@ -494,7 +522,7 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             if len(auth) != 1 or not secrets.compare_digest(auth[0].encode(), ('Bearer '+token).encode()):
                 return self.reply(403, {'error':'model authorization required'})
             tool=self.path in ('/v1/conversions','/v1/infer')and hasattr(service,'tool_start')
-            if not tool and self.path not in ('/prepare', '/infer', '/unload'):return self.reply(404, {'error':'not found'})
+            if not tool and self.path not in ('/prepare', '/infer', '/unload','/memory/observe'):return self.reply(404, {'error':'not found'})
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get_all('Transfer-Encoding', []) or len(lengths) != 1 or not lengths[0].isascii()
                     or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= MAX_PACKET):
@@ -506,7 +534,7 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
                 if self.path in ('/prepare','/unload'):
                     if len(raw) > 4096:raise ValueError('bounded prepare identity required')
                     return self.reply(200, (service.prepare if self.path=='/prepare' else service.unload)(json.loads(raw)))
-                self.reply(200, service.infer(raw), 'application/x-npz')
+                self.reply(200, service.infer(raw,memory_only=True)if self.path=='/memory/observe'else service.infer(raw), 'application/x-npz')
             except (ValueError, KeyError, TypeError) as error:self.reply(409, {'error':str(error)})
             except Exception as error:self.reply(503, {'error':str(error)})
     server = ThreadingHTTPServer((host, port), Handler)
@@ -630,7 +658,7 @@ class RemoteBaseClient:
         self.identity = deepcopy(identity)
         return deepcopy(identity)
 
-    def infer(self, request, *, prepared_input=None):
+    def infer(self, request, *, prepared_input=None, memory_only=False):
         if self.identity is None:raise ValueError('explicit remote model preparation required')
         from .pipeline_timing import timing
         from .model_session import _CAPABILITY
@@ -644,18 +672,18 @@ class RemoteBaseClient:
         timing.record('model.packet_encode',began,request_id=timing_request,bytes=len(payload))
         decisions=[]
         began=time.monotonic_ns()
-        reply=self._request('/infer', payload, kind='application/x-npz',guard_receipts=decisions)
+        reply=self._request('/memory/observe'if memory_only else'/infer', payload, kind='application/x-npz',guard_receipts=decisions)
         timing.record('model.http_roundtrip',began,request_id=timing_request)
         began=time.monotonic_ns();metadata, arrays = decode_packet(reply, {'action14'}, self.model_id)
         timing.record('model.packet_decode',began,request_id=timing_request,bytes=len(reply))
         keys = {'protocol', 'model_id', 'conversion_id', 'request_id', 'audit'}
-        if model_family(self.model_id) in ('base566','mixed366','wam'):keys.add('expected_bundle_digest')
+        if model_family(self.model_id) in ('base566','mixed366','wam','wam-mem'):keys.add('expected_bundle_digest')
         if native_runtime(self.model_bundle):keys.add('backend')
         if (set(metadata) != keys or 'expected_bundle_digest' in metadata and metadata['expected_bundle_digest'] != self.bundle_digest
                 or native_runtime(self.model_bundle)and metadata['backend']!=self.model_bundle['backend']
                 or metadata['conversion_id'] != self.conversion_id or metadata['request_id'] != request['request_id']):
             raise ValueError('remote result request or conversion identity mismatch')
-        action = _finite(arrays['action14'], tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
+        action = _finite(arrays['action14'], (0,14)if memory_only else tuple(action_contract(self.model_id,self.model_bundle)['shape']), 'model action')
         audit = deepcopy(metadata['audit'])
         if not isinstance(audit, dict):raise ValueError('model audit object required')
         from .model_session import _CAPABILITY

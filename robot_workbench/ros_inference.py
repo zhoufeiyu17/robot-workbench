@@ -84,6 +84,7 @@ class RosModelWorker:
         self.state_to_device=state_to_device
         self.stall_recovery=stall_recovery
         self.current=None;self.pending=None;self.completed=OrderedDict();self.closed=False;self.thread=None
+        self.memory_done=threading.Event();self.memory_done.set()
         self.sequences={'model_input':0,'model_result':0};self.clock_id=clock_id
         self.inputs=ros.publisher('model/inputs',ros.types.ModelInput)
         self.results=ros.publisher('model/results',ros.types.ModelResult)
@@ -121,7 +122,35 @@ class RosModelWorker:
     def watermarks(self):
         with self.lock:
             if self.pending is not None:raise ValueError('model request still in flight')
+            if not self.memory_done.is_set():raise ValueError('memory observation still in flight')
             return dict(self.sequences)
+
+    def memory_observation(self,request,prepared,call):
+        """Record actual memory inputs and an explicitly non-action result."""
+        with self.lock:
+            if self.closed or self.current is None or self.current[0]!=request['run_id']:
+                raise ValueError('memory observation Run was retired')
+            self.memory_done.clear()
+        result=None;error='';state,images=prepared
+        try:
+            observation=deepcopy(request['observation']['ros_observation'])
+            observation.run_id=request['run_id'];observation.epoch=request['epoch']
+            self.inputs.publish(self.ros.types.ModelInput(reference=self._reference('model_input'),
+                request_id=request['request_id'],run_id=request['run_id'],epoch=request['epoch'],
+                observation=observation,model_state=np.asarray(state).tolist(),
+                preprocessing_json=json_text(input_transforms(request['observation']['images'],images)),
+                metadata_json=json_text(dict(binding=self.binding,seed=0,task=self.binding['task'],
+                    model_state_dtype=str(np.asarray(state).dtype),applied_history_model14=[],
+                    operation='memory_observe',memory=request['memory']))))
+            result=call()
+            if np.asarray(result.get('action14',[])).size:raise ValueError('manual memory update returned an action')
+            return result
+        except Exception as exc:error=str(exc);raise
+        finally:
+            try:self.results.publish(self.ros.types.ModelResult(reference=self._reference('model_result'),
+                request_id=request['request_id'],run_id=request['run_id'],epoch=request['epoch'],actions=[],rows=0,columns=14,
+                envelope_json=json_text(dict(memory_only=True)),audit_json=json_text((result or{}).get('audit',{})),error=error))
+            finally:self.memory_done.set()
 
     def _receive(self, request):
         received=time.monotonic_ns()
@@ -233,6 +262,7 @@ class RosModelWorker:
         with self.lock:self.closed=True;self.current=None
         if self.thread is not None:self.thread.join(5.)
         if self.thread is not None and self.thread.is_alive():raise RuntimeError('model call still in flight')
+        if not self.memory_done.wait(5.):raise RuntimeError('memory observation still in flight')
         if hasattr(self,'descriptor_device_id'):self.source_descriptors(self.descriptor_device_id)
 
 

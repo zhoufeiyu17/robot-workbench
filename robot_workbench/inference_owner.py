@@ -143,6 +143,8 @@ def configuration(value):
     if result.get('recording_backend') not in (None,'capture_session_v1'):
         raise ValueError('known recording backend required')
     result['execute_steps']=execution_steps(result.get('execute_steps',15),horizon=horizon)
+    if str(result.get('model_id','')).startswith('wam-mem-')and result['execute_steps']!=32:
+        raise ValueError('WAM-MEM requires each complete32-action chunk')
     for key in ('state_max_age_s','max_camera_span_s'):
         limit=result.setdefault(key,.1)
         if type(limit) not in (int,float) or not math.isfinite(limit) or not 0<limit<=.1:
@@ -155,7 +157,7 @@ def configuration(value):
         from .motion_reference import infer_reference_policy
         from .inference_model import model_family,NOHISTORY_MODELS
         result['reference_planning']=infer_reference_policy(result['reference_planning'])
-        if (model_family(result.get('model_id'))not in('mixed366','wam') or result.get('trajectory_kind')=='prepared_native_reference'):
+        if (model_family(result.get('model_id'))not in('mixed366','wam','wam-mem') or result.get('trajectory_kind')=='prepared_native_reference'):
             raise ValueError('new planning policy is scoped to current online infer; frozen research/normal-brake budgets are unchanged')
         if result.get('bounded_live_prediction'):
             raise ValueError('0.5s diagnostic prefix is not a complete-segment endpoint; decide execution scope before enabling this curve')
@@ -176,7 +178,7 @@ def configuration(value):
     if result.get('finite_chunk_count')is not None:
         from .inference_model import model_family,NOHISTORY_MODELS
         if (type(result['finite_chunk_count'])is not int or result['finite_chunk_count']not in(3,4)
-                or result.get('reference_planning')is None or model_family(result.get('model_id'))not in('mixed366','wam')
+                or result.get('reference_planning')is None or model_family(result.get('model_id'))not in('mixed366','wam','wam-mem')
                 or result.get('task')not in('coffee','lid_handoff')or result.get('duration_s')!=.5
                 or result.get('execute_steps')!=15 or result.get('reference_planning',{}).get('max_execution_duration_s')!=2.
                 or result.get('target_execution')!='shared_reference_windows'

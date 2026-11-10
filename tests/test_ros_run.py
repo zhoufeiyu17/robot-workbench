@@ -462,7 +462,7 @@ class RosRunTests(unittest.TestCase):
                             bridge.update('inference_recording',dict(prepared=True,done=False,alive=True,error=capture.error,
                                 execution_instance_id=capture.execution_instance_id,ingress_closed=False))
                 device=SimpleNamespace(id='cpu_robot',environment='fake',runtime=runtime)
-                service=SimpleNamespace(device=device,event=event)
+                service=SimpleNamespace(device=device,event=event,reference_executor=None)
                 bridge=OwnerInference(service,config,dict(profile=profile,reference=None,preloaded_prediction=None,feedforward=None))
                 policy=runtime._guard_policy('inference')
                 pairer=TimestampPairer(Guard.bind(policy,dict(training_rgb_pair_error_s=TRAINING_RGB_PAIR_ERROR_S,

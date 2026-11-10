@@ -366,6 +366,7 @@ class Application:
                 request={key:body[key]for key in ('environment','business','request_id')}
                 request.update({key:session[key]for key in ('seed','duration_s','model_id','expected_bundle_digest')})
                 request['wam_stall_recovery']=session.get('wam_stall_recovery',False)
+                request['recording_enabled']=session.get('recording_enabled',False)
                 request.update(expected_context=self.inference_context(device,state,workflow),state_wall_ns=time.time_ns(),
                     physical_clearance=True,scene_reset=True,arms_supported=True)
                 return self.action('inference_run',request)
@@ -457,6 +458,12 @@ class Application:
         state=device.snapshot('inference')
         if state['command_epoch']!=body['epoch']or state['holder']!='inference':raise ValueError('operator epoch or control ownership changed')
         if state.get('recoverable_fault')or not state.get('feedback_healthy'):raise ValueError('operator action cannot recover a control fault')
+        if action=='inference_memory_clear':
+            mode=(workflow.snapshot().get('inference')or{}).get('normal_mode')or{}
+            if (mode.get('mode')!='HOLD'or mode.get('transition_stage')
+                    or self.operator_tasks.get(device.environment,{}).get('status')=='running'):
+                raise ValueError('请先进入 HOLD 并等待当前操作结束，再清空记忆')
+            return workflow.clear_memory(body['request_id'],body['epoch'])
         if action=='inference_home'and body['physical_clearance']is not True:raise ValueError('home requires current workspace clearance')
         if self._operator_model_active(device,state):
             if action=='inference_home':return dict(accepted=False)
@@ -679,8 +686,9 @@ class Application:
 
     def run_inference(self, device, workflow, body, job, generation, inference_generation, flow_generation):
         environment=device.environment
-        if body.get('prepare_only')and (workflow.normal_modes is None or workflow.recording_backend!='capture_session_v1'):
-            raise ValueError('预备控制会话要求共享正常模式与常驻录制')
+        job['memory_start']=body.get('memory_start','continue')
+        if body.get('prepare_only')and workflow.normal_modes is None:
+            raise ValueError('预备控制会话要求共享正常模式')
         runtime=device.runtime
         binding=self.inference_context(device,device.snapshot('inference'),workflow)
         def current():
@@ -715,10 +723,12 @@ class Application:
                 raise ValueError('控制会话参数已冻结，请结束会话后重新准备')
             if body.get('wam_stall_recovery',False)!=session.get('wam_stall_recovery',False):
                 raise ValueError('WAM trick mode differs from the prepared control session')
+            if body.get('recording_enabled',False)!=session.get('recording_enabled',False):
+                raise ValueError('录制选择已变化，请结束旧会话后重新准备')
             with self.lock:
                 if job.get('operator_stop_request_id'):
-                    return dict(message='启动已停止，当前位置继续保持和录制',
-                        execution=dict(operator_stopped=True,recording_open=True))
+                    return dict(message='启动已停止，当前位置继续保持',
+                        execution=dict(operator_stopped=True,control_session_open=True,recording_open=bool((getattr(workflow,'current',None)or{}).get('recorder'))))
                 workflow.current.pop('operator_stop_request_id',None)
                 workflow.current.pop('operator_stop_command',None)
                 workflow.current.pop('operator_positioning',None)
@@ -733,6 +743,7 @@ class Application:
             binding=self.inference_context(device,device.snapshot('inference'),workflow)
         check()
         stage('reviewing');review=workflow.preview_episode(body['seed'],duration_s=body['duration_s'],
+            recording_enabled=body.get('recording_enabled',False),
             **(dict(wam_stall_recovery=True)if body.get('wam_stall_recovery')else{}));check()
         preview=review.get('preview',{})
         token=preview.get('token')
@@ -755,10 +766,11 @@ class Application:
             normal_episode=self.run_normal_episode(device,workflow,job,current,runtime,binding['runtime_nonce'],body['duration_s'],
                 prepare_only=True)
             workflow.operator_session=dict(run_id=normal_episode['execution_instance_id'],runtime_nonce=runtime.nonce,
+                recording_enabled=body.get('recording_enabled',False),
                 wam_stall_recovery=body.get('wam_stall_recovery',False),
                 **{name:body[name]for name in ('seed','duration_s','model_id','expected_bundle_digest')})
             if body.get('prepare_only'):
-                return dict(message='控制与录制已准备，踏板可直接切换模式',execution=normal_episode)
+                return dict(message='控制会话已准备，踏板可直接切换模式',execution=normal_episode)
             normal_episode=self.run_normal_episode(device,workflow,job,current,runtime,binding['runtime_nonce'],body['duration_s'],
                 keep_session=True)
             result=dict(result,normal_episode=normal_episode)
@@ -793,7 +805,7 @@ class Application:
                 initialized=any(row.get('op')=='normal_initialize' and row.get('completed')is True
                     for row in receipts.values())
                 if prepare_only and held and initialized:
-                    return dict(execution_instance_id=execution_id,mode='HOLD',recording_open=True)
+                    return dict(execution_instance_id=execution_id,mode='HOLD',control_session_open=True,recording_open=bool((getattr(workflow,'current',None)or{}).get('recorder')))
                 positioning=(getattr(workflow,'current',None)or{}).get('operator_positioning')
                 if positioning and positioning.get('status')=='running':
                     deadline=time.monotonic()+10.
@@ -806,7 +818,7 @@ class Application:
                 if model_request is None and held and initialized:
                     if operator_stop and keep_session:
                         return dict(execution_instance_id=execution_id,reason='operator stopped in position HOLD',
-                            recording_open=True,operator_stopped=True)
+                            control_session_open=True,recording_open=bool((getattr(workflow,'current',None)or{}).get('recorder')),operator_stopped=True)
                     target='END'if operator_stop else'MODEL'
                 elif model_request is not None and end_request is None and held:
                     model_receipt=receipts.get(model_request)or{}
@@ -815,7 +827,7 @@ class Application:
                         if keep_session:
                             if not operator_stop and not positioning and stop_reason not in normal_reasons:
                                 raise ValueError('推理已保持：'+str(stop_reason))
-                            return dict(execution_instance_id=execution_id,reason=stop_reason,recording_open=True,
+                            return dict(execution_instance_id=execution_id,reason=stop_reason,control_session_open=True,recording_open=bool((getattr(workflow,'current',None)or{}).get('recorder')),
                                 operator_stopped=bool(operator_stop or positioning))
                         target='END'
                 if end_request is not None:
@@ -834,6 +846,8 @@ class Application:
                     request=dict(session_id=mode['mode_session_id'],runtime_nonce=nonce,
                         request_id=request_id,epoch=mode['command_epoch'],
                         mode='MODEL'if target=='MODEL'else'HOLD',target=target)
+                    if target=='MODEL'and callable(getattr(workflow,'begin_memory',None)):
+                        workflow.begin_memory(job.get('memory_start','continue'))
                     with self.lock:
                         if not current() or device.runtime is not runtime:
                             raise ValueError('本轮 Run 已撤销，后续 MODEL/END 未提交')
@@ -1212,6 +1226,10 @@ class Application:
             operator_ready=(runtime.get('connected')and holder=='inference'and runtime.get('feedback_healthy')
                 and not runtime.get('recoverable_fault')and 'FAULT'not in str(runtime.get('state')))
             allowed['inference_hold']=dict(allowed=bool(operator_ready),reason=None if operator_ready else'需要当前推理控制权与健康连接')
+            memory_mode=(value.get('inference',{}).get('normal_mode')or{})
+            memory_ready=bool(operator_ready and not operator_busy and getattr(getattr(workflow,'client',None),'memory_flow',None)
+                and memory_mode.get('mode')=='HOLD'and not memory_mode.get('transition_stage'))
+            allowed['inference_memory_clear']=dict(allowed=memory_ready,reason=None if memory_ready else'请先准备 WAM-MEM 并进入 HOLD')
             session=getattr(workflow,'operator_session',None)
             session_ready=bool(session and value.get('id')==session['run_id']
                 and (value.get('inference',{}).get('normal_mode')or{}).get('runner_status')=='RUNNING')
@@ -1385,8 +1403,8 @@ class Application:
             if body.get('wam_stall_recovery')and not getattr(device.workflows.get('inference'),'wam_stall_recovery_available',True):
                 raise ValueError('当前部署未开放 Trick，请使用普通推理')
             extra=({'model_id','expected_bundle_digest'} if action=='inference_select' else set())
-            if action=='inference_preview':extra.add('reference_feedforward_sha256')
-            if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported','prepare_only','wam_stall_recovery'}
+            if action=='inference_preview':extra|={'reference_feedforward_sha256','recording_enabled'}
+            if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported','prepare_only','wam_stall_recovery','memory_start','recording_enabled'}
             if business!='inference' or set(body)-{'environment','business','request_id','seed','duration_s'}-extra:
                 raise ValueError('推理请求包含未支持的字段；模型须来自 checkpoint 目录')
             if type(body.get('seed',0)) is not int or not 0<=body.get('seed',0)<2**32:
@@ -1398,6 +1416,8 @@ class Application:
                 raise ValueError('prepare_only requires an explicit boolean')
             if 'wam_stall_recovery'in body and type(body['wam_stall_recovery'])is not bool:
                 raise ValueError('wam_stall_recovery requires an explicit boolean')
+            if 'recording_enabled'in body and type(body['recording_enabled'])is not bool:raise ValueError('explicit recording selection required')
+            if body.get('memory_start','continue')not in('fresh','continue'):raise ValueError('choose fresh or retained memory')
         request_id=body.get('request_id')
         if not isinstance(request_id,str) or not 1 <= len(request_id) <= 128:
             raise ValueError('有效的单次请求身份必需')
@@ -1417,7 +1437,7 @@ class Application:
             result=flow.recording_files(body['run_ids'])
             with self.lock:self.requests[key]=dict(body=original_body,action=action,response=result)
             return result
-        if action in ('inference_hold','inference_home','inference_teach'):
+        if action in ('inference_hold','inference_home','inference_teach','inference_memory_clear'):
             flow=device.workflows.get('inference')
             if flow is None:raise ValueError('inference workflow is not configured')
             result=self._operator_action(device,flow,action,body)
@@ -1748,7 +1768,7 @@ class Application:
             while len(self.requests)>256:self.requests.popitem(last=False)
         def work():
             trace=None
-            trace_flow=device.workflows.get('inference') if action=='inference_run' else None
+            trace_flow=device.workflows.get('inference') if action=='inference_run'and body.get('recording_enabled',False) else None
             try:
                 if trace_flow is not None and hasattr(trace_flow,'begin_debug_request'):
                     trace=trace_flow.begin_debug_request(job,original_body)

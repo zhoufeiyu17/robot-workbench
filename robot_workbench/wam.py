@@ -106,7 +106,7 @@ class StallRecovery:
 
 
 def is_model_id(value):
-    return isinstance(value,str)and re.fullmatch(r'wam-[a-z0-9-]+-step[0-9]+',value)is not None
+    return isinstance(value,str)and not value.startswith('wam-mem-')and re.fullmatch(r'wam-[a-z0-9-]+-step[0-9]+',value)is not None
 
 
 def validate_native_profile(profile):
@@ -438,10 +438,11 @@ def metadata_weight(registry,row):
 
 class Client:
     """Same shared ModelService client API, in WAM's existing cp312 runtime."""
-    def __init__(self,registry,bundle):
-        import secrets
-        self.registry=deepcopy(registry);self.bundle=validate_descriptor(bundle);self.model_id=self.bundle['model_id']
-        if self.bundle!=descriptor(registry,denoise_steps=self.bundle['inference_options']['denoise_steps']):
+    def __init__(self,registry,bundle,*,implementation=None):
+        import secrets,sys
+        self.implementation=implementation or sys.modules[__name__]
+        self.registry=deepcopy(registry);self.bundle=self.implementation.validate_descriptor(bundle);self.model_id=self.bundle['model_id']
+        if self.bundle!=self.implementation.descriptor(registry,denoise_steps=self.bundle['inference_options']['denoise_steps']):
             raise ValueError('WAM registry and selected descriptor differ')
         self.process=self.connection=self.lock=self.process_owner=None
         self.log_path=str(Path(registry['root'])/'logs'/('wam-worker-'+secrets.token_hex(8)+'.log'))
@@ -456,9 +457,9 @@ class Client:
         from rule_based_workbench.launch_environment import clean_environment
         if sys.platform!='linux':raise ValueError('WAM model host must be Linux')
         if self.process is not None:
-            if self.process.poll()is None:return worker_identity(self.bundle)
+            if self.process.poll()is None:return self.implementation.worker_identity(self.bundle)
             self.close()  # This explicit prepare retires the proven-exited attempt.
-        root,_=verify_registry(self.registry)
+        root,_=self.implementation.verify_registry(self.registry)
         # Keep the supplied bundle's interpreter convention; no parent Python,
         # ROS or CUDA environment is inherited into the compiled cp312 engine.
         python=root/('env/bin/python'if self.bundle['backend']=='torch'else'env/anyinfer-3090-py312/bin/python')
@@ -483,7 +484,7 @@ class Client:
                     # Linux parent-death follows the creating thread, including
                     # after the HTTP request that called prepare has returned.
                     try:
-                        self.process=subprocess.Popen([str(python),'-u','-B','-m',__name__,'--worker',str(snapshot),
+                        self.process=subprocess.Popen([str(python),'-u','-B','-m',self.implementation.__name__,'--worker',str(snapshot),
                             '--pipe-fd',str(child.fileno()),'--parent-pid',str(os.getpid())],pass_fds=(child.fileno(),),
                             stdout=log,stderr=log,env=env,start_new_session=True)
                     except BaseException as error:errors.append(error)
@@ -497,8 +498,8 @@ class Client:
             if not parent.poll(300):raise TimeoutError('WAM worker load deadline; inspect worker log')
             result=parent.recv()
             if (result.get('ready')is not True or result.get('pid')!=self.process.pid
-                    or result.get('adapter_source_sha256')!=_SOURCE_SHA256):raise ValueError(result.get('error','WAM worker identity/source differs'))
-            return worker_identity(self.bundle)
+                    or result.get('adapter_source_sha256')!=self.implementation._SOURCE_SHA256):raise ValueError(result.get('error','WAM worker identity/source differs'))
+            return self.implementation.worker_identity(self.bundle)
         except BaseException:
             child.close();self.close();raise
 
@@ -507,8 +508,7 @@ class Client:
         if len(request.get('applied_history',[])):raise ValueError('WAM does not accept action history')
         # Frame/source/Run identities stay with the shared caller and recorder;
         # this model process consumes only tensors, seed and reply association.
-        self.connection.send(dict(request_id=request['request_id'],seed=request['seed'],observation=dict(
-            model_state14=request['observation']['model_state14'],images=request['observation']['images'])))
+        self.connection.send(self.implementation.worker_request(request))
         if not self.connection.poll(120):raise TimeoutError('WAM inference deadline; do not replay')
         value=self.connection.recv()
         if value.get('ok')is not True:raise ValueError(value.get('error','WAM inference failed'))
@@ -527,6 +527,11 @@ class Client:
         if self.process_owner is not None:self.process_owner.join(2);self.process_owner=None
         if self.connection is not None:self.connection.close();self.connection=None
         if self.lock is not None:self.lock.close();self.lock=None
+
+
+def worker_request(request):
+    return dict(request_id=request['request_id'],seed=request['seed'],observation=dict(
+        model_state14=request['observation']['model_state14'],images=request['observation']['images']))
 
 
 def model_service(registry):

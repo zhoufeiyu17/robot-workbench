@@ -192,7 +192,7 @@ class RegisteredCatalog:
         self.root = self.root.resolve()
 
     def _entry(self, manifest):
-        from . import wam, mixed366
+        from . import wam, mixed366, wam_mem
         info = manifest.lstat()
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077 or manifest.resolve().parent != manifest.parent):
@@ -214,13 +214,17 @@ class RegisteredCatalog:
             relative = Path(item['path'])
             if (relative.is_absolute() or '..' in relative.parts or str(relative) in paths
                     or type(item.get('bytes')) is not int or item['bytes'] < 0
-                    or not _SHA.fullmatch(str(item.get('sha256')))and not(wam.is_model_id(identity)and wam.metadata_weight(registry,item))):
+                    or not _SHA.fullmatch(str(item.get('sha256')))and not(
+                        wam.is_model_id(identity)and wam.metadata_weight(registry,item)
+                        or wam_mem.is_model_id(identity)and wam_mem.metadata_weight(registry,item))):
                 raise ValueError('invalid or duplicate registered artifact path/size/hash')
             paths.add(str(relative))
             path = (root / relative).resolve(strict=True)
             if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size != item['bytes']:
                 raise ValueError('missing, incomplete or out-of-root artifact: ' + str(relative))
-        if wam.is_model_id(identity):
+        if wam_mem.is_model_id(identity):
+            bundles=wam_mem.variants(registry)
+        elif wam.is_model_id(identity):
             canonical = json.dumps(sorted(files, key=lambda row: row['path']), sort_keys=True,
                                    separators=(',', ':')).encode()
             if hashlib.sha256(canonical).hexdigest() != registry['bundle_sha256']:
@@ -298,13 +302,14 @@ class RegisteredCatalog:
         return self.client(choices[0])
 
     def client(self, bundle, *, current=None):
-        from . import wam, mixed366
+        from . import wam, mixed366, wam_mem
         matches = [row for row in self.rows() if row['selectable'] and row['manifest'] == bundle]
         if len(matches) != 1:
             raise ValueError('catalog selection is absent, ambiguous or changed before preparation')
         registry = matches[0]['registry']
         if current is not None and getattr(current, 'registry', None) == registry and current.bundle == bundle:
             return current
+        if wam_mem.is_model_id(bundle['model_id']):return wam_mem.Client(registry,bundle)
         if wam.is_model_id(bundle['model_id']):
             return wam.Client(registry, bundle)
         packed = None

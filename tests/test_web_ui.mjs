@@ -22,7 +22,13 @@ for(const id of ['observation-panel','manual-tools','media-preview','camera-grid
   assert.equal([...html.matchAll(new RegExp('id="'+id+'"','g'))].length,1,'shared workspace component must not be duplicated: '+id);
 assert.match(html, /id="control-fault-recovery" href="#environment-recover"/);
 assert.match(html, /id="collection-speed" type="range" min="30" max="170"/);
-const {recordingTaskTime,createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+const {inferenceFamily,inferenceModes,recordingTaskTime,createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+
+assert.equal(inferenceFamily({id:'wam-mem-fixture-step1'}),'wam-mem');
+assert.equal(inferenceFamily({id:'wam-fixture-step1'}),'wam');
+assert.match(html,/<option value="wam-mem">WAM-MEM<\/option>/);
+assert.match(html,/id="inference-memory-fresh"/);
+assert.equal(inferenceModes([{id:'wam-mem-fixture-step1',backend:'torch',inference_options:{denoise_steps:2},inference_capabilities:{denoise_steps:{default:2}}}], 'torch','wam-mem',2).length,1);
 
 
 class Element {
@@ -2398,8 +2404,29 @@ for(const change of ['steps','duration','denoise','stop','duration-run']){
   h.app.destroy();
 }
 
+for(const choice of ['fresh','continue']){
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  const id='wam-mem-fixture-step1',digest='c'.repeat(64),caps={denoise_steps:{minimum:2,maximum:2,default:2}};
+  info.models=[{id,backend:'torch',selectable:true,status:'ready',label:'WAM-MEM',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps}];
+  Object.assign(info,{selected_model_id:id,backend:'torch',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps,memory:{empty:false,observations:8,manual_observations:3},normal_mode:{mode:'HOLD'}});
+  Object.assign(info.model,{id,backend:'torch',bundle_digest:digest});
+  value.runtime.allowed_operations.inference_memory_clear={allowed:true};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-recording-enabled').checked,false,'recording is opt-in even for a ready memory model');
+  assert.equal(h.get('inference-run').hidden,true);assert.equal(h.get('inference-memory-'+choice).hidden,false);
+  assert.match(h.get('inference-memory-status').textContent,/8.*3/);
+  if(choice==='continue'){h.get('inference-recording-enabled').checked=true;h.get('inference-recording-enabled').events.change();}
+  h.get('inference-memory-'+choice).events.click();await settle();
+  assert.equal(h.get('inference-run-dialog').open,true);
+  assert.match(h.get('inference-run-title').textContent,choice==='fresh'?/无状态/:/保留记忆/);
+  assert.match(h.get('inference-run-details').textContent,choice==='fresh'?/不保存/:/已开启录制/);
+  h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();h.get('inference-run-confirm').events.click();
+  const body=JSON.parse(h.requests.at(-1).options.body);
+  assert.equal(body.memory_start,choice);assert.equal(body.recording_enabled,choice==='continue');h.app.destroy();
+}
+
 {
-  const h=harness({business:'inference'});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('results');
+  const h=harness({business:'inference',crypto:{getRandomValues:values=>webcrypto.getRandomValues(values)}});h.app.start();h.reply(0,snapshot());await settle();h.app.selectTab('results');
   h.get('recording-files').open=true;h.get('recording-files').events.toggle();
   const read=h.requests.at(-1);assert.match(read.url,/api\/inference-recordings/);
   read.resolve(response({recordings:[{run_id:'saved-one',started_wall_ns:1794280000000000000,state:'complete',deletable:true},{run_id:'saved-two',state:'incomplete',deletable:true},{run_id:'active',state:'recording',deletable:false,reason:'录制尚未结束'}]}));await settle();
