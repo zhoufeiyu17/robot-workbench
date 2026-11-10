@@ -1577,7 +1577,7 @@ class _CaptureCamera:
             finally:self.done.set()
 
 
-def _seal_capture(root,spec,extra_issue=None):
+def _seal_capture(root,spec,extra_issue=None,*,probe_cache=None):
     """Verify the on-disk prefix and sequence barrier; never alter event files."""
     from .inference_trace import write_json
     from .pipeline_timing import timing
@@ -1594,10 +1594,9 @@ def _seal_capture(root,spec,extra_issue=None):
     revision=max(revisions,default=0)+1;gap_name=f'gaps-r{revision:06d}.jsonl';segment_name=f'segments-r{revision:06d}.jsonl'
     issues=[extra_issue] if extra_issue else [];streams={};files={}
     model_indexes={'model_input':{},'model_result':{}}
-    # Keep only codec metadata for this seal's files, released on return. The
-    # small process LRU cannot retain a long capture across its three passes.
+    # Reuse the live writer's codec proofs when available; recovery starts cold.
     # Each reuse still hashes the current bytes; no stat-only authorization.
-    probe_cache={}
+    if probe_cache is None:probe_cache={}
     ros_capture=all(s.get('source_ref',{}).get('kind')=='ros'for s in spec['source_descriptors'])
     producer_gap=root/'producer-gap.json'
     if producer_gap.exists():
@@ -1780,7 +1779,7 @@ def _seal_capture(root,spec,extra_issue=None):
                 for request in sorted(requests):issues.append('model input '+request+' references missing original '+stream+' sample')
         if not issues and model_indexes['model_input']:
             from .ros_recording import verify_model_inputs
-            try:verify_model_inputs(root,model_indexes['model_input'],streams,probe_cache=probe_cache)
+            try:verify_model_inputs(root,model_indexes['model_input'],streams,probe_cache=probe_cache,reconstruct_pixels=False)
             except (OSError,ValueError,KeyError,TypeError,RuntimeError)as error:
                 issues.append('model input validation: '+str(error))
     phase('verify_model_inputs',proof_started)
@@ -1790,6 +1789,9 @@ def _seal_capture(root,spec,extra_issue=None):
         gaps_ref=gap_name,segments_ref=segment_name,seal_revision=revision,coverage_scope='declared producer sequences; upstream sensor completeness is not inferred')
     if ros_capture:
         manifest.update(model_inputs=model_indexes['model_input'],model_results=model_indexes['model_result'])
+        manifest['model_input_validation']=dict(
+            metadata_and_references=('failed'if issues else'passed')if model_indexes['model_input']else'not_applicable',
+            pixel_reconstruction='not_requested',scope='recorded structure, source references and input/result coverage')
     if activity is not None:manifest['recording_activity']=deepcopy(finish['recording_activity'])
     if activity_policy is not None and activity is None:manifest['playback_error']='recording activity timeline unavailable; unfiltered replay prohibited'
     elif any('source_ref' in source for source in spec['source_descriptors']):

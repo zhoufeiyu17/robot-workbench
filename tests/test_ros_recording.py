@@ -81,7 +81,7 @@ class StartupSnapshotTests(unittest.TestCase):
             read_fd,write_fd=os.pipe();os.write(write_fd,b''.join((json.dumps(c)+'\n').encode()for c in commands))
             output=StringIO()
             from robot_workbench.recording_process import _seal_capture
-            def seal(*args):
+            def seal(*args,**kwargs):
                 if check_ingress:
                     self.assertTrue(node.closed,'source subscriptions must close before admission proof')
                     self.assertTrue((root/'finish.json').is_file())
@@ -89,7 +89,7 @@ class StartupSnapshotTests(unittest.TestCase):
                     self.assertIs(state.get('ingress_closed'),True)
                     self.assertFalse(state['done'],'closure must not claim seal completion')
                     self.assertTrue(any(json.loads(line).get('ingress_closed')for line in output.getvalue().splitlines()))
-                return _seal_capture(*args)
+                return _seal_capture(*args,**kwargs)
             try:
                 with os.fdopen(read_fd)as pipe,patch('robot_workbench.ros_recording.RosNode',return_value=node)as node_factory,\
                         patch('robot_workbench.ros_recording.RosInputs',return_value=inputs),\
@@ -149,7 +149,7 @@ class RosRecordingTests(unittest.TestCase):
     def test_delayed_model_input_uses_saved_originals_after_live_cache_eviction(self):
         self.record_run(False,slow_preparation=True)
 
-    def test_saved_model_input_hash_is_verified_after_ingress_closes(self):
+    def test_pixel_reconstruction_is_explicit_and_default_seal_keeps_source_checks(self):
         self.record_run(False,bad_model_hash=True)
 
     def test_failed_model_keeps_actual_input_error_result_and_original_sources(self):
@@ -463,8 +463,14 @@ class RosRecordingTests(unittest.TestCase):
                 rows[0]['payload']['preprocessing_json']=json.dumps(rules)
                 path.write_text(''.join(json.dumps(row)+'\n'for row in rows))
                 resealed=_seal_capture(root,json.loads((root/'capture.json').read_text()))
-                self.assertEqual(resealed['recording_outcome'],'incomplete')
-                self.assertTrue(any('reconstructed model input differs'in issue for issue in resealed['issues']),resealed['issues'])
+                self.assertEqual(resealed['recording_outcome'],'complete',resealed['issues'])
+                self.assertEqual(resealed['model_input_validation']['pixel_reconstruction'],'not_requested')
+                from robot_workbench.ros_recording import verify_model_inputs
+                from unittest.mock import patch
+                with patch('rgbd_segments.iter_segment',side_effect=AssertionError('default seal must not decode model frames')):
+                    verify_model_inputs(root,resealed['model_inputs'],resealed['streams'],reconstruct_pixels=False)
+                with self.assertRaisesRegex(ValueError,'reconstructed model input differs'):
+                    verify_model_inputs(root,resealed['model_inputs'],resealed['streams'])
         finally:
             for reader in health_readers:reader.close()
             # A disconnected producer's done flag is not writer exit. Reattach

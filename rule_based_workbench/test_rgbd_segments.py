@@ -290,10 +290,14 @@ class CodecTest(unittest.TestCase):
     def test_seal_scope_retains_proofs_after_global_lru_eviction(self):
         self.test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(scoped=True)
 
-    def test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(self,scoped=False):
+    def test_writer_proofs_survive_global_eviction_before_sealing(self):
+        self.test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(scoped=True,from_writer=True)
+
+    def test_repeated_probe_reuses_content_proof_but_detects_changed_bytes(self,scoped=False,from_writer=False):
         with segments._PROBE_LOCK:segments._PROBE_CACHE.clear()
         with TemporaryDirectory()as directory:
-            root=Path(directory);writer=self.writer(root)
+            root=Path(directory);cache={}if scoped else None
+            writer=self.writer(root,probe_cache=cache if from_writer else None)
             original=segments.subprocess.Popen;probes=[]
             def launch(argv,*args,**kwargs):
                 if argv[0]==FFPROBE:probes.append(tuple(argv))
@@ -303,7 +307,8 @@ class CodecTest(unittest.TestCase):
                     meta,_,_,color,depth=frame(i);writer.add(meta,color,depth)
                 manifest=writer.finish()[0];count=len(probes)
                 self.assertGreater(count,0)
-                cache={}if scoped else None
+                if from_writer:
+                    with segments._PROBE_LOCK:segments._PROBE_CACHE.clear()
                 segments.verify_segment(root,'base_0/000000.commit.json',ffprobe=FFPROBE,probe_cache=cache)
                 for _ in range(2):
                     if scoped:

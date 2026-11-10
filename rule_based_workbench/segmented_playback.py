@@ -15,7 +15,7 @@ from rgbd_segments import _safe, verify_segment
 from robot_workbench.sample_clock import clock_for_source, sample_stamp, assert_progress
 
 CAMERAS = ('base_0', 'left_wrist_0', 'right_wrist_0')
-_EXPORT_WORKERS = 2
+_EXPORT_WORKERS = 3  # One bounded, single-thread codec path per declared camera.
 
 
 def _setpts(offsets):

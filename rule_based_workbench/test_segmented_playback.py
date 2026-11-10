@@ -41,7 +41,7 @@ class ExpressionTest(unittest.TestCase):
                 rows = [dict(clock, simulation_only=True, host_receive_ns=1_000_000_000 + index * 33_333_333,
                              source_time_ns=index * 33_333_333, physics_step=index, capture_fps=30)
                         for index in range(2)]
-                barrier = threading.Barrier(2, timeout=5)
+                barrier = threading.Barrier(3, timeout=5)
                 lock = threading.Lock()
                 active = maximum = 0
                 checked = []
@@ -50,8 +50,7 @@ class ExpressionTest(unittest.TestCase):
                     with lock:
                         active += 1
                         maximum = max(active, maximum)
-                    if camera != playback.CAMERAS[-1]:
-                        barrier.wait()  # Fails if the first two cameras run serially.
+                    barrier.wait()  # All three cameras must overlap.
                     return rows, [root / (camera + '.rgb.mp4')]
                 def encode(args, **kwargs):
                     nonlocal active
@@ -80,7 +79,7 @@ class ExpressionTest(unittest.TestCase):
                         self.assertEqual(result['capture_status'], 'incomplete')
                         self.assertEqual(result['task_outcome'], 'unverified')
                         self.assertEqual(list(result['source_timing']), list(playback.CAMERAS))
-                self.assertEqual(maximum, 2)
+                self.assertEqual(maximum, 3)
                 self.assertEqual(active, 0)
 
     def test_balanced_tree_exact_offsets_and_bounded_depth(self):

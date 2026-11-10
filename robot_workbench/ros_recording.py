@@ -42,8 +42,9 @@ def _plain(value):
     return [_plain(v)for v in value]
 
 
-def verify_model_inputs(root,model_inputs,streams,*,probe_cache=None):
-    """After ingress closes, verify exact saved frames in one pass per segment."""
+def verify_model_inputs(root,model_inputs,streams,*,probe_cache=None,reconstruct_pixels=True):
+    """Check recorded references; pixel reconstruction is an explicit deep audit."""
+    if type(reconstruct_pixels)is not bool:raise ValueError('explicit pixel reconstruction mode required')
     from rgbd_segments import iter_segment
     wanted={};segments={}
     for request,payload in model_inputs.items():
@@ -57,6 +58,14 @@ def verify_model_inputs(root,model_inputs,streams,*,probe_cache=None):
         if len(roles)!=3 or len(set(roles))!=3 or len(frames)!=3 or set(rules)!=set(roles):
             raise ValueError('three original model input transform roles required')
         for role,raw in zip(roles,frames):
+            rule=rules[role]
+            if (not isinstance(rule,dict)or set(rule)!={'kind','shape','sha256'}
+                    or rule['kind']not in ('identity_rgb','letterbox_rgb224','wam_bicubic256_wan_bf16','wam_zero_head_bicubic256_wan_bf16')
+                    or not isinstance(rule['shape'],list)or len(rule['shape'])!=3 or rule['shape'][2]!=3
+                    or any(type(x)is not int or x<=0 for x in rule['shape'])
+                    or not isinstance(rule['sha256'],str)or not re.fullmatch('[0-9a-f]{64}',rule['sha256'])
+                    or rule['kind']=='wam_zero_head_bicubic256_wan_bf16'and role!='base_0_rgb'):
+                raise ValueError('declared model input transform metadata invalid')
             ref=StreamRef(**raw)
             wanted.setdefault(ref.stream_id,{}).setdefault(ref,[]).append((request,role,rules[role]))
     for stream,refs in wanted.items():
@@ -71,6 +80,7 @@ def verify_model_inputs(root,model_inputs,streams,*,probe_cache=None):
                 if path.parts[:2]!=('camera',stream)or '..'in path.parts:raise ValueError('model frame belongs to another stream')
                 segments.setdefault(str(path.relative_to('camera')),{}).setdefault(frame['frame'],[]).append((ref,checks))
         if refs:raise ValueError('model input references missing original '+stream+' sample')
+    if not reconstruct_pixels:return
     for segment,frames in segments.items():
         manifest=json.loads((root/'camera'/segment).read_text())
         for index,(meta,rgb,_)in enumerate(iter_segment(root/'camera',segment,png=False,probe_cache=probe_cache)):
@@ -133,6 +143,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     lock=threading.RLock();errors={};active=False;binding=None;terminal=None;ending_at=None
     activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={};control_gap_start=None
     received={k:0 for k in sources};flushed=dict(received);first={};last={};files={};segments={};model_results=set();artifact_index=None
+    # Run-local codec facts survive the process LRU. No pixels are cached; each
+    # reuse still verifies the current file bytes against the content digest.
+    probe_cache={}
     recorded_models={}
     file_locks={k:threading.Lock()for k in sources}
     encoders=ThreadPoolExecutor(max_workers=3,thread_name_prefix='ros-capture-camera')
@@ -338,7 +351,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         if source['kind']=='image':
             writer=segments.get(ref.stream_id)
             if writer is None:writer=segments[ref.stream_id]=SegmentWriter(root/'camera',ref.stream_id,
-                pixel_format='rgb8-depth16le'if value.get('depth')is not None else'rgb8')
+                pixel_format='rgb8-depth16le'if value.get('depth')is not None else'rgb8',probe_cache=probe_cache)
             meta=dict(value['metadata'],schema='workbench.ros-image.v1',ros_reference=ref.__dict__)
             frame=writer.add_pixels(meta,value['rgb'],value.get('depth'),value['width'],value['height'])
             append(ref,dict(frame_ref=dict(segment='camera/'+frame['segment'],frame=frame['frame']),metadata=meta))
@@ -510,7 +523,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         write_json(root/'finish.json',finish)
         state.update(ingress_closed=True,ready=False,source_errors=dict(errors),degraded=bool(errors))
         write_json(root/'status.json',state);emit(persist=False)
-        manifest=_seal_capture(root,spec,'; '.join(errors.values())or terminal.get('control_terminal',{}).get('recording_error'))
+        manifest=_seal_capture(root,spec,'; '.join(errors.values())or terminal.get('control_terminal',{}).get('recording_error'),
+            probe_cache=probe_cache)
         state.update(state=manifest['recording_outcome'],done=True,ready=False,manifest_ref='manifest.json',
             seal_revision=manifest['seal_revision'],streams=manifest['streams'],source_errors=dict(errors),degraded=bool(manifest['issues']))
         write_json(root/'status.json',state);emit(persist=False)

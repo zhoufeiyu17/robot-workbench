@@ -206,7 +206,7 @@ def _check_probe(path, manifest, kind, ffprobe, timeout_s, **kwargs):
 
 class SegmentWriter:
     def __init__(self, root, camera, segment_frames=120, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s=30,
-                 commit_executor=None, pixel_format='rgb8-depth16le'):
+                 commit_executor=None, pixel_format='rgb8-depth16le',probe_cache=None):
         started = time.monotonic()
         if not isinstance(camera, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', camera):
             raise ValueError('safe camera name required')
@@ -222,6 +222,7 @@ class SegmentWriter:
         self.directory = self.root / camera
         self.directory.mkdir(exist_ok=False)
         self.segment_frames, self.ffmpeg, self.ffprobe, self.timeout_s = segment_frames, ffmpeg, ffprobe, timeout_s
+        self.probe_cache=probe_cache
         self.segments, self.children = [], {}
         self.meta = None
         self.closed = self.aborted = False
@@ -432,7 +433,7 @@ class SegmentWriter:
             for kind in self.kinds:
                 self._check_active()
                 _check_probe(paths[kind], manifest, kind, self.ffprobe, self.timeout_s,
-                             factory=self._spawn, release=self._forget)
+                             factory=self._spawn, release=self._forget,probe_cache=self.probe_cache)
             detail['probe_wall_s'] = time.monotonic() - before
             before = time.monotonic()
             metadata.flush()
