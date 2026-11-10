@@ -432,7 +432,9 @@ class TargetInterpreter:
             decisions.append(jaws)
             if jaws['verdict']=='reject':raise ValueError('G17: native jaw command exceeds the bound SDK capability')
         mark('feedback_target_sample')
-        target, _, _ = self.reference.sample([sample - self.start_s])
+        # Only residual integrators consume the feedback-time target. Ordinary
+        # windows must not spend their admission lead evaluating an unused row.
+        target = self.reference.sample([sample - self.start_s])[0] if self.integrals else None
         mark('bias_allocation')
         bias_started=time.perf_counter();integral_times={}
         bias = np.zeros_like(q)

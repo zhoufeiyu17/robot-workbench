@@ -590,6 +590,7 @@ class ControlRuntimeClient:
         self.owner=OwnerFacts(self);self.hardware_binding=hardware_binding;self.closed=threading.Event()
         self.data_plane=None;self.ros_state=None;self.recording_health=None;self.ros_control_source=None;self.ros_control_sequence=None
         self._recording_ack=None;self._recording_health_sent=None
+        self._gc_guarded=False
         self.refresh()
         if self.nonce is not None:self._require_capture_capabilities()
 
@@ -624,6 +625,11 @@ class ControlRuntimeClient:
                 self._project_recording(value)
             self.state=value
             self.fd=1 if nonce is not None and not(value.get('release_receipt')or{}).get('status')=='released'else None
+            if self.fd is not None and self.data_plane is not None and not self.closed.is_set() and not self._gc_guarded:
+                # This process supplies observations even though the SDK lives
+                # in Owner. Defer cyclic GC for the same attached lifetime.
+                from .gc_timing import acquire_control
+                acquire_control(self);self._gc_guarded=True
         return deepcopy(value)
 
     def _project_feedback(self,value):
@@ -928,9 +934,13 @@ class ControlRuntimeClient:
         if self.state.get('connected'):raise ValueError('Owner still acquired; business detach is separate from release')
         self.detach();self.fd=None
     def detach(self):
-        self.closed.set();self.event_closed.set()
-        if getattr(self,'recording_health',None)is not None:self.recording_health.close();self.recording_health=None
-        if getattr(self,'ros_state',None) is not None:self.ros_state.close()
+        with self.lock:
+            self.closed.set();self.event_closed.set()
+            if getattr(self,'recording_health',None)is not None:self.recording_health.close();self.recording_health=None
+            if getattr(self,'ros_state',None) is not None:self.ros_state.close()
+            if getattr(self,'_gc_guarded',False):
+                from .gc_timing import release_control
+                release_control(self);self._gc_guarded=False
     def monitor(self,closed):
         while not closed.is_set()and not self.closed.is_set():
             try:self.refresh();self.observation_error=None

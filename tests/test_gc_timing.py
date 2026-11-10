@@ -4,12 +4,42 @@ import gc
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+from copy import deepcopy
+from types import SimpleNamespace
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from robot_workbench import gc_timing
 
 
 class GCTimingTest(unittest.TestCase):
+    def test_remote_ros_attachment_defers_gc_until_the_last_client_detaches(self):
+        from robot_workbench.control_owner import ControlRuntimeClient,SCHEMA
+        original=gc.isenabled();self.addCleanup(gc.enable if original else gc.disable)
+        gc.enable()
+        value=dict(runtime_nonce='cpu-owner',connected=True,recording=None,
+            control_owner=dict(schema=SCHEMA,data_plane=dict(namespace='/cpu',domain_id=126)))
+        channel=SimpleNamespace(descriptor=dict(device_id='cpu',environment='fake'),
+            call=lambda *args,**kwargs:deepcopy(value))
+        view=SimpleNamespace(resolve=lambda *_:{},close=lambda:None)
+        clients=[]
+        with patch('robot_workbench.control_owner.ControlChannel',return_value=channel),patch(
+                'robot_workbench.ros_inputs.RosStateView',return_value=view):
+            try:
+                first=ControlRuntimeClient('/unused');clients.append(first)
+                self.assertFalse(gc.isenabled(),'remote observations need the existing GC boundary too')
+                first.refresh();self.assertEqual(gc_timing.snapshot()['control_owners'],1)
+                value['runtime_nonce']=None;value['connected']=False
+                second=ControlRuntimeClient('/unused');clients.append(second)
+                self.assertEqual(gc_timing.snapshot()['control_owners'],1)
+                value['runtime_nonce']='cpu-owner';value['connected']=True
+                second.refresh();self.assertEqual(gc_timing.snapshot()['control_owners'],2)
+                first.detach();self.assertFalse(gc.isenabled())
+                second.detach();self.assertTrue(gc.isenabled())
+                first.refresh();self.assertTrue(gc.isenabled(),'a final status read must not reattach the GC guard')
+                self.assertEqual(gc_timing.snapshot()['control_owners'],0)
+            finally:
+                for client in clients:client.detach()
+
     def test_collection_waits_until_all_sdk_workers_exit_and_restores_prior_policy(self):
         original=gc.isenabled();self.addCleanup(gc.enable if original else gc.disable)
         for enabled in (True,False):

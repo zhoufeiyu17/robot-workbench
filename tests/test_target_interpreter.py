@@ -133,6 +133,28 @@ class TargetInterpreterTests(unittest.TestCase):
         expected=executor.reference.target
         for row in self.packets[-1]['q_sdk14']:np.testing.assert_allclose(row,expected,atol=1e-12)
 
+    def test_unused_feedback_sample_cannot_consume_initial_admission_lead(self):
+        executor=self.fixture(profile='x5_control50_damping_v1')
+        executor.start_s=self.now+.017
+        feedback=self.feedback(executor)
+        sample=executor.reference.sample
+        def delayed_sample(times):
+            # Reproduce the observed9ms window +4ms redundant single-row
+            # evaluation and1.3ms transport, without changing native3ms guard.
+            self.now+=.004 if len(times)==1 else .009
+            return sample(times)
+        def admit(packet):
+            self.now+=.0013
+            self.assertGreaterEqual(packet['host_times_s'][0]-self.now,.003)
+            self.packets.append(deepcopy(packet));return {'firmware_ack':False}
+        executor.backend.queue_reference=admit
+        with patch.object(type(executor.reference),'sample',side_effect=delayed_sample):
+            result=executor.tick(100.,feedback)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(self.packets[0]['host_times_s'][0],100.017)
+        expected,velocity,_=sample(np.asarray(self.packets[0]['host_times_s'])-executor.start_s)
+        np.testing.assert_array_equal(self.packets[0]['q_sdk14'],expected)
+
     def test_position_only_policy_is_explicit_bounded_and_revocable(self):
         executor=self.fixture(profile='x5_control50_damping_v1',native_grid='reference_origin_30Hz',velocity_source='sdk_position_only')
         executor.tick(self.now,self.feedback(executor))
