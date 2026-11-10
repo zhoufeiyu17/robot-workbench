@@ -1361,9 +1361,10 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const stall=el('inference-stall-enabled'),stallInfo=value.wam_stall_recovery;
     el('inference-stall-tools').hidden=inferenceFamilySelection()!=='wam';
     if(value.operator_session)stall.checked=value.operator_session.wam_stall_recovery===true;
-    stall.disabled=!!state?.workflow?.busy||!!value.operator_session||!options().fresh;
+    if(stallInfo?.available===false)stall.checked=false;
+    stall.disabled=stallInfo?.available===false||!!state?.workflow?.busy||!!value.operator_session||!options().fresh;
     const decision=stallInfo?.last_decision;
-    setText('inference-stall-status',decision?`已观察 ${decision.observed_steps} / ${decision.config.window_steps} 个模型步。`+
+    setText('inference-stall-status',stallInfo?.available===false?'当前部署未开放 Trick，请使用普通推理。':decision?`已观察 ${decision.observed_steps} / ${decision.config.window_steps} 个模型步。`+
       (decision.stalled?`静止恢复中 · ${decision.head_black?'顶部黑屏':'真实画面'} · 实际随机种子已记录`:'常规画面与配置种子。'):
       '连续3秒模型步静止后，交替使用2块顶部黑屏和1块真实画面，并为每块重新采样种子。检测到运动后恢复常规推理。夹爪静止阈值为各侧标定行程的5%。');
     const models=inferenceModes(value.models,inferenceBackend(),inferenceFamilySelection(),inferenceDenoiseValue()),placeholder=(!prepared||!!inferenceBackendReason())&&!preparing;

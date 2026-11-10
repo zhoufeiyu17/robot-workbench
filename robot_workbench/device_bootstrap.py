@@ -58,6 +58,9 @@ def _inference_options(profile):
             or profile.get('preserve_begin_jaws')is not True):
         raise ValueError('normal modes require explicit chunks, preserved begin jaws and workbench recording disabled')
     if chunks:options['action_chunks']=True
+    if 'wam_stall_recovery_available'in config:
+        if type(config['wam_stall_recovery_available'])is not bool:raise ValueError('explicit WAM trick availability required')
+        options['wam_stall_recovery_available']=config['wam_stall_recovery_available']
     if config.get('reference_planning')is not None:
         if not chunks:raise ValueError('reference planning requires explicit action chunks')
         options['reference_planning']=deepcopy(config['reference_planning'])

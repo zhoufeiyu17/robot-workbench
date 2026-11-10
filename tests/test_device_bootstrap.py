@@ -20,6 +20,17 @@ from test_owner_clock import ClockBackend,Safety,calibration,jaw
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_deployment_can_close_trick_without_changing_normal_inference(self):
+        from robot_workbench.device_bootstrap import _inference_options
+        from robot_workbench.inference_workflow import InferenceWorkflow
+        profile=dict(self.profile,disabled_grippers=[],inference={'wam_stall_recovery_available':False})
+        self.assertFalse(_inference_options(profile)['wam_stall_recovery_available'])
+        flow=NS(wam_stall_recovery_available=False)
+        with self.assertRaisesRegex(ValueError,'未开放 Trick'):
+            InferenceWorkflow._preview(flow,seed=7,duration_s=5,wam_stall_recovery=True)
+        profile['inference']['wam_stall_recovery_available']='false'
+        with self.assertRaises(ValueError):_inference_options(profile)
+
     def test_production_profile_requires_ros_without_legacy_live_sources(self):
         with self.assertRaisesRegex(ValueError,'explicit ROS'):read_profile(self.path,require_ros=True)
         plane=dict(schema='workbench.ros-data-plane.v1',namespace='/workbench/cpu',domain_id=126)

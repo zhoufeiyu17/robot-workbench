@@ -1382,6 +1382,8 @@ class Application:
             permission=workflow.allowed(action)
             if permission.get('allowed')is not True:raise ValueError(permission.get('reason') or '业务预热条件尚未满足')
         if action in (*INFERENCE_TOOLS,'inference_run'):
+            if body.get('wam_stall_recovery')and not getattr(device.workflows.get('inference'),'wam_stall_recovery_available',True):
+                raise ValueError('当前部署未开放 Trick，请使用普通推理')
             extra=({'model_id','expected_bundle_digest'} if action=='inference_select' else set())
             if action=='inference_preview':extra.add('reference_feedforward_sha256')
             if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported','prepare_only','wam_stall_recovery'}

@@ -96,7 +96,9 @@ class InferenceWorkflow:
                  model_prepare_operation=None, reference_trajectory=None,prepared_reference_execution=False,reference_integral_feedback=False,
                  control_mapping_pending=None, task=None, rgb_source=None, action_chunks=False, normal_modes=None,
                  normal_initial_mode='MODEL',normal_finish_kind=None,normal_finish_policy=None,reference_planning=None,
-                 finite_chunk_count=None,recording_backend=None,ros_plane=None):
+                 finite_chunk_count=None,recording_backend=None,ros_plane=None,wam_stall_recovery_available=True):
+        if type(wam_stall_recovery_available)is not bool:raise ValueError('explicit WAM trick availability required')
+        self.wam_stall_recovery_available=wam_stall_recovery_available
         if type(recording_enabled) is not bool:raise ValueError('recording_enabled must be boolean')
         if recording_backend not in (None,'capture_session_v1'):raise ValueError('known recording backend required')
         self.recording_backend=recording_backend
@@ -1057,6 +1059,7 @@ class InferenceWorkflow:
     def _preview(self, seed, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False):
         duration_s=episode_duration(duration_s)
         if type(wam_stall_recovery)is not bool:raise ValueError('WAM trick requires an explicit boolean')
+        if wam_stall_recovery and not self.wam_stall_recovery_available:raise ValueError('当前部署未开放 Trick，请使用普通推理')
         if wam_stall_recovery and (model_family(self.selected_model_id)!='wam' or self.ros_plane is None
                 or self.normal_modes is None or self.reference_planning is None
                 or self.recording_backend!='capture_session_v1'):
@@ -1706,7 +1709,7 @@ class InferenceWorkflow:
                 outcomes=dict(motion='running' if active else 'completed' if value.get('runner_status')=='READY' else status if run else 'not_started',
                     data=data,simulation='not_applicable',task='passed' if outcome.get('success') is True else 'failed' if outcome.get('success') is False else 'unknown'),
                 inference=dict(models=deepcopy(self.models),selected_model_id=self.selected_model_id,catalog_root=self.catalog_root,
-                    wam_stall_recovery=dict(enabled=bool(run and run.get('stall_recovery')),
+                    wam_stall_recovery=dict(enabled=bool(run and run.get('stall_recovery')),available=self.wam_stall_recovery_available,
                         **(run['stall_recovery'].snapshot()if run and run.get('stall_recovery')else{})),
                     operator_task=operator_task,operator_controls=deepcopy(getattr(self,'operator_controls',{})),
                     operator_input=deepcopy(getattr(self,'operator_input_status',{})),

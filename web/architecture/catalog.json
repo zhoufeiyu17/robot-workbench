@@ -489,7 +489,8 @@
         "lifetime": "scan per refresh; exact frozen descriptor rechecked at prepare",
         "failure": "unavailable candidates carry reason; stale selection rejected"
       },
-      "stall_recovery": "可选WAM业务干预，默认关闭；消费已有控制ROS反馈/段事件，ModelInput metadata记录实际seed与黑屏转换，Owner/SDK动作契约复用"
+      "stall_recovery": "可选WAM业务干预，默认关闭；消费已有控制ROS反馈/段事件，ModelInput metadata记录实际seed与黑屏转换，Owner/SDK动作契约复用",
+      "stall_recovery_availability": "Deployment inference.wam_stall_recovery_available is an explicit boolean; when false, UI disables opt-in and backend rejects Trick before Run preparation. Ordinary inference is unchanged."
     },
     {
       "id": "I04",
