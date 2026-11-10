@@ -22,6 +22,35 @@ class InferCurvePolicyTests(unittest.TestCase):
         kwargs.update(options)
         return prepare_reference(source,source['device_targets14'][0],limits,**kwargs)
 
+    def test_resident_planner_matches_fresh_process_reuses_worker_and_preserves_rejection(self):
+        import os
+        from robot_workbench.motion_reference import create_reference_executor,prepare_reference_process
+        source,limits=self.fixture();initial=source['device_targets14'][0]
+        options=dict(source_sha256='a'*64,planning_policy=POLICY,
+            initial_velocity_sdk14=[0.]*14,initial_acceleration_sdk14=[0.]*14,
+            sdk_targets14=source['device_targets14'],jaw_scales={'left':1000.,'right':1000.})
+        cold={};expected=prepare_reference_process(source,initial,limits.tolist(),timing=cold,**options)
+        executor=create_reference_executor()
+        try:
+            pid=executor.submit(os.getpid).result(5);self.assertNotEqual(pid,os.getpid())
+            for _ in range(2):
+                measured={};actual=prepare_reference_process(source,initial,limits.tolist(),executor=executor,timing=measured,**options)
+                self.assertEqual(actual.metadata,expected.metadata)
+                for name in ('breaks','coefficients','jaws'):np.testing.assert_array_equal(getattr(actual,name),getattr(expected,name))
+                self.assertEqual(measured['worker_pid'],pid)
+                for row in (cold,measured):
+                    times=[row['worker_'+name+'_ns']for name in ('started','decoded','prepared','finished')]
+                    self.assertEqual(times,sorted(times));self.assertGreater(row['worker_total_s'],0)
+                    self.assertGreater(row['fit_s'],0);self.assertGreater(row['extrema_s'],0)
+            invalid=deepcopy(options);invalid['sdk_targets14']=deepcopy(source['device_targets14'])
+            invalid['sdk_targets14'][1][0]=2.
+            for pool in (None,executor):
+                with self.assertRaisesRegex(ValueError,'source outside SDK command limits'):
+                    prepare_reference_process(source,initial,limits.tolist(),executor=pool,**invalid)
+            self.assertEqual(executor.submit(os.getpid).result(5),pid)
+        finally:executor.shutdown(wait=True,cancel_futures=True)
+        with self.assertRaises(RuntimeError):executor.submit(os.getpid)
+
     def test_internal_derivatives_are_not_forced_to_zero_and_only_outer_ends_stop(self):
         source,limits=self.fixture();r=self.prepare(source,limits)
         q,v,a=r.sample(r.breaks)

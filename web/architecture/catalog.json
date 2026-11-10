@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.7c214ada013d",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.eefeec17b3d7",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -500,7 +500,10 @@
         "identity": "original frame/source stamp, observation_id, request_id, run_id, epoch; host monotonic clocks require matching boot_id",
         "bounds": "8192 events/process,128 stages,256 recent measurements/stage,4 frozen fault windows; no image/command/credential payload",
         "missing": "explicit unavailable; publisher-to-callback combines DDS transport and scheduling if RMW receive timestamp is unavailable",
-        "status_projection": "Owner ordinary facts omit mode history; explicit inference_state views full/status/none, business polls status; HTTP page state excludes duplicated historical ledger. Full idempotent replies and recorded evidence retained."
+        "status_projection": "Owner ordinary facts omit mode history; explicit inference_state views full/status/none, business polls status; HTTP page state excludes duplicated historical ledger. Full idempotent replies and recorded evidence retained.",
+        "planning": "One prewarmed CPU process per Owner service, shared by successive inference runners; local direct workflow owns its corresponding process. Identical reference calculation and brake guards. Normal service close joins the worker; model cancellation retains epoch rejection.",
+        "planning_timing": "CPU roundtrip, worker decode/prepare/encode spans, import/fit/extrema accumulated durations, brake reserve and reference recording. Accumulated durations are labeled aggregated_duration, not exact phase positions; one-shot comparison also returns worker timing.",
+        "observation_consumer": "Owner state subscriber must receive an initial real sample before inference binding succeeds. Diagnostics expose consumer name, cached sample count/latest state reference, cache/resolver errors and bounded callback errors."
       }
     },
     {
@@ -2801,7 +2804,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "fd85ef2a02b357333c46e322cdbb513c0597ad321b1cb77dce8d2d83866df853",
+        "fingerprint": "2ee6befd5dad0555421e71207d2846f348ccb2147600766505ff095637d63571",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2925,7 +2928,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "6d194439d9980f46d2c79002bd19bb6a7c8907be41ebda89aa70a59f0066d9aa",
+        "fingerprint": "9bf731380690a15d3be9652a98055a465d1e04b8a71f0a06556b57b7aa93ea4f",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3052,7 +3055,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "6a00e31574dde3152ae3fd6114102378eefccc6887686652bc965a4c38d4476c",
+        "fingerprint": "67cc95b29405924ffd1aa2f8aa230aee1d10216be56d7dd32d39b6a527916f30",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3171,7 +3174,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "770ab4bb0ddcf95ad4f4072f7cdf30e0a63a2865c218dd88fc0e46628cd8c4b1",
+        "fingerprint": "3f11c799405967f579eea74458281727a7d9b0ea0ba0a07c0f23fb865cabe9b5",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3385,7 +3388,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "ccc41ca4a9fadcc40088cf540caa1d0cb49b30fc929308d2815051cb4cb4891a",
+        "fingerprint": "36f8459a4c9c3515e9bca8c6f3b9962fcdc633af17670a9c76098839c5758ff5",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3548,7 +3551,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "2f827f57d6365a23bd689dad92f7b14223670d2148d92185787229f4c127eb9d",
+        "fingerprint": "117f43e20aa73e5fd13bea17d49114c09de69639300eab55bb7ebf623a474d07",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3685,7 +3688,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "2fae976ff2a4b0c97b0f036aa0b9c33ff9c31b159ae6a0e39e500b2fc06b6743",
+        "fingerprint": "af346084e54227fcc75a3fe9d60d77875ebb4f2e47736c4fb9f11cc0f5c0470c",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3827,7 +3830,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "43d04cf016276919fda66434a4d6719ca3143e9b3d08676c5d66c9128444854a",
+        "fingerprint": "2c13331957c191c52187612c5816c0871c61820d3a3b4f2f332764c7bc47fd80",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3953,7 +3956,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "64e13acd16c7ae258163480c2b9bff549272ec50eb64b064f97d27b54a5a9cda",
+        "fingerprint": "c79816ef2cff67b5e5ae4933f051a36542e2651b37abbb9ade5297bb61b8ea2b",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4082,7 +4085,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "fdc495773cce12270622c93c3534e72205432269f6facfa4c56f8300e698c6ed",
+        "fingerprint": "e83a8fe0eb6ae5e1b6e163a8cef30d706062542ec35375127685a57bbfba2755",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4208,7 +4211,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "e22c3fd8248550826df3ae55feab37a928254065e33dda98c0fca8aa0645a1cb",
+        "fingerprint": "0fcc72d05d63972b0fd3089b0a141b3484b6a44cc667e931f88f4c21c9c7ea23",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },

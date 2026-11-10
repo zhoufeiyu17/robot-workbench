@@ -366,9 +366,11 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
                       velocity_limit=.25,acceleration_limit=1.,timing_policy='retime_allowed',sdk_targets14=None,jaw_scales=None,
                       planning_policy=None,initial_velocity_sdk14=None,initial_acceleration_sdk14=None,timing=None):
     """Pure CPU preparation. No SDK, camera, model or file access."""
+    import time
+    importing=time.perf_counter()
     from scipy.interpolate import CubicSpline, PchipInterpolator, BPoly, PPoly
     from .inference_owner import sdk_target
-    import time
+    imports_wall=time.perf_counter()-importing
     started=time.perf_counter();fit_wall=extrema_wall=0.
     policy=None if planning_policy is None else infer_reference_policy(planning_policy)
     if policy is not None:
@@ -492,7 +494,8 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
     digest=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode())
     for array in (breaks,coefficients,sdk[:,[6,13]]):digest.update(array.tobytes())
     metadata['reference_id']=digest.hexdigest()
-    if timing is not None:timing.update(fit_s=fit_wall,extrema_s=extrema_wall,prepare_total_s=time.perf_counter()-started,retiming_refits=refits)
+    if timing is not None:timing.update(imports_s=imports_wall,fit_s=fit_wall,extrema_s=extrema_wall,
+        prepare_total_s=time.perf_counter()-started,retiming_refits=refits)
     return PreparedReference(_frozen(breaks),_frozen(coefficients),_frozen(sdk[:,[6,13]]),metadata)
 
 
@@ -703,16 +706,42 @@ def check_brake_reserve(reference, limits, *, duration_s, velocity_limit, accele
 def _prepare_encoded(body,profile=False):
     """Identical bounded CPU calculation for one-shot and warmed child paths."""
     if len(body)>128*1024:raise ValueError('preparation input exceeds bound')
+    import os
     import time
-    started=time.perf_counter();request=json.loads(body);decoded=time.perf_counter();timing={}
+    started=time.perf_counter();started_ns=time.monotonic_ns()
+    request=json.loads(body);decoded=time.perf_counter();decoded_ns=time.monotonic_ns();timing={}
     reference=prepare_reference(request['source'],request['initial'],request['limits'],timing=timing,**request['options'])
-    encoding=time.perf_counter()
+    encoding=time.perf_counter();prepared_ns=time.monotonic_ns()
     encoded=json.dumps(dict(breaks=reference.breaks.tolist(),coefficients=reference.coefficients.tolist(),
         jaws=reference.jaws.tolist(),metadata=reference.metadata),allow_nan=False,separators=(',',':')).encode()
     if len(encoded)>256*1024:raise ValueError('preparation output exceeds bound')
     timing.update(worker_json_decode_s=decoded-started,worker_json_encode_s=time.perf_counter()-encoding,
-        worker_total_s=time.perf_counter()-started)
+        worker_total_s=time.perf_counter()-started,worker_pid=os.getpid(),worker_started_ns=started_ns,
+        worker_decoded_ns=decoded_ns,worker_prepared_ns=prepared_ns,worker_finished_ns=time.monotonic_ns())
     return (encoded,timing)if profile else encoded
+
+
+def _reference_worker_start(parent_pid):
+    import os
+    import sys
+    os.environ['CUDA_VISIBLE_DEVICES']=''
+    if sys.platform=='linux':
+        from .arx_output_guard import parent_death
+        parent_death(parent_pid)
+    from scipy.interpolate import CubicSpline, PchipInterpolator, BPoly, PPoly
+
+
+def create_reference_executor():
+    """One eager CPU worker, created by the owning service's main thread."""
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+    executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
+        initializer=_reference_worker_start,initargs=(os.getpid(),))
+    try:executor.submit(os.getpid).result(timeout=10.)
+    except BaseException:
+        executor.shutdown(wait=True,cancel_futures=True);raise
+    return executor
 
 
 def prepare_reference_process(source,initial_sdk_command14,sdk_limits,*,executor=None,timing=None,**options):
@@ -732,11 +761,14 @@ def prepare_reference_process(source,initial_sdk_command14,sdk_limits,*,executor
     if len(body)>128*1024:raise ValueError('preparation request exceeds bounded source size')
     stages={}
     if executor is None:
-        result=subprocess.run([os.environ.get('WORKBENCH_CPU_PYTHON')or sys.executable,'-B','-m',__name__,'--prepare'],
+        result=subprocess.run([os.environ.get('WORKBENCH_CPU_PYTHON')or sys.executable,'-B','-m',__name__,
+            '--prepare-profile'if timing is not None else'--prepare'],
             input=body,capture_output=True,env=_environment(),timeout=20)
-        if result.returncode or len(result.stdout)>256*1024:
+        if result.returncode or len(result.stdout)>256*1024+4096:
             raise ValueError('isolated CPU motion preparation failed: '+result.stderr.decode(errors='replace')[-1000:])
         encoded=result.stdout
+        if timing is not None:
+            encoded,details=encoded.split(b'\n',1);stages=json.loads(details)
     else:encoded,stages=executor.submit(_prepare_encoded,body,True).result(timeout=20)
     returned=time.perf_counter();value=json.loads(encoded);decoded=time.perf_counter()
     if timing is not None:timing.update(stages,request_json_encode_s=encoded_at-encoding,
@@ -747,7 +779,10 @@ def prepare_reference_process(source,initial_sdk_command14,sdk_limits,*,executor
 
 if __name__=='__main__':
     import sys
-    if sys.argv[1:]!=['--prepare']:raise SystemExit('private CPU preparation worker only')
+    if sys.argv[1:]not in (['--prepare'],['--prepare-profile']):raise SystemExit('private CPU preparation worker only')
     raw=sys.stdin.buffer.read(128*1024+1)
     if len(raw)>128*1024:raise ValueError('preparation input exceeds bound')
-    sys.stdout.buffer.write(_prepare_encoded(raw))
+    if sys.argv[1]=='--prepare-profile':
+        encoded,stages=_prepare_encoded(raw,True)
+        sys.stdout.buffer.write(encoded+b'\n'+json.dumps(stages,allow_nan=False).encode())
+    else:sys.stdout.buffer.write(_prepare_encoded(raw))

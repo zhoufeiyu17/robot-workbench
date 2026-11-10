@@ -1774,7 +1774,18 @@ class InferenceRunner:
             # nonzero q/v/a boundaries; live moving joins remain separate work.
             options.update(planning_policy=policy,initial_velocity_sdk14=[0.]*14,initial_acceleration_sdk14=[0.]*14)
         if self.reference_executor is not None:options['executor']=self.reference_executor
+        cpu_start=time.monotonic_ns()
         cpu_timing={};reference=prepare_reference_process(source,initial,self.sdk_limits,timing=cpu_timing,**options)
+        timing.record('planning.cpu_roundtrip',cpu_start,request_id=request['request_id'])
+        if 'worker_started_ns'in cpu_timing:
+            for phase,begin,end in (('decode','started','decoded'),('prepare','decoded','prepared'),('encode','prepared','finished')):
+                timing.record('planning.cpu.'+phase,cpu_timing['worker_'+begin+'_ns'],
+                    ended_ns=cpu_timing['worker_'+end+'_ns'],worker_pid=cpu_timing['worker_pid'],request_id=request['request_id'])
+            for phase in ('imports','fit','extrema'):
+                end=cpu_timing['worker_prepared_ns']
+                timing.record('planning.cpu.'+phase,end-round(cpu_timing[phase+'_s']*1e9),ended_ns=end,
+                    aggregated_duration=True,worker_pid=cpu_timing['worker_pid'],request_id=request['request_id'])
+        brake_start=time.monotonic_ns()
         if self.normal_config:
             from .motion_reference import check_brake_reserve,retime_for_brake_reserve
             if self.normal_planned:
@@ -1784,8 +1795,11 @@ class InferenceRunner:
             else:
                 check_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
                     velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])
+        timing.record('planning.brake_reserve',brake_start,request_id=request['request_id'])
+        record_start=time.monotonic_ns()
         from .owner_inference import reference_wire
         self._record('reference',dict(request_id=request['request_id'],reference=reference_wire(reference)))
+        timing.record('planning.reference_record',record_start,request_id=request['request_id'])
         timing.record('planning.reference_and_brake_reserve',prepared_start,request_id=request['request_id'])
         return dict(response,_prepared_reference=reference,_preparation_timing=dict(
             response_received_source_s=response_at,prepared_source_s=self.owner.control_time(),

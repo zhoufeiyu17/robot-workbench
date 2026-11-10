@@ -207,6 +207,11 @@ class InferenceWorkflow:
             if self.ros_plane is None:self.artifacts=RunArtifacts(self.output,self.input_evidence,self._debug_finished)
             from .collection_history import CaptureResults
             self.capture_results=CaptureResults(self.output,environment=self.device.environment,device_id=self.device.id,inference_history=self.history)
+        self.reference_executor=None
+        if ((self.action_chunks or self.prepared_reference_execution)
+                and not getattr(self.device.runtime,'remote_control_owner',False)):
+            from .motion_reference import create_reference_executor
+            self.reference_executor=create_reference_executor()
         self.model_probe_thread=threading.Thread(target=self._model_fact_loop,daemon=True,name='model-facts')
         self.model_probe_thread.start()
         self.model_catalog_thread=threading.Thread(target=self._model_catalog_loop,daemon=True,name='model-catalog')
@@ -1182,7 +1187,8 @@ class InferenceWorkflow:
             from .motion_reference import prepare_reference_process
             initial=list(feedback_to_command(feedback['qpos'],limits,environment=self.device.environment))
             if self.disabled_grippers:initial[13]=command_sdk('right',config['disabled_right_gripper_device_mm'])
-            compiled=prepare_reference_process(self.reference,initial,limits,source_sha256=self.reference_pin['sha256'])
+            compiled=prepare_reference_process(self.reference,initial,limits,source_sha256=self.reference_pin['sha256'],
+                executor=self.reference_executor)
             config['reference_integral_feedback']=self.reference_integral_feedback
             from .motion_reference import native_holds
             config.update(prepared_reference=deepcopy(compiled.metadata),execution_duration_s=compiled.duration_s+sum(native_holds(config)),
@@ -1293,7 +1299,7 @@ class InferenceWorkflow:
                 record=(lambda name,value:callback('_record_event',name,value)) if configuration['recording_enabled'] or self.recording_backend else None,
                 record_prepared=recording_prepared if configuration['recording_enabled'] or self.recording_backend else None,
                 preloaded_prediction=reference.infer(dict(request_id='reference-'+self.reference_pin['sha256'])) if reference is not None and compiled is None else None,
-                prepared_reference=compiled,feedforward_profile=feedforward)
+                prepared_reference=compiled,feedforward_profile=feedforward,reference_executor=self.reference_executor)
             run['runner']=runner
             if self.recording_backend:
                 runner.control_policy=deepcopy(run['control_policy']);runner.guard_policy=deepcopy(run['control_policy'])
@@ -1823,6 +1829,8 @@ class InferenceWorkflow:
         return self.history.media(identity)
 
     def close(self):
+        if self.reference_executor is not None:
+            self.reference_executor.shutdown(wait=True,cancel_futures=True);self.reference_executor=None
         if getattr(self,'operator_input_closed',None)is not None:
             self.operator_input_closed.set();self.operator_input_thread.join(2)
         self.model_probe_stop.set();self.model_probe_thread.join(3)

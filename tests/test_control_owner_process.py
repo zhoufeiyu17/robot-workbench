@@ -261,6 +261,7 @@ def _owner_process(root,ready,closing,heartbeat=None,tripped=None,fixture_mode=N
     else:
         service.event_encoder.shutdown(wait=True,cancel_futures=True)
         service.read_encoder.shutdown(wait=True,cancel_futures=True)
+        service.reference_executor.shutdown(wait=True,cancel_futures=True)
 
 
 def _guard_process(heartbeat,tripped,ready,closed):
@@ -732,6 +733,8 @@ class ControlOwnerProcessTests(unittest.TestCase):
             diagnostics=flow.pipeline_diagnostics(limit=0)
             self.assertEqual(diagnostics['owner']['status'],'observed')
             self.assertIn('control.tick',diagnostics['owner']['data']['stages'])
+            self.assertGreater(diagnostics['owner']['data']['observation_input']['sample_count'],0)
+            if normal32:self.assertIn('planning.cpu.prepare',diagnostics['owner']['data']['stages'])
             self.assertIn('model.resolve_sources',diagnostics['business']['stages'])
             self.assertTrue(any(row.get('data',{}).get('stage')=='complete'for row in diagnostics['recording']))
             self.assertIn('recording.seal.total',manifest['pipeline_timing']['stages'])
@@ -1426,6 +1429,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
             self.assertFalse(serving.is_alive())
             with self.assertRaises(RuntimeError):service.event_encoder.submit(os.getpid)
             with self.assertRaises(RuntimeError):service.read_encoder.submit(os.getpid)
+            with self.assertRaises(RuntimeError):service.reference_executor.submit(os.getpid)
             self.assertFalse((Path(directory)/'control-token').exists())
             with patch.object(transport,'_identity',return_value=dict(pid=os.getpid())):
                 restarted=transport.ControlOwnerService(Device('cpu-codec','fake',None),directory)

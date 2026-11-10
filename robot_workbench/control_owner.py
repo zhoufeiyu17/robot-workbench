@@ -239,6 +239,8 @@ class ControlOwnerService:
             initializer=_event_encoder_start,initargs=(os.getpid(),))
         self.read_encoder_pid=self.read_encoder.submit(os.getpid).result(timeout=10.)
         self.read_encoding_slots=threading.BoundedSemaphore(2)
+        from .motion_reference import create_reference_executor
+        self.reference_executor=create_reference_executor()
         service=self
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
@@ -376,7 +378,19 @@ class ControlOwnerService:
         if operation=='pipeline_timing':
             from .pipeline_timing import timing
             if set(args)-{'after','limit'}:raise ValueError('unknown timing query')
-            return timing.snapshot(**args)
+            result=timing.snapshot(**args)
+            bridge=self.inference
+            inputs=getattr(bridge,'ros_inputs',None);node=getattr(bridge,'ros_node',None)
+            if inputs is not None and node is not None:
+                cache=inputs.caches['state']
+                with cache.lock:
+                    latest=next(reversed(cache.samples),None)
+                    result['observation_input']=dict(consumer=inputs.consumer,
+                        sample_count=len(cache.samples),error=cache.error,
+                        latest_state_sequence=latest.sequence if latest else None,
+                        latest_state_source_ns=latest.source_time_ns if latest else None,
+                        resolver_error=bridge.ros_error,callback_errors=list(node.errors))
+            return result
         if operation=='inspect':return self.inspect()
         if operation=='snapshot':return self.inspect(args.get('business'))
         if operation=='inputs':
@@ -526,6 +540,7 @@ class ControlOwnerService:
         self.server.shutdown();self.server.server_close()
         _shutdown_encoder(self.event_encoder)
         _shutdown_encoder(self.read_encoder)
+        _shutdown_encoder(self.reference_executor)
         Path(self.server.server_address).unlink(missing_ok=True)
         token_path=self.root/'control-token'
         if not token_path.is_symlink() and token_path.is_file() and token_path.read_text()==self.token:

@@ -168,6 +168,14 @@ class OwnerInference:
             if self.ros_sources[camera]['metadata'].get('serial')!=self.camera_bindings[role][1]:
                 raise ValueError('ROS camera serial differs from the reviewed binding')
         self.ros_inputs=RosInputs(self.ros_node,[self.ros_sources['state']],on_sample=lambda *_:self._resolve_ros_observation())
+        # A retained source declaration does not prove this new reader receives
+        # data. Establish the consumer before replacing the previous binding.
+        cache=self.ros_inputs.caches['state']
+        with cache.changed:
+            if not cache.changed.wait_for(lambda:bool(cache.samples)or cache.error or self.ros_node.errors,timeout=5.):
+                raise TimeoutError('Owner state subscription has no initial sample; inference binding not ready')
+            if cache.error or self.ros_node.errors:
+                raise ValueError(cache.error or self.ros_node.errors[-1])
         self.ros_client=RosModelClient(self.ros_node,binding=binding,
             clock=lambda:round(runtime.owner.control_time()*1e9))
         self.ros_node.subscribe('observations',self.ros_node.types.Observation,self._receive_ros_observation)
@@ -327,7 +335,8 @@ class OwnerInference:
             support=support,adapter=self.adapter,event=event,
             record=record if enabled else None,
             record_prepared=prepared if enabled else None,
-            prepared_reference=self.reference,preloaded_prediction=self.preloaded)
+            prepared_reference=self.reference,preloaded_prediction=self.preloaded,
+            reference_executor=self.service.reference_executor)
         if enabled:
             previous=owner.recording
             if previous is not None and not getattr(previous,'ingress_closed',False) and (not previous.done.is_set()or previous.thread.is_alive()):
