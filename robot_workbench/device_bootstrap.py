@@ -9,6 +9,7 @@ import hashlib
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -121,16 +122,20 @@ def read_profile(path,*,require_ros=False):
             or value.get('environment') != 'physical' or not isinstance(value.get('robot_id'), str)
             or not value['robot_id'].strip() or value['robot_id'].startswith('fake-')):
         raise ValueError('explicit physical-device schema and non-fake robot identity required')
-    expected_can = ({'left': 'can13l', 'right': 'can13r'} if value['robot_id']=='arx13'
-                    else {'left': 'can3', 'right': 'can1'})
-    if value.get('can_interfaces') != expected_can:
-        raise ValueError('CAN roles differ from the declared physical device: '+str(expected_can))
+    interfaces=value.get('can_interfaces')
+    if (not isinstance(interfaces,dict)or set(interfaces)!={'left','right'}
+            or any(not isinstance(name,str)or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}',name)
+                   for name in interfaces.values())or interfaces['left']==interfaces['right']):
+        raise ValueError('explicit distinct left/right CAN interface names required')
     if 'acquisition_blocked_reason' in value and (not isinstance(value['acquisition_blocked_reason'],str)
             or not 1 <= len(value['acquisition_blocked_reason']) <= 1024):
         raise ValueError('nonempty bounded acquisition_blocked_reason required')
-    if 'exclusive_idle_units' in value and value['exclusive_idle_units']!={'arx13':['prometheus-arx13-web.service'],
-            'arx6':['prometheus-web.service']}.get(value['robot_id']):
-        raise ValueError('reviewed machine-specific collection handoff unit required')
+    if 'exclusive_idle_units'in value:
+        units=value['exclusive_idle_units']
+        if (not isinstance(units,list)or not units
+                or any(not isinstance(unit,str)or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',unit)for unit in units)
+                or len(set(units))!=len(units)):
+            raise ValueError('explicit unique collection handoff unit names required')
     if value.get('initial_hold_mode','manual_gravity') not in ('manual_gravity','retained_hold'):
         raise ValueError('explicit initial hold mode required')
     _pedal_input_mode(value)
@@ -244,7 +249,6 @@ def read_profile(path,*,require_ros=False):
             raise ValueError('absolute deployment path required: '+key)
     setup = value.get('collection_setup')
     if setup is not None:
-        import re
         if (not isinstance(setup,dict) or set(setup)-{'compute','registration','profile_template','asset_catalog'}
                 or not {'compute','registration','profile_template'}<=set(setup)
                 or not value.get('calibration_config') or value.get('collection_config')):

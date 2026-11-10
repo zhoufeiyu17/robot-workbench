@@ -96,18 +96,21 @@ class BootstrapTests(unittest.TestCase):
             backend.send.assert_not_called()
 
     def test_collection_handoff_must_be_stopped_before_sdk_acquisition(self):
-        value=dict(self.profile,robot_id='arx13',can_interfaces=dict(left='can13l',right='can13r'),
-                   exclusive_idle_units=['prometheus-arx13-web.service'])
+        value=dict(self.profile,robot_id='bench-b',can_interfaces=dict(left='bus_l',right='bus_r'),
+                   exclusive_idle_units=['collection-b.service'])
         for active,pid,expected in [('inactive','0',True),('active','12',False),('failed','0',False),('inactive','12',False)]:
             result=NS(returncode=0,stdout=f'ActiveState={active}\nSubState={"dead" if active=="inactive" else "running"}\nMainPID={pid}\n')
             with patch('robot_workbench.device_bootstrap.subprocess.run',return_value=result):
                 row=next(r for r in preflight(value,net_root=self.net)['checks']if r['name']=='exclusive collection handoff')
                 self.assertEqual(row['passed'],expected)
-        self.path.write_text(json.dumps(dict(value,exclusive_idle_units=['unrelated.service'])))
-        with self.assertRaisesRegex(ValueError,'handoff unit'):read_profile(self.path)
+        self.path.write_text(json.dumps(value))
+        self.assertEqual(read_profile(self.path)['exclusive_idle_units'],['collection-b.service'])
+        for units in ([],['../collection.service'],['collection.service','collection.service'],'collection.service'):
+            self.path.write_text(json.dumps(dict(value,exclusive_idle_units=units)))
+            with self.assertRaisesRegex(ValueError,'handoff unit'):read_profile(self.path)
 
-    def test_arx13_mapping_and_commissioning_are_inert_and_device_bound(self):
-        value=dict(self.profile,robot_id='arx13',can_interfaces=dict(left='can13l',right='can13r'),
+    def test_declared_mapping_and_commissioning_are_inert_and_device_bound(self):
+        value=dict(self.profile,robot_id='bench-b',can_interfaces=dict(left='bus_l',right='bus_r'),
                    acquisition_blocked_reason='new device parameters not qualified')
         self.path.write_text(json.dumps(value))
         with patch('subprocess.Popen',side_effect=AssertionError('must not start SDK')):
@@ -115,7 +118,7 @@ class BootstrapTests(unittest.TestCase):
             report=preflight(value,net_root=self.net)
             self.assertFalse(report['configuration_ready'])
             self.assertTrue(any(r['name']=='device commissioning' and not r['passed'] for r in report['checks']))
-        for changes in (dict(robot_id='arx6'),dict(can_interfaces=dict(left='can13r',right='can13l')),
+        for changes in (dict(robot_id='fake-bench'),dict(can_interfaces=dict(left='bus_l',right='bus_l')),
                         dict(acquisition_blocked_reason='')):
             self.path.write_text(json.dumps(dict(value,**changes)))
             with self.assertRaises(ValueError):read_profile(self.path)
@@ -257,7 +260,7 @@ class BootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'calibration.wrist_seed_file'):calibration_configuration(config)
 
     def test_profile_rejects_wrong_can_duplicate_serial_and_fake_identity(self):
-        for edit in (lambda p:p.update(can_interfaces=dict(left='can1',right='can3')),
+        for edit in (lambda p:p.update(can_interfaces=dict(left='../bus_l',right='bus_r')),
                      lambda p:p.update(robot_id='fake-something'),
                      lambda p:p['cameras']['left'].update(serial=p['cameras']['head']['serial']),
                      lambda p:p.update(inference=dict(model_endpoint='http://robot:1234'))):

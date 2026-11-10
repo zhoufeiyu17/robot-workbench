@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 439,
-  "updated_at": "2026-11-09T18:17:25.015785+00:00",
+  "revision": 441,
+  "updated_at": "2026-11-10T02:41:36.610314+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -512,7 +512,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "ce2b9ce9f8cc2bbf4dc16cfd63ccf451a70c3121f79e28de2a53ee5b14f5c899",
+      "fingerprint": "d3890c928bdb20896f96016b5f27539363799da08fcae243f2dd9f8ba760c227",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -545,7 +545,7 @@
         "sha256": "666bb65fc8efaad3eecb67368f0e25e6900c37f9278ec54f9439a0dbad8875f3",
         "matches_file": true
       },
-      "fingerprint": "d0f94b19f78671ea8d7c783cb253328ff3bf2623003090115a9ea3af076381a3",
+      "fingerprint": "938fa1b59e19d8439bce0f89349c56e83a99cc6c103444b2e6bab441c61dfe7b",
       "verified_fingerprint": null
     },
     {
@@ -2650,15 +2650,19 @@
       "fingerprint": "169dde953d88db86c06101672721d7becc4437bec271c1d340dbe1c557baffe5"
     },
     "robot_workbench/device_bootstrap.py": {
-      "state": "active",
-      "note": "用户已批准通用模型契约：Owner/翻译消费已有action_contract与native绑定，去掉E03名称驱动的形状/历史/夹爪判断；当前在线旧Owner保持不动。",
-      "next": "先CPU验证名字无关和版本拒绝，再按既有受控维护发布。",
+      "state": "implemented",
+      "note": "Physical profile validation now consumes explicit distinct CAN role names and declared unique service units without machine-number branches. Device/artifact binding and actual interface/service-exit checks retained.89 Linux lifecycle/profile checks and native desktop cold/prepare-only deployment acceptance passed.",
+      "next": "Human physical pedal/jaw and model validation on the newly deployed environment.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-07T06:34:11.920276+00:00",
-      "evidence": null,
+      "updated_at": "2026-11-10T02:41:35.811251+00:00",
+      "evidence": {
+        "path": ".evidence/arx6-latest-deploy-20261110-v1/deployment-validation.json",
+        "sha256": "5107854ff5a95222bab4efe356912c2fee6ca305daa755b1664b826e5b9b2e69",
+        "matches_file": true
+      },
       "source": {
         "exists": true,
-        "sha256": "10ef758867479c81cc189ce42c340e3a0b52833846fd032d877efa0928d32366",
+        "sha256": "fcdd5533cc82106d03e77c89bc20c530ade4ee45a183cc40a655ccf878dda25f",
         "imports": [
           "robot_workbench/bridges.py",
           "robot_workbench/calibration_profile.py",
@@ -2699,7 +2703,7 @@
           }
         ]
       },
-      "fingerprint": "1db28ddf726067f7f23ad1747fac3c78ea64fe6ede9c5318e903a14eec8c17d1",
+      "fingerprint": "47e3dc75bec7cd2170b7ddd7cf9d348672dcf56461c2120a53c187057774793c",
       "verified_fingerprint": null
     },
     "robot_workbench/machine_profile.py": {
@@ -3394,7 +3398,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "ba207a19397d7df730235c0fc42cbf5a01f8ec27bc4df73399946546845af0c8",
+      "fingerprint": "b4108e20fe0f0e09f1938569adbb4c92d97c98f84681c6889907be24731f9d6c",
       "verified_fingerprint": "8d6e33336f6a6e884f2eb9a0192dc12c5e695f523a797e18de580b16eed460bf"
     },
     "rule_based_workbench/rgbd_segments.py": {
@@ -3663,7 +3667,7 @@
           }
         ]
       },
-      "fingerprint": "5271e5f52612974b4f0fc529ed527a0e1f947d8a38df45a32303fffd1c46f891",
+      "fingerprint": "24bd5290a1bc61640440d38ec3264849af36c292911406e1add4c4b2b87d08bc",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3689,7 +3693,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "19274ddc29129947e6da6235fae1d371311e3ff00d69c0903ffb98243011aa2b",
+      "fingerprint": "5befad3d8203b07f91031dd878ea17d2a5c8d4a64495c68c6b8e54ade81af499",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3731,7 +3735,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "669dc3141a8918da74bac1f60cf42474bbde7d0b44ecfc45133abc3147f19352",
+      "fingerprint": "e3abee5e6b9340ad03a16ff3adfff1f8744e322798acd3cb7c042eb08d710545",
       "evidence": {
         "path": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
         "sha256": "cdaa1c92024a81b4d69e6c471b7efdd4fe0d5e72edd155c19045343314195689",
@@ -3943,15 +3947,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-07T10:34:22.125176+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/inference_owner.py"
-      ],
-      "state": "verified",
-      "note": "有限正数总控制预算、任意秒数与5s两后端真机通过；不以模型action累计时间代替墙钟预算"
-    },
     {
       "at": "2026-11-07T10:34:23.461687+00:00",
       "kind": "file",
@@ -4873,9 +4868,18 @@
       ],
       "state": "blocked",
       "note": "Implementation and CPU qualification completed; acceptance is blocked on human physical pedal USB reconnect and manual jaw adjustment/HOLD confirmation. Current user HOLD session remains available; no new control actions."
+    },
+    {
+      "at": "2026-11-10T02:41:35.811375+00:00",
+      "kind": "file",
+      "ids": [
+        "robot_workbench/device_bootstrap.py"
+      ],
+      "state": "implemented",
+      "note": "Physical profile validation now consumes explicit distinct CAN role names and declared unique service units without machine-number branches. Device/artifact binding and actual interface/service-exit checks retained.89 Linux lifecycle/profile checks and native desktop cold/prepare-only deployment acceptance passed."
     }
   ],
   "unmapped_files": [],
-  "source_head": "f0497367189a046061e63d3bc639e489f57fef52",
+  "source_head": "37b5e2f4f81d042e3733302a7adedad4062ca291",
   "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.2e760929d4b9"
 }
