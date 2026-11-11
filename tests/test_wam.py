@@ -22,6 +22,17 @@ PINS=dict(checkpoint='1'*64,stats=hashlib.sha256((ROOT/'tests/fixtures/wam-e03-n
 
 
 class WamInputWorkflowTests(unittest.TestCase):
+    def test_native_training_context_is_padded_without_changing_visible_tokens(self):
+        torch=wam._torch()
+        context=torch.arange(128*4096,dtype=torch.float32).reshape(128,4096).to(torch.bfloat16)
+        mask=torch.ones(128,dtype=torch.bool);mask[7]=False
+        prepared=wam.prepare_text_context(dict(context=context,context_mask=mask))
+        self.assertEqual(tuple(prepared['context'].shape),(1,200,4096))
+        self.assertTrue(torch.equal(prepared['context'][0,:128][mask],context[mask]))
+        self.assertEqual(int(prepared['context_mask'].sum()),127)
+        self.assertEqual(int(torch.count_nonzero(prepared['context'][~prepared['context_mask']])),0)
+        with self.assertRaises(ValueError):wam.prepare_text_context(dict(context=context[:,:32],context_mask=mask))
+
     def test_source_manifest_identity_does_not_invent_a_weight_hash(self):
         from robot_workbench.inference_model import native_runtime,validate_native_descriptor
         value=self.descriptor();value.update(schema=wam.SOURCE_SCHEMA,

@@ -303,6 +303,23 @@ class Adapter:
         return prepare_state(self.device_to_model(observation['device_state14']),self.stats),prepare_images(observation['images'])
 
 
+def prepare_text_context(value):
+    """Preserve source tokens and masks while adapting the declared runtime extent."""
+    torch=_torch();context=value['context'];mask=value['context_mask']
+    if context.ndim==2:context=context.unsqueeze(0)
+    if mask.ndim==1:mask=mask.unsqueeze(0)
+    if (context.device.type!='cpu'or mask.device.type!='cpu'or context.dtype!=torch.bfloat16
+            or context.ndim!=3 or context.shape[0]!=1 or context.shape[2]!=4096
+            or not 0<context.shape[1]<=200 or mask.shape!=context.shape[:2]or mask.dtype!=torch.bool
+            or not mask.any()or not torch.isfinite(context).all()):
+        raise ValueError('supported frozen training text context and attention mask required')
+    padded=torch.zeros((1,200,4096),dtype=context.dtype)
+    padded_mask=torch.zeros((1,200),dtype=torch.bool)
+    padded[:,:context.shape[1]]=context;padded_mask[:,:mask.shape[1]]=mask
+    padded[~padded_mask]=0
+    return dict(context=padded,context_mask=padded_mask)
+
+
 def network_inputs(state14,images,context,context_mask,*,seed):
     """Reconstruct CPU network tensors from the recorded effective BF16 values."""
     torch=_torch()
@@ -493,7 +510,8 @@ class Client:
         root,_=self.implementation.verify_registry(self.registry)
         # Keep the supplied bundle's interpreter convention; no parent Python,
         # ROS or CUDA environment is inherited into the compiled cp312 engine.
-        python=root/('env/bin/python'if self.bundle['backend']=='torch'else'env/anyinfer-3090-py312/bin/python')
+        python=(Path(self.registry['python'])if self.registry.get('python')else
+                root/('env/bin/python'if self.bundle['backend']=='torch'else'env/anyinfer-3090-py312/bin/python'))
         if not python.is_file():raise ValueError('WAM registered cp312 interpreter is missing')
         query='import sys,sysconfig,json;print(json.dumps([list(sys.version_info[:2]),sysconfig.get_paths()["purelib"]]))'
         if self.bundle['backend']=='torch':query='import sys,json,importlib.util;from pathlib import Path;print(json.dumps([list(sys.version_info[:2]),str(Path(importlib.util.find_spec("torch").origin).parent.parent)]))'
@@ -653,7 +671,7 @@ def _worker(registry,connection,parent_pid):
             raise ValueError('WAM model runtime requires the pinned Torch cu130 build')
         raw_context=paths['context'].read_bytes()
         if hashlib.sha256(raw_context).hexdigest()!=bundle['artifacts']['context']['sha256']:raise ValueError('WAM text context changed before use')
-        context=torch.load(io.BytesIO(raw_context),map_location='cpu',weights_only=True)
+        context=prepare_text_context(torch.load(io.BytesIO(raw_context),map_location='cpu',weights_only=True))
         # Validate the complete cached context before allocating the engine.
         zero_images={k:np.zeros((256,256,3),np.uint16)for k in CAMS}
         network_inputs(np.zeros(14,np.float32),zero_images,context['context'],context['context_mask'],seed=0)
