@@ -391,7 +391,7 @@ class BootstrapTests(unittest.TestCase):
         deployment=build_physical_application(self.inference_profile(),output=self.root/'infer-events',event=event)
         try:
             flow=deployment.inference;directory=flow.output/'cpu-event-fixture';directory.mkdir()
-            run=dict(directory=directory,event_bytes=0)
+            run=dict(directory=directory,event_bytes=0,config=dict(recording_enabled=True))
             value=dict(execution_instance_id='cpu-only-no-motion',sequence=1)
             flow._record_event(run,'prediction_requested',value)
             self.assertEqual(recorded,[('prediction_requested',value)])

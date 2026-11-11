@@ -22,12 +22,15 @@ for(const id of ['observation-panel','manual-tools','media-preview','camera-grid
   assert.equal([...html.matchAll(new RegExp('id="'+id+'"','g'))].length,1,'shared workspace component must not be duplicated: '+id);
 assert.match(html, /id="control-fault-recovery" href="#environment-recover"/);
 assert.match(html, /id="collection-speed" type="range" min="30" max="170"/);
-const {inferenceFamily,inferenceModes,recordingTaskTime,createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
+const {inferenceFamily,inferenceModes,inferenceLabel,recordingTaskTime,createWorkbench,actionPermission,handoffPermission,countedProgress,frameAgeSeconds,safeMediaUrl,verifyPreviewFrame,previewAuditSummary,matchingMeshCandidate,meshRows,meshGroups,routePhysicalRequest}=await import('data:text/javascript;base64,'+Buffer.from(source.replace("'./session.js'",JSON.stringify(sessionModule)).replace("'./physical_endpoint.js'",JSON.stringify(endpointModule))).toString('base64'));
 
 assert.equal(inferenceFamily({id:'wam-mem-fixture-step1'}),'wam-mem');
 assert.equal(inferenceFamily({id:'wam-fixture-step1'}),'wam');
+assert.equal(inferenceLabel({id:'wam-mem-t01-step006486',label:'WAM-MEM · step_006486 · 2步去噪'}),'WAM-MEM T01 · step_006486 · 2步去噪');
+assert.equal(inferenceLabel({id:'wam-mem-t02-1-step006076',label:'WAM-MEM · step_006076 · 10步去噪'}),'WAM-MEM T02_1 · step_006076 · 10步去噪');
+assert.equal(inferenceLabel({id:'wam-example-step1',label:'WAM example'}),'WAM example');
 assert.match(html,/<option value="wam-mem">WAM-MEM<\/option>/);
-assert.match(html,/id="inference-memory-fresh"/);
+assert.doesNotMatch(html,/id="inference-memory-fresh"/);
 assert.equal(inferenceModes([{id:'wam-mem-fixture-step1',backend:'torch',inference_options:{denoise_steps:2},inference_capabilities:{denoise_steps:{default:2}}}], 'torch','wam-mem',2).length,1);
 
 
@@ -1271,17 +1274,25 @@ for(const invalidate of ['offset','stale','dismiss','tab','instance']){
 }
 {
   const h=harness();h.app.start();const value=snapshot();
-  value.results=[['source','base_0'],['target','base_0'],['source','left_wrist_0']].map(([role,camera],i)=>({id:String(i),kind:'recording',media:{id:String(i),kind:'replay',ready:true,mime_type:'video/mp4',url:'/api/result-media?id='+i,role,camera}}));
+  value.results=[['source','base_0'],['target','base_0'],['source','left_wrist_0'],['source','right_wrist_0']].map(([role,camera],i)=>({id:String(i),kind:'recording',media:{id:String(i),kind:'replay',ready:true,mime_type:'video/mp4',url:'/api/result-media?id='+i,role,camera}}));
   h.reply(0,value);await settle();h.app.selectTab('results');const videos=h.get('replay-media').querySelectorAll('video');
-  videos.forEach((node,i)=>node.duration=[2,4,3][i]);videos[0].events.loadedmetadata();
+  videos.forEach((node,i)=>node.duration=[2,4,3,5][i]);videos[0].events.loadedmetadata();
   assert.equal(h.get('collection-replay-toggle').disabled,false);await h.get('collection-replay-toggle').events.click();
   h.advance(1000);h.intervals[2]();assert.equal(videos[0].currentTime,1);assert.equal(videos[1].currentTime,1);
   h.get('collection-replay-speed').value='.5';h.get('collection-replay-speed').events.change();h.advance(2000);h.intervals[2]();
   assert.equal(videos[0].currentTime,2);assert.equal(videos[0].paused,true);assert.equal(videos[1].currentTime,2);assert.equal(videos[1].paused,false);
   h.get('collection-replay-time').value='1';h.get('collection-replay-time').events.input();await settle();assert.equal(videos[0].paused,false,'seeking back resumes a shorter video');
-  h.get('collection-replay-camera').value='left_wrist_0';h.get('collection-replay-camera').events.change();
-  assert.equal(h.get('collection-replay-toggle').disabled,true);assert.equal(videos[2].controls,true);assert.match(h.get('collection-replay-status').textContent,/仅有单侧/);
-  h.get('collection-replay-camera').value='base_0';h.get('collection-replay-camera').events.change();
+  assert.equal(h.get('replay-media').children[2].hidden,true);
+  h.get('collection-replay-left').checked=true;h.get('collection-replay-left').events.change();
+  assert.equal(h.get('replay-media').children[2].hidden,false);assert.equal(videos[2].currentTime,1);
+  assert.equal(h.get('collection-replay-toggle').disabled,false);assert.equal(videos[2].controls,false);
+  assert.equal(h.get('replay-media').children[3].hidden,true);
+  h.get('collection-replay-right').checked=true;h.get('collection-replay-right').events.change();
+  assert.equal(h.get('replay-media').children[3].hidden,false);
+  assert.equal(videos[3].currentTime,1);
+  await h.get('collection-replay-toggle').events.click();assert(videos.every(node=>!node.paused));
+  h.get('collection-replay-left').checked=false;h.get('collection-replay-left').events.change();
+  assert.equal(videos[2].paused,true);assert.equal(h.get('replay-media').children[2].hidden,true);
   let rejectOldPlay;videos[0].play=()=>new Promise((resolve,reject)=>{rejectOldPlay=reject;});
   const oldPlay=h.get('collection-replay-toggle').events.click();h.app.selectTab('calibration');rejectOldPlay(Error('old playback failed'));
   await oldPlay;assert.doesNotMatch(h.get('collection-replay-status').textContent,/old playback failed/,'late play errors cannot replace a different view');
@@ -2060,6 +2071,31 @@ function oneRunSnapshot(){
   assert.match(h.get('task-message').textContent,/本次请求失败/,'new model preparation cannot hide an execution failure');
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
 }
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot();
+  value.workflow.id='timeline-run';value.workflow.busy=false;
+  value.results=[{id:'capture-timeline-run-receipt',run_id:'timeline-run',kind:'control_recording',status:'completed'},
+    {id:'timeline-video',run_id:'timeline-run',kind:'replay',media:{id:'timeline-video',run_id:'timeline-run',
+      kind:'replay',camera:'base_0',role:'source',ready:true,mime_type:'video/mp4',url:'/api/result-media?result_id=timeline-video'}}];
+  h.app.start();h.reply(0,value);await settle();h.app.selectTab('results');await settle();
+  const metadata=h.requests.findIndex(row=>row.url.startsWith('/api/inference-replay-metadata?'));
+  assert(metadata>=0);
+  const common={model_id:'wam-mem-fixture-step1',model_label:'WAM-MEM · step_1 · 2步去噪 · 32步输出',backend:'torch',execute_steps:8};
+  h.reply(metadata,{run_id:'timeline-run',segments:[{...common,start_s:0,end_s:2,mode:'MODEL',denoise_steps:2},
+    {...common,start_s:2,end_s:4,mode:'TEACH',denoise_steps:2},
+    {...common,start_s:4,end_s:6,mode:'MODEL',denoise_steps:10}]});await settle();
+  const video=h.get('replay-media').querySelectorAll('video')[0];video.duration=6;video.events.loadedmetadata();
+  assert.match(h.get('replay-current-configuration').textContent,/去噪 2 步.*执行 8 点/);
+  assert.match(h.get('replay-current-configuration').textContent,/WAM-MEM FIXTURE/);
+  assert.doesNotMatch(h.get('replay-current-configuration').textContent,/2步去噪|32步输出/);
+  assert.match(h.get('replay-media').querySelectorAll('figcaption')[0].textContent,/头部/);
+  h.get('collection-replay-time').value='3';h.get('collection-replay-time').events.input();
+  assert.match(h.get('replay-current-configuration').textContent,/人工接管/);
+  h.get('collection-replay-time').value='5';h.get('collection-replay-time').events.input();
+  assert.match(h.get('replay-current-configuration').textContent,/去噪 10 步/);
+  assert.equal(h.get('replay-configuration-segments').querySelectorAll('button').length,3);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);h.app.destroy();
+}
 console.log('PASS unified web: inference workspace/reviews/metrics/media, execution error settings/drafts/gates, per-run history pairing, server-owned outcomes, workspace drafts, degree sliders, readonly auto-preview, calibration comparison, explicit collection stages and failure guidance, HTTP request IDs, reviewed speed, replay, release, per-environment server identities and bound physical endpoint routing.');
 
 // The catalog contains trusted IDs, while selection alone remains read-only.
@@ -2242,9 +2278,13 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
 {
   const h=harness({business:'inference'}),value=oneRunSnapshot();
   value.workflow.inference.operator_session={run_id:'prepared'};
-  value.workflow.inference.operator_controls={double_press_window_s:.5};
+  value.workflow.inference.operator_controls={double_press_window_s:.6};
   h.app.start();h.reply(0,value);await settle();
-  assert.match(h.get('inference-operator-status').textContent,/0.5秒内双踩踏板1/);
+  assert.equal(h.get('manual-tools').hidden,true);
+  assert.equal(h.get('media-preview').hidden,true);
+  assert.equal(h.get('overview-controls').hidden,true);
+  assert(!h.requests.some(row=>row.url.includes('/api/preview/target')));
+  assert.match(h.get('inference-operator-status').textContent,/0.6秒内双踩踏板1/);
   assert.equal(h.get('inference-run-dialog').open,false);
   const running=oneRunSnapshot();running.workflow.inference.normal_mode={mode:'MODEL'};
   running.revision=value.revision+1;h.app.poll();h.reply(h.requests.length-1,running);await settle();
@@ -2331,30 +2371,89 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
   assert.equal(h.get('inference-duration').value,'30','a new prepared session shows its actual frozen duration');h.app.destroy();
 }
 
-for(const change of ['steps','duration','denoise','stop','duration-run']){
+{
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  info.reference_planning={velocity_limit_rad_s:2};value.runtime.execution_settings={revision:4};
+  value.runtime.allowed_operations.control_policy={allowed:true};
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-parameter-settings').hidden,false);
+  assert.equal(h.get('inference-planning-speed').value,'2');
+  for(const invalid of ['', '0', '-1', 'Infinity']){
+    h.get('inference-planning-speed').value=invalid;h.get('inference-planning-speed').events.input();
+    assert.equal(h.get('inference-planning-apply').disabled,true);
+  }
+  h.get('inference-planning-speed').value='1.5';h.get('inference-planning-speed').events.input();
+  assert.equal(h.get('inference-planning-apply').disabled,false);
+  value.revision++;value.runtime.execution_settings.revision=5;info.reference_planning.velocity_limit_rad_s=1;
+  h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-planning-speed').value,'1.5');
+  assert.equal(h.get('inference-planning-apply').disabled,true);
+  assert.match(h.get('inference-planning-effective').textContent,/策略版本已变化/);
+  h.get('inference-planning-reset').events.click();assert.equal(h.get('inference-planning-speed').value,'1');
+  value.revision++;value.runtime.allowed_operations.control_policy={allowed:false,reason:'MODEL active'};
+  info.operator_session={run_id:'active'};info.normal_mode={mode:'MODEL',runner_status:'RUNNING'};
+  h.app.poll();h.reply(h.requests.length-1,value);await settle();
+  assert.equal(h.get('inference-planning-speed').disabled,true);
+  assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
+  h.app.selectTab('results');assert.equal(h.get('inference-parameter-settings').hidden,true);h.app.destroy();
+}
+
+for(const recording of [false,true]){
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  value.workflow.busy=true;value.runtime.allowed_operations.cancel={allowed:true};
+  info.operator_session={run_id:'test-ending'};info.recording_enabled=recording;
+  h.app.start();h.reply(0,value);await settle();
+  assert.equal(h.get('inference-disarm').textContent,recording?'结束控制会话并封存':'结束控制会话');
+  h.get('inference-disarm').events.click();await settle();
+  const request=h.requests.find(row=>row.options.method==='POST');
+  assert(request.url.endsWith('/cancel'));assert.equal(JSON.parse(request.options.body).end_test,true);
+  h.app.destroy();
+}
+
+for(const change of ['steps','memory-steps','planning','memory-planning','duration','denoise','memory-denoise','stop','duration-run','recording-run']){
   const value=oneRunSnapshot(),info=value.workflow.inference,old='prepared-old',digest='a'.repeat(64),nextDigest='b'.repeat(64);
-  Object.assign(value.runtime,{runtime_nonce:'connected-owner',stationary:true,stop_receipt:{accepted_monotonic_s:1}});
+  Object.assign(value.runtime,{runtime_nonce:'connected-owner',command_epoch:7,stationary:true,stop_receipt:{accepted_monotonic_s:1}});
   value.workflow.id=old;value.workflow.busy=true;
   value.inference_execution={execute_steps:15,revision:2,action_horizon:32,allowed:false};
+  value.runtime.execution_settings={...value.runtime.execution_settings,revision:2};
+  value.runtime.allowed_operations.control_policy={allowed:false,reason:'Run active'};
   value.runtime.allowed_operations.inference_execution_settings={allowed:false,reason:'Run active'};
-  Object.assign(info,{selected_model_id:'wam-fixture-step42',backend:'torch',normal_modes_enabled:true,reference_planning:{},
+  Object.assign(info,{selected_model_id:'wam-fixture-step42',backend:'torch',normal_modes_enabled:true,reference_planning:{velocity_limit_rad_s:2},
     operator_controls:{timeout_s:30},normal_mode:{mode:'HOLD',runner_status:'RUNNING'},
     operator_session:{run_id:old,duration_s:120,seed:0,model_id:'wam-fixture-step42',expected_bundle_digest:digest},
     inference_options:{denoise_steps:2},inference_capabilities:{denoise_steps:{minimum:1,maximum:10,default:2}},
     models:[2,10].map(n=>({id:'wam-fixture-step42',backend:'torch',selectable:true,status:'ready',bundle_digest:n===2?digest:nextDigest,
       inference_options:{denoise_steps:n},inference_capabilities:{denoise_steps:{minimum:1,maximum:10,default:2}}}))});
   Object.assign(info.model,{id:info.selected_model_id,backend:'torch'});
-  let closed=false,renewed=false,modelApplied=false;const posts=[];
-  const access={state:{active_job:null,recent_jobs:[]},permission:()=>({allowed:closed}),subscribe(){},setEnvironment(){},destroy(){},refresh:async()=>{},
-    prepare(action,parameters){assert(closed);assert.equal(action,'prepare_model');assert.equal(parameters.expected_bundle_digest,nextDigest);
+  if(change.startsWith('memory-')){
+    const model='wam-mem-fixture-step42';info.selected_model_id=info.model.id=info.operator_session.model_id=model;
+    for(const row of info.models)row.id=model;
+  }
+  let closed=false,renewed=false,modelApplied=false,managementRefreshes=0;const posts=[];
+  const access={state:{active_job:null,recent_jobs:[],target:{backend_instance:value.server_instance_id,runtime_nonce:value.runtime.runtime_nonce,command_epoch:-1}},permission:()=>({allowed:closed}),subscribe(){},setEnvironment(){},destroy(){},
+    async refresh(){if(++managementRefreshes>=2)this.state.target.command_epoch=value.runtime.command_epoch;},
+    prepare(action,parameters){assert(closed);assert(managementRefreshes>=2,'wait for the manager to observe the post-cancel epoch');assert.equal(action,'prepare_model');assert.equal(parameters.expected_bundle_digest,nextDigest);
       modelApplied=true;info.bundle_digest=info.model.bundle_digest=nextDigest;info.inference_options={denoise_steps:10};return {job:{id:'model-update'}};}};
   const h=harness({business:'inference',environmentAccess:access});h.app.start();h.reply(0,structuredClone(value));await settle();
   assert.equal(h.get('inference-execute-steps').disabled,false);assert.equal(h.get('inference-duration').disabled,false);
   assert.equal(h.get('inference-seed').disabled,true,'prepared seed stays frozen; only the requested controls renew the Run');
   assert.equal(h.get('inference-denoise-steps').disabled,false);
-  if(change==='steps'){h.get('inference-execute-steps').value='32';h.get('inference-execute-steps').events.input();h.get('inference-steps-apply').events.click();}
-  else if(change==='denoise'){h.get('inference-denoise-steps').value='10';h.get('inference-denoise-steps').events.input();h.get('inference-denoise-apply').events.click();}
-  else if(change==='duration-run'){
+  if(change==='steps'||change==='memory-steps'){
+    assert.equal(h.get('inference-execute-steps').min,'1');
+    h.get('inference-execute-steps').value=change==='memory-steps'?'8':'32';
+    h.get('inference-execute-steps').events.input();assert.equal(h.get('inference-steps-apply').disabled,false);
+    h.get('inference-steps-apply').events.click();
+  }
+  else if(change.endsWith('planning')){
+    assert.equal(h.get('inference-planning-speed').value,'2');
+    h.get('inference-planning-speed').value='1.5';h.get('inference-planning-speed').events.input();
+    assert.equal(h.get('inference-planning-apply').disabled,false);h.get('inference-planning-apply').events.click();
+  }
+  else if(change.endsWith('denoise')){h.get('inference-denoise-steps').value='10';h.get('inference-denoise-steps').events.input();h.get('inference-denoise-apply').events.click();}
+  else if(change==='recording-run'){
+    h.get('inference-recording-enabled').checked=true;h.get('inference-recording-enabled').events.change();
+    h.get('inference-run').events.click();
+  }else if(change==='duration-run'){
     h.get('inference-duration').value='5';h.document.activeElement=h.get('inference-duration');let prevented=false;
     h.get('inference-run').events.pointerdown({button:0,preventDefault(){prevented=true;}});assert(prevented);
     h.get('inference-run').events.click();h.get('inference-run').events.click();
@@ -2367,21 +2466,30 @@ for(const change of ['steps','duration','denoise','stop','duration-run']){
       if(request.options.method==='POST'){
         const action=request.url.split('/').at(-1),body=JSON.parse(request.options.body);posts.push(action);
         if(action==='cancel'){
-          closed=true;value.workflow.busy=false;info.operator_session=null;info.recording_ingress_closed=true;
+          assert.equal(body.end_test,undefined,'parameter renewal preserves the test memory');
+          closed=true;value.workflow.busy=false;value.runtime.command_epoch=9;info.operator_session=null;info.recording_ingress_closed=true;
           info.normal_mode={mode:'HOLD',runner_status:'STOPPED'};value.runtime.stop_receipt={accepted_monotonic_s:2};
           value.runtime.allowed_operations.inference_execution_settings={allowed:true};value.inference_execution.allowed=true;
+          value.runtime.allowed_operations.control_policy={allowed:true};
           info.background_recordings=[{run_id:old,ingress_closed:true,state:'sealing'}];
         }else if(action==='inference_execution_settings'){
-          assert(closed);assert.equal(body.expected_revision,2);assert.equal(body.execute_steps,32);
-          value.inference_execution.execute_steps=32;value.inference_execution.revision=3;
+          assert(closed);assert.equal(body.expected_revision,2);assert.equal(body.execute_steps,change==='memory-steps'?8:32);
+          value.inference_execution.execute_steps=body.execute_steps;value.inference_execution.revision=3;
+        }else if(action==='control_policy'){
+          assert(closed);assert.equal(body.expected_revision,2);
+          assert.deepEqual(body.changes,{'planning.velocity_limit_rad_s':1.5});
+          info.reference_planning.velocity_limit_rad_s=1.5;value.runtime.execution_settings.revision=3;
         }else if(action==='inference_run'){
           assert(closed);assert.equal(body.prepare_only,true);assert.equal(body.duration_s,change.startsWith('duration')?5:120);
-          assert.equal(body.expected_bundle_digest,change==='denoise'?nextDigest:digest);
+          assert.equal(body.expected_bundle_digest,change.endsWith('denoise')?nextDigest:digest);
+          assert.equal(body.recording_enabled,change==='recording-run');
           renewed=true;value.workflow.id='prepared-new';value.workflow.busy=true;
-          info.operator_session={run_id:'prepared-new',duration_s:body.duration_s,seed:body.seed,expected_bundle_digest:body.expected_bundle_digest};
+          info.recording_enabled=body.recording_enabled;
+          info.operator_session={run_id:'prepared-new',duration_s:body.duration_s,seed:body.seed,expected_bundle_digest:body.expected_bundle_digest,recording_enabled:body.recording_enabled};
           info.normal_mode={mode:'HOLD',runner_status:'RUNNING'};
         }
-        h.reply(index,{message:'accepted',job_id:'renewal'});
+        h.reply(index,action==='control_policy'?{control_policy:{revision:3,parameters:{planning:{velocity_limit_rad_s:1.5}},
+          editable_paths:['planning.velocity_limit_rad_s'],update_allowed:true}}:{message:'accepted',job_id:'renewal'});
       }else{value.revision++;h.reply(index,structuredClone(value));}
     }
     await settle();
@@ -2389,7 +2497,7 @@ for(const change of ['steps','duration','denoise','stop','duration-run']){
     if(timer){h.timeouts.delete(timer[0]);h.advance(100);timer[1].fn();await settle();}
   }
   assert.equal(posts[0],'cancel');assert.equal(renewed,change!=='stop',h.get('request-status').textContent);
-  assert.equal(modelApplied,change==='denoise');assert.equal(h.get('inference-run-dialog').open,change==='duration-run');
+  assert.equal(modelApplied,change.endsWith('denoise'));assert.equal(h.get('inference-run-dialog').open,change==='duration-run'||change==='recording-run');
   if(change==='duration-run'){
     assert.match(h.get('inference-run-title').textContent,/开始本轮推理/);
     assert.match(h.get('inference-run-summary').textContent,/5 秒/);
@@ -2404,7 +2512,8 @@ for(const change of ['steps','duration','denoise','stop','duration-run']){
   h.app.destroy();
 }
 
-for(const choice of ['fresh','continue']){
+{
+  const choice='continue';
   const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
   const id='wam-mem-fixture-step1',digest='c'.repeat(64),caps={denoise_steps:{minimum:2,maximum:2,default:2}};
   info.models=[{id,backend:'torch',selectable:true,status:'ready',label:'WAM-MEM',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps}];
@@ -2418,8 +2527,8 @@ for(const choice of ['fresh','continue']){
   if(choice==='continue'){h.get('inference-recording-enabled').checked=true;h.get('inference-recording-enabled').events.change();}
   h.get('inference-memory-'+choice).events.click();await settle();
   assert.equal(h.get('inference-run-dialog').open,true);
-  assert.match(h.get('inference-run-title').textContent,choice==='fresh'?/无状态/:/保留记忆/);
-  assert.match(h.get('inference-run-details').textContent,choice==='fresh'?/不保存/:/已开启录制/);
+  assert.match(h.get('inference-run-title').textContent,/保留记忆/);
+  assert.match(h.get('inference-run-details').textContent,/已开启录制/);
   h.get('inference-run-clearance').checked=true;h.get('inference-run-clearance').events.change();h.get('inference-run-confirm').events.click();
   const body=JSON.parse(h.requests.at(-1).options.body);
   assert.equal(body.memory_start,choice);assert.equal(body.recording_enabled,choice==='continue');h.app.destroy();

@@ -153,7 +153,7 @@ def model_spec(model_id=BASE379_ID, bundle=None):
         return dict(id=model_id,schema=value['schema'],epoch=None,step=value['step'],prompt=value['prompt'],
             pins={k:v.get('sha256')for k,v in value['artifacts'].items()},backend='torch',
             inference_options=value['inference_options'],inference_capabilities=value['inference_capabilities'],
-            memory_protocol=value['memory_protocol'],label=f"WAM-MEM · step_{value['step']:06d} · 2步去噪 · 32步输出")
+            memory_protocol=value['memory_protocol'],label=f"WAM-MEM · step_{value['step']:06d} · {value['inference_options']['denoise_steps']}步去噪 · 32步输出")
     if model_family(model_id)=='wam':
         from .wam import validate_descriptor,SCHEMA
         value=validate_descriptor(bundle)

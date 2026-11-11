@@ -11,10 +11,16 @@ class ManualStartupTests(unittest.TestCase):
     def test_webpage_opens_before_service_preparation_and_model_wait(self):
         config=dict(units=['demo-ui@bench.service'],ui_unit='demo-ui@bench.service',url='http://127.0.0.1:18868')
         response=MagicMock();response.__enter__.return_value.status=200
-        with patch('scripts.start_registered_workbench.build_opener')as opener,patch('scripts.start_registered_workbench.subprocess.run')as command:
+        with patch('scripts.start_registered_workbench.build_opener')as opener,patch('scripts.start_registered_workbench.subprocess.run')as command,\
+                patch.dict('os.environ',{'LD_LIBRARY_PATH':'/fixture/robot/lib','LD_PRELOAD':'/fixture/preload.so','DISPLAY':':fixture'}):
             opener.return_value.open.return_value=response
             self.assertLess(open_page(config)['open_completed_after_s'],5)
             self.assertEqual([x.args[0][0]for x in command.call_args_list],['systemctl','xdg-open'])
+            browser_env=command.call_args_list[-1].kwargs['env']
+            self.assertNotIn('LD_LIBRARY_PATH',browser_env)
+            self.assertNotIn('LD_PRELOAD',browser_env)
+            self.assertNotIn('PYTHONPATH',browser_env)
+            self.assertEqual(browser_env['DISPLAY'],':fixture')
 
     def test_declared_pedal_requires_a_live_heartbeat_before_startup_succeeds(self):
         with TemporaryDirectory()as folder:

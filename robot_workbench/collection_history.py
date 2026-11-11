@@ -537,6 +537,25 @@ class CaptureResults:
             except (OSError,ValueError,KeyError,TypeError):pass
         return page
 
+    def replay_metadata(self,business,run_id):
+        if business!='inference' or not isinstance(run_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',run_id):
+            raise ValueError('explicit inference recording identity required')
+        identity='capture-'+run_id+'-receipt'
+        row=self.histories[business].result(identity)
+        if row is None:return dict(run_id=run_id,segments=[],reason='录像尚未封存或已删除')
+        path=self.media(business,identity)
+        receipt=self._read(path)
+        recording=receipt.get('recording')or{}
+        pin=row['details'].get('manifest_pin')
+        if not pin or not recording.get('directory'):
+            return dict(run_id=run_id,segments=[],reason='录像配置尚未封存')
+        manifest=_file(self.root,str(Path(recording['directory'])/f"manifest-r{row['details']['seal_revision']:06d}.json"))
+        if _pin(manifest)!=pin:raise ValueError('recording manifest changed')
+        from .recording_activity import inference_replay_segments
+        result=inference_replay_segments(self._read(manifest))
+        if _pin(manifest)!=pin:raise ValueError('recording manifest changed during metadata read')
+        return dict(result,run_id=run_id)
+
     def media(self,business,identity):
         row=self.histories[business].result(identity)
         if row is None:return None

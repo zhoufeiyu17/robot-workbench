@@ -70,7 +70,7 @@ class PedalGestureTests(unittest.TestCase):
         self.device=SimpleNamespace(id='cpu',environment='physical',runtime=SimpleNamespace(nonce='owner'))
         self.app=Application({'physical':self.device})
         self.flow=SimpleNamespace(generation=1,current={'id':'run','ended_wall':None},
-            operator_controls={'double_press_window_s':.5},
+            operator_controls={'double_press_window_s':.6},
             operator_session=dict(run_id='run',runtime_nonce='owner',seed=7,duration_s=12.,
                 model_id='wam-cpu',expected_bundle_digest='a'*64))
         self.device.snapshot=lambda business:dict(runtime_nonce='owner',command_epoch=4,holder='inference',
@@ -100,6 +100,17 @@ class PedalGestureTests(unittest.TestCase):
         self.assertTrue(body['physical_clearance']);self.assertTrue(body['arms_supported'])
         self.assertEqual(body['request_id'],'pedal-pedal-source-2')
         self.assertTrue(body['wam_stall_recovery'])
+        self.assertEqual(body['memory_start'],'continue')
+
+    def test_six_hundred_ms_window_is_inclusive_and_memory_start_is_retained(self):
+        self.flow.operator_session['model_id']='wam-mem-fixture-step1'
+        for gap,accepted in ((.599999,True),(.6,True),(.600001,False)):
+            with self.subTest(gap=gap):
+                self.mode='HOLD';self.calls=[];self.flow.operator_pedal_gesture=None;self.stamp+=1.
+                self.press(11);self.press(11,gap)
+                starts=[body for action,body in self.calls if action=='inference_run']
+                self.assertEqual(bool(starts),accepted)
+                if starts:self.assertEqual(starts[0]['memory_start'],'continue')
 
     def test_first_press_in_model_stops_and_second_never_restarts(self):
         for mode,phase in [('MODEL',None),('HOLD','RESUMING'),('HOLD','MODEL_ADMITTED')]:
@@ -121,7 +132,7 @@ class PedalGestureTests(unittest.TestCase):
         self.press(11,.7);self.press(11,.3);self.assertEqual(self.calls[-1][0],'inference_run')
 
     def test_expiry_other_pedal_focus_and_replayed_sequence_cannot_start(self):
-        self.press(11);self.press(11,.501)
+        self.press(11);self.press(11,.601)
         self.assertNotIn('inference_run',[x[0]for x in self.calls])
         self.press(22,.1);self.press(11,.1);self.press(11,.3)
         self.assertNotIn('inference_run',[x[0]for x in self.calls])
@@ -137,6 +148,19 @@ class PedalGestureTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
 class PedalSourceTests(unittest.TestCase):
+    def test_fifty_ms_debounce_rejects_bounce_but_accepts_the_boundary(self):
+        sys.path.insert(0,os.environ['PROMETHEUS_PEDAL_TEST_ROOT'])
+        from prometheus.input.pedal_publisher import PedalKeyFilter,PedalMapping
+        from robot_workbench.execution_settings import PEDAL_DEBOUNCE_S
+        self.assertEqual(PEDAL_DEBOUNCE_S,.05)
+        for gap,expected in ((.049999,None),(.05,11),(.050001,11)):
+            pedal=PedalKeyFilter(PedalMapping(),confirm_presses=1,debounce_s=PEDAL_DEBOUNCE_S)
+            self.assertEqual(pedal.process('1','down',now=0.),11)
+            self.assertIsNone(pedal.process('1','up',now=.001))
+            self.assertEqual(pedal.process('1','down',now=gap),expected)
+        self.assertIsNone(pedal.process('1','down',now=1.),'held key must remain locked')
+        self.assertIsNone(pedal.process('1','repeat',now=2.))
+
     def test_single_evdev_source_focus_and_shared_action_routing(self):
         from unittest.mock import patch
         environment=patch.dict(os.environ,ROS_LOCALHOST_ONLY='0');environment.start();self.addCleanup(environment.stop)
@@ -171,7 +195,7 @@ class PedalSourceTests(unittest.TestCase):
                 inference=dict(mode=mode[0],transition_stage=None,runner_status='RUNNING'))
             app=Application({'fake':device});calls=[]
             flow=SimpleNamespace(ros_plane=profile['data_plane'],generation=1,
-                operator_controls=dict(focus_timeout_s=8.,event_max_age_s=1.,double_press_window_s=.5))
+                operator_controls=dict(focus_timeout_s=8.,event_max_age_s=1.,double_press_window_s=.4))
             device.workflows['inference']=flow
             def operator(dev,workflow,action,body):
                 calls.append((action,body));mode[0]='TEACH'if action=='inference_teach'and mode[0]!='TEACH'else'HOLD'
@@ -223,13 +247,15 @@ class PedalSourceTests(unittest.TestCase):
                 if name=='inference_run':calls.append((name,body));mode[0]='MODEL';return {'accepted':True}
                 return ordinary_action(name,body)
             app.action=action
-            time.sleep(.3);key(2);time.sleep(.1);key(2);time.sleep(.2)
-            self.assertEqual(len(calls),4,'the original250ms evdev debounce must suppress a100ms second press')
-            time.sleep(.4);key(2);time.sleep(.3);key(2)
+            self.assertEqual(flow.operator_pedal_source['metadata']['debounce_s'],.05)
+            time.sleep(.3);key(2);time.sleep(.02);key(2);time.sleep(.2)
+            self.assertEqual(len(calls),4,'50ms evdev debounce must suppress a20ms bounce')
+            time.sleep(.4);key(2);time.sleep(.1);key(2)
             deadline=time.monotonic()+2
             while mode[0]!='MODEL':
                 self.assertLess(time.monotonic(),deadline,getattr(flow,'operator_input_status',{}));time.sleep(.01)
             self.assertEqual(calls[-1][0],'inference_run');self.assertEqual(calls[-1][1]['duration_s'],12.)
+            self.assertEqual(calls[-1][1]['memory_start'],'continue')
             count=len(calls);key(4);time.sleep(.3);self.assertEqual(len(calls),count,'pedal3 is ignored in MODEL')
             key(3);time.sleep(.3);self.assertEqual(calls[-1][0],'inference_hold');self.assertEqual(mode[0],'HOLD')
             time.sleep(.3);key(2);time.sleep(.3);key(2)

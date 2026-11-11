@@ -197,7 +197,8 @@ class InferenceWorkflow:
         settings=json.loads(settings_path.read_text()) if settings_path.exists() else {}
         self.execute_steps=execution_steps(settings.get('execute_steps',15))
         if finite_chunk_count is not None:self.execute_steps=15
-        if self.reference_planning is not None:self.reference_planning['max_execution_duration_s']=self.execute_steps/30.*4
+        if self.reference_planning is not None and finite_chunk_count is None:
+            self.reference_planning['max_execution_duration_s']=None
         self.execution_revision=settings.get('revision',0)
         if type(self.execution_revision) is not int or self.execution_revision<0:raise ValueError('invalid inference settings revision')
         self.history = InferenceHistory(self.output)
@@ -310,6 +311,8 @@ class InferenceWorkflow:
             busy=self.snapshot()['busy']
             return dict(execute_steps=self.execute_steps,revision=self.execution_revision,
                 action_horizon=WAM_HORIZON if str(getattr(self,'selected_model_id','')).startswith('wam-') else 60,
+                max_execution_duration_s=(self.reference_planning['max_execution_duration_s']if self.finite_chunk_count is not None
+                    else None),
                 control_hz=30,allowed=not busy and self.finite_chunk_count is None,
                 reason='当前验证固定每轮完整15步'if self.finite_chunk_count is not None else'请等待本轮推理或处理结束'if busy else None)
 
@@ -340,7 +343,9 @@ class InferenceWorkflow:
         if policy['origins'].get('execution.execute_steps')!='product_default':
             self.execute_steps=parameters['execution']['execute_steps']
         if self.reference_planning is not None:
-            self.reference_planning.update(parameters.get('planning',{}),max_execution_duration_s=self.execute_steps/30.*4)
+            maximum=(self.reference_planning['max_execution_duration_s']if self.finite_chunk_count is not None
+                else None)
+            self.reference_planning.update(parameters.get('planning',{}),max_execution_duration_s=maximum)
             if 'planning'not in parameters and self.device.environment=='physical'and parameters['measured']['enabled']:
                 self.reference_planning['velocity_limit_rad_s']=min(
                     self.reference_planning['velocity_limit_rad_s'],parameters['measured']['limit_rad_s'])
@@ -351,7 +356,6 @@ class InferenceWorkflow:
 
     def set_execution_steps(self, value, expected_revision):
         value=execution_steps(value,horizon=WAM_HORIZON if str(getattr(self,'selected_model_id','')).startswith('wam-') else 60)
-        if model_family(self.selected_model_id)=='wam-mem'and value!=32:raise ValueError('WAM-MEM 每次完整执行32步')
         if self.finite_chunk_count is not None and value!=15:raise ValueError('当前验证固定每轮完整15步')
         with self.lock:
             if self.snapshot()['busy']:raise ValueError('请等待本轮推理或处理结束')
@@ -370,7 +374,8 @@ class InferenceWorkflow:
                 raise ValueError('推理执行设置已变化，请重新读取后应用')
             self._write_json(self.output/'execution-settings.json',dict(execute_steps=value,revision=self.execution_revision+1))
             self.execute_steps=value;self.execution_revision+=1
-            if self.reference_planning is not None:self.reference_planning['max_execution_duration_s']=value/30.*4
+            if self.reference_planning is not None and self.finite_chunk_count is None:
+                self.reference_planning['max_execution_duration_s']=None
             self.invalidate()
             return self.execution_settings()
 
@@ -552,6 +557,15 @@ class InferenceWorkflow:
         candidate=None
         try:
             if not still_current():raise ValueError('模型准备运维操作已撤销')
+            from .wam import sampling_change
+            updating_sampling=bool(_selection is not None and self.model_bundle
+                and sampling_change(self.model_bundle,_selection[1]) and self._model_gate()['ready'] is True)
+            preserved=None
+            if _selection is not None and model_family(self.selected_model_id)=='wam-mem':
+                if sampling_change(self.model_bundle,_selection[1]) and getattr(self.client,'memory_flow',None) is not None:
+                    if (not self.client.healthy() or (self.prepared or{}).get('dependencies')!=self._device_dependencies()):
+                        raise ValueError('记忆会话绑定已变化，不能热更新采样参数')
+                    preserved=self.client
             self._revoke_device_review()
             with self.lock:
                 if _selection is not None:
@@ -559,11 +573,13 @@ class InferenceWorkflow:
                     self.selected_spec=model_spec(*_selection)
                     self.selected_bundle_digest=model_bundle_digest(*_selection)
                 self.generation+=1;generation=self.generation
-                prior=[self.client,self.model_client]
-                self.client=self.model_client=self.adapter=self.prepared=self.current=None
+                prior=[client for client in (self.client,self.model_client)if client is not preserved]
+                self.client=preserved;self.model_client=self.current=None
+                if preserved is None:self.adapter=self.prepared=None
                 self.cache=self.support_cache=None;self.model_identity=None
                 self.cache_error='模型准备不连接设备；运行前需要新鲜反馈与三相机'
-                self.status='loading';self.stage='inference.prepare';self.message='正在加载与预热 '+self.selected_spec['label']+'；不执行动作。'
+                self.status='loading';self.stage='inference.prepare'
+                self.message=('正在应用采样参数，保留已加载模型；'if updating_sampling else'正在加载与预热 ')+self.selected_spec['label']+'；不执行动作。'
                 self.model_status,self.model_error='loading',None
             for client in prior:
                 if client is not None:client.close()
@@ -572,17 +588,23 @@ class InferenceWorkflow:
                 _torch()  # Verify the business-side CPU preprocessor before warmup.
             candidate=self._new_client()
             if not still_current():raise ValueError('模型准备运维操作已撤销')
-            try:identity=candidate.prepare(ready_only=True);reused=True
-            except Exception:
-                if expected_model_id is not None:raise
-                if not still_current():raise ValueError('模型准备运维操作已撤销')
-                identity=candidate.prepare();reused=False
+            if preserved is not None:
+                bound=self._new_client(self.adapter,self.prepared['conversion'])
+                preserved.memory_flow.reconfigure(bound)
+                identity=candidate.prepare(ready_only=True);reused=True
+            else:
+                try:identity=candidate.prepare(ready_only=True);reused=True
+                except Exception:
+                    if expected_model_id is not None:raise
+                    if not still_current():raise ValueError('模型准备运维操作已撤销')
+                    identity=candidate.prepare();reused=getattr(candidate,'preparation_reused',False) is True
             with self.lock:
                 if self.generation!=generation or not still_current():raise ValueError('模型准备已撤销，未绑定到设备')
                 self.model_client,self.model_identity=candidate,identity
                 self.model_binding_identity={}
                 self.model_status,self.model_error,self.model_observed_wall_ns='ready',None,time.time_ns()
-                self.status='model_ready';self.stage='inference.idle';self.message='所选模型已预热；设备执行尚未准备。'
+                self.status='model_ready';self.stage='inference.idle'
+                self.message=('采样参数已更新，原模型进程已复用。'if updating_sampling and reused else'所选模型已预热；设备执行尚未准备。')
             self._refresh_model_fact()
             with self.lock:
                 if self._model_gate()['ready'] is not True:raise ValueError(self._model_gate()['reason'])
@@ -908,7 +930,15 @@ class InferenceWorkflow:
             for role,camera in CAMERAS.items():
                 if sources[camera]['metadata'].get('serial')!=binding['camera_serials'][role]:
                     raise ValueError('ROS camera serial differs from the installed binding')
+            if model_family(self.selected_model_id)=='wam-mem' and sources['state']['metadata'].get('memory_sampling_schema')!='workbench.memory-activity.v1':
+                raise ValueError('WAM-MEM requires current Owner real-memory activity protocol')
             inputs=RosInputs(node,rows)
+            state_cache=inputs.caches['state']
+            with state_cache.changed:
+                if not state_cache.changed.wait_for(lambda:bool(state_cache.samples)or state_cache.error or node.errors,timeout=5.):
+                    raise TimeoutError('business state subscription has no initial sample; inference binding not ready')
+                if state_cache.error or node.errors:
+                    raise ValueError(state_cache.error or node.errors[-1])
             publisher=node.publisher('observations',node.types.Observation)
             control=directory.resolve({'control':dict(source_instance_id=runtime.nonce,kind='event')})[0]
             publishers=node.node.get_publishers_info_by_topic(control['topic'])
@@ -930,7 +960,7 @@ class InferenceWorkflow:
                     if run is not None and run.get('stall_recovery')is not None:
                         run['stall_recovery'].reset('control_source_error')
                     node.errors.append(str(error))
-            node.subscriptions.append(node.node.create_subscription(node.types.DataEvent,control['topic'],control_event,node.qos(depth=128)))
+            node.subscribe(control['topic'],node.types.DataEvent,control_event,depth=128)
         except BaseException:node.close();raise
         self.ros_node,self.ros_directory,self.ros_inputs=node,directory,inputs
         self.ros_observations=publisher;self.observation_pairer=TimestampPairer()
@@ -1003,6 +1033,11 @@ class InferenceWorkflow:
             self.ros_worker.sequences.update(self._memory_model_sequences)
         self.ros_worker.source_descriptors(self.device.id)
 
+    def _ros_model_watermarks(self):
+        memory=getattr(self.client,'memory_flow',None)
+        if memory is not None:memory.finish_run()
+        return self.ros_worker.watermarks()
+
     def _ros_capture_sources(self):
         from .ros_recording import capture_source
         control=self.ros_directory.resolve({'control':dict(source_instance_id=self.device.runtime.nonce)})
@@ -1052,7 +1087,8 @@ class InferenceWorkflow:
                 raise PairingPending(f"{rule}: waiting for a fresh ROS selection (observed={decision['observed']}, limit={decision['limit']})")
         value=referenced_observation(message,self.ros_inputs.sources,feedback,state_to_device=lambda raw:device_state(
             raw['qpos'],disabled_grippers=self.disabled_grippers,right_gripper_device_mm=prepared['profile']['gripper']['max_opening_mm']))
-        value.update(feedback_sample_time_s=state.source_time_ns/1e9,feedback_sample_wall_ns=feedback['sample_wall_ns'])
+        value.update(feedback_sample_time_s=state.source_time_ns/1e9,feedback_sample_wall_ns=feedback['sample_wall_ns'],
+            memory_sampling=deepcopy(feedback.get('memory_sampling')),sample_grid_time=pairing['target_source_ns']/1e9)
         captures={name:row['capture_instance_id']for name,row in value['frame_ids'].items()}
         if prepared.get('capture_instances')is not None and captures!=prepared['capture_instances']:
             raise ValueError('ROS camera source changed; explicit rebind required')
@@ -1271,6 +1307,11 @@ class InferenceWorkflow:
                         finally:
                             with self.lock:self.pending_captures.pop(run['id'],None)
                     recorder_config=dict(configuration,execution_context=dict(device_id=self.device.id,environment=self.device.environment))
+                    recorder_config['execution_context']['inference_configuration']=dict(
+                        model_id=self.selected_model_id,model_label=self.selected_spec['label'],
+                        backend=self.selected_spec.get('backend'),
+                        denoise_steps=(self.selected_spec.get('inference_options')or{}).get('denoise_steps'),
+                        execute_steps=configuration['execute_steps'])
                     if self.ros_plane is not None and configuration.get('normal_modes')and configuration.get('normal_initial_mode')=='HOLD':
                         from .recording_activity import POLICY
                         recorder_config['execution_context']['recording_activity']=POLICY
@@ -1278,7 +1319,7 @@ class InferenceWorkflow:
                         config=run['stall_recovery'].config if wam_stall_recovery else None)
                     run['recorder']=self.capture_factory(run['id'],run['directory'],recorder_config,control_policy,self.cameras,
                         self.device.environment,self.input_evidence,current,published,
-                        **(dict(ros_sources=self._ros_capture_sources,ros_watermarks=self.ros_worker.watermarks)if self.ros_plane is not None else{}))
+                        **(dict(ros_sources=self._ros_capture_sources,ros_watermarks=self._ros_model_watermarks)if self.ros_plane is not None else{}))
                     self.pending_captures[run['id']]=run['recorder']
                     run['debug_request']=debug_request
                     if debug_request is not None:
@@ -1743,6 +1784,37 @@ class InferenceWorkflow:
     def cancel(self):
         self.invalidate()
 
+    def end_test(self,request_id):
+        """Retire memory after explicit test completion; parameter renewals use cancel."""
+        self.invalidate()
+        with self.lock:
+            client=self.client;memory=getattr(client,'memory_flow',None);run=self.current
+            if memory is None:return
+            if self.busy:raise ValueError('测试结束仍在处理，请等待原请求')
+            self.busy=True
+            self.message='正在结束测试并清空时序记忆'
+        def finish():
+            try:
+                deadline=time.monotonic()+30.
+                while run and run.get('runner'):
+                    state=run['runner'].snapshot()
+                    if state.get('runner_status')in('READY','STOPPED','FAULT')and not state.get('transition_stage'):break
+                    if time.monotonic()>=deadline:raise TimeoutError('测试停止尚未确认，记忆结束未完成')
+                    time.sleep(.02)
+                epoch=self.device.runtime.control_inputs(include_feedback=False)['command_epoch']
+                memory.clear('end-'+digest(request_id),epoch)
+                client.close()
+                with self.lock:
+                    if self.client is not client:raise ValueError('结束测试期间模型租约变化')
+                    self.client=self.prepared=self.cache=self.support_cache=None
+                    self.status,self.stage,self.message='ready','inference.idle','测试已结束，时序记忆已清空'
+            except Exception as error:
+                memory.source_error('结束测试清空失败: '+str(error))
+                with self.lock:self.status='failed';self.message=str(error)
+            finally:
+                with self.lock:self.busy=False
+        threading.Thread(target=finish,daemon=True,name='end-memory-test').start()
+
     def snapshot(self):
         with self.lock:
             self._sync_control_policy()
@@ -1882,6 +1954,10 @@ class InferenceWorkflow:
 
     def results_page(self, *, before=None, after=None):
         return self.history.page(before=before, after=after)
+
+    def replay_metadata(self,run_id):
+        if self.capture_results is None:return dict(segments=[],reason='这条录像没有公共录制元数据')
+        return self.capture_results.replay_metadata('inference',run_id)
 
     def recording_files(self,run_ids=None):
         with self.lock:

@@ -143,8 +143,6 @@ def configuration(value):
     if result.get('recording_backend') not in (None,'capture_session_v1'):
         raise ValueError('known recording backend required')
     result['execute_steps']=execution_steps(result.get('execute_steps',15),horizon=horizon)
-    if str(result.get('model_id','')).startswith('wam-mem-')and result['execute_steps']!=32:
-        raise ValueError('WAM-MEM requires each complete32-action chunk')
     for key in ('state_max_age_s','max_camera_span_s'):
         limit=result.setdefault(key,.1)
         if type(limit) not in (int,float) or not math.isfinite(limit) or not 0<limit<=.1:
@@ -167,12 +165,12 @@ def configuration(value):
                 acceleration_limit=result['reference_planning']['acceleration_limit_rad_s2'],gain_transition_s=NORMAL_GAIN_TRANSITION_S,teach_kd_scale=.1)
             if (not isinstance(result['normal_modes'],dict)or any(result['normal_modes'].get(k)!=v for k,v in expected.items())
                     or result.get('finite_chunk_count')is not None or result.get('normal_initial_mode')!='HOLD'
-                    or not math.isclose(result['reference_planning']['max_execution_duration_s'],result['execute_steps']/30.*4,abs_tol=1e-9)
+                    or result['reference_planning']['max_execution_duration_s'] is not None
                     or result.get('task')not in('coffee','lid_handoff')
                     or result.get('target_execution')!='shared_reference_windows'
                     or type(result.get('maximum_observation_age_s')) not in (int,float) or not 0<result['maximum_observation_age_s']<=age_limit
                     or type(result.get('reference_supply_timeout_s')) not in (int,float) or not 0<result['reference_supply_timeout_s']<=.5):
-                raise ValueError('reviewed normal policy requires0.2s brake/0.05s gains/1rad/s/40rad/s2, fresh complete1-60-point source and initial HOLD')
+                raise ValueError('reviewed normal policy requires0.2s brake/0.05s gains/declared velocity/40rad/s2, fresh complete1-60-point source and initial HOLD')
         elif result.get('finite_chunk_count')not in(3,4):
             raise ValueError('reviewed infer planning policy currently requires the explicit three-or-four-segment contract')
     if result.get('finite_chunk_count')is not None:
@@ -208,7 +206,7 @@ def configuration(value):
                 or any(type(normal[k])not in(int,float)or not math.isfinite(normal[k])or normal[k]<=0
                        for k in('brake_duration_s','velocity_limit','acceleration_limit','gain_transition_s'))
                 or normal['brake_duration_s']>30
-                or normal['velocity_limit']>(1. if result.get('reference_planning')else .25)
+                or normal['velocity_limit']>(2. if result.get('reference_planning')else .25)
                 or normal['acceleration_limit']>(40. if result.get('reference_planning')else 1.)
                 or normal['gain_transition_s']>normal['brake_duration_s'] or result.get('bounded_live_prediction')
                 or type(normal['teach_kd_scale'])not in(int,float)or not math.isfinite(normal['teach_kd_scale'])or not 0<=normal['teach_kd_scale']<=1
@@ -1017,6 +1015,19 @@ class InferenceRunner:
         self._emit('normal_model_segment_started',deepcopy(self.normal_segment))
         return True
 
+    def memory_sampling_activity(self, sample_time, sample_epoch):
+        """Classify real feedback against execution time, independent of speed."""
+        phase = 'HOLD'
+        if self.normal_config and self.status == 'RUNNING' and sample_epoch == self.owner.epoch:
+            if self.mode == 'TEACH' and self.normal_job is None:
+                phase = 'TEACH'
+            elif self.mode == 'MODEL':
+                phase = 'WAIT'
+                segment = self.normal_segment
+                if self.normal_job is None and segment and segment['start_source_s'] <= sample_time < segment['end_source_s']:
+                    phase = 'MODEL_EXECUTING'
+        return dict(schema='workbench.memory-activity.v1', run_id=self.execution_instance_id, phase=phase)
+
     def _tick_normal_segment(self,now,feedback):
         """Synchronous complete chunks keep MODEL/Raw open until intent or budget."""
         import numpy as np
@@ -1293,7 +1304,10 @@ class InferenceRunner:
         self.previous = now
         self.execution_target = sdk_target(self.initial_device14)
         self.status = 'VERIFYING'
-        self.preparation_deadline = time.monotonic()+1.
+        # Resident capture prepares a writer and its ROS health subscription.
+        # Match its bounded preparation handshake before admitting inference.
+        self.preparation_timeout_s = 10. if self.config.get('recording_backend')=='capture_session_v1' else 1.
+        self.preparation_deadline = time.monotonic()+self.preparation_timeout_s
         if self.record:
             self._record_thread = threading.Thread(target=self._data_worker, name='policy-record', daemon=True)
             self._record_thread.start()
@@ -1437,7 +1451,8 @@ class InferenceRunner:
             if not ready and not self.recording_error and time.monotonic() < self.preparation_deadline:
                 return False
             if not ready:
-                self._recording_failure(self.recording_error or 'inference camera preparation exceeded 1 wall second')
+                self._recording_failure(self.recording_error or
+                    f'inference camera preparation exceeded {self.preparation_timeout_s:g} wall seconds')
             self.preparation_complete = True
             self.verify_started = now
             self.stationary.reset()
@@ -1799,7 +1814,7 @@ class InferenceRunner:
             if self.normal_planned:
                 reference=retime_for_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
                     velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'],
-                    maximum_duration_s=self.config['reference_planning']['max_execution_duration_s'])
+                    maximum_duration_s=self.config['duration_s'])
             else:
                 check_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
                     velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])

@@ -41,7 +41,9 @@ def open_page(config):
         except OSError:pass
         require(time.monotonic()-started<4,'management webpage did not start within the desktop opening budget')
         time.sleep(.05)
-    subprocess.run(['xdg-open',url],check=True,capture_output=True,timeout=max(.1,5-(time.monotonic()-started)))
+    from rule_based_workbench.launch_environment import clean_environment
+    subprocess.run(['xdg-open',url],check=True,capture_output=True,
+        env=clean_environment(),timeout=max(.1,5-(time.monotonic()-started)))
     timing=dict(open_completed_wall_ns=time.time_ns(),open_completed_after_s=time.monotonic()-started)
     print('WORKBENCH_PAGE_OPEN '+json.dumps(timing),file=sys.stderr,flush=True)
     return timing

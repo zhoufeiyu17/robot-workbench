@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 
 import numpy as np
@@ -22,6 +23,7 @@ from robot_workbench.inference_transport import ModelService,RemoteBaseClient,Mo
 def registry():
     rows=[dict(path=role+'.fixture',bytes=1,sha256=hashlib.sha256(role.encode()).hexdigest())for role in mem.ROLES]
     return dict(model_id='wam-mem-fixture-step1',step=1,instruction='fixture instruction',files=rows,
+        inference_capabilities={'denoise_steps':{'minimum':1,'maximum':10,'default':2}},
         artifacts={role:row['sha256']for role,row in zip(mem.ROLES,rows)},
         bundle_sha256=hashlib.sha256(json.dumps(sorted(rows,key=lambda r:r['path']),sort_keys=True,separators=(',',':')).encode()).hexdigest())
 
@@ -33,9 +35,67 @@ def request(identity='decision',stamp=100.,epoch=1,session='session'):
             images={key:np.zeros((8,10,3),np.uint8)for key in wam.CAMS}))
 
 
+class RealTrajectorySampling(unittest.TestCase):
+    @staticmethod
+    def observation(index, offset=0.):
+        return dict(source_time=offset+index/30., model_state14=[float(index)]*14,
+                    frame_ids={'fixture': index})
+
+    def collect(self, phase, *, count=65):
+        sampler=mem.RealTrajectorySampler();blocks=[]
+        for index in range(count):
+            value=self.observation(index)
+            blocks.extend(sampler.offer(value,phase=phase,grid_time=value['source_time']))
+        return sampler,blocks
+
+    def test_model_and_teach_share_training_write_indices_and_gt_alignment(self):
+        model,a=self.collect('MODEL_EXECUTING');teach,b=self.collect('TEACH')
+        self.assertEqual([x['effective_index'] for x in a],[0,32,64])
+        self.assertEqual([x['valid_actions'] for x in a],[0,32,32])
+        for left,right in zip(a,b):
+            self.assertEqual({k:v for k,v in left.items() if k!='mode'},
+                             {k:v for k,v in right.items() if k!='mode'})
+            if left['valid_actions']:
+                np.testing.assert_array_equal(np.asarray(left['actions14'])-left['states14'],1.)
+                self.assertTrue(all(a>b for a,b in zip(left['action_times'],left['state_times'])))
+        self.assertEqual(model.samples,teach.samples)
+
+    def test_wait_and_handover_preserve_effective_stride_and_true_source_gap(self):
+        sampler=mem.RealTrajectorySampler();blocks=[]
+        for index in range(20):
+            value=self.observation(index)
+            blocks.extend(sampler.offer(value,phase='MODEL_EXECUTING',grid_time=value['source_time']))
+        for index in range(20,100):
+            value=self.observation(index)
+            self.assertEqual(sampler.offer(value,phase='WAIT',grid_time=value['source_time']),[])
+        self.assertEqual(sampler.samples,20)
+        for index in range(100,113):
+            value=self.observation(index)
+            blocks.extend(sampler.offer(value,phase='TEACH',grid_time=value['source_time']))
+        self.assertEqual([x['effective_index']for x in blocks],[0,32])
+        self.assertEqual(blocks[-1]['observation']['source_time'],112/30.)
+        self.assertNotIn(([19.]*14,[100.]*14),list(zip(blocks[-1]['states14'],blocks[-1]['actions14'])))
+        self.assertEqual(blocks[-1]['valid_actions'],31)
+
+    def test_duplicate_and_missing_frames_never_generate_interpolated_gt(self):
+        sampler=mem.RealTrajectorySampler(stride=4);blocks=[]
+        for index in [0,1,2,2,6,7]:
+            value=self.observation(index)
+            blocks.extend(sampler.offer(value,phase='TEACH',grid_time=value['source_time']))
+        self.assertEqual(blocks[-1]['effective_index'],4)
+        self.assertEqual(blocks[-1]['states14'],[[0.]*14,[1.]*14,[6.]*14])
+        self.assertEqual(blocks[-1]['actions14'],[[1.]*14,[2.]*14,[7.]*14])
+        self.assertEqual(sampler.gaps,1)
+        with self.assertRaisesRegex(ValueError,'regressed'):
+            sampler.offer(self.observation(6),phase='TEACH',grid_time=6/30.)
+
+
+
+
 class Policy:
     def __init__(self):
         self.resets=0;self.times=[];self.observations=[];self.memory=None;self.executed=[];self.first_frame=None;self.acts=0
+        self.config=SimpleNamespace(inference=SimpleNamespace(denoising_steps=2))
     def reset(self,*,control_frequency):
         assert control_frequency==30
         self.resets+=1;self.times=[];self.memory=None;self.executed=[];self.pending=None;self.first_frame=None
@@ -61,40 +121,88 @@ class Worker:
         if value['warmup']:self.memory.clear()
         return result
     def close(self):pass
+    def can_reconfigure(self,bundle):return mem.sampling_change(self.bundle,bundle)
+    def reconfigure(self,bundle):
+        self.bundle=deepcopy(bundle);self.policy.config.inference.denoising_steps=bundle['inference_options']['denoise_steps']
+        return mem.worker_identity(bundle)
 
 
 class MemoryTests(unittest.TestCase):
+    def test_hot_sampling_keeps_exclusive_memory_lease_and_rejects_other_changes(self):
+        from robot_workbench.inference_model import model_bundle_digest
+        worker=Worker();variants=mem.variants(registry())
+        service=ModelService(worker,catalog=lambda:{str(n):b for n,b in enumerate(variants)},
+            client_factory=lambda _:self.fail('sampling must retain the worker'))
+        with TemporaryDirectory()as directory:
+            token=Path(directory)/'token';token.write_text('fixture-secret-'+40*'x')
+            server=serve_model(service,token_file=token,port=0);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            def client(steps):return RemoteBaseClient('http://127.0.0.1:'+str(server.server_port),token_file=token,
+                adapter=ModelDomainAdapter(),conversion_identity={'scope':'cpu-only'},model_id=worker.model_id,
+                model_bundle=mem.descriptor(registry(),denoise_steps=steps))
+            pin=None;flow=None
+            try:
+                base=client(2);base.prepare();pin=base.pin('continuous-memory',auto_renew=False)
+                first=request('first',100.);first.pop('memory')
+                pin.infer_chunk(first,epoch=1,clock_domain='source',valid_until_source_time=110.)
+                flow=mem.MemorySession(pin,ModelDomainAdapter(),'source');pin.memory_flow=flow
+                state=(worker.policy.memory,worker.policy.first_frame.copy(),list(worker.policy.times),worker.memory.calls,worker.memory.observations)
+                identity=(pin.token,pin.session_id,pin.memory_revision,worker.memory.phase)
+                for steps in (10,1,2):
+                    flow.reconfigure(client(steps))
+                    self.assertEqual(worker.policy.config.inference.denoising_steps,steps)
+                    self.assertEqual(worker.memory.calls,state[3]);self.assertEqual(worker.memory.observations,state[4])
+                    self.assertEqual(worker.policy.memory,state[0]);np.testing.assert_array_equal(worker.policy.first_frame,state[1])
+                    self.assertEqual(worker.policy.times,state[2]);self.assertEqual((pin.token,pin.session_id,pin.memory_revision,worker.memory.phase),identity)
+                    self.assertEqual(pin.model_binding['bundle_digest'],model_bundle_digest(worker.model_id,pin.model_bundle))
+                    pin.renew();self.assertTrue(pin.healthy())
+                self.assertEqual(service.prepare_attempts,1)
+                with self.assertRaisesRegex(RuntimeError,'pinned'):client(10).prepare()
+                next_request=request('continued',101.);next_request.pop('memory');next_request['memory_start']='continue'
+                result=pin.infer_chunk(next_request,epoch=2,clock_domain='source',valid_until_source_time=111.)
+                self.assertEqual(result['audit']['memory']['observations'],1);self.assertFalse(result['audit']['memory']['reset_applied'])
+                with self.assertRaises(ValueError):mem.descriptor(registry(),denoise_steps=11)
+            finally:
+                if flow:flow.close();pin.memory_flow=None
+                if pin:pin.close()
+                server.shutdown();server.server_close();thread.join(2)
+
     def test_phase_lifecycle_retry_and_original_input(self):
         policy=Policy();seeds=[];memory=mem.PhaseMemory(policy,'fixture instruction',seeds.append)
         a=request();first=memory.infer(a);again=memory.infer(deepcopy(a))
         np.testing.assert_array_equal(first['action14'],again['action14'])
         self.assertEqual((policy.resets,len(policy.times)),(1,1))
         b=memory.infer(request('next',101.))
-        self.assertEqual(b['audit']['memory']['observations'],2)
-        self.assertEqual(seeds,[7,8]);self.assertEqual(policy.times,[0.,1.])
-        self.assertEqual(b['audit']['memory']['source_time'],101.)
+        self.assertEqual(b['audit']['memory']['observations'],1)
+        self.assertEqual(seeds,[7,8]);self.assertEqual(policy.times,[0.])
+        self.assertEqual(b['audit']['memory']['source_time'],100.)
+        self.assertEqual(b['audit']['memory']['query_source_time'],101.)
         self.assertEqual(b['audit']['memory']['origin_source_time'],100.)
         changed=deepcopy(a);changed['observation']['images'][wam.CAMS[0]][0,0,0]=1
         with self.assertRaisesRegex(ValueError,'different data'):memory.infer(changed)
         reset=memory.infer(request('decision',104.,epoch=2))
         self.assertTrue(reset['audit']['memory']['reset_applied']);self.assertEqual(policy.times,[0.])
         with self.assertRaisesRegex(ValueError,'obsolete'):memory.infer(a)
-        with self.assertRaisesRegex(ValueError,'strictly advance'):memory.infer(request('late',104.,epoch=2))
+        same=memory.infer(request('same-observation-read',104.,epoch=2))
+        self.assertEqual(same['audit']['memory']['observations'],1)
+        with self.assertRaisesRegex(ValueError,'future memory'):memory.infer(request('late',103.,epoch=2))
         memory.infer(request('decision',200.,epoch=0,session='reacquired'))
         self.assertEqual(policy.resets,3)
-        self.assertEqual(set(policy.observations[-1][0]),{'main','left','right'})
+        self.assertEqual(policy.first_frame.shape,(8,10,3))
 
     def test_manual_memory_is_observation_only_and_clear_cannot_be_repopulated(self):
         policy=Policy();memory=mem.PhaseMemory(policy,'fixture instruction',lambda seed:None)
         memory.infer(request('model',100.))
         a=request('manual',101.,epoch=2);a['memory']['start']='continue';a['memory_operation']='observe'
         a['observation']['model_state14'][0]=2
+        a['memory_sample']=dict(states14=[],actions14=[],state_times=[],action_times=[],mode='TEACH',
+            effective_index=32,action_semantics='materialized_next_observation',valid_actions=0,executed_action_condition=False)
         result=memory.infer(a)
-        self.assertNotIn('action14',result);self.assertEqual(policy.acts,1)
+        self.assertNotIn('action14',result);self.assertEqual(memory.calls,1)
         self.assertEqual(policy.memory,5.);self.assertEqual(policy.times,[0.,1.])
         resumed=request('resume',102.,epoch=3);resumed['memory']['start']='continue'
         result=memory.infer(resumed)
-        self.assertFalse(result['audit']['memory']['reset_applied']);self.assertEqual(policy.memory,11.)
+        self.assertFalse(result['audit']['memory']['reset_applied']);self.assertEqual(policy.memory,5.)
+        np.testing.assert_array_equal(result['action14'],11.)
         self.assertEqual(result['audit']['memory']['manual_observations'],1)
         self.assertFalse(result['audit']['memory']['executed_action_context']);self.assertEqual(policy.executed,[])
         clear=dict(request_id='clear',memory=dict(resumed['memory'],epoch=4),memory_operation='clear')
@@ -155,31 +263,63 @@ class MemoryTests(unittest.TestCase):
                 self.assertNotEqual(old_session,worker.memory.phase[0]);self.assertEqual(worker.memory.calls,1)
                 image_fixture=request()['observation']['images']
                 flow=mem.MemorySession(pin,ModelDomainAdapter(),'source',resolve=lambda obs:dict(obs,images=image_fixture));pin.memory_flow=flow
-                flow.mode_event(dict(command_epoch=2,mode='TEACH',completed=True))
-                manual=request('manual',101.)['observation'];manual.pop('images');manual['model_state14'][0]=2
-                flow.offer(manual,2)
+                self.assertTrue(flow.control_event(10))
+                self.assertTrue(flow.control_event(13))
+                self.assertFalse(flow.control_event(12))
+                self.assertTrue(flow.snapshot()['available'])
+                self.assertEqual(flow.snapshot()['last_control_gap'],dict(previous=10,received=13,missing=2))
+                flow.sampler.bootstrap(a['observation'])
+                def offered(stamp,phase='TEACH',epoch=2):
+                    value=request('sample',stamp)['observation'];value.pop('images')
+                    value['model_state14'][0]=2
+                    value.update(run_id='run',sample_grid_time=stamp,
+                        memory_sampling=dict(schema='workbench.memory-activity.v1',run_id='run',phase=phase))
+                    flow.offer(value,epoch)
+                for index in range(1,33):offered(100.+index/30.)
+                self.assertEqual(flow.snapshot()['phase'],'TEACH','paired state recovers a missing mode audit event')
                 deadline=time.monotonic()+2
                 while worker.memory.manual_observations<1 and time.monotonic()<deadline:time.sleep(.01)
                 self.assertEqual(worker.memory.manual_observations,1)
+                self.assertEqual(worker.memory.observations,2)
                 flow.mode_event(dict(command_epoch=3,mode='HOLD',completed=True))
                 self.assertEqual(flow.snapshot()['control_epoch'],3)
-                self.assertEqual(flow.snapshot()['phase_epoch'],2)
                 flow.begin('continue')
                 continued=request('continued',102.);continued.update(epoch=4,clock_domain='source',valid_until_source_time=112.)
                 answer=flow.infer(continued)
-                self.assertEqual(answer['audit']['memory']['observations'],3)
+                self.assertEqual(answer['audit']['memory']['observations'],2)
+                flow.mode_event(dict(command_epoch=4,mode='MODEL',completed=True))
+                entered=threading.Event();release=threading.Event();act=Policy.act
+                def blocked_decision(policy,*args):
+                    entered.set();release.wait(3);return act(policy,*args)
+                waiting=request('waiting-model',103.)
+                waiting.update(epoch=4,clock_domain='source',valid_until_source_time=113.)
+                with patch.object(Policy,'act',blocked_decision),ThreadPoolExecutor(max_workers=1)as pool:
+                    pending=pool.submit(flow.infer,waiting)
+                    self.assertTrue(entered.wait(1))
+                    try:
+                        count=flow.sampler.samples
+                        offered(103.5,'WAIT',4)
+                        self.assertEqual(flow.sampler.samples,count)
+                        self.assertFalse(flow.pending)
+                    finally:release.set()
+                    answer=pending.result(3)
+                self.assertEqual(answer['audit']['memory']['source_time'],100.+32/30.)
+                self.assertEqual(answer['audit']['memory']['observations'],2)
+                next_decision=request('after-wait',105.)
+                next_decision.update(epoch=4,clock_domain='source',valid_until_source_time=115.)
+                flow.infer(next_decision)
+                np.testing.assert_allclose(worker.policy.times,[0.,32/30.],rtol=0,atol=1e-12)
                 cleared=flow.clear('clear',5);self.assertTrue(cleared['audit']['memory']['empty'])
                 self.assertEqual(pin.memory_revision,1)
                 self.assertEqual(pin.memory_clear('clear',epoch=5,clock_domain='source'),cleared)
                 self.assertIsNone(worker.policy.memory)
-                flow.offer(manual,2);time.sleep(.05);self.assertIsNone(worker.policy.memory)
+                offered(106.,'HOLD',5);time.sleep(.05);self.assertIsNone(worker.policy.memory)
                 flow.close();pin.memory_flow=None
                 # Clear is ordered after an in-flight GPU call; the old result is fenced.
-                entered=threading.Event();release=threading.Event();act=worker.policy.act
-                def blocked(*args):
-                    entered.set();release.wait(3);return act(*args)
-                worker.policy.act=blocked
-                with ThreadPoolExecutor(max_workers=2)as pool:
+                entered=threading.Event();release=threading.Event();act=Policy.act
+                def blocked(policy,*args):
+                    entered.set();release.wait(3);return act(policy,*args)
+                with patch.object(Policy,'act',blocked),ThreadPoolExecutor(max_workers=2)as pool:
                     pending=pool.submit(pin.infer_chunk,request('pending',110.),epoch=6,clock_domain='source',valid_until_source_time=120.)
                     self.assertTrue(entered.wait(1))
                     reset=pool.submit(pin.memory_clear,'concurrent-clear',epoch=7,clock_domain='source')

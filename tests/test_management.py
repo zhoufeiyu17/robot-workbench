@@ -66,6 +66,9 @@ def cpu_fixture(kind,port,environment,model_port):
             except (BrokenPipeError,ConnectionResetError):pass
         def do_GET(self):
             value['requests']+=1
+            if self.path.startswith('/api/inference-replay-metadata?'):
+                return self.send(200,dict(schema='workbench.inference-replay.v1',run_id='recorded-run',
+                    segments=[dict(mode='MODEL',denoise_steps=4,execute_steps=32)],request_path=self.path))
             if self.path=='/fixture':return self.send(200,{key:item for key,item in value.items() if key not in ('begin_cache','call_results')})
             if self.path=='/fixture/exit-zero':
                 self.send(200,{'exiting':True});threading.Thread(target=server.shutdown,daemon=True).start();return
@@ -1070,6 +1073,10 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(self.h['services']['workbench'].starts,1)
 
     def test_proxy_preserves_origin_csrf_range_and_media_metadata(self):
+        path='/api/inference-replay-metadata?environment=fake&run_id=recorded-run'
+        status,metadata,_=self.request(path)
+        self.assertEqual(status,200);self.assertEqual(metadata['request_path'],path)
+        self.assertEqual(metadata['segments'][0]['denoise_steps'],4)
         status,state,_=self.request('/api/state?environment=fake');self.assertEqual(status,200)
         status,result,_=self.request('/api/actions/stop',dict(environment='fake',business='inference',request_id='stop-fixture'),
             headers={'Origin':'http://127.0.0.1:'+str(self.h['port']),'X-CSRF-Token':state['csrf'],'Content-Type':'application/json'})

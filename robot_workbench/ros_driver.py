@@ -22,7 +22,8 @@ class RosDriverPublisher:
         self.state_references=OrderedDict()
         self.source_values=[dict(device_id=device_id,stream_id=stream,source_instance_id=instance_id,
             source_clock_id=clock_id,topic=topic,message_type='workbench_interfaces/msg/'+kind,kind=source_kind,
-            units=units,coordinate_frame='device',nominal_hz=hz,available=stream!='state',metadata={})
+            units=units,coordinate_frame='device',nominal_hz=hz,available=stream!='state',
+            metadata={'memory_sampling_schema':'workbench.memory-activity.v1'}if stream=='state'else{})
             for stream,topic,kind,source_kind,units,hz in (
                 ('state',state_topic,'RobotState','state',{'positions':'SDK_rad_and_m','velocities':'SDK_rad_s_and_m_s'},100.),
                 ('control',event_topic,'DataEvent','event','original_event_units',0.))]
@@ -60,7 +61,7 @@ class RosDriverPublisher:
         validity=[value is not None for value in efforts]
         metadata={k:deepcopy(feedback[k])for k in ('sample_time_s','sample_wall_ns','sdk_timestamps',
             'gripper_feedback_valid','gripper_feedback_reason','runtime_nonce','command_epoch','source_call_id',
-            'clock_domain','source_clock_id','source_time_ns','physics_step','step_kind','environment','simulation_only')if k in feedback}
+            'clock_domain','source_clock_id','source_time_ns','physics_step','step_kind','environment','simulation_only','memory_sampling')if k in feedback}
         metadata['effort_validity']=validity
         metadata['raw_metadata']={k:deepcopy(raw[k])for k in ('schema','status','joint_units','jaw_units','effort_units','pairing','host_time_scope','jaw_calibration_id')if k in raw}
         metadata['per_arm_samples']={side:{k:deepcopy(value)for k,value in arm.items()

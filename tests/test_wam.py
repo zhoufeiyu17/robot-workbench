@@ -259,6 +259,35 @@ while c.recv() is not None:pass
         old=deepcopy(base);old['schema']='workbench.wam.v1'
         with self.assertRaises(ValueError):wam.validate_descriptor(old)
 
+    def test_torch_sampling_update_reuses_worker_and_warm_parameters(self):
+        from robot_workbench.inference_transport import ModelService,PROTOCOL
+        from robot_workbench.inference_model import model_bundle_digest
+        base=self.descriptor();base['backend']='torch';base['runtime']['adapter']='wam_torch_client.v2'
+        next_bundle=deepcopy(base);next_bundle['inference_options']['denoise_steps']=10
+        changed=deepcopy(next_bundle);changed['artifacts']['checkpoint']['sha256']='f'*64
+        self.assertTrue(wam.sampling_change(base,next_bundle));self.assertFalse(wam.sampling_change(base,changed))
+        self.assertFalse(wam.sampling_change(self.descriptor(),next_bundle))
+        class Loaded:
+            model_id=MODEL_ID
+            def __init__(self):self.bundle=deepcopy(base);self.prepares=0;self.closes=0;self.steps=[]
+            def worker_status(self):return dict(worker_pid=4321,worker_alive=True,worker_exit_code=None)
+            def can_reconfigure(self,bundle):return wam.sampling_change(self.bundle,bundle)
+            def reconfigure(self,bundle):self.bundle=deepcopy(bundle);return wam.worker_identity(bundle)
+            def prepare(self):self.prepares+=1;return wam.worker_identity(self.bundle)
+            def infer(self,request):
+                self.steps.append(self.bundle['inference_options']['denoise_steps'])
+                return dict(action14=np.full((32,14),self.steps[-1],dtype=np.float32))
+            def close(self):self.closes+=1
+        loaded=Loaded();service=ModelService(loaded,catalog={'old':base,'new':next_bundle},
+            client_factory=lambda _:self.fail('same checkpoint must not create another client'))
+        def prepare(bundle):return service.prepare(dict(protocol=PROTOCOL,model_id=MODEL_ID,backend='torch',
+            conversion_id='c'*64,expected_bundle_digest=model_bundle_digest(MODEL_ID,bundle)))
+        prepare(base);prepare(next_bundle);prepare(next_bundle);prepare(base)
+        self.assertEqual((loaded.prepares,loaded.closes,service.prepare_attempts),(1,0,1))
+        self.assertEqual(loaded.steps,[2,10,2]);self.assertEqual(service.status()['worker_pid'],4321)
+        self.assertEqual(service.status()['worker_identity']['inference_steps'],2)
+        self.assertTrue(service.status()['warmup']['completed'])
+
     def test_new_checkpoint_uses_its_own_identity_statistics_and_action_contract(self):
         import json
         from robot_workbench.inference_model import action_contract,model_spec
@@ -339,7 +368,7 @@ while c.recv() is not None:pass
                     candidate=config(steps);candidate.update(model_id=MODEL_ID,maximum_observation_age_s=2.5,action_chunk_binding=binding)
                     frozen=configuration(candidate)
                     self.assertEqual(frozen['execute_steps'],steps)
-                    self.assertAlmostEqual(frozen['reference_planning']['max_execution_duration_s'],steps/30*4)
+                    self.assertIsNone(frozen['reference_planning']['max_execution_duration_s'])
                     self.assertEqual(frozen['state_max_age_s'],.1);self.assertEqual(frozen['max_camera_span_s'],.1)
                     parameters=control_parameters(defaults('inference'),configuration=frozen,business='inference')
                     policy=dict(revision=1,parameters=parameters,policy_hash=policy_hash(parameters))

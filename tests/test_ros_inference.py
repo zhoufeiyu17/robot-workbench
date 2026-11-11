@@ -141,7 +141,7 @@ class OwnerRosTests(unittest.TestCase):
                 _guard_policy=lambda _:policy)
             emitted=[]
             service=SimpleNamespace(device=SimpleNamespace(id='cpu_robot',environment='physical',runtime=runtime),
-                event=lambda name,**kw:emitted.append((name,kw)))
+                event=lambda name,**kw:emitted.append((name,kw)),inference=None,inference_state=None,inference_state_lock=threading.Lock())
             contract=dict(shape=[60,14],axes=[f'{s}_{a}'for s in('left','right')for a in('j1','j2','j3','j4','j5','j6','jaw')],
                 units=(['rad']*6+['m'])*2,action_type='absolute_position',normalized=False,device_mapping_applied=False)
             binding=dict(session_id='model_session',model_binding={},conversion_id='conversion',action_contract=contract,task='coffee')
@@ -170,6 +170,8 @@ class OwnerRosTests(unittest.TestCase):
                 with patch('robot_workbench.inference_workflow.calibrated_adapter',return_value=(object(),{})):
                     bridge=OwnerInference(service,configuration,dict(profile={'gripper':{'max_opening_mm':83.}},
                         reference=None,preloaded_prediction=None,feedforward=None))
+                    service.inference=bridge
+                    self.addCleanup(service.inference_state[1].close)
             finally:initial_stop.set();initial_thread.join(1)
             first_sequence=initial_sequence[0]+1
             model_inputs=RosInputs(model_node,rows);used=[]

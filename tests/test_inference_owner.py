@@ -88,7 +88,7 @@ class InferenceOwnerTests(unittest.TestCase):
             if getattr(runner,'is_inference',False) and runner.loop._query_pending:
                 time.sleep(.0001)
 
-    def configure(self,predict=None,record=None,record_prepared=None,duration_s=40,execute_steps=30,prepared_reference=None,integral=False):
+    def configure(self,predict=None,record=None,record_prepared=None,duration_s=40,execute_steps=30,prepared_reference=None,integral=False,recording_backend=None):
         def to_model(q):
             result=np.asarray(q).copy();result[[6,13]]/=1000;return result
         def to_device(q):
@@ -107,6 +107,7 @@ class InferenceOwnerTests(unittest.TestCase):
             return runner
         self.factory=factory
         config=dict(model_identity='CPU contract fixture',seed=8,duration_s=duration_s,execute_steps=execute_steps)
+        if recording_backend is not None:config['recording_backend']=recording_backend
         if prepared_reference is not None:config.update(prepared_reference=prepared_reference.metadata,
             trajectory_kind='prepared_native_reference',execution_duration_s=prepared_reference.duration_s+(4.04 if integral else .14),reference_integral_feedback=integral)
         return self.runtime.configure_inference(config,factory)
@@ -386,6 +387,25 @@ class InferenceOwnerTests(unittest.TestCase):
         self.assertEqual(len(runner.loop.external_completed),1)
         self.assertEqual(runner.command_context['execution_tick'],runner.actual_submission_count-1)
         self.assertTrue(any(name=='prepare' for name,_ in rows))
+
+    def test_resident_capture_waits_for_its_handshake_before_model_admission(self):
+        ready=[False]
+        self.configure(record=lambda *_:None,record_prepared=lambda:ready[0],recording_backend='capture_session_v1')
+        self.confirm(self.preview());self.advance(10)
+        runner=self.runtime.owner.runner
+        with patch('time.monotonic',return_value=time.monotonic()+2.):self.advance()
+        self.assertEqual(runner.status,'VERIFYING')
+        self.assertIsNone(runner.recording_error)
+        self.assertEqual(runner.actual_submission_count,0)
+        ready[0]=True;self.advance(40)
+        self.assertEqual(runner.status,'RUNNING',runner.reason)
+
+    def test_resident_capture_handshake_still_has_a_finite_deadline(self):
+        self.configure(record=lambda *_:None,record_prepared=lambda:False,recording_backend='capture_session_v1')
+        self.confirm(self.preview());self.advance(10)
+        runner=self.runtime.owner.runner
+        with patch('time.monotonic',return_value=time.monotonic()+11.):self.advance()
+        self.assertIn('10 wall seconds',runner.recording_error)
 
     def test_first_video_command_is_real_hold_with_owner_thread_timestamp(self):
         rows=[]

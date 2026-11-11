@@ -241,17 +241,17 @@ class SettingsTest(unittest.TestCase):
             'planning.jaw_velocity_limit_mm_s':20},environment='fake')
         runtime=object.__new__(Runtime)
         derived=runtime._configuration_from_policy(original,changed)
-        self.assertEqual(derived['reference_planning']['max_execution_duration_s'],4.)
+        self.assertIsNone(derived['reference_planning']['max_execution_duration_s'])
         self.assertEqual(derived['normal_modes']['velocity_limit'],.5)
         self.assertEqual(derived['normal_modes']['acceleration_limit'],20.)
         self.assertEqual(derived['prepare_drift_joint_rad'],.003)
         self.assertEqual(derived['prepare_drift_jaw_mm'],1.)
-        self.assertEqual(original['reference_planning']['max_execution_duration_s'],2.)
+        self.assertIsNone(original['reference_planning']['max_execution_duration_s'])
         floats=merge_control_policy(parameters,{'planning.acceleration_limit_rad_s2':20.0},environment='fake')
         integers=merge_control_policy(parameters,{'planning.acceleration_limit_rad_s2':20},environment='fake')
         self.assertEqual(policy_hash(floats),policy_hash(integers))
         with self.assertRaises(ValueError):
-            merge_control_policy(parameters,{'arrival.jaw_mm':3.,'planning.velocity_limit_rad_s':2.},environment='fake')
+            merge_control_policy(parameters,{'arrival.jaw_mm':3.,'planning.velocity_limit_rad_s':2.0001},environment='fake')
         self.assertEqual(parameters['arrival']['jaw_mm'],2.)
 
     def test_common_guard_uses_policy_and_preserves_boundaries_and_times(self):
@@ -281,7 +281,7 @@ class SettingsTest(unittest.TestCase):
         for steps in (1,15,60):
             parameters=control_parameters(defaults('inference'),configuration=config(steps),business='inference')
             policy=dict(revision=4,policy_hash=policy_hash(parameters),parameters=parameters)
-            for rule,limit in [('G13',1.),('G15',40.),('G16',40.),('G21',steps),('G22',steps/30.*4)]:
+            for rule,limit in [('G13',1.),('G15',40.),('G16',40.),('G21',steps)]:
                 signal=dict(rule_id=rule,signal_id='cpu-reference',observed=limit,source_time=10.,checked_time=10.1)
                 result=Guard.evaluate(signal,'submission',policy)
                 self.assertEqual(result['verdict'],'pass')

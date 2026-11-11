@@ -231,7 +231,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                                 try:saved=inputs.rgbd(saved_ref)if raw_source['kind']=='image'else saved
                                 except (LookupError,ValueError):continue
                                 prefilled_until[stream]=max(prefilled_until.get(stream,0),saved_ref.sequence)
-                                admit(saved_ref,saved,opened['request_id'],True)
+                                admit(saved_ref,saved,activity.sample_group(clock,saved_ref.source_time_ns),True)
                 group=activity.current['request_id']if activity.current else previous_group if lifecycle else None
                 if source['kind']in('image','state'):
                     group=activity.sample_group(ref.source_clock_id,ref.source_time_ns)
@@ -346,7 +346,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             errors.setdefault(ref.stream_id,'source sequence regressed');return
         if (source['kind']!='image' and not(activity is not None and ref.stream_id=='control')
                 and previous is not None and ref.sequence!=previous.sequence+1
-                and (activity is None or written_groups.get(ref.stream_id)==group)):
+                and (activity is None or group is not None and written_groups.get(ref.stream_id)==group)):
             errors.setdefault(ref.stream_id,f'source sequence gap: {previous.sequence} -> {ref.sequence}')
         if source['kind']=='image':
             writer=segments.get(ref.stream_id)

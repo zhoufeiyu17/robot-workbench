@@ -4,6 +4,7 @@ import argparse,errno,fcntl,hashlib,json,math,os,signal,sys,threading,time
 from pathlib import Path
 from types import SimpleNamespace
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
+from robot_workbench.execution_settings import PEDAL_DEBOUNCE_S
 
 
 def read_reconnecting(reader,stopped,disconnected):
@@ -43,6 +44,7 @@ def main():
         topic=publisher.topic_name,message_type='workbench_interfaces/msg/DataEvent',kind='event',units='pedal_command',
         coordinate_frame='operator',nominal_hz=float(profile['heartbeat_hz']),available=False,
         metadata=dict(continuous_window=True,reader_sha256=profile['reader_sha256'],confirm_presses=1,
+            debounce_s=PEDAL_DEBOUNCE_S,
             timestamp_basis='publisher_receipt; original_evdev_wall_time_in_occurred_at'))
     stopped=threading.Event();connected=threading.Event();mutex=threading.Lock();sequence=[0]
     def declare(available):
@@ -61,7 +63,7 @@ def main():
             # Reuse the pinned evdev loop and filter without its second ROS publisher.
             self.node=ros.node;self.device=profile['device'];self.mapping=PedalMapping();self.rate_hz=profile['rate_hz']
             defaults=inspect.signature(PedalKeyFilter).parameters
-            self.confirm_presses=1;self.confirm_window_s=defaults['confirm_window_s'].default;self.debounce_s=defaults['debounce_s'].default
+            self.confirm_presses=1;self.confirm_window_s=defaults['confirm_window_s'].default;self.debounce_s=PEDAL_DEBOUNCE_S
             self.rclpy=SimpleNamespace(ok=lambda:not stopped.is_set(),spin_once=lambda *a,**k:None)
         def publish_command(self,cmd,*,occurred_at=None):publish(cmd,occurred_at=occurred_at)
         @staticmethod

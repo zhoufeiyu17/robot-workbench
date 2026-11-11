@@ -37,7 +37,8 @@ def reference_read(value,limits):
     if m.get('kind')in('normal_brake','prefix_then_normal_brake'):shapes.add((n-1,5,12))
     if m.get('kind')in('online_prediction_chunk','prefix_then_normal_brake'):shapes.add((n-1,6,12))
     if (not 2<=n<=(63 if m.get('kind')=='prefix_then_normal_brake'else 61) or b.ndim!=1 or c.shape not in shapes or j.shape!=(n,2)
-            or not all(np.isfinite(a).all()for a in(b,c,j))or b[0]!=0. or not 0<b[-1]<=30.
+            or not all(np.isfinite(a).all()for a in(b,c,j))or b[0]!=0. or b[-1]<=0.
+            or m.get('kind')not in('online_prediction_chunk','prefix_then_normal_brake')and b[-1]>30.
             or np.any(np.diff(b)<=0)or m.get('duration_s')!=b[-1]or m.get('schema')!=SCHEMA):
         raise ValueError('bounded continuous reference required')
     identity=m.pop('reference_id',None)
@@ -139,7 +140,7 @@ class OwnerInference:
         self.service=service;self.session_id=secrets.token_hex(16);self.runner=None
         self.lock=threading.Lock();self.observation=None;self.support=None;self.pending={}
         self.recording_ready=False;self.recording_error=None
-        self.ros_node=self.ros_client=None;self.ros_error=None;self.ros_pending_observation=None
+        self.ros_node=self.ros_client=self.ros_state_node=None;self.ros_error=None;self.ros_pending_observation=None
         self.ros_configuration=deepcopy(configuration);self.ros_profile=deepcopy(specification['profile'])
         if getattr(service.device.runtime,'data_plane',None) is not None:
             try:self._open_ros(configuration)
@@ -147,6 +148,7 @@ class OwnerInference:
                 self.close();raise
 
     def _open_ros(self,configuration):
+        from .pipeline_timing import timing
         from .ros_data import RosNode,SourceDirectory,plane_config
         from .ros_inputs import RosInputs
         from .ros_inference import RosModelClient
@@ -167,15 +169,38 @@ class OwnerInference:
         for role,camera in CAMERAS.items():
             if self.ros_sources[camera]['metadata'].get('serial')!=self.camera_bindings[role][1]:
                 raise ValueError('ROS camera serial differs from the reviewed binding')
-        self.ros_inputs=RosInputs(self.ros_node,[self.ros_sources['state']],on_sample=lambda *_:self._resolve_ros_observation())
+        with self.service.inference_state_lock:
+            source=self.ros_sources['state'];shared=self.service.inference_state
+            if shared is not None and shared[0]['source_instance_id']!=runtime.nonce:
+                shared[1].close();self.service.inference_state=shared=None
+            if shared is not None and shared[0]!=source:
+                raise ValueError('Owner state descriptor changed within the same runtime')
+            reused=shared is not None
+            if shared is None:
+                state_node=RosNode('owner_state_'+runtime.nonce[:12],namespace=plane['namespace'],
+                    domain_id=plane['domain_id'],localhost_only=False)
+                service=self.service
+                def received(*_):
+                    current=service.inference;bound=service.inference_state
+                    if current is not None and bound is not None and current.ros_inputs is bound[2]:
+                        current._resolve_ros_observation()
+                try:inputs=RosInputs(state_node,[source],on_sample=received)
+                except BaseException:state_node.close();raise
+                self.service.inference_state=shared=(deepcopy(source),state_node,inputs)
+        self.ros_state_node,self.ros_inputs=shared[1:]
         # A retained source declaration does not prove this new reader receives
         # data. Establish the consumer before replacing the previous binding.
         cache=self.ros_inputs.caches['state']
+        began=time.monotonic_ns()
         with cache.changed:
-            if not cache.changed.wait_for(lambda:bool(cache.samples)or cache.error or self.ros_node.errors,timeout=5.):
+            if not cache.changed.wait_for(lambda:bool(cache.samples)or cache.error or self.ros_state_node.errors,timeout=5.):
+                timing.fault('Owner state subscription has no initial sample',consumer=self.ros_inputs.consumer,
+                    reused=reused,reader_alive=self.ros_state_node.thread.is_alive(),
+                    publisher_count=self.ros_state_node.node.count_publishers(source['topic']))
                 raise TimeoutError('Owner state subscription has no initial sample; inference binding not ready')
-            if cache.error or self.ros_node.errors:
-                raise ValueError(cache.error or self.ros_node.errors[-1])
+            if cache.error or self.ros_state_node.errors:
+                raise ValueError(cache.error or self.ros_state_node.errors[-1])
+        timing.record('owner.state_subscription_ready',began,consumer=self.ros_inputs.consumer,reused=reused)
         self.ros_client=RosModelClient(self.ros_node,binding=binding,
             clock=lambda:round(runtime.owner.control_time()*1e9))
         self.ros_node.subscribe('observations',self.ros_node.types.Observation,self._receive_ros_observation)

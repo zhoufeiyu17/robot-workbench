@@ -99,6 +99,7 @@ class PinnedModelService:
     def prepare(self,metadata):
         if not isinstance(metadata,dict):raise ValueError('model session metadata must be an object')
         if metadata.get('operation')=='memory_clear':return self._memory_clear(metadata)
+        if metadata.get('operation')=='memory_sampling':return self._memory_sampling(metadata)
         if 'session_protocol'not in metadata:return self._change(lambda:self.service.prepare(metadata))
         with self._gate:
             self._expire()
@@ -140,6 +141,30 @@ class PinnedModelService:
                 if not isinstance(token,str)or not re.fullmatch('[a-f0-9]{32}',token):raise ValueError('invalid release capability')
                 absent=self._pins.pop(token,None)is None
                 return dict(session_protocol=PROTOCOL,released=True,model_unloaded=False,already_released=absent)
+
+    def _memory_sampling(self,metadata):
+        from .wam_mem import validate_descriptor,sampling_change
+        from .inference_model import model_bundle_digest
+        from .inference_transport import PROTOCOL as WIRE
+        if (set(metadata)!={'session_protocol','operation','token','expected_binding','model_bundle','conversion_id'}
+                or metadata['session_protocol']!=PROTOCOL):raise ValueError('explicit leased sampling update required')
+        selected=validate_descriptor(metadata['model_bundle'])
+        with self._gate:
+            pin=self._check(metadata['token'])
+            if self._closed or self._mutating or self._inflight or getattr(self.service,'active',None)is not None:
+                raise ValueError('model memory operation busy')
+            if len(self._pins)!=1 or pin['binding']!=metadata['expected_binding']:
+                raise ValueError('exclusive current memory binding required')
+            if not sampling_change(self.service.model_bundle,selected):raise ValueError('only sampling options may change')
+            if not self.service.client.can_reconfigure(selected):raise ValueError('live memory worker required')
+            self._mutating=True
+            try:
+                self.service.prepare(dict(protocol=WIRE,model_id=selected['model_id'],backend='torch',
+                    expected_bundle_digest=model_bundle_digest(selected['model_id'],selected),conversion_id=metadata['conversion_id']))
+                current=binding(self.service.status());pin['binding']=deepcopy(current)
+                pin['guard']=_lease_guard(self.ttl,identity=current);pin['renewed_at']=self.clock()
+                return dict(session_protocol=PROTOCOL,binding=current)
+            finally:self._mutating=False
 
     def _memory_clear(self,metadata):
         import hashlib
@@ -333,6 +358,18 @@ class PinnedModelClient:
         self.memory_clears[request_id]=((epoch,clock_domain),deepcopy(result))
         while len(self.memory_clears)>32:self.memory_clears.pop(next(iter(self.memory_clears)))
         return result
+
+    def reconfigure_memory(self,client):
+        from .wam_mem import sampling_change
+        if not self.healthy():raise self._unhealthy_error('model session is not healthy')
+        if not sampling_change(self.client.model_bundle,client.model_bundle):raise ValueError('only memory sampling options may change')
+        reply=self._rpc('/prepare',dict(session_protocol=PROTOCOL,operation='memory_sampling',token=self.token,
+            expected_binding=self.model_binding,model_bundle=client.model_bundle,conversion_id=client.conversion_id),timeout=15)
+        identity=client.prepare(ready_only=True);current=binding(client.status())
+        if reply.get('session_protocol')!=PROTOCOL or reply.get('binding')!=current:raise ValueError('sampling binding receipt differs')
+        previous=self.client;self.client=client;self.model_binding=current;self.renewed_at=time.monotonic()
+        previous.close()
+        return identity
 
     def _unhealthy_error(self,message):
         error=ValueError(message);decision=getattr(self,'lease_decision',None)

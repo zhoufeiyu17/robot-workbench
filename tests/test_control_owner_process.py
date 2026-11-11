@@ -1,5 +1,6 @@
 """Actual Runtime/target interpreter in an independent CPU process; no SDK/CAN."""
 from pathlib import Path
+from copy import deepcopy
 from unittest.mock import patch
 import gc,json,multiprocessing,os,sys,tempfile,threading,time,unittest
 
@@ -368,6 +369,29 @@ class ControlOwnerProcessTests(unittest.TestCase):
     def test_wam32_normal_full_chunk_is_executed_and_recorded(self):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(wam32=True,normal32=True,execute_steps=32)
 
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_memory_prepare_sampling_and_short_infer_use_shared_owner(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(
+            wam32=True,normal32=True,execute_steps=8,memory_parameters=True)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_memory_short_infer_records_three_streams(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(
+            wam32=True,normal32=True,execute_steps=8,memory_parameters=True,recording_only=True)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_torch_prepare_sampling_and_short_infer_use_shared_owner(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(
+            wam32=True,normal32=True,execute_steps=8,torch_parameters=True)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_normal_eight_steps_are_executed_and_recorded(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(wam32=True,normal32=True,execute_steps=8)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS only')
+    def test_wam32_normal_twenty_steps_are_executed_and_recorded(self):
+        self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(wam32=True,normal32=True,execute_steps=20)
+
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
     def test_wam32_observations_continue_while_page_polls_a_long_control_session(self):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(
@@ -457,7 +481,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
         self.test_ros_workflow_runs_through_independent_owner_and_resident_recorder(simulated=True)
 
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
-    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False,direct_run=False,long_session=False):
+    def test_ros_workflow_runs_through_independent_owner_and_resident_recorder(self,simulated=False,wam32=False,stop_during_model=False,expire_supply=False,normal32=False,execute_steps=15,operator_stop=False,operator_home=False,stop_home=False,operator_teach=False,teach_stop=False,prepared_session=False,native_home=False,manual_boundary=False,poll_page=False,pedal_gestures=False,stale_control_clock=False,direct_run=False,long_session=False,memory_parameters=False,torch_parameters=False,recording_only=False):
         import numpy as np
         from types import SimpleNamespace
         from sensor_msgs.msg import Image
@@ -468,6 +492,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
         from robot_workbench.ros_data import RosNode,descriptor_message
         from robot_workbench.service import Device
         from robot_workbench import wam
+        parameter_test=(memory_parameters or torch_parameters)and not recording_only
         fixture=InferenceWorkflowTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
         fixture.workflow.close()
         for patcher in fixture.patches:patcher.stop()
@@ -476,6 +501,12 @@ class ControlOwnerProcessTests(unittest.TestCase):
             from test_wam import WamInputWorkflowTests
             _,mapping=native_mapping_fixture(Path(self.temp.name)/'native');jaw.configure_mapping(mapping['path'])
             self.addCleanup(lambda:jaw.configure_mapping(None));bundle=WamInputWorkflowTests().descriptor()
+            if memory_parameters:
+                from test_wam_mem import Worker,registry
+                from robot_workbench import wam_mem
+                bundle=wam_mem.descriptor(registry())
+            elif torch_parameters:
+                bundle['backend']='torch';bundle['runtime']['adapter']='wam_torch_client.v2'
         self.acquire();client=ControlRuntimeClient(self.descriptor).acquire();self.addCleanup(client.detach)
         if stale_control_clock:
             actual_inputs=client.control_inputs
@@ -494,21 +525,33 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 cameras={s:dict(serial=v)for s,v in fixture.binding['camera_serials'].items()}))
         model_started=threading.Event();model_continue=threading.Event()
         class Model(StubModel):
-            def prepare(self):return wam.worker_identity(bundle)if wam32 else super().prepare()
+            def __init__(self):
+                super().__init__()
+                if memory_parameters:
+                    self.temporal=Worker()
+            def prepare(self):return self.temporal.prepare()if memory_parameters else wam.worker_identity(bundle)if wam32 else super().prepare()
+            def can_reconfigure(self,selected):return parameter_test and wam.sampling_change(self.bundle,selected)
+            def reconfigure(self,selected):
+                self.bundle=selected;return self.temporal.reconfigure(selected)if memory_parameters else wam.worker_identity(selected)
             def worker_status(self):return dict(worker_pid=os.getpid(),worker_exit_code=None,worker_alive=True)
             def infer(self,request):
                 self.requests.append(request)
                 if (stop_during_model or operator_stop)and len(self.requests)>1:
                     model_started.set()
                     if not model_continue.wait(5):raise TimeoutError('CPU late-output barrier expired')
-                if wam32 and not stop_during_model and len(self.requests)>=3:
+                if wam32 and not parameter_test and not stop_during_model and len(self.requests)>=3:
                     time.sleep(2.6 if expire_supply else .4)
                 held=np.zeros(14);held[[6,13]]=.081
                 if operator_home:held[0]=.04
-                return dict(request_id=request['request_id'],action14=np.tile(held if wam32 else request['observation']['model_state14'],(32 if wam32 else 60,1)),audit={'cpu_stub':True})
+                result=(self.temporal.infer(request)if memory_parameters else dict(request_id=request['request_id'],audit={'cpu_stub':True}))
+                if not memory_parameters or 'action14'in result:result['action14']=np.tile(held if wam32 else request['observation']['model_state14'],(32 if wam32 else 60,1))
+                return result
         model=Model();token=Path(self.temp.name)/'model-token';token.write_text('test-only-'+40*'x')
         if wam32:model.bundle=bundle;model.model_id=bundle['model_id']
-        server=serve_model(ModelService(model),token_file=token)
+        variants=([dict(deepcopy(bundle),inference_options={'denoise_steps':n})for n in range(1,11)]if parameter_test else [])
+        service=ModelService(model,**(dict(catalog={str(n):b for n,b in enumerate(variants)},
+            client_factory=lambda _:self.fail('sampling must retain this worker'))if parameter_test else{}))
+        server=serve_model(service,token_file=token)
         serving=threading.Thread(target=server.serve_forever,daemon=True);serving.start()
         camera=RosNode('workflow_camera',namespace='/wb_process_state',domain_id=126)
         closed=threading.Event();pause_frames=threading.Event();thread=None;flow=None
@@ -536,10 +579,12 @@ class ControlOwnerProcessTests(unittest.TestCase):
             if wam32 and not stop_during_model:
                 from test_variable_inference_steps import config as planned_config
                 model_options.update(recording_enabled=False,reference_planning=planned_config()['reference_planning'],finite_chunk_count=3,task='coffee')
+                model_options['reference_planning']['max_execution_duration_s']=2.
                 if normal32:
                     from robot_workbench.execution_settings import NORMAL_BRAKE_DURATION_S,NORMAL_GAIN_TRANSITION_S
                     model_options.pop('finite_chunk_count')
                     policy=model_options['reference_planning']
+                    if recording_only:policy['velocity_limit_rad_s']=2.
                     model_options.update(normal_initial_mode='HOLD',normal_modes=dict(brake_duration_s=NORMAL_BRAKE_DURATION_S,
                         velocity_limit=policy['velocity_limit_rad_s'],acceleration_limit=policy['acceleration_limit_rad_s2'],
                         gain_transition_s=NORMAL_GAIN_TRANSITION_S,teach_kd_scale=.1,recording_required=False,
@@ -554,6 +599,148 @@ class ControlOwnerProcessTests(unittest.TestCase):
             finally:parent.maintenance=False
             if normal32:flow.set_execution_steps(execute_steps,flow.execution_settings()['revision'])
             flow.bind_device()
+            if parameter_test:
+                from robot_workbench.service import Application,serve as serve_app
+                from robot_workbench.management import WorkbenchManager,serve as serve_manager
+                from robot_workbench.inference_model import model_bundle_digest
+                from urllib.request import build_opener,ProxyHandler,Request
+                parent.workflows['inference']=flow;app=Application({'fake':parent});nonce=client.nonce
+                flow.operator_controls=dict(home_velocity_rad_s=.1,timeout_s=30.,focus_timeout_s=8.,double_press_window_s=.4)
+                web=serve_app(app,port=0);threading.Thread(target=web.serve_forever,daemon=True).start()
+                self.addCleanup(web.server_close);self.addCleanup(web.shutdown)
+                url='http://127.0.0.1:'+str(web.server_port);http=build_opener(ProxyHandler({}))
+                def read(request):
+                    from urllib.error import HTTPError
+                    try:
+                        with http.open(request)as response:return json.load(response)
+                    except HTTPError as error:raise AssertionError(str(error.code)+': '+error.read().decode())from error
+                def get():return read(url+'/api/state?environment=fake&business=inference')
+                def action(name,body):
+                    state=get();body=dict(body,environment='fake',business='inference')
+                    return read(Request(url+'/api/actions/'+name,data=json.dumps(body).encode(),
+                        headers={'Content-Type':'application/json','Origin':url,'X-CSRF-Token':state['csrf']}))
+                class ThreadService:
+                    def __init__(self,port):self.port=port
+                    def snapshot(self):return dict(state='running',running=True,owned=True,
+                        identity=dict(pid=os.getpid(),script=__file__,process_state='test-owned-thread'))
+                    def start(self):return dict(self.snapshot(),reused=True)
+                    def track_child(self,pid):
+                        if pid!=os.getpid():raise AssertionError('foreign process')
+                        return self.snapshot()
+                manager=WorkbenchManager(dict(schema='robot_workbench.manager.v1',environment='fake',device_id=parent.id,
+                    state_root=str(Path(self.temp.name)/'manager'),backend_port=web.server_port,model_port=server.server_port),
+                    services={'workbench':ThreadService(web.server_port),'model':ThreadService(server.server_port)},monitor=True)
+                management=serve_manager(manager,host="127.0.0.1",port=0);threading.Thread(target=management.serve_forever,daemon=True).start()
+                self.addCleanup(manager.close);self.addCleanup(management.server_close);self.addCleanup(management.shutdown)
+                management_url='http://127.0.0.1:'+str(management.server_port)
+                def wait_job():
+                    deadline=time.monotonic()+75
+                    while app.jobs[('fake','inference')]['status']=='running':
+                        self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                    job=app.jobs[('fake','inference')];self.assertEqual(job['status'],'completed',job)
+                def held():
+                    state=get();self.assertEqual(state['workflow']['inference']['normal_mode']['mode'],'HOLD')
+                    for name in ('inference_run','inference_teach','inference_home'):
+                        self.assertTrue(state['runtime']['allowed_operations'][name]['allowed'],state['runtime']['allowed_operations'][name])
+                state_consumers=set()
+                def run(identity,duration=3.,prepare_only=False):
+                    state=get();info=state['workflow']['inference']
+                    action('inference_run',dict(request_id=identity,model_id=info['selected_model_id'],
+                        expected_bundle_digest=info['bundle_digest'],expected_context=info['run_context'],
+                        state_wall_ns=state['server_wall_ns'],seed=7,duration_s=duration,recording_enabled=False,
+                        prepare_only=prepare_only,physical_clearance=True,scene_reset=True))
+                    wait_job();held()
+                    state_consumers.add(flow.pipeline_diagnostics(limit=1)['owner']['data']['observation_input']['consumer'])
+                    self.assertEqual(len(state_consumers),1,'same Owner reuses its ready state subscription across Runs')
+                    self.assertEqual(client.nonce,nonce);self.assertTrue(client.refresh()['connected'])
+                def end(identity):
+                    action('cancel',dict(request_id=identity));deadline=time.monotonic()+10
+                    while flow.snapshot()['busy']:
+                        self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                    self.assertFalse(flow.current['directory'].exists(),'recording disabled must leave no Run artifacts')
+                loads=service.prepare_attempts
+                run('speed-policy-bind',prepare_only=True);end('speed-policy-stop')
+                policy=app.control_policy('fake','inference')
+                updated=action('control_policy',dict(request_id='speed-policy-update',
+                    changes={'planning.velocity_limit_rad_s':2.},expected_revision=policy['revision']))
+                self.assertEqual(app.control_policy('fake','inference')['parameters']['planning']['velocity_limit_rad_s'],2.)
+                for steps in (1,8,20,32):
+                    state=get();action('inference_execution_settings',dict(request_id='length-'+str(steps),
+                        execute_steps=steps,expected_revision=state['inference_execution']['revision']))
+                    run('hold-'+str(steps),prepare_only=True)
+                    self.assertEqual(flow.current['config']['execute_steps'],steps)
+                    self.assertEqual(flow.current['config']['normal_modes']['velocity_limit'],2.)
+                    self.assertIsNone(flow.current['config']['reference_planning']['max_execution_duration_s'])
+                    run('infer-'+str(steps));end('end-'+str(steps))
+                pin=flow.client;lease=pin.token
+                for steps in (2,4,10,2):
+                    selected=deepcopy(bundle);selected['inference_options']['denoise_steps']=steps
+                    deadline=time.monotonic()+5
+                    while True:
+                        current=read(management_url+'/api/environment?environment=fake&view=summary')
+                        if (current['target']['command_epoch']==get()['runtime']['command_epoch']
+                                and not current['health']['busy']):break
+                        self.assertLess(time.monotonic(),deadline);time.sleep(.05)
+                    identity='hot-'+str(steps)+'-'+str(flow.generation)
+                    operation=read(Request(management_url+'/api/operations/action',
+                        data=json.dumps(dict(action='prepare_model',request_id=identity,expected_target=current['target'],arms_supported=False,
+                            parameters=dict(model_id=selected['model_id'],expected_bundle_digest=model_bundle_digest(selected['model_id'],selected)))).encode(),
+                        headers={'Content-Type':'application/json','Origin':management_url,'X-CSRF-Token':current['csrf'],
+                            'X-Workbench-Deployment':current['deployment']['sha256']}))
+                    deadline=time.monotonic()+15
+                    while True:
+                        operation=read(management_url+'/api/operations/jobs/'+operation['job_id']+'?environment=fake')
+                        if operation['status']not in ('queued','running'):break
+                        self.assertLess(time.monotonic(),deadline,operation);time.sleep(.02)
+                    self.assertEqual(operation['status'],'succeeded',operation)
+                    self.assertTrue(operation['result']['model']['prepared']['reused'])
+                    if memory_parameters:self.assertIs(flow.client,pin);self.assertEqual(pin.token,lease)
+                    run(identity+'-hold',prepare_only=True);run(identity+'-infer');end(identity+'-end')
+                    self.assertEqual(service.prepare_attempts,loads)
+                run('alternating-hold',prepare_only=True)
+                for cycle in range(3):
+                    run('alternating-model-'+str(cycle))
+                    state=get();action('inference_teach',dict(request_id='teach-'+str(cycle),
+                        runtime_nonce=nonce,epoch=state['runtime']['command_epoch']))
+                    deadline=time.monotonic()+10
+                    while app.operator_tasks['fake']['phase']!='teaching':
+                        self.assertLess(time.monotonic(),deadline,app.operator_tasks['fake']);time.sleep(.02)
+                    time.sleep(10)
+                    state=get();action('inference_teach',dict(request_id='teach-exit-'+str(cycle),
+                        runtime_nonce=nonce,epoch=state['runtime']['command_epoch']))
+                    deadline=time.monotonic()+10
+                    while app.operator_tasks['fake']['status']=='running':
+                        self.assertLess(time.monotonic(),deadline,app.operator_tasks['fake']);time.sleep(.02)
+                    held();print('PARAMETER_ACCEPTANCE '+json.dumps({'family':flow.selected_model_id,'takeover_s':10,'cycle':cycle+1}),flush=True)
+                end('before-long');run('long-hold',duration=60.,prepare_only=True);run('long-infer',duration=60.);end('long-end')
+                self.assertGreater(len(model.requests),1);self.assertEqual(service.prepare_attempts,loads)
+                if memory_parameters:
+                    flow.client.memory_flow.begin('continue')
+                    memory=flow.client.memory_flow.snapshot()
+                    self.assertTrue(memory['available'],memory)
+                    self.assertGreater(memory['effective_samples'],32)
+                    self.assertGreaterEqual(memory['manual_observations'],3)
+                    self.assertEqual(memory['observations'],1+(memory['effective_samples']-1)//32)
+                    self.assertFalse(memory['prediction_commits_memory'])
+                    self.assertFalse(memory['executed_action_context'])
+                    self.assertEqual(memory['predictions_used_as_actions'],0)
+                    print('REAL_MEMORY_ACCEPTANCE '+json.dumps(memory),flush=True)
+                    finished=action('cancel',dict(request_id='explicit-test-end',end_test=True))
+                    self.assertEqual(action('cancel',dict(request_id='explicit-test-end',end_test=True)),finished)
+                    deadline=time.monotonic()+10
+                    while flow.busy:
+                        self.assertLess(time.monotonic(),deadline,flow.message);time.sleep(.02)
+                    self.assertIsNone(flow.client,flow.message)
+                    self.assertTrue(model.temporal.memory.snapshot()['empty'])
+                    run('next-independent-test-hold',prepare_only=True)
+                    self.assertIsNot(flow.client,pin)
+                    self.assertTrue(flow.client.memory_flow.snapshot()['empty'])
+                    self.assertEqual(service.prepare_attempts,loads)
+                    end('next-test-end')
+                print('PARAMETER_ACCEPTANCE '+json.dumps({'family':flow.selected_model_id,'execute_steps':[1,8,20,32],
+                    'denoise_steps':[2,4,10,2],'long_infer_s':60,'model_requests':len(model.requests),'loads':loads,
+                    'owner_environment':client.environment,'SDK':'NormalBackend only; no hardware imports'}),flush=True)
+                return
             if wam32 and not stop_during_model and not expire_supply:
                 pause_frames.set();time.sleep(.15)
                 resume=threading.Timer(.1,pause_frames.clear);resume.start();self.addCleanup(resume.cancel)
@@ -562,7 +749,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 from robot_workbench.service import Application
                 import uuid
                 parent.workflows['inference']=flow;app=Application({'fake':parent})
-                flow.operator_controls=dict(home_velocity_rad_s=.1,timeout_s=30.,focus_timeout_s=8.,double_press_window_s=.5)
+                flow.operator_controls=dict(home_velocity_rad_s=.1,timeout_s=30.,focus_timeout_s=8.,double_press_window_s=.4)
                 self.assertIsNone(getattr(flow,'operator_session',None))
                 view=app.state('fake','inference');info=view['workflow']['inference']
                 app.action('inference_run',dict(environment='fake',business='inference',request_id=uuid.uuid4().hex,
@@ -607,7 +794,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
                 self.assertTrue(client.refresh()['connected'])
                 return
-            review=flow.preview_episode(seed=1,duration_s=duration)
+            review=flow.preview_episode(seed=1,duration_s=duration,recording_enabled=True)
             flow.execute_review(review['preview']['token'])
             if long_session:
                 from robot_workbench.service import Application
@@ -714,10 +901,10 @@ class ControlOwnerProcessTests(unittest.TestCase):
             self.assertEqual(run['receipt']['controller']['status'],'stopped'if stop_during_model or wam32 and not normal32 else'completed',run['receipt'])
             if normal32 and not operator_stop:
                 metrics=flow.snapshot()['inference']['metrics']
-                self.assertEqual(metrics['returned_predictions'],len(manifest['model_results']))
+                self.assertEqual(metrics['returned_predictions'],sum(row['rows']>0 for row in manifest['model_results'].values()))
                 self.assertGreater(metrics['accepted_predictions'],0,'normal MODEL admissions must be visible in UI metrics')
                 self.assertEqual(run['config']['execute_steps'],execute_steps)
-                self.assertAlmostEqual(run['config']['reference_planning']['max_execution_duration_s'],execute_steps/30*4)
+                self.assertIsNone(run['config']['reference_planning']['max_execution_duration_s'])
                 segment=run['runner'].snapshot()['normal_model_segment']
                 self.assertEqual(segment['complete_source_steps'],execute_steps)
                 self.assertEqual(run['runner'].snapshot()['mode'],'HOLD')
@@ -734,7 +921,10 @@ class ControlOwnerProcessTests(unittest.TestCase):
             self.assertEqual(diagnostics['owner']['status'],'observed')
             self.assertIn('control.tick',diagnostics['owner']['data']['stages'])
             self.assertGreater(diagnostics['owner']['data']['observation_input']['sample_count'],0)
-            if normal32:self.assertIn('planning.cpu.prepare',diagnostics['owner']['data']['stages'])
+            if normal32 and not operator_stop:
+                self.assertIn('planning.cpu.prepare',diagnostics['owner']['data']['stages'])
+            if operator_stop:
+                self.assertNotIn('planning.cpu.prepare',diagnostics['owner']['data']['stages'])
             self.assertIn('model.resolve_sources',diagnostics['business']['stages'])
             self.assertTrue(any(row.get('data',{}).get('stage')=='complete'for row in diagnostics['recording']))
             self.assertIn('recording.seal.total',manifest['pipeline_timing']['stages'])
@@ -745,6 +935,19 @@ class ControlOwnerProcessTests(unittest.TestCase):
             self.assertEqual(run['recorder'].session.publish_calls,0)
             self.assertIsNone(flow.input_evidence);self.assertFalse(list(flow.output.rglob('input.npz')))
             self.assertEqual(len(manifest['playback']['streams']),3)
+            if recording_only and memory_parameters:
+                parent.workflows['inference']=flow
+                app=Application({'fake':parent})
+                pin=flow.client
+                result=app.action('cancel',dict(environment='fake',business='inference',request_id='end-recorded-test',end_test=True))
+                self.assertIn('清空记忆',result['message'])
+                deadline=time.monotonic()+10
+                while flow.busy:
+                    self.assertLess(time.monotonic(),deadline,flow.message);time.sleep(.02)
+                self.assertIsNone(flow.client,flow.message)
+                self.assertIsNone(pin.token)
+                self.assertTrue(model.temporal.memory.snapshot()['empty'])
+                self.assertEqual(manifest['recording_outcome'],'complete')
             if operator_teach:
                 from robot_workbench.service import Application
                 parent.workflows['inference']=flow
@@ -760,7 +963,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     response=app.action('inference_run',dict(environment='fake',business='inference',request_id=uuid.uuid4().hex,
                         seed=1,duration_s=5.,model_id=info['selected_model_id'],expected_bundle_digest=info['bundle_digest'],
                         expected_context=info['run_context'],state_wall_ns=view['server_wall_ns'],
-                        physical_clearance=True,scene_reset=True,prepare_only=prepare_only))
+                        physical_clearance=True,scene_reset=True,prepare_only=prepare_only,recording_enabled=True))
                     deadline=time.monotonic()+25
                     while app.jobs[('fake','inference')]['status']=='running':
                         self.assertLess(time.monotonic(),deadline,app.jobs[('fake','inference')]);time.sleep(.02)
@@ -772,7 +975,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     self.assertEqual(len(model.requests),calls_before)
                     prepared_run=flow.current
                     if pedal_gestures:
-                        flow.operator_controls['double_press_window_s']=.5
+                        flow.operator_controls['double_press_window_s']=.4
                         sequence=[0];focus=dict(client_id='cpu-page',started_wall=time.time())
                         def press(command):
                             sequence[0]+=1
@@ -1491,7 +1694,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 rows[:,0]+=(.02 if cycle%2==0 else -.02)*np.linspace(0,1,61)
                 workflow.reference=dict(model_id=workflow.selected_model_id,calibration_profile_digest=fixture.binding['calibration_profile_digest'],
                     duration_s=2.,device_targets14=rows.tolist())
-                review=workflow.preview_episode(seed=3,duration_s=2)
+                review=workflow.preview_episode(seed=3,duration_s=2,recording_enabled=True)
                 workflow.execute_review(review['preview']['token'])
                 deadline=time.monotonic()+8
                 while time.monotonic()<deadline:

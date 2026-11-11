@@ -15,6 +15,33 @@ from robot_workbench.target_interpreter import gains
 from robot_workbench.sdk_process import EXECUTION_CONTEXT_SCHEMA
 
 
+class MemoryActivityTests(unittest.TestCase):
+    def test_feedback_phase_uses_actual_segment_times_and_teach_handover(self):
+        runner=InferenceRunner.__new__(InferenceRunner)
+        runner.normal_config={'enabled':True}
+        runner.status='RUNNING';runner.mode='MODEL';runner.owner=NS(epoch=7)
+        runner.execution_instance_id='sample-run';runner.normal_job=None
+        runner.normal_segment=dict(start_source_s=10.,end_source_s=11.)
+        phase=lambda stamp:runner.memory_sampling_activity(stamp,7)['phase']
+        self.assertEqual(phase(9.99),'WAIT')
+        self.assertEqual(phase(10.),'MODEL_EXECUTING')
+        self.assertEqual(phase(10.999),'MODEL_EXECUTING')
+        self.assertEqual(phase(11.),'WAIT')
+        self.assertEqual(runner.memory_sampling_activity(10.5,6)['phase'],'HOLD')
+        for stage in ('QUEUED','PREPARING','BRAKING','GAINS'):
+            runner.normal_job={'stage':stage}
+            self.assertEqual(phase(10.5),'WAIT','pending takeover must not commit model memory')
+        runner.mode='TEACH';runner.normal_job={'stage':'GAINS'}
+        self.assertEqual(phase(12.),'HOLD')
+        runner.normal_job=None
+        self.assertEqual(phase(12.),'TEACH')
+        runner.mode='BRAKE';runner.normal_job=dict(brake_started=True,boundary_s=12.,end_s=12.2)
+        self.assertEqual(phase(12.1),'HOLD')
+        self.assertEqual(phase(12.2),'HOLD')
+        runner.status='STOPPED'
+        self.assertEqual(phase(12.1),'HOLD')
+
+
 class NormalBackend(shared.WindowBackend):
     native_reference_api='preserve_reference_v1'
     motion_gain_profile='normal_X5'
@@ -180,7 +207,7 @@ class NormalModeTests(unittest.TestCase):
             from test_infer_curve_policy import POLICY
             normal.update(brake_duration_s=.2,velocity_limit=1.,acceleration_limit=40.)
             config.update(model_id=MIXED366_ID,task='coffee',duration_s=reviewed_duration_s,execute_steps=15,
-                reference_planning=deepcopy(POLICY),target_execution='shared_reference_windows',
+                reference_planning=dict(POLICY,max_execution_duration_s=None),target_execution='shared_reference_windows',
                 maximum_observation_age_s=.5,reference_supply_timeout_s=.5,
                 conversion_identity={'mapping':{'command_jaw_limits_mm':[0.,81.],'device_jaw_unit':'recorder_endpoint_mm'}})
         if per_episode:

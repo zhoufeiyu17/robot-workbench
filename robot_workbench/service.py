@@ -356,8 +356,11 @@ class Application:
             request_id='pedal-'+reference.source_instance_id.replace(':','_')+'-'+str(reference.sequence),
             runtime_nonce=device.runtime.nonce,epoch=state['command_epoch'])
         if command==11:
+            # evdev occurred_at has microsecond resolution; compare in that
+            # domain so the inclusive window edge does not depend on float ULPs.
             second=bool(gesture and gesture['context']==context
-                and 0<occurred_at-gesture['occurred_at']<=workflow.operator_controls['double_press_window_s'])
+                and 0<round((occurred_at-gesture['occurred_at'])*1_000_000)
+                    <=round(workflow.operator_controls['double_press_window_s']*1_000_000))
             if second:
                 workflow.operator_pedal_gesture=None
                 if not(gesture['eligible']and held and gesture['epoch']==state['command_epoch']):return dict(accepted=False)
@@ -367,6 +370,7 @@ class Application:
                 request.update({key:session[key]for key in ('seed','duration_s','model_id','expected_bundle_digest')})
                 request['wam_stall_recovery']=session.get('wam_stall_recovery',False)
                 request['recording_enabled']=session.get('recording_enabled',False)
+                request['memory_start']='continue'
                 request.update(expected_context=self.inference_context(device,state,workflow),state_wall_ns=time.time_ns(),
                     physical_clearance=True,scene_reset=True,arms_supported=True)
                 return self.action('inference_run',request)
@@ -1477,6 +1481,8 @@ class Application:
         if action=='stop':
             return self.stop_device(device)
         if action=='cancel' and business=='inference':
+            if set(body)-{'environment','business','request_id','end_test'}or type(body.get('end_test',False))is not bool:
+                raise ValueError('结束推理测试需要显式布尔 end_test')
             workflow=device.workflows.get('inference')
             with self.lock:
                 self.inference_generations[environment]+=1
@@ -1486,8 +1492,12 @@ class Application:
             if own_connection:device.stop_latched=True
             if device.runtime is not None and (device.runtime.holder=='inference' or own_connection):
                 device.submit(business,{'action':'stop'})
-            if workflow:threading.Thread(target=workflow.cancel,daemon=True).start()
-            return dict(message='本轮推理准备或执行已撤销，不会自动重试')
+            if workflow:
+                if body.get('end_test'):workflow.end_test(request_id)
+                else:threading.Thread(target=workflow.cancel,daemon=True).start()
+            response=dict(message='本次测试结束与清空记忆已受理'if body.get('end_test')else'本轮推理准备或执行已撤销，不会自动重试')
+            with self.lock:self.requests[key]=dict(body=original_body,action=action,response=response)
+            return response
         if action not in ('preview_target','preview_overview','preview_mesh','preview_recover','mesh','select_result',*HISTORY_ACTIONS):
             with self.lock:
                 if any(row.get('status')=='running' and row.get('action')=='inference_run'
@@ -2017,6 +2027,12 @@ def handler(app):
                     if flow is None:raise ValueError('推理业务未配置')
                     options={k:int(query[k][0])for k in ('after','owner_after','limit')if k in query}
                     return self.send(200,flow.pipeline_diagnostics(**options))
+                if path.path=='/api/inference-replay-metadata':
+                    if set(query)!={'environment','run_id'}or any(len(v)!=1 for v in query.values()):
+                        raise ValueError('one explicit environment and recording Run required')
+                    flow=app.device(query['environment'][0]).workflows.get('inference')
+                    if flow is None:raise ValueError('推理业务未配置')
+                    return self.send(200,flow.replay_metadata(query['run_id'][0]))
                 if path.path=='/api/inference-recordings':
                     if set(query)!={'environment','business'}or any(len(v)!=1 for v in query.values())or query['business'][0]!='inference':
                         raise ValueError('one explicit inference environment required')

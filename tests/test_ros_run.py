@@ -462,8 +462,11 @@ class RosRunTests(unittest.TestCase):
                             bridge.update('inference_recording',dict(prepared=True,done=False,alive=True,error=capture.error,
                                 execution_instance_id=capture.execution_instance_id,ingress_closed=False))
                 device=SimpleNamespace(id='cpu_robot',environment='fake',runtime=runtime)
-                service=SimpleNamespace(device=device,event=event,reference_executor=None)
+                service=SimpleNamespace(device=device,event=event,reference_executor=None,inference=None,
+                    inference_state=None,inference_state_lock=threading.Lock())
                 bridge=OwnerInference(service,config,dict(profile=profile,reference=None,preloaded_prediction=None,feedforward=None))
+                service.inference=bridge
+                self.addCleanup(service.inference_state[1].close)
                 policy=runtime._guard_policy('inference')
                 pairer=TimestampPairer(Guard.bind(policy,dict(training_rgb_pair_error_s=TRAINING_RGB_PAIR_ERROR_S,
                                                             training_state_pair_error_s=TRAINING_STATE_PAIR_ERROR_S)))
@@ -520,14 +523,16 @@ class RosRunTests(unittest.TestCase):
                     self.addCleanup(restore_gc)
                     runtime.revoke_inference()
                     retired=weakref.ref(bridge);facts=weakref.ref(runtime.owner.recording)
-                    bridge.close();runtime.owner.recording=None;bridge=None
+                    service.inference=None;bridge.close();runtime.owner.recording=None;bridge=None
                     self.assertTrue(backend.is_connected,'retirement must be safe while the Owner stays connected')
                     self.assertEqual({'binding':retired()is not None,'recording':facts()is not None},
                         {'binding':False,'recording':False})
                     for _ in range(16):
                         bridge=OwnerInference(service,config,dict(profile=profile,reference=None,preloaded_prediction=None,feedforward=None))
+                        self.assertIs(bridge.ros_inputs,service.inference_state[2])
+                        service.inference=bridge
                         runtime.configure_inference(config,bridge.factory);runtime.revoke_inference()
-                        retired=weakref.ref(bridge);bridge.close();bridge=None
+                        retired=weakref.ref(bridge);service.inference=None;bridge.close();bridge=None
                         self.assertIsNone(retired(),'repeated model binding must release the old ROS callback graph')
         finally:
             model_continue.set();closed.set()

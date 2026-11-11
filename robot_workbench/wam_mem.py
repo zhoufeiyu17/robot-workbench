@@ -1,6 +1,6 @@
 """World-memory WAM family. Raw native14/RGB in; absolute native14 targets out."""
-from collections import OrderedDict
-from copy import deepcopy
+from collections import OrderedDict, deque
+from copy import copy, deepcopy
 import hashlib
 import json
 import math
@@ -15,7 +15,7 @@ import numpy as np
 from . import wam
 
 SCHEMA='workbench.wam-mem.v1'
-MEMORY_PROTOCOL='workbench.wam-memory-phase.v2'
+MEMORY_PROTOCOL='workbench.wam-memory-phase.v4'
 ROLES=('checkpoint','vae','phoenix_encoder','csvae_checkpoint','text_index','text_features','source_manifest')
 _SHA=re.compile('[0-9a-f]{64}')
 _SOURCE_SHA256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -56,10 +56,9 @@ def validate_descriptor(value):
             or not _SHA.fullmatch(str(value['model_bundle_sha256']))):
         raise ValueError('WAM-MEM producer artifact identities required')
     for pin in value['artifacts'].values():artifact_identity(pin)
-    if (value['runtime']!={'adapter':'world_memory_policy.v1','python_abi':'cp312','adapter_sha256':_SOURCE_SHA256}
-            or value['inference_options']!={'denoise_steps':2}
-            or value['inference_capabilities']!={'denoise_steps':{'minimum':2,'maximum':2,'default':2}}):
-        raise ValueError('WAM-MEM initial integration requires the qualified N2 Torch interface')
+    if value['runtime']!={'adapter':'world_memory_policy.v1','python_abi':'cp312','adapter_sha256':_SOURCE_SHA256}:
+        raise ValueError('WAM-MEM requires the registered Torch interface')
+    wam.validate_inference_options(value['inference_options'],value['inference_capabilities'])
     return deepcopy(value)
 
 
@@ -67,19 +66,26 @@ def descriptor(registry,*,denoise_steps=None):
     rows=registry.get('files');pins=registry.get('artifacts')
     if not isinstance(rows,list)or not rows or not isinstance(pins,dict)or set(pins)!=set(ROLES):
         raise ValueError('complete WAM-MEM deployment artifact registry required')
-    if denoise_steps not in (None,2)or registry.get('selected_inference_options',{'denoise_steps':2})!={'denoise_steps':2}:
-        raise ValueError('WAM-MEM supports N2 in this integration')
+    capabilities=registry.get('inference_capabilities',{'denoise_steps':{'minimum':2,'maximum':2,'default':2}})
+    if denoise_steps is None:
+        denoise_steps=registry.get('selected_inference_options',{}).get('denoise_steps',capabilities['denoise_steps']['default'])
+    options=wam.validate_inference_options({'denoise_steps':denoise_steps},capabilities)
     canonical=json.dumps(sorted(rows,key=lambda row:row['path']),sort_keys=True,separators=(',',':')).encode()
     if hashlib.sha256(canonical).hexdigest()!=registry.get('bundle_sha256'):
         raise ValueError('WAM-MEM artifact manifest identity differs')
     return validate_descriptor(dict(schema=SCHEMA,model_id=registry['model_id'],epoch=None,step=registry['step'],backend='torch',
         artifacts={k:artifact_identity(v)for k,v in pins.items()},model_bundle_sha256=registry['bundle_sha256'],prompt=registry['instruction'],
         runtime=dict(adapter='world_memory_policy.v1',python_abi='cp312',adapter_sha256=_SOURCE_SHA256),
-        memory_protocol=MEMORY_PROTOCOL,inference_options=dict(denoise_steps=2),
-        inference_capabilities=dict(denoise_steps=dict(minimum=2,maximum=2,default=2))))
+        memory_protocol=MEMORY_PROTOCOL,inference_options=options,inference_capabilities=deepcopy(capabilities)))
 
 
-def variants(registry):return [descriptor(registry)]
+def variants(registry):
+    default=descriptor(registry);bounds=default['inference_capabilities']['denoise_steps']
+    return [dict(deepcopy(default),inference_options=dict(denoise_steps=n))
+            for n in range(bounds['minimum'],bounds['maximum']+1)]
+
+
+sampling_change=wam.sampling_change
 
 
 def verify_registry(registry):
@@ -123,7 +129,7 @@ def worker_identity(bundle):
     return dict(status='ready',model_id=value['model_id'],epoch=None,step=value['step'],backend='torch',strict_load=True,
         checkpoint_identity=value['artifacts']['checkpoint'],model_bundle_sha256=value['model_bundle_sha256'],
         runtime=value['runtime'],memory_protocol=MEMORY_PROTOCOL,action_horizon=32,history_steps=0,action_hz=30,
-        inference_steps=2,input_domain='recorded_native14_and_rgb',output_domain='recorded_native_state14',command_publication=False)
+        inference_steps=value['inference_options']['denoise_steps'],input_domain='recorded_native14_and_rgb',output_domain='recorded_native_state14',command_publication=False)
 
 
 class Adapter(wam.Adapter):
@@ -148,7 +154,35 @@ def validate_phase(value):
             or value['protocol']!=MEMORY_PROTOCOL or value['start']not in('fresh','continue')
             or any(type(value[k])is not int or value[k]<0 for k in ('epoch','revision'))
             or any(not isinstance(value[k],str)or not 0<len(value[k])<=128 for k in ('session_id','clock_domain'))):
-        raise ValueError('explicit WAM-MEM v2 memory context required')
+        raise ValueError('explicit WAM-MEM v4 memory context required')
+    return value
+
+
+def validate_memory_sample(value, observation_time, *, required=False):
+    if value is None:
+        if required:raise ValueError('real sampled context metadata required')
+        return None
+    keys={'states14','actions14','state_times','action_times','mode','effective_index',
+          'action_semantics','valid_actions','executed_action_condition'}
+    if (not isinstance(value,dict) or set(value)!=keys
+            or value['mode']not in ('INITIAL','MODEL_EXECUTING','TEACH')
+            or value['action_semantics']!='materialized_next_observation'
+            or value['executed_action_condition']is not False
+            or type(value['effective_index'])is not int or value['effective_index']<0
+            or type(value['valid_actions'])is not int or not 0<=value['valid_actions']<=32):
+        raise ValueError('T01 real-sample contract differs')
+    if type(observation_time)not in (int,float)or not math.isfinite(observation_time):
+        raise ValueError('finite memory observation time required')
+    count=value['valid_actions']
+    for name in ('states14','actions14'):
+        array=np.asarray(value[name],dtype=float)
+        if array.size!=count*14 or count and array.shape!=(count,14) or not np.isfinite(array).all():
+            raise ValueError('bounded real GT states/actions required')
+    before=np.asarray(value['state_times'],dtype=float);after=np.asarray(value['action_times'],dtype=float)
+    if (before.shape!=(count,) or after.shape!=(count,) or not np.isfinite(before).all()
+            or not np.isfinite(after).all() or np.any(after<=before) or np.any(after>observation_time)
+            or np.any(np.diff(before)<=0) or np.any(np.diff(after)<=0)):
+        raise ValueError('GT timestamps must precede the selected real observation')
     return value
 
 
@@ -158,10 +192,12 @@ class PhaseMemory:
         self.policy,self.instruction,self.seed=policy,instruction,seed
         self.phase=None;self.revision=0;self.results=OrderedDict()
         self.origin=self.last_time=None;self.calls=self.observations=self.manual_observations=0
+        self.context_cache=None;self.context_identity=None;self.context_previous_times=[]
 
     def _reset(self):
         self.policy.reset(control_frequency=30)
         self.origin=self.last_time=None;self.calls=0;self.observations=0;self.manual_observations=0
+        self.context_cache=None;self.context_identity=None;self.context_previous_times=[]
 
     def clear(self):
         self._reset();self.phase=None;self.revision=0;self.results.clear()
@@ -171,7 +207,8 @@ class PhaseMemory:
             observations=self.observations,manual_observations=self.manual_observations,infer_calls=self.calls,
             source_time=self.last_time,origin_source_time=self.origin,
             executed_action_context=False,predictions_used_as_actions=0,
-            action_context_reason='Observation memory only; future-window admission is not executed point control')
+            action_context_reason='T01 materialized_next_observation training contract masks historical executed controls',
+            write_policy='shared_effective_samples_0_32_64',prediction_commits_memory=False)
 
     def infer(self,request):
         context=validate_phase(request['memory']);operation=request.get('memory_operation','infer')
@@ -188,13 +225,17 @@ class PhaseMemory:
         identity=request['request_id']
         if not isinstance(identity,str)or not 0<len(identity)<=128:raise ValueError('bounded request identity required')
         obs=request.get('observation');stamp=None
-        digest=hashlib.sha256(json.dumps([phase,context['revision'],context['start'],operation,request.get('seed')],separators=(',',':')).encode())
+        sample=request.get('memory_sample')
+        digest=hashlib.sha256(json.dumps([phase,context['revision'],context['start'],operation,request.get('seed'),
+            self.policy.config.inference.denoising_steps],separators=(',',':')).encode())
         if operation!='clear':
             validate_input(obs['model_state14'],obs['images']);stamp=obs['source_time']
+            validate_memory_sample(sample, stamp, required=operation=='observe')
             if type(stamp)not in(int,float)or not math.isfinite(stamp)or stamp<0:raise ValueError('finite source timestamp required')
             digest.update(str(stamp).encode());digest.update(np.asarray(obs['model_state14'],dtype=np.float32).tobytes())
             for name in wam.CAMS:
                 digest.update(str(obs['images'][name].shape).encode());digest.update(obs['images'][name].tobytes())
+        digest.update(json.dumps(sample,sort_keys=True,separators=(',',':')).encode())
         key=(phase,context['revision'],identity);signature=digest.hexdigest()
         if key in self.results:
             old,result=self.results[key]
@@ -207,31 +248,53 @@ class PhaseMemory:
             return dict(request_id=identity,audit=dict(memory=self.snapshot(),operation='clear',command_publication=False))
         if reset:self._reset()
         self.phase=phase
-        if self.last_time is not None and stamp<=self.last_time:raise ValueError('memory observations must strictly advance')
+        if self.last_time is not None and (stamp < self.last_time or operation=='observe' and stamp==self.last_time):
+            raise ValueError('memory observations must strictly advance; queries cannot read future memory')
         if self.origin is None:self.origin=stamp
         model_time=stamp-self.origin
         rgb={role:obs['images'][name]for role,name in zip(('main','left','right'),wam.CAMS)}
         state=np.asarray(obs['model_state14'],dtype=np.float32)
+        observation_digest=hashlib.sha256(state.tobytes())
+        for role in ('main','left','right'):
+            observation_digest.update(str(rgb[role].shape).encode())
+            observation_digest.update(rgb[role].tobytes())
+        observed_identity=observation_digest.hexdigest()
         result=dict(request_id=identity)
-        if operation=='observe':
-            # Same non-reference context write as Policy.act, with no denoising,
-            # action prediction, reference-demo prefill or fabricated controls.
+        bootstrap=self.last_time is None
+        if operation=='observe' or bootstrap:
+            self.context_previous_times=list(self.policy.times)
             cache=self.policy._context(rgb,model_time,self.instruction,state)
+            self.context_cache=cache;self.context_identity=observed_identity
             self.policy.memory=cache.memory;self.policy.times.append(model_time)
-            self.policy.pending=None;self.policy.executed.clear();self.manual_observations+=1
-        else:
+            self.policy.pending=None;self.policy.executed.clear()
+            self.last_time=stamp;self.observations+=1
+            if sample and sample['mode']=='TEACH':self.manual_observations+=1
+        if operation=='infer':
             if type(request['seed'])is not int or not 0<=request['seed']<2**63:raise ValueError('uint63 sampling seed required')
             effective_seed=(request['seed']+self.calls)%(2**63);self.seed(effective_seed)
-            self.policy.observe(rgb,model_time)
-            prediction=self.policy.act(self.instruction,state)['execute']
+            query=copy(self.policy)
+            query.times=list(self.policy.times);query.executed=[];query.pending=None
+            if stamp==self.last_time:
+                if observed_identity!=self.context_identity:
+                    raise ValueError('same memory observation timestamp carried different data')
+                query.times=list(self.context_previous_times)
+                cache=self.context_cache
+            else:
+                cache=query._context(rgb,model_time,self.instruction,state)
+            # Policy.act keeps its native denoising implementation. Its context
+            # and assignments belong to this request-local policy view only.
+            query._context=lambda *args,**kwargs:cache
+            query.observe(rgb,model_time)
+            prediction=query.act(self.instruction,state)['execute']
             if hasattr(prediction,'detach'):prediction=prediction.detach().float().cpu().numpy()
             action=np.asarray(prediction,dtype=np.float32)
             if action.shape!=(32,14)or not np.isfinite(action).all():raise ValueError('WAM-MEM requires finite absolute32x14 output')
             result['action14']=action;self.calls+=1
-        self.last_time=stamp;self.observations+=1
         result['audit']=dict(memory=dict(self.snapshot(),session_id=phase[0],clock_domain=phase[1],phase_epoch=phase[2],
-            reset_applied=reset,model_time_s=model_time,start=context['start'],observation_kind='manual'if operation=='observe'else'model',
-            source_references=deepcopy(obs.get('frame_ids',{}))),operation=operation,command_publication=False)
+            reset_applied=reset,model_time_s=model_time,start=context['start'],
+            observation_kind=sample['mode']if sample else'initial'if bootstrap else'model_query',
+            query_source_time=stamp,source_references=deepcopy(obs.get('frame_ids',{}))),
+            operation=operation,command_publication=False,memory_sample=deepcopy(sample))
         if operation=='infer':result['audit'].update(seed=effective_seed,requested_seed=request['seed'])
         self.results[key]=(signature,deepcopy(result))
         while len(self.results)>32:self.results.popitem(last=False)
@@ -244,7 +307,8 @@ def worker_request(request):
         if warm else request.get('memory'))
     validate_phase(memory)
     operation=request.get('memory_operation','infer')
-    result=dict(request_id=request['request_id'],seed=request.get('seed',0),memory=deepcopy(memory),warmup=warm,memory_operation=operation)
+    result=dict(request_id=request['request_id'],seed=request.get('seed',0),memory=deepcopy(memory),warmup=warm,memory_operation=operation,
+        memory_sample=deepcopy(request.get('memory_sample')))
     if operation!='clear':result['observation']={k:request['observation'][k]for k in ('model_state14','images','source_time','frame_ids')if k in request['observation']}
     return result
 
@@ -254,72 +318,165 @@ def Client(registry,bundle):
     return wam.Client(registry,bundle,implementation=sys.modules[__name__])
 
 
-class MemorySession:
-    """Serialize manual observation writes, MODEL calls and explicit clearing.
+class RealTrajectorySampler:
+    """Select real samples 0, stride, 2*stride across active MODEL and TEACH.
 
-    Keep only the latest paired TEACH observation; sample at the model's32/30s
-    decision cadence, then flush the final selected observation before resume.
-    No camera/control calls and no action prediction in the background thread.
+    Waiting pauses the effective index. Next-state GT links only adjacent real
+    samples, while original timestamps retain all waits and source gaps.
     """
+    def __init__(self, *, stride=32, frequency=30.):
+        if type(stride) is not int or not 1 <= stride <= 32:
+            raise ValueError('memory sampling stride must be within the model horizon')
+        if type(frequency) not in (int, float) or not math.isfinite(frequency) or frequency <= 0:
+            raise ValueError('finite positive memory sampling frequency required')
+        self.stride = stride
+        self.period = 1. / frequency
+        self.previous = None
+        self.history = []
+        self.last_source_time = None
+        self.last_grid_time = None
+        self.samples = 0
+        self.blocks = 0
+        self.gaps = 0
+
+    def _selected(self, observation, phase, index):
+        rows = self.history
+        result = dict(observation=deepcopy(observation),
+                      states14=[row[0] for row in rows], actions14=[row[1] for row in rows],
+                      state_times=[row[2] for row in rows], action_times=[row[3] for row in rows],
+                      mode=phase, effective_index=index, action_semantics='materialized_next_observation',
+                      valid_actions=len(rows), executed_action_condition=False)
+        self.history = []
+        self.blocks += 1
+        return result
+
+    def bootstrap(self, observation):
+        if self.samples:
+            return None
+        self.samples = 1
+        self.last_source_time = observation['source_time']
+        return self._selected(observation, 'INITIAL', 0)
+
+    def pause(self):
+        self.previous = None
+
+    def offer(self, observation, *, phase, grid_time):
+        if phase not in ('MODEL_EXECUTING', 'TEACH', 'WAIT', 'HOLD'):
+            raise ValueError('explicit Owner execution phase required')
+        stamp = observation['source_time']
+        if any(type(value) not in (int, float) or not math.isfinite(value) for value in (stamp, grid_time)):
+            raise ValueError('finite original observation and grid timestamps required')
+        state = np.asarray(observation['model_state14'], dtype=np.float64)
+        if state.shape != (14,) or not np.isfinite(state).all():
+            raise ValueError('one finite measured native14 state required')
+        if self.last_source_time is not None and stamp < self.last_source_time:
+            raise ValueError('memory sample source time regressed')
+        if self.last_grid_time is not None and grid_time < self.last_grid_time:
+            raise ValueError('memory sample grid time regressed')
+        if stamp == self.last_source_time or grid_time == self.last_grid_time:
+            return []
+        self.last_source_time = stamp
+        self.last_grid_time = grid_time
+        if phase in ('WAIT', 'HOLD'):
+            self.pause()
+            return []
+        if self.previous is not None:
+            old_state, old_stamp, old_grid = self.previous
+            if grid_time-old_grid <= 1.5*self.period:
+                self.history.append((old_state, state.tolist(), old_stamp, stamp))
+                self.history = self.history[-self.stride:]
+            else:
+                self.gaps += 1
+        self.previous = state.tolist(), stamp, grid_time
+        index = self.samples
+        self.samples += 1
+        if index % self.stride == 0:
+            return [self._selected(observation, phase, index)]
+        return []
+
+
+class MemorySession:
+    """One real-data sampler and serialized writer for MODEL and TEACH."""
     def __init__(self,client,adapter,clock_domain,*,resolve=None,record=None):
         self.client,self.adapter,self.clock_domain=client,adapter,clock_domain
         self.resolve,self.record=resolve,record
         self.lock=threading.RLock();self.io=threading.Lock();self.wake=threading.Event();self.stop=threading.Event()
-        self.mode='HOLD';self.epoch=-1;self.latest=None;self.last_manual=None;self.generation=0
-        self.control_sequence=None
-        self.force_tail=False;self.offered=0;self.mode_events=0
-        self.start='continue';self.error=None;self.audit=None;self.active=False
+        self.mode='HOLD';self.epoch=-1;self.generation=0;self.control_sequence=None
+        self.control_event_gaps=0;self.last_control_gap=None
+        self.sampler=RealTrajectorySampler();self.pending=deque();self.offered=0;self.mode_events=0
+        self.start='continue';self.error=None;self.audit=None;self.last_manual=None
         self.thread=threading.Thread(target=self._work,name='wam-memory-observations',daemon=True);self.thread.start()
 
     def mode_event(self,value):
         epoch=value.get('command_epoch')
         with self.lock:
             if type(epoch)is not int or epoch<self.epoch:return
-            previous=self.mode;self.mode_events+=1
-            self.epoch=epoch
+            self.mode_events+=1;self.epoch=epoch
             self.mode=value.get('mode','HOLD')if value.get('completed')else'HOLD'
-            if previous=='TEACH'and self.mode!='TEACH':self.force_tail=True;self.wake.set()
 
     def control_event(self,sequence):
         with self.lock:
             if self.control_sequence is not None:
                 if sequence<=self.control_sequence:return False
-                if sequence!=self.control_sequence+1:self.source_error('control event sequence gap; clear or rebind memory')
+                if sequence!=self.control_sequence+1:
+                    self.control_event_gaps+=1
+                    self.last_control_gap=dict(previous=self.control_sequence,received=sequence,
+                        missing=sequence-self.control_sequence-1)
+                    # v4 samples the authoritative activity on paired RobotState.
+                    # This separate audit stream is not a memory-write input.
+                    from .pipeline_timing import timing
+                    timing.record('memory.control_event_gap',time.monotonic_ns(),**self.last_control_gap)
             self.control_sequence=sequence
             return True
 
     def source_error(self,error):
-        with self.lock:self.error=str(error);self.latest=None
+        with self.lock:self.error=str(error);self.pending.clear()
         from .pipeline_timing import timing
         timing.fault('WAM-MEM: '+str(error),epoch=self.epoch)
 
     def offer(self,observation,epoch):
+        activity=observation.get('memory_sampling')
+        if (not isinstance(activity,dict)or activity.get('schema')!='workbench.memory-activity.v1'
+                or activity.get('run_id')!=observation.get('run_id')):
+            return
+        state=(observation['model_state14']if 'model_state14'in observation else
+               self.adapter.device_to_model(observation['device_state14']))
+        value=dict(observation,model_state14=np.asarray(state,dtype=float).tolist())
         with self.lock:
-            if self.stop.is_set()or self.error or self.mode!='TEACH'or epoch!=self.epoch:return
-            if self.last_manual is not None and observation['source_time']<=self.last_manual:return
-            if self.latest is None or observation['source_time']>self.latest[0]['source_time']:
-                self.latest=(observation,epoch,self.generation);self.offered+=1
-        self.wake.set()
+            if self.stop.is_set()or self.error or epoch<self.epoch:return
+            selected=self.sampler.offer(value,phase=activity['phase'],grid_time=observation['sample_grid_time'])
+            self.epoch=epoch
+            self.mode={'MODEL_EXECUTING':'MODEL','WAIT':'MODEL','TEACH':'TEACH','HOLD':'HOLD'}[activity['phase']]
+            self.offered=self.sampler.samples
+            for sample in selected:
+                if len(self.pending)>=8:
+                    self.source_error('real memory writer queue full; no observations silently dropped')
+                    return
+                self.pending.append((sample,epoch,self.generation))
+        if selected:self.wake.set()
 
-    def _observe(self,force=False):
-        with self.lock:
-            item=self.latest
-            if item is None:return
-            observation,epoch,generation=item;stamp=observation['source_time']
-            if self.last_manual is not None and stamp<=self.last_manual:self.latest=None;return
-            if self.last_manual is not None and not force and stamp-self.last_manual<32/30:return
-            self.latest=None
-        if self.resolve is not None:observation=self.resolve(observation)
-        prepared=self.adapter.model_input(observation)
-        request=dict(request_id=secrets.token_hex(16),seed=0,run_id=observation.get('run_id'),epoch=epoch,
-            observation=observation,applied_history=np.empty((0,14)),
-            memory=dict(protocol=MEMORY_PROTOCOL,session_id=self.client.session_id,clock_domain=self.clock_domain,
-                epoch=epoch,revision=self.client.memory_revision,start='continue'))
-        def call():return self.client.infer(request,prepared_input=prepared,memory_only=True)
-        result=self.record(request,prepared,call)if self.record is not None else call()
-        with self.lock:
-            if generation==self.generation:
-                self.last_manual=stamp;self.audit=deepcopy(result['audit']['memory'])
+    def _drain(self,until=None):
+        while True:
+            with self.lock:
+                if not self.pending:return
+                sample,epoch,generation=self.pending[0]
+                if until is not None and sample['observation']['source_time']>until:return
+                self.pending.popleft()
+                if generation!=self.generation:continue
+            observation=sample['observation']
+            if self.resolve is not None:observation=self.resolve(observation)
+            prepared=self.adapter.model_input(observation)
+            metadata={key:value for key,value in sample.items()if key!='observation'}
+            request=dict(request_id=secrets.token_hex(16),seed=0,run_id=observation.get('run_id'),epoch=epoch,
+                observation=observation,applied_history=np.empty((0,14)),memory_sample=metadata,
+                memory=dict(protocol=MEMORY_PROTOCOL,session_id=self.client.session_id,clock_domain=self.clock_domain,
+                    epoch=epoch,revision=self.client.memory_revision,start='continue'))
+            def call():return self.client.infer(request,prepared_input=prepared,memory_only=True)
+            result=self.record(request,prepared,call)if self.record is not None else call()
+            with self.lock:
+                if generation==self.generation:
+                    self.audit=deepcopy(result['audit']['memory'])
+                    if sample['mode']=='TEACH':self.last_manual=observation['source_time']
 
     def _work(self):
         while not self.stop.is_set():
@@ -327,9 +484,7 @@ class MemorySession:
             with self.lock:generation=self.generation
             try:
                 with self.io:
-                    if not self.stop.is_set():
-                        with self.lock:force=self.force_tail;self.force_tail=False
-                        self._observe(force=force)
+                    if not self.stop.is_set():self._drain()
             except Exception as error:
                 with self.lock:
                     if generation==self.generation:self.source_error(error)
@@ -339,22 +494,36 @@ class MemorySession:
         with self.io:
             with self.lock:
                 if self.error:raise ValueError('memory unavailable: '+self.error)
-                if start=='fresh':self.latest=None
-            if start=='continue':self._observe(force=True)
+                if start=='fresh':
+                    self.pending.clear();self.sampler=RealTrajectorySampler()
+            if start=='continue':self._drain()
             with self.lock:self.start=start
 
-    def rebind_hold(self):
-        # Rebinding an ended Run can change recording selection without
-        # discarding the same model/device memory. No mode may run in this gap.
+    def finish_run(self):
         with self.io:
-            self._observe(force=True)
-            with self.lock:self.mode='HOLD';self.control_sequence=None
+            self._drain()
+            with self.lock:self.sampler.pause()
+
+    def rebind_hold(self):
+        with self.io:
+            self._drain()
+            with self.lock:
+                self.mode='HOLD';self.control_sequence=None;self.sampler.pause()
+
+    def reconfigure(self,client):
+        with self.io:
+            with self.lock:
+                if self.error or self.mode not in ('HOLD','STOPPED'):raise ValueError('memory sampling update requires HOLD')
+            self._drain()
+            return self.client.reconfigure_memory(client)
 
     def infer(self,request,*,prepared_input=None):
         with self.io:
             with self.lock:
                 if self.error:raise ValueError('memory unavailable: '+self.error)
                 start=self.start;generation=self.generation
+                self.sampler.bootstrap(request['observation'])
+            self._drain(until=request['observation']['source_time'])
             result=self.client.infer_chunk(dict(request,memory_start=start),epoch=request['epoch'],
                 clock_domain=request['clock_domain'],valid_until_source_time=request['valid_until_source_time'],prepared_input=prepared_input)
             with self.lock:
@@ -363,7 +532,8 @@ class MemorySession:
             return result
 
     def clear(self,request_id,epoch):
-        with self.lock:self.generation+=1;self.latest=None
+        with self.lock:
+            self.generation+=1;self.pending.clear();self.sampler=RealTrajectorySampler()
         with self.io:
             result=self.client.memory_clear(request_id,epoch=epoch,clock_domain=self.clock_domain)
             with self.lock:
@@ -371,14 +541,20 @@ class MemorySession:
         return result
 
     def snapshot(self):
-        with self.lock:return dict(self.audit or dict(empty=True,observations=0,manual_observations=0,infer_calls=0),available=not self.stop.is_set()and not self.error,
-            error=self.error,pending_manual_observation=self.latest is not None,next_start=self.start,
-            phase=self.mode,control_epoch=self.epoch,mode_events=self.mode_events,manual_offers=self.offered,
-            control_sequence=self.control_sequence,revision=self.client.memory_revision)
+        with self.lock:
+            return dict(self.audit or dict(empty=True,observations=0,manual_observations=0,infer_calls=0),
+                available=not self.stop.is_set()and not self.error,error=self.error,
+                pending_manual_observation=bool(self.pending),next_start=self.start,
+                phase=self.mode,control_epoch=self.epoch,mode_events=self.mode_events,
+                manual_offers=self.offered,effective_samples=self.sampler.samples,
+                sampled_blocks=self.sampler.blocks,source_gaps=self.sampler.gaps,
+                pending_real_contexts=len(self.pending),control_sequence=self.control_sequence,
+                control_event_gaps=self.control_event_gaps,last_control_gap=deepcopy(self.last_control_gap),
+                revision=self.client.memory_revision)
 
     def close(self):
         self.stop.set();self.wake.set()
-        with self.lock:self.generation+=1;self.latest=None
+        with self.lock:self.generation+=1;self.pending.clear()
         self.thread.join(5)
         if self.thread.is_alive():raise RuntimeError('memory observer still in flight')
 
@@ -413,7 +589,7 @@ def _load_policy(registry,paths):
     if (d.action_dim!=14 or d.state_dim!=14 or d.action_horizon!=32 or d.execute_actions!=32
             or d.relative_action_dims!=0 or list(d.views)!=['main','left','right']or d.image_size!=256):
         raise ValueError('unsupported temporal native14/camera/action contract')
-    cfg.inference.denoising_steps=2
+    cfg.inference.denoising_steps=descriptor(registry)['inference_options']['denoise_steps']
     cfg.codec.checkpoint=str(paths['vae']);cfg.codec.phoenix_encoder=str(paths['phoenix_encoder'])
     cfg.codec.csvae_checkpoint=str(paths['csvae_checkpoint']);cfg.data.cache_dir=str(paths['text_index'].parent)
     cfg.text.online=False;cfg.text.packed_cache=False
@@ -435,14 +611,23 @@ def _worker(registry,connection):
         random.seed(value);np.random.seed(value%(2**32));torch.manual_seed(value)
     try:
         _,paths=verify_registry(registry);policy,instruction=_load_policy(registry,paths)
-        memory=PhaseMemory(policy,instruction,seed);memory.clear()
+        memory=PhaseMemory(policy,instruction,seed);memory.clear();bundle=descriptor(registry)
         connection.send(dict(ready=True,pid=os.getpid(),adapter_source_sha256=_SOURCE_SHA256))
         while True:
             request=connection.recv()
             if request is None:return
+            if request.get('operation')=='sampling':
+                try:
+                    options=wam.sampling_options(bundle,request)
+                    policy.config.inference.denoising_steps=options['denoise_steps']
+                    bundle['inference_options']=options
+                    connection.send(dict(ok=True,worker_pid=os.getpid(),worker_identity=worker_identity(bundle)))
+                except (ValueError,TypeError,KeyError)as error:connection.send(dict(ok=False,error=str(error)))
+                continue
             began=time.monotonic();result=memory.infer(request);torch.cuda.synchronize();finished=time.monotonic()
             result['audit']['timing']=dict(total_wall_s=finished-began,engine_wall_s=finished-began,
                 measurement='entire temporal Policy observe/act including visual encoding, memory and CUDA synchronization')
+            result['audit']['denoise_steps']=policy.config.inference.denoising_steps
             if request['warmup']:memory.clear();result['audit']['memory']['warmup_state_cleared']=True
             connection.send(dict(ok=True,result=result))
     except BaseException as error:

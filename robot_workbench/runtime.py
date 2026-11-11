@@ -647,7 +647,9 @@ class Runtime:
         if 'planning' in parameters:
             if result.get('reference_planning') is None:
                 raise ValueError('selected model has no compatible planning policy binding')
-            result['reference_planning'].update(parameters['planning'], max_execution_duration_s=result['execute_steps']/30.*4)
+            maximum=(result['reference_planning']['max_execution_duration_s']if result.get('finite_chunk_count')is not None
+                else None)
+            result['reference_planning'].update(parameters['planning'], max_execution_duration_s=maximum)
             if result.get('normal_modes'):
                 result['normal_modes'].update(velocity_limit=parameters['planning']['velocity_limit_rad_s'],
                                               acceleration_limit=parameters['planning']['acceleration_limit_rad_s2'])
@@ -777,8 +779,13 @@ class Runtime:
         if self.ros_publisher is not None:
             from .inference_trace import clean
             if kind=='feedback' and fields.get('phase')=='sdk_read':
+                runner = getattr(self.owner, 'runner', None)
+                classify = getattr(runner, 'memory_sampling_activity', None)
+                activity = (classify(fields['raw']['sample_time_s'], fields['sample_epoch'])
+                            if callable(classify) else
+                            dict(schema='workbench.memory-activity.v1', run_id=None, phase='HOLD'))
                 self.ros_publisher.publish_state(dict(fields['raw'],source_call_id=fields.get('call_id'),
-                    runtime_nonce=self.nonce,command_epoch=fields['sample_epoch']))
+                    runtime_nonce=self.nonce,command_epoch=fields['sample_epoch'],memory_sampling=activity))
                 return
             self.ros_publisher.event(kind,clean(fields),run_id=getattr(self.owner,'execution_instance_id','')or'',
                 epoch=self.owner.epoch,source_time_ns=round(self.owner.control_time()*1e9))

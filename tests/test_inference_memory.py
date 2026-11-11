@@ -37,7 +37,7 @@ class InferenceMemoryTests(unittest.TestCase):
 
     def test_recording_admission_callbacks_do_not_retain_retired_runs(self):
         fixture=workflow_fixture.InferenceWorkflowTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
-        fixture.prepare();fixture.workflow.preview_episode(seed=0,duration_s=2)
+        fixture.prepare();fixture.workflow.preview_episode(seed=0,duration_s=2,recording_enabled=True)
         config,factory=fixture.configured[-1];fixture.owner.environment='fake';fixture.owner.shared_target_profile=None
         enabled=gc.isenabled();self.addCleanup(gc.enable if enabled else gc.disable);gc.collect();gc.disable()
         runner=factory(fixture.owner,SimpleNamespace(joint_limits=fixture.limits),fixture.feedback,config)

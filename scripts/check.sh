@@ -22,6 +22,7 @@ python tests/test_registered_model_startup.py
 python tests/test_mixed366.py
 python tests/test_model_session.py
 python tests/test_wam_mem.py
+python tests/test_wam_mem_source.py
 python tests/test_docker_model_service.py
 python tests/test_environment_exit.py
 python tests/test_reclaim_control.py

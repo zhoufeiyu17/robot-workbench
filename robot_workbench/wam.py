@@ -436,6 +436,21 @@ def metadata_weight(registry,row):
         and Path(row['path']).suffix.lower()in('.pt','.pth','.ckpt','.safetensors','.bin'))
 
 
+def sampling_change(previous, selected):
+    """Only native Torch sampling changes can reuse this loaded worker."""
+    if (previous.get('backend')!='torch' or selected.get('backend')!='torch'
+            or previous.get('schema')not in (*SCHEMAS,'workbench.wam-mem.v1')):return False
+    return ({k:v for k,v in previous.items()if k!='inference_options'}
+            =={k:v for k,v in selected.items()if k!='inference_options'})
+
+
+def sampling_options(bundle,request):
+    if (bundle['backend']!='torch' or set(request)!={'operation','expected_options','inference_options'}
+            or request['expected_options']!=bundle['inference_options']):
+        raise ValueError('sampling update binding differs')
+    return validate_inference_options(request['inference_options'],bundle['inference_capabilities'])
+
+
 class Client:
     """Same shared ModelService client API, in WAM's existing cp312 runtime."""
     def __init__(self,registry,bundle,*,implementation=None):
@@ -450,6 +465,22 @@ class Client:
     def worker_status(self):
         p=self.process
         return dict(worker_pid=p.pid if p else None,worker_exit_code=p.poll()if p else None,worker_alive=p is not None and p.poll()is None)
+
+    def can_reconfigure(self,bundle):
+        return self.implementation.sampling_change(self.bundle,bundle) and self.process is not None and self.process.poll()is None
+
+    def reconfigure(self,bundle):
+        bundle=self.implementation.validate_descriptor(bundle)
+        if not self.can_reconfigure(bundle):raise ValueError('sampling update requires the same live Torch model')
+        self.connection.send(dict(operation='sampling',expected_options=self.bundle['inference_options'],
+            inference_options=bundle['inference_options']))
+        if not self.connection.poll(10):raise TimeoutError('sampling update unconfirmed; do not replay')
+        result=self.connection.recv()
+        if result.get('ok')is not True:raise ValueError(result.get('error','sampling update failed'))
+        if result.get('worker_pid')!=self.process.pid or result.get('worker_identity')!=self.implementation.worker_identity(bundle):
+            raise ValueError('sampling update worker identity differs')
+        self.bundle=bundle;self.registry['selected_inference_options']=deepcopy(bundle['inference_options'])
+        return result['worker_identity']
 
     def prepare(self):
         import multiprocessing,os,subprocess,sys,threading
@@ -649,6 +680,15 @@ def _worker(registry,connection,parent_pid):
         while True:
             request=connection.recv()
             if request is None:return
+            if request.get('operation')=='sampling':
+                try:
+                    options=sampling_options(bundle,request)
+                    # _torch_runner reads this same bundle on every call; its
+                    # model and GPU tensors remain resident.
+                    bundle['inference_options']=options
+                    connection.send(dict(ok=True,worker_pid=os.getpid(),worker_identity=worker_identity(bundle)))
+                except (ValueError,TypeError,KeyError)as error:connection.send(dict(ok=False,error=str(error)))
+                continue
             start=time.monotonic();obs=request['observation']
             inputs=network_inputs(obs['model_state14'],obs['images'],context['context'],context['context_mask'],seed=request['seed'])
             hashes={k:hashlib.sha256(v.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()for k,v in inputs.items()}

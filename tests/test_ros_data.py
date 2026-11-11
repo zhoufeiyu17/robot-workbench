@@ -32,6 +32,37 @@ def native_subscriber(pipe):
 
 
 class SourceContracts(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST') == '1', 'native ROS DDS needs isolated Linux')
+    def test_timing_keeps_rmw_metadata_and_direct_callbacks(self):
+        from robot_workbench.ros_data import RosNode
+        from robot_workbench.pipeline_timing import timing
+        producer=RosNode('timing_source',namespace='/wb_timing',domain_id=126)
+        consumer=RosNode('timing_reader',namespace='/wb_timing',domain_id=126)
+        received=[];direct=[]
+        try:
+            publisher=producer.publisher('state',producer.types.RobotState)
+            consumer.subscribe('state',consumer.types.RobotState,lambda message:received.append(message.reference.sequence))
+            raw=consumer.node.create_subscription(consumer.types.RobotState,'/wb_timing/state',
+                lambda message:direct.append(message.reference.sequence),consumer.qos())
+            consumer.subscriptions.append(raw)
+            deadline=time.monotonic()+5
+            while publisher.get_subscription_count()!=2:
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            ref=StreamRef('state','timing_source','host_wall',time.time_ns(),1)
+            publisher.publish(producer.types.RobotState(reference=ref.message(),positions=[0.]*14,velocities=[0.]*14))
+            while not received or not direct:
+                self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+            self.assertEqual(received,[1]);self.assertEqual(direct,[1])
+            rows=[row for row in timing.snapshot(limit=512)['events']
+                  if row.get('consumer')=='timing_reader' and row['stage']=='ros.callback.RobotState']
+            self.assertEqual(len(rows),1)
+            self.assertGreater(rows[0]['rmw_received_wall_ns'],0)
+            self.assertEqual(rows[0]['source_time_ns'],ref.source_time_ns)
+            self.assertEqual(rows[0]['outcome'],'ok')
+            self.assertFalse(consumer.errors)
+        finally:
+            consumer.close();producer.close()
+
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST') == '1', 'native ROS DDS needs the isolated Linux ROS environment')
     def test_closed_nodes_retire_without_cyclic_gc(self):
         import gc,weakref

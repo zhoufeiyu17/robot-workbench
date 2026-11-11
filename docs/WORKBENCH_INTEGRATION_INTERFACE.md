@@ -90,16 +90,16 @@ ControlPolicy。顶部RGB在预处理前用同形零数组替换，腕部RGB、s
 ModelInput复用现有metadata_json保存干预决定和实际种子，黑屏输入使用可重建的
 `wam_zero_head_bicubic256_wan_bf16`转换。常驻记录器保留原始ROS图像、验证实际输入摘要，
 封存时从原ModelInput日志生成`stall_recovery.jsonl`，包含失败模型请求的干预记录。
-记录服务在线协议现为`workbench.recording-service.v6`，同时提供下文的取流关闭证明，旧组合在绑定时拒绝。
+记录服务在线协议现为`workbench.recording-service.v7`，同时提供下文的取流关闭证明，旧组合在绑定时拒绝。v7要求录制服务加载支持2 rad/s的当前策略校验。服务明确拒绝bind/start后，客户端核验writer仍处于prepared/bound及同一绑定，发送正常结束请求并等待封存与真实退出，保留失败原因及已有结束请求。
 Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 `.evidence/infer-pedal2-start-20261107-v1/wam-trick-design.json`和本目录统一进度记录。
 维护触发为检测单位、步数语义、转换格式、Run配置或录制协议变化。
 
 本节记录本聊天已批准的当前契约。验收状态和实际部署身份见 .evidence/infer-pedal2-start-20261107-v1/progress.json，架构追溯见 web/architecture/catalog.json。
 
-2026-11-08 已确认的踏板规则使用一次网页准备。完成位置 HOLD 后，双踩踏板 1 通过现有 inference_run 启动模型，使用服务端已准备的模型、seed 和运行时长。该手势直接表达启动意图。单踩 1 立即请求保持。MODEL 及其进入过程内，踏板 1 和 2 请求保持，踏板 3 无动作。第一脚发生在 Infer 中的双踩，第一脚停止，第二脚忽略。TEACH 中先完成 HOLD，再用一组独立双踩启动。其余时刻，踏板 2 切换 TEACH/HOLD，踏板 3 从 HOLD 启动原生回零。
+2026-11-08 已确认的踏板规则使用一次网页准备。完成位置 HOLD 后，双踩踏板 1 通过现有 inference_run 启动模型，使用服务端已准备的模型、seed 和运行时长。该手势直接表达启动意图，并显式使用 `memory_start=continue`。WAM-MEM 页面只保留带记忆启动与 HOLD 下清空记忆，不再提供无状态 Infer 按钮。单踩 1 立即请求保持。MODEL 及其进入过程内，踏板 1 和 2 请求保持，踏板 3 无动作。第一脚发生在 Infer 中的双踩，第一脚停止，第二脚忽略。TEACH 中先完成 HOLD，再用一组独立双踩启动。其余时刻，踏板 2 切换 TEACH/HOLD，踏板 3 从 HOLD 启动原生回零。
 
-来源保留已有 250 ms 去抖和按住锁定。业务侧在既有 `inference.operator_controls` 中一次绑定 `double_press_window_s=0.5`，以原始 `occurred_at` 判断双踩间隔。手势同时绑定已有踏板来源实例、前台客户端、Owner 与控制会话。重复来源序号、失焦、会话更换以及夹杂其他踏板均不能把旧第一脚用于启动。每次手势资格由第一脚时的模式确定，执行前再次核对当前 HOLD 与准入。
+2026-11-11 用户将双踩识别窗口扩大至 600 ms，发布状态以本轮部署回执为准。来源使用 50 ms 去抖并保留按住锁定。业务侧在既有 `inference.operator_controls` 中一次绑定 `double_press_window_s=0.6`，按 evdev 原始 `occurred_at` 的微秒精度判断双踩间隔，600 ms 边界包含在内。手势同时绑定已有踏板来源实例、前台客户端、Owner 与控制会话。重复来源序号、失焦、会话更换以及夹杂其他踏板均不能把旧第一脚用于启动。每次手势资格由第一脚时的模式确定，执行前再次核对当前 HOLD 与准入。
 
 2026-11-09 用户确认推理录像按 MODEL／TEACH 模式分段：准备和 HOLD 等待、HOME 回零不计入有效录像；TEACH 内短暂停手继续录制，不依赖速度判定。业务在既有 `execution_context` 冻结 `recording_activity=model_teach_compact_v1`，记录器消费同一 Owner 的模式接纳事件，以请求进入 MODEL／TEACH 为开始，退出请求或终止事件为结束。原始源时间和序列不改；仅为模型输入追溯保留策略规定范围内的前置原始样本，前置样本不进入有效回放。
 
@@ -184,11 +184,11 @@ Owner在线协议同步为 `workbench.control_owner.v5`，防止旧端在Run时�
 
 ### 2026-11-07 Infer 参数配置（已批准并接入）
 
-正常工作台使用既有 `normal_modes` / `normal_initial_mode=HOLD` Run 流程，不使用固定三段的 `finite_chunk_count` 验收配置。WAM 执行长度范围由已绑定动作契约给出，当前为1–32步，默认15；仍通过唯一 `ControlPolicy.execution.execute_steps` 提交，并在下一Run冻结。单段源时长为N/30秒，最长执行时间为N/30×4秒。运行时长沿用既有单段诊断、1/2/40/120秒选项；正常整轮预算包含观测、模型调用、规划、等待和运动，只接纳能完整放入预算的片段，不截断运动尾部。
+正常工作台使用既有 `normal_modes` / `normal_initial_mode=HOLD` Run 流程，不使用固定三段的 `finite_chunk_count` 验收配置。WAM 执行长度范围由已绑定动作契约给出，当前为1–32步，默认15；仍通过唯一 `ControlPolicy.execution.execute_steps` 提交，并在下一Run冻结。单段源时长为N/30秒，最长执行时间为N/30×6秒。运行时长沿用既有单段诊断、1/2/40/120秒选项；正常整轮预算包含观测、模型调用、规划、等待和运动，只接纳能完整放入预算的片段，不截断运动尾部。
 
 WAM模型描述升级为 `workbench.wam.v2`，显式携带 `inference_options.denoise_steps` 及模型包声明的 `inference_capabilities.denoise_steps.{minimum,maximum,default}`。本批E03/E04_2模型包声明1–10整数、默认2；公共代码不按checkpoint名字推断该值。checkpoint、统计量、文本及基础配置的制品身份保持，既有 `bundle_digest` 同时冻结所选推理配置。缺少字段、旧在线描述或越界值在准备模型前拒绝。
 
-模型目录提供受包能力约束的配置身份；网页按去噪草稿过滤同一checkpoint，不把所有配置重复列入checkpoint菜单。应用继续使用既有 `prepare_model(model_id, expected_bundle_digest)` 操作，不新增控制RPC。SO从已固定的基础YAML生成本次运行配置并加载，Torch前向消费同一个绑定值；两者统一在Run之间重新准备后生效。草稿未应用时不能以旧配置执行Run。Owner与SDK不接收去噪参数，录制从模型绑定与审计保存实际步数及配置摘要。WAM观测/结果新鲜度2.5秒、实时state年龄及其余保护不变。
+模型目录提供受包能力约束的配置身份；网页按去噪草稿过滤同一checkpoint，不把所有配置重复列入checkpoint菜单。应用继续使用既有 `prepare_model(model_id, expected_bundle_digest)` 操作，不新增控制RPC。普通 WAM／Torch 在模型、权重、文本、统计量、运行时身份均未改变且仅去噪步数变化时，通过既有 worker IPC 更新采样参数并短预热，保留原进程和权重。新参数经 worker 身份回读后绑定；存在活动模型租约或推理请求时仍拒绝更新。SO 从基础 YAML 生成本次配置并重新加载，热更新适配暂缓。参数在 Run 之间生效，草稿未应用时不能以旧配置执行 Run。Owner 与 SDK 不接收去噪参数，录制保存实际步数及配置摘要。WAM 观测/结果新鲜度2.5秒、实时 state 年龄及其余保护不变。
 
 验证入口为 `.evidence/infer-parameters-20261107-v1/progress.json`：包括实际CPU ROS/Owner/常驻记录器的1/15/32步完整用例、两后端实际GPU1/10步去噪、线上策略提交及模型配置应用回执。候选、实际部署与真机运动验收分开记录；本轮参数发布后不自动执行机器人动作。
 
@@ -400,7 +400,7 @@ I06候选验证覆盖真实本地子进程IPC、重复绑定复用、缺绑定�
 
 读取入口为`GET /api/control-policy?environment=...&business=...`，返回`revision/policy_hash/parameters/origins/editable_paths/update_allowed/update_reason`。提交入口为`POST /api/actions/control_policy`，复用HTTP层`environment/business/request_id`，策略负载仅为`expected_revision`与`changes`。`changes`是非空的点分字段映射，例如`{"planning.velocity_limit_rad_s":0.5,"execution.execute_steps":30}`；只有读取结果声明的`editable_paths`可修改。Owner RPC分别为`control_policy_snapshot`和`control_policy`，后者的负载严格限定为上述两个字段。
 
-当前参数包含实测速度保护`measured`、跟踪`tracking`、到位`arrival`、`execution.fake_error`及下述`recording`策略。推理业务增加`execution.execute_steps`，默认15、范围1至60；已绑定的模型配置可提供`planning`、`observation.maximum_age_s`和`model.reference_supply_timeout_s`。未提供的能力不作为可编辑字段。规划上限保留已确认的1 rad/s、40 rad/s²、40 mm/s；实际配置可更低，physical规划速度不得高于启用的实测速度保护。单段预算从执行步数派生为`execute_steps/30*4`秒，不维护第二份独立时长。观测有效期及完整片段的供给期限最多0.5秒。通用生命周期其余策略继续按对应契约接入。
+当前参数包含实测速度保护`measured`、跟踪`tracking`、到位`arrival`、`execution.fake_error`及下述`recording`策略。推理业务增加`execution.execute_steps`，默认15、范围1至60；已绑定的模型配置可提供`planning`、`observation.maximum_age_s`和`model.reference_supply_timeout_s`。未提供的能力不作为可编辑字段。规划参数支持关节速度至2 rad/s、加速度至40 rad/s²、夹爪速度至40 mm/s；实际配置由ControlPolicy提供，physical规划速度不得高于启用的实测速度保护。普通在线Infer使用`max_execution_duration_s=null`，按速度和加速度约束重定时。完整片段及制动预留受本轮总时长约束。观测有效期与供给期限使用各自的ControlPolicy字段。通用生命周期其余策略继续按对应契约接入。
 
 更新先认证业务、核验持权/空闲和`expected_revision`，完整校验后原子替换存储，再提交内存状态并撤销旧预览；写盘失败保留旧版本和摘要。写盘期间禁止新动作进入，但不占用Owner控制锁或HTTP Stop路径。新Run冻结`revision/policy_hash/parameters`到已有执行上下文，既有Run不得在执行中修改策略。唯一兼容例外是其他业务空闲持权时修改下一次infer执行步数，该操作不改变当前持权业务的有效参数。
 
@@ -444,6 +444,78 @@ Owner 和业务只在控制保持、旧 Run 取流关闭后允许下一次准备
 原参数接口应用和新 Run 准备。执行步数仍核对 ControlPolicy expected_revision，模型仍绑定
 精确 bundle_digest；Stop 撤销未完成的重新准备，任何失败都保持设备且不续跑旧动作。
 UI 可编辑草稿并区分正在应用、准备成功与旧录像后台封存，踏板只在新 HOLD 准备成功后启用。
+
+WAM-MEM 同样允许在 HOLD 下将执行长度更新为 1–32 步。模型仍返回完整 32 步预测，
+Owner 只规划并执行前 N 步，再使用新观测推理；未执行的预测不作为动作写入记忆。
+参数更新沿用上述 Run 更新流程及同模型／设备的记忆租约复用，不加载权重或重接 SDK。
+WAM-MEM 去噪能力以已登记制品为准，当前支持 1–10 步、默认 2 步。仅更新步数时保留
+权重、worker、同一独占记忆租约及其时钟／revision；不执行会重置记忆的合成预热。
+`workbench.wam-memory-phase.v4` 的 leased `/prepare memory_sampling` 核对原绑定和新模型描述，
+只接受 `inference_options` 变化，拒绝未结束请求、其他活跃任务或过期租约。服务与客户端原子
+更新模型绑定，下一 Run 按新配置准入；旧绑定不能提交迟到推理。人工观测尾部先在原配置下
+串行提交，更新不清空记忆或把未执行预测写成动作。SO 接入暂缓。
+
+### 统一真实观测记忆与回放配置
+
+v4 统一真实数据写入协议已通过隔离验收。Owner 在真实反馈上附加 `workbench.memory-activity.v1`，按反馈源时间和
+command epoch 标记 MODEL_EXECUTING、TEACH 或等待／保持。业务端仅在前两种阶段推进
+统一有效样本计数，选择第 0、32、64……个真实观测写入记忆，等待和切换期间保留实际时间差。
+首次启动的真实观测建立初始记忆。相邻实测状态生成 q-next GT 审计，缺帧和等待不补造动作。
+
+已核对的 T01、T02_1 训练快照均将历史 executed-control 条件掩码设为 false。适配器遵循
+各制品原有归一化，将真实 RGB、当前状态和 episode 相对秒送入原 Policy context。
+GT 审计通过 `memory_sample` 随 ModelInput 留存。预测调用复用请求级冻结 context，生成的
+未来动作及重复查询均不提交持久记忆。真实写入按时序串行，显式清空以 revision 和 generation
+隔离旧请求，参数更新沿用同一记忆租约与有效样本计数。
+
+显式结束控制会话通过 `cancel.end_test=true` 表达测试结束。控制停止确认后清空记忆、关闭
+该测试的记忆租约，下一次准备建立空租约并复用已加载权重。参数热更新内部的普通 cancel
+保持原记忆。清空失败在业务状态中显示，下一次准备等待结束处理完成。
+控制审计 DataEvent 的序号缺口计入 `control_event_gaps` 与 `last_control_gap`，并进入
+现有流水线计时。统一采样与阶段判断使用配对 RobotState 的 `memory_sampling` 及 epoch。
+原始观测来源变化、时间倒退、写入队列溢出仍使记忆不可用。
+Owner 的状态订阅按 Runtime 实例常驻，推理绑定、测试结束和模型参数更新复用同一已就绪
+输入。每轮模型绑定与请求仍独立。Runtime 身份变更时替换状态订阅，同一实例的描述变更
+明确拒绝。首次就绪计时、订阅缓存与错误、发布端序列及丢弃数由现有诊断接口返回。
+
+`GET /api/inference-replay-metadata?environment=...&run_id=...` 按所选封存 Run 返回
+`workbench.inference-replay.v1`。录制绑定保存模型、后端、去噪步数及执行步数，已有录像
+通过冻结的 ModelInput 和 ControlPolicy 还原。配置变化与 MODEL／TEACH 区间共同投影到
+压缩回放时钟，页面在视频下显示当前配置并支持按片段跳转。TEACH 显示关联模型配置。
+缺少历史字段时返回未知，缺少模式时间轴时明确提示。该接口按需读取，常规状态轮询不携带
+完整配置时间轴。读取核对已登记回执和 manifest 身份，拒绝路径越界与读取期间的变更。
+
+### Infer 变更的非真机验收门
+
+2026-11-11 用户要求：每次相关修改后，先完成以下验收再安排发布。应用、管理器、
+模型 HTTP、ROS 与独立 Owner 使用实际组件，测试执行端必须是隔离的模拟后端。
+独立命名空间、localhost ROS domain、真实 SDK 模块导入与 AF_CAN 拦截共同约束测试；
+测试引入的真实控机调用必须为零。当前现场模型租约和活动控制会话不属于测试资源。
+
+| 编号 | 必验内容 | 通过条件 |
+| --- | --- | --- |
+| A00 | 隔离 | 模拟执行器、独立数据与 IPC；无真实 SDK/CAN 调用 |
+| A01 | 公共准备 | WAM Torch/SO、WAM-MEM Torch 的 1/8/20/32 步经 HTTP 与 Owner 接纳到 HOLD |
+| A02 | Run/操作者 | MODEL/HOLD/TEACH 与回零入口准入一致；失败后无持续灰死或旧动作重放 |
+| A03 | 去噪 | 两个 Torch 家族经管理器完成 2→4→10→2，worker 与加载次数不变；回执和页面反映实际复用 |
+| A04 | 记忆 | 人工观测、参数变更后记忆连续；显式清空／fresh 才复位；未执行预测不写动作上下文 |
+| A05 | 其他参数 | 执行长度、时长、录制选项更新后新 Run 生效，旧配置被冻结，SDK 不重建 |
+| A06 | 竞争与失败 | 越界、短忙、重复请求、Stop 与迟到回包被正确处理；状态不永久锁定 |
+| A07 | 规划 | 验证无倍数上限的完整重定时、2 rad/s策略、超过30秒的Owner传递与中途制动；显式有限诊断预算继续校验 |
+| A08 | 连续切换 | 三次各 10 秒 TEACH 交替，再 60 秒 MODEL；检查断供、死锁与泄漏 |
+| A09 | 录制 | 默认关闭无 Run 录像；开启三路完整；删除只影响选定的合成测试任务 |
+| A10 | 发布 | 核对所有实际消费者与加载版本，尤其业务与 Owner；不打断现场活动会话 |
+
+核心入口、参数与失败路径为必跑项；连续运行、录制和其他关联项按影响执行并说明不适用理由。
+GPU 单模块与页面 DOM 通过不能代替上述链路通过。模型数值实现变化还须真实 GPU 对照；
+复用未改变的既有数值资格时须标注来源和适用边界。SO 热更新与 WAM-MEM SO 暂缓，
+不得把已有 SO 重载行为登记为热更新通过。
+
+可重复入口为 `test_control_owner_process` 中两个 `prepare_sampling_and_short_infer_use_shared_owner`
+用例（`WORKBENCH_NATIVE_ROS_TEST=1`、`ROS_LOCALHOST_ONLY=1`，执行环境须具有项目原生 ROS 依赖），
+以及同文件 1/8/20/32 步录制用例；其余项目对应 `test_variable_inference_steps`、`test_execution_settings`、
+`test_model_session`、`test_inference_transport`、`test_http_service`、`test_management`、`test_inference_history`
+和 `test_web_ui.mjs`。候选、验收、发布各自保留回执，失败记录不覆盖。
 
 用户已批准在`recording_process.py`中实现独立CPU记录进程，稳定身份绑定一次，事件只携带流、序列、源时间和有界数据/引用；沿用64 MiB事件队列与512 KiB消息上限。该增量是通用记录基础，不自动替换现有数采或infer录制，也不接入SDK或开启相机。
 
@@ -493,7 +565,7 @@ UI 可编辑草稿并区分正在应用、准备成功与旧录像后台封存�
 
 ### P1输入与轨迹规则归并（2026-11-05已批准）
 
-G13/G15/G16使用I01现有`planning.velocity_limit_rad_s/acceleration_limit_rad_s2/jaw_velocity_limit_mm_s`，G21使用`execution.execute_steps`，G22从同一步数派生`4×steps/30`秒。Infer在接纳完整轨迹前统一调用I05，轨迹的峰值计算、重定时和SDK本地边界核验继续保留。`execution_settings.py`补入原`trajectory-check`文件映射，不新增策略身份或逐窗口完整配置。动态峰值沿用既有1e-10数值计算余量；步数必须为完整整数，时长不得超过派生上限。
+G13/G15/G16使用I01现有`planning.velocity_limit_rad_s/acceleration_limit_rad_s2/jaw_velocity_limit_mm_s`，G21使用`execution.execute_steps`，G22核对单段时长为有限正数。Infer在接纳完整轨迹前统一调用I05，轨迹的峰值计算、重定时和SDK本地边界核验继续保留。`execution_settings.py`补入原`trajectory-check`文件映射，不新增策略身份或逐窗口完整配置。动态峰值沿用既有1e-10数值计算余量；步数必须为完整整数；普通在线Infer由G23核对整轮剩余时间，夹爪重定时读取已冻结的`planning.jaw_velocity_limit_mm_s`。
 
 I01的`observation`组新增`state_max_age_s/max_camera_span_s`，默认均为0.1秒，仅可在既有已验证上限内收紧。前者由业务输入管理和Owner核验配对反馈年龄，后者由输入管理核验三相机时间跨度；`maximum_age_s`继续管理图像及整体观测年龄。G02/G03/G04使用现有I05字段，采样时刻与检查时刻分别保留。训练配对25/12ms仍仅诊断，本轮没有将它们变为拦截条件。
 

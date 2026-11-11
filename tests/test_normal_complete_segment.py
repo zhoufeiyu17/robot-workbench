@@ -82,7 +82,7 @@ class CompleteNormalTests(unittest.TestCase):
         from robot_workbench.inference_workflow import InferenceWorkflow
         self.setup_reviewed(40.);runner=self.runtime.owner.runner
         recovery=StallRecovery({'left':80.,'right':89.});decisions=[];sequence=0
-        flow=SimpleNamespace(lock=threading.RLock(),current={'id':runner.execution_instance_id,
+        flow=SimpleNamespace(client=None,lock=threading.RLock(),current={'id':runner.execution_instance_id,
             'owner':self.runtime.owner,'stall_recovery':recovery},_metric_event=Mock())
         original_record=runner._record
         def record(name,value):

@@ -198,10 +198,45 @@ recorder._capture_worker()
         from robot_workbench.recording_process import _recording_descriptor,RECORDING_SERVICE_SCHEMA
         with tempfile.TemporaryDirectory()as folder:
             path=Path(folder)/'old-recording.json'
-            path.write_text(json.dumps(dict(schema='workbench.recording-service.v3')));path.chmod(0o600)
-            with self.assertRaisesRegex(ValueError,'protocol version mismatch'):_recording_descriptor(path)
+            for version in ('v3','v6'):
+                path.write_text(json.dumps(dict(schema='workbench.recording-service.'+version)));path.chmod(0o600)
+                with self.assertRaisesRegex(ValueError,'protocol version mismatch'):_recording_descriptor(path)
             path.write_text(json.dumps(dict(schema=RECORDING_SERVICE_SCHEMA)))
             self.assertEqual(_recording_descriptor(path)['schema'],RECORDING_SERVICE_SCHEMA)
+
+    def test_rejected_bind_preserves_already_requested_finish(self):
+        self.test_rejected_bind_seals_unstarted_writer_and_allows_service_exit(finish_pending=True)
+
+    def test_rejected_bind_seals_unstarted_writer_and_allows_service_exit(self,finish_pending=False):
+        import threading
+        from robot_workbench.recording_process import RecordingService,CaptureSession
+        allowed=self.root/'allowed';allowed.mkdir()
+        service=RecordingService(self.root/'bind-service',data_roots=[allowed])
+        original=service.dispatch
+        def reject_binding(request,**kwargs):
+            if request['action']=='bind':
+                if finish_pending:session.finish({'feedback':0},dict(status='stopped',reason='operator already stopped'))
+                raise ValueError('injected old planning policy rejection')
+            return original(request,**kwargs)
+        service.dispatch=reject_binding
+        serving=threading.Thread(target=service.serve_forever,daemon=True);serving.start()
+        try:
+            with patch.dict(os.environ,WORKBENCH_RECORDING_SERVICE=str(service.descriptor_path)):
+                session=CaptureSession.create(allowed,request_id='rejected-bind',source_descriptors=[self.source],purpose_profile='infer_debug')
+                session.prepare()
+                with self.assertRaisesRegex(ValueError,'old planning policy'):
+                    session.bind(run_id='rejected-bind',business_kind='inference',policy_hash='a'*64)
+                self.assertTrue(session.done.wait(10));session.thread.join(2)
+                state=session.snapshot();self.assertTrue(state['writer_exited']);self.assertTrue(state['sealed'])
+                self.assertEqual(session.process.poll(),0)
+                manifest=json.loads((session.directory/'manifest.json').read_text())
+                self.assertEqual(manifest['recording_outcome'],'incomplete')
+                self.assertEqual(manifest['control_terminal']['status'],'stopped'if finish_pending else'failed')
+                self.assertIn('operator already stopped'if finish_pending else'old planning policy',manifest['control_terminal']['reason'])
+                self.assertTrue(service.snapshot()['can_stop'])
+        finally:
+            service.dispatch=original
+            service.dispatch(dict(action='shutdown'));serving.join(3);service.close()
 
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory();self.addCleanup(self.folder.cleanup)
@@ -737,21 +772,21 @@ class CaptureCameraTest(unittest.TestCase):
         import segmented_playback
         import threading
         original_run=segmented_playback.subprocess.run
-        barrier=threading.Barrier(2,timeout=5)
-        first_pair={source['stream_id']for source in self.sources[:2]}
+        barrier=threading.Barrier(3,timeout=5)
+        parallel_streams={source['stream_id']for source in self.sources}
         active=peak=0;export_lock=threading.Lock()
         def run_codec(argv,**kwargs):
             nonlocal active,peak
             if Path(argv[0]).name!='ffmpeg':return original_run(argv,**kwargs)
             with export_lock:active+=1;peak=max(peak,active)
             try:
-                if Path(argv[-1]).stem in first_pair:barrier.wait()
+                if Path(argv[-1]).stem in parallel_streams:barrier.wait()
                 return original_run(argv,**kwargs)
             finally:
                 with export_lock:active-=1
         with patch.object(segmented_playback.subprocess,'run',side_effect=run_codec):
             parallel=export_capture(session.directory,manifest,session.directory/'parallel-replay')
-        self.assertEqual((peak,active),(2,0))
+        self.assertEqual((peak,active),(3,0))
         self.assertEqual(set(parallel['streams']),set(manifest['playback']['streams']))
         for name,value in parallel['streams'].items():
             self.assertEqual(value['frame_offsets_s'],manifest['playback']['streams'][name]['frame_offsets_s'])

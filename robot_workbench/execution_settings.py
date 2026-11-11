@@ -16,6 +16,7 @@ TRAINING_STATE_PAIR_ERROR_S=.012
 MODEL_JAW_OPEN_MARGIN_MM=2.
 NORMAL_BRAKE_DURATION_S=.2
 NORMAL_GAIN_TRANSITION_S=.05
+PEDAL_DEBOUNCE_S=.05
 NATIVE_WATCHDOG_TIMEOUT_S=.1
 DEFAULT_JOINT_TOLERANCE_RAD=math.radians(2.)
 DEFAULT_MEASURED_SPEED_LIMIT_RAD_S=2.5
@@ -188,10 +189,10 @@ def validate_control_parameters(parameters, *, environment,business=None):
             result['execution'][key] = float(value)
     planning = result.get('planning')
     if planning:
-        maxima = dict(velocity_limit_rad_s=1., acceleration_limit_rad_s2=40., jaw_velocity_limit_mm_s=40.)
+        maxima = dict(velocity_limit_rad_s=2., acceleration_limit_rad_s2=40., jaw_velocity_limit_mm_s=40.)
         if set(planning) != set(maxima) or any(type(v) not in (int, float) or not math.isfinite(v)
                 or not 0 < v <= maxima[k] for k, v in planning.items()):
-            raise ValueError('planning limits must fit the qualified1rad/s,40rad/s2,40mm/s profile')
+            raise ValueError('planning limits must fit the supported2rad/s,40rad/s2,40mm/s profile')
         if environment == 'physical' and (not result['measured']['enabled']
                 or planning['velocity_limit_rad_s'] > result['measured']['limit_rad_s']):
             raise ValueError('planning velocity requires enabled and sufficient measured-speed protection')
@@ -227,7 +228,7 @@ class Guard:
         'G15': ('planning', 'acceleration_limit_rad_s2', 'rad/s²', '0<=observed<=limit+1e-10', 'REJECT_PLAN'),
         'G16': ('planning', 'jaw_velocity_limit_mm_s', 'mm/s', '0<=observed<=limit+1e-10', 'REJECT_PLAN'),
         'G21': ('execution', 'execute_steps', 'steps', 'observed==limit', 'REJECT_PLAN'),
-        'G22': ('execution', 'execute_steps', 's', '0<observed<=4*steps/30', 'REJECT_PLAN'),
+        'G22': ('execution', 'execute_steps', 's', 'finite observed>0', 'REJECT_PLAN'),
         'G35': ('recording', 'purpose_profile', 'failed_conditions', 'observed==0', 'REJECT_INPUT'),
         'G38': ('recording', 'purpose_profile', 'failed_conditions', 'observed==0', 'BRAKE_TO_HOLD'),
     }
@@ -271,6 +272,8 @@ class Guard:
             if type(observed) not in (int,float) or not math.isfinite(observed):raise ValueError('finite guard observed required')
             recording = group == 'recording'
         if signal['rule_id'] in cls._bound_rules:pass
+        elif signal['rule_id']=='G22':
+            limit,enabled,passed=None,True,observed>0
         elif recording:
             purpose = settings[key]
             if purpose not in ('data_required', 'infer_debug') or type(observed) is not int or observed < 0:
@@ -278,13 +281,11 @@ class Guard:
             limit, enabled, passed = 0, purpose == 'data_required'and phase!='seal', observed == 0
         else:
             limit = settings[key]
-            if signal['rule_id']=='G22':limit=limit/30.*4
             if type(limit) not in (int, float) or not math.isfinite(limit) or limit <= 0:
                 raise ValueError('finite positive guard limit required')
             enabled = settings.get('enabled', True)
             if signal['rule_id']=='G21':
                 passed=type(observed) is int and observed==limit
-            elif signal['rule_id']=='G22':passed=0<observed<=limit
             elif signal['rule_id'] in ('G13','G15','G16'):passed=0<=observed<=limit+1e-10
             else:passed = 0 <= observed <= limit if signal['rule_id'] in ('G02','G03','G04') else abs(observed) <= limit
         if type(enabled) is not bool:raise ValueError('boolean guard enabled required')

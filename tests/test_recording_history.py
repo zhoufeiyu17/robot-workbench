@@ -32,18 +32,55 @@ class CommonCaptureIndexTest(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name).resolve()
         self.index=CaptureResults(self.root,environment='fake',device_id='cpu');self.addCleanup(self.index.close)
 
-    def sealed(self,revision,status='completed',outcome='complete'):
+    def sealed(self,revision,status='completed',outcome='complete',business='calibration'):
         from robot_workbench.collection_history import _pin
-        run='cpu-run';folder=self.root/run;data=folder/'capture'/'data';data.mkdir(parents=True,exist_ok=True)
+        run='cpu-run';folder=self.root/(('inference-'if business=='inference'else'')+run);data=folder/'capture'/'data';data.mkdir(parents=True,exist_ok=True)
         manifest=dict(schema='workbench.capture-manifest.v1',capture_session_id=run,seal_revision=revision,
-            binding=dict(run_id=run,business_kind='calibration',policy_hash='a'*64),files={},playback={},recording_outcome=outcome)
+            binding=dict(run_id=run,business_kind=business,policy_hash='a'*64),files={},playback={},recording_outcome=outcome)
         mp=data/f'manifest-r{revision:06d}.json';mp.write_text(json.dumps(manifest))
-        receipt=dict(schema='workbench.capture-run.v1',execution_instance_id=run,business_kind='calibration',seal_revision=revision,
+        receipt=dict(schema='workbench.capture-run.v1',execution_instance_id=run,business_kind=business,seal_revision=revision,
             execution_context=dict(device_id='cpu',environment='fake'),control_policy={'policy_hash':'a'*64},
             recording=dict(directory=str(data),recording_outcome=outcome),controller={'status':status})
         rp=folder/f'receipt-r{revision:06d}.json';rp.write_text(json.dumps(receipt))
-        return dict(execution_instance_id=run,business_kind='calibration',seal_revision=revision,
+        return dict(execution_instance_id=run,business_kind=business,seal_revision=revision,
             receipt_ref=dict(path=str(rp),**_pin(rp)),manifest_ref=dict(path=str(mp),**_pin(mp)))
+
+    def test_inference_replay_metadata_http_reads_only_pinned_recorded_configuration(self):
+        import threading
+        from types import SimpleNamespace
+        from urllib.request import build_opener,ProxyHandler
+        from urllib.error import HTTPError
+        from robot_workbench.service import Device,Application,serve
+        from robot_workbench.collection_history import CaptureResults,_pin
+        from robot_workbench.inference_history import InferenceHistory
+        from robot_workbench.recording_activity import ActivityTimeline
+        self.index.close()
+        self.index=CaptureResults(self.root,environment='fake',device_id='cpu',inference_history=InferenceHistory(self.root))
+        self.addCleanup(self.index.close)
+        event=self.sealed(1,business='inference');mp=Path(event['manifest_ref']['path'])
+        manifest=json.loads(mp.read_text())
+        config=dict(model_id='wam-fixture-step7',model_label='Recorded fixture',backend='torch',denoise_steps=6,execute_steps=20)
+        manifest['binding']['execution_context']=dict(inference_configuration=config)
+        timeline=ActivityTimeline('cpu-run','clock')
+        timeline.observe('inference_mode_transition',dict(op='normal_mode',requested_mode='MODEL',request_id='start',
+            accepted=True,status='accepted',capture_wall_ns=100_000_000_000),
+            SimpleNamespace(source_clock_id='clock',source_time_ns=10_000_000_000),'cpu-run')
+        timeline.finish(12_000_000_000);manifest['recording_activity']=timeline.manifest()
+        mp.write_text(json.dumps(manifest));event['manifest_ref'].update(_pin(mp));self.index.register(event)
+        device=Device('cpu','fake',None)
+        device.workflows['inference']=SimpleNamespace(replay_metadata=lambda run:self.index.replay_metadata('inference',run))
+        server=serve(Application({'fake':device}),host='127.0.0.1',port=0)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        opener=build_opener(ProxyHandler({}));url='http://127.0.0.1:'+str(server.server_port)+'/api/inference-replay-metadata?environment=fake&run_id=cpu-run'
+        try:
+            result=json.load(opener.open(url,timeout=3));self.assertEqual(result['run_id'],'cpu-run')
+            row=result['segments'][0]
+            self.assertEqual((row['model_id'],row['denoise_steps'],row['execute_steps']),('wam-fixture-step7',6,20))
+            self.assertEqual((row['start_s'],row['end_s']),(0.,2.))
+            mp.write_text('{}')
+            with self.assertRaises(HTTPError):opener.open(url,timeout=3)
+            with self.assertRaises(ValueError):self.index.replay_metadata('inference','../outside')
+        finally:server.shutdown();server.server_close();thread.join(2)
 
     def test_recording_date_uses_original_activity_or_existing_frame_not_file_mtime(self):
         from robot_workbench.collection_history import _capture_started_wall_ns,_pin

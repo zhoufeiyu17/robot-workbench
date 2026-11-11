@@ -290,7 +290,22 @@ class RosNode:
             self.context = entry[0]; entry[1] += 1
         self.node = rclpy.create_node(name, namespace=namespace, context=self.context,
                                      enable_rosout=False, start_parameter_services=False)
-        self.executor = SingleThreadedExecutor(context=self.context); self.executor.add_node(self.node)
+        class TimedExecutor(SingleThreadedExecutor):
+            # The pinned Humble executor discards take_message()[1]. Preserve it
+            # for our diagnostic wrappers while retaining direct subscriptions.
+            def _take_subscription(self, subscription):
+                if not getattr(subscription.callback, '_workbench_timing', False):
+                    return super()._take_subscription(subscription)
+                with subscription.handle:
+                    return subscription.handle.take_message(subscription.msg_type, subscription.raw)
+
+            async def _execute_subscription(self, subscription, taken):
+                if not getattr(subscription.callback, '_workbench_timing', False):
+                    return await super()._execute_subscription(subscription, taken)
+                if taken is not None:
+                    subscription.callback(taken[0], taken[1])
+
+        self.executor = TimedExecutor(context=self.context); self.executor.add_node(self.node)
         self.errors = deque(maxlen=16); self.publishers = {}; self.subscriptions = []
         self.thread = threading.Thread(target=self.executor.spin, name=name+'-ros', daemon=True)
         self.thread.start()
@@ -319,8 +334,9 @@ class RosNode:
             identity=dict(consumer=consumer,topic=topic,
                 request_id=getattr(message,'request_id',None),observation_id=getattr(message,'observation_id',None),
                 stream_id=getattr(ref,'stream_id',None),source_time_ns=source_stamp,
+                source_sequence=getattr(ref,'sequence',None),
                 source_instance_id=getattr(ref,'source_instance_id',None))
-            received=getattr(info,'received_timestamp',0)
+            received=info.get('received_timestamp',0)if isinstance(info,dict)else getattr(info,'received_timestamp',0)
             if type(received)is int and received>0 and 0<=wall-received<=60_000_000_000:
                 timing.record('ros.middleware_to_callback.'+message_type.__name__,began-(wall-received),
                     ended_ns=began,**identity)
@@ -330,6 +346,7 @@ class RosNode:
             finally:
                 timing.record('ros.callback.'+message_type.__name__,began,outcome=outcome,
                     rmw_received_wall_ns=received or None,**identity)
+        receive._workbench_timing=True
         sub = self.node.create_subscription(message_type, topic, receive, self.qos(retained=retained, depth=depth,reliable=reliable))
         self.subscriptions.append(sub); return sub
 

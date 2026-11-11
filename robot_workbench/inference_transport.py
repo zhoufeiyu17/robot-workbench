@@ -163,7 +163,9 @@ def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bun
     if model_family(model_id) in ('base566','mixed366','wam','wam-mem'):metadata['expected_bundle_digest'] = model_bundle_digest(model_id,model_bundle)
     if native_runtime(model_bundle):metadata['backend']=model_bundle['backend']
     if model_family(model_id)=='mixed366':metadata['task']=request['task']
-    if model_family(model_id)=='wam-mem':metadata['memory']=deepcopy(request.get('memory'))
+    if model_family(model_id)=='wam-mem':
+        metadata['memory']=deepcopy(request.get('memory'))
+        metadata['memory_sample']=deepcopy(request.get('memory_sample'))
     arrays = dict(model_state14=np.asarray(state), model_history=np.asarray(request['applied_history']), **images)
     _validate_request(metadata, arrays, model_id, model_bundle)
     return encode_packet(metadata, arrays)
@@ -177,8 +179,9 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
         if metadata.get('task') not in model_spec(model_id,model_bundle)['tasks']:raise ValueError('task is not registered for this checkpoint')
     if model_family(model_id) in ('base566','mixed366','wam','wam-mem'):keys.add('expected_bundle_digest')
     if model_family(model_id)=='wam-mem':
-        from .wam_mem import validate_phase
-        keys.add('memory');validate_phase(metadata.get('memory'))
+        from .wam_mem import validate_phase,validate_memory_sample
+        keys.update(('memory','memory_sample'));validate_phase(metadata.get('memory'))
+        validate_memory_sample(metadata.get('memory_sample'),metadata.get('source_time'))
     if native_runtime(model_bundle):
         keys.add('backend')
         if metadata.get('backend')!=model_bundle['backend']:raise ValueError('model backend differs from prepared runtime')
@@ -337,11 +340,26 @@ class ModelService:
             raise ValueError('model worker busy; preparation was not queued')
         try:
             candidate = self.client
-            if requested != self.model_id or selected != self.model_bundle:
+            identity = None
+            reused=self.status()['loaded']
+            changed=requested!=self.model_id or selected!=self.model_bundle
+            if (changed and self.status()['loaded']
+                    and getattr(self.client,'can_reconfigure',lambda _:False)(selected)):
+                self._set(busy=True)
+                identity=self.client.reconfigure(selected)
+                validate_worker_identity(identity,requested,bundle=selected)
+                self.model_bundle=selected
+                if model_family(requested)=='wam-mem':
+                    # A synthetic warmup is a memory reset. Sampling-only
+                    # changes preserve the already-warm policy and its state.
+                    self._set(status='ready',loaded=True,worker_identity=deepcopy(identity),error=None)
+                    return dict(**metadata,worker_identity=identity,reused=True)
+            elif changed:
                 candidate = self.client_factory(selected)
             elif self.client_refresh is not None and not self.status()['loaded']:
                 candidate = self.client_refresh(self.client)
             if candidate is not self.client:
+                reused=False
                 if getattr(candidate, 'model_id', None) != requested:
                     candidate.close();raise ValueError('catalog client differs from selected model')
                 self.client.close()
@@ -361,6 +379,7 @@ class ModelService:
                           worker_logs=list(self.worker_logs))
                 identity = self.client.prepare()
                 validate_worker_identity(identity, self.model_id, bundle=self.model_bundle)
+            if identity is not None:
                 start=time.monotonic()
                 warm_request=dict(request_id='warmup',seed=0,applied_history=np.empty((0,14),np.float32),
                     observation=dict(source_time=0.,model_state14=np.zeros(14,np.float32),
@@ -375,7 +394,7 @@ class ModelService:
                         input='zero model state/RGB and empty history; no device command',
                         output_sha256=hashlib.sha256(prediction.tobytes()).hexdigest(),
                         timing=deepcopy(warm.get('audit',{}).get('timing'))))
-            return dict(**metadata, worker_identity=self.status()['worker_identity'])
+            return dict(**metadata, worker_identity=self.status()['worker_identity'],reused=bool(reused))
         except Exception as error:
             self.client.close()
             self._set(status='error', loaded=False, error=str(error))
@@ -406,7 +425,9 @@ class ModelService:
                     source_time=metadata['source_time'], frame_ids=metadata['frame_ids']),
                 applied_history=arrays['model_history'])
             if model_family(self.model_id)=='mixed366':request['task']=metadata['task']
-            if model_family(self.model_id)=='wam-mem':request['memory']=deepcopy(metadata['memory'])
+            if model_family(self.model_id)=='wam-mem':
+                request['memory']=deepcopy(metadata['memory'])
+                request['memory_sample']=deepcopy(metadata['memory_sample'])
             if memory_only:request['memory_operation']='observe'
             started = time.monotonic()
             result = self.client.infer(request)
@@ -643,6 +664,7 @@ class RemoteBaseClient:
             identity=value.get('worker_identity') or {}
             validate_worker_identity(identity,self.model_id,bundle=self.model_bundle)
             self.identity=deepcopy(identity)
+            self.preparation_reused=True
             return deepcopy(identity)
         status=json.loads(self._request('/status'))
         if status.get('protocol')!=PROTOCOL:raise ValueError('model HTTP protocol version mismatch; preparation refused')
@@ -656,6 +678,7 @@ class RemoteBaseClient:
             raise ValueError('remote model or conversion identity mismatch')
         validate_worker_identity(identity, self.model_id, bundle=self.model_bundle)
         self.identity = deepcopy(identity)
+        self.preparation_reused=value.get('reused')
         return deepcopy(identity)
 
     def infer(self, request, *, prepared_input=None, memory_only=False):

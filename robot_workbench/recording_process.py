@@ -31,7 +31,7 @@ from .ros_data import bounded_value as _capture_value, BoundedQueue as _CaptureE
 
 ROOT=Path(__file__).resolve().parents[1]
 LIMIT=4*1024*1024
-RECORDING_SERVICE_SCHEMA='workbench.recording-service.v6'
+RECORDING_SERVICE_SCHEMA='workbench.recording-service.v7'
 
 
 def _capture_spec(request_id, sources, purpose, resource_budget):
@@ -846,6 +846,22 @@ class CaptureSession(_CaptureWriter):
                         if message is None:continue
                         self._write(message);return
                 self._write(message)
+        except _RecordingRejected as error:
+            self._error(error)
+            try:
+                state=self._call('status')
+                if (message['action']not in('bind','start')or state.get('state')not in('prepared','bound')
+                        or state.get('binding')not in(None,self.binding)):
+                    raise ValueError('rejected capture is not an unstarted candidate')
+                with self.lock:
+                    if self.terminal is None:
+                        self.finish(dict(self.last_sequence),dict(status='failed',reason=str(error)),source_endpoints={
+                            key:dict(source_clock_id=row['source_clock_id'],source_time=0.)
+                            for key,row in self.camera_sources.items()})
+                    terminal=deepcopy(self.terminal)
+                self._write(terminal)
+            except Exception as ending_error:
+                self._error(ending_error);self.disconnected.set()
         except Exception as error:self._error(error);self.disconnected.set()
 
     def _write(self,message):

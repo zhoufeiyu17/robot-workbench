@@ -91,11 +91,17 @@ class InferenceWorkflowTests(unittest.TestCase):
             source_clock_id='owner-clock',topic='/cpu/control/events')
         images=[dict(stream_id=name,metadata={'serial':self.binding['camera_serials'][role]})for role,name in CAMERAS.items()]
         directory=Mock();directory.resolve.side_effect=[images, [control]]
+        cache=SimpleNamespace(changed=threading.Condition(),samples={},error=None)
+        def first_sample():
+            with cache.changed:cache.samples['first']=True;cache.changed.notify_all()
+        timer=threading.Timer(.15,first_sample);self.addCleanup(timer.cancel);timer.start()
+        started=time.monotonic()
         with patch('robot_workbench.ros_data.RosNode',return_value=node),\
                 patch('robot_workbench.ros_data.SourceDirectory',return_value=directory),\
-                patch('robot_workbench.ros_inputs.RosInputs'):
+                patch('robot_workbench.ros_inputs.RosInputs',return_value=SimpleNamespace(caches={'state':cache})):
             flow._bind_ros_sources(self.binding)
-        callback=node.node.create_subscription.call_args.args[2]
+        self.assertGreaterEqual(time.monotonic()-started,.1,'first-state readiness precedes live freshness checks')
+        callback=node.subscribe.call_args.args[2]
         message=SimpleNamespace(reference=SimpleNamespace(**{k:control[k]for k in ('stream_id','source_instance_id','source_clock_id')}))
         recovery=Mock();flow.current={'stall_recovery':recovery}
         with patch.object(flow,'_ros_control_event')as consume:
@@ -234,7 +240,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             return SimpleNamespace(observation_id='cpu-observation',state=state,frames=list(frames.values()),camera_roles=list(frames),**fields)
         flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.observation_pairer=None
         flow.ros_inputs=SimpleNamespace(sources=sources,latest=lambda stream:newest,
-            paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),{}),
+            paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),{'target_source_ns':state.source_time_ns}),
             resolve=lambda ref:feedback,observation=observation)
         flow.ros_observations=SimpleNamespace(publish=published.append)
         with patch.object(self.device.runtime,'control_inputs',side_effect=AssertionError('status RPC is stalled')):
@@ -694,6 +700,38 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.workflow.busy=True
         with self.assertRaisesRegex(ValueError,'结束'):self.workflow.set_execution_steps(30,1)
         self.assertEqual(self.workflow.execute_steps,45)
+
+    def test_memory_execution_length_uses_same_update_without_closing_client(self):
+        self.workflow.selected_model_id='wam-mem-fixture-step42'
+        client=Mock();self.workflow.client=client
+        self.workflow.set_execution_steps(8,0)
+        self.assertEqual(self.workflow.execute_steps,8)
+        client.close.assert_not_called()
+        for bad in (0,33,True):
+            with self.assertRaises(ValueError):self.workflow.set_execution_steps(bad,1)
+        self.assertIs(self.workflow.client,client)
+
+    def test_memory_sampling_preparation_keeps_existing_pin_and_state_owner(self):
+        from test_wam_mem import registry
+        from robot_workbench.wam_mem import descriptor
+        from robot_workbench.inference_model import model_spec,model_bundle_digest
+        flow=self.workflow;base=descriptor(registry());selected=descriptor(registry(),denoise_steps=10)
+        flow.selected_model_id=base['model_id'];flow.model_bundle=base;flow.selected_spec=model_spec(base['model_id'],base)
+        flow.selected_bundle_digest=model_bundle_digest(base['model_id'],base)
+        memory=SimpleNamespace(snapshot=lambda:dict(observations=3),reconfigure=Mock())
+        pin=SimpleNamespace(memory_flow=memory,healthy=lambda:True,close=Mock())
+        flow.client=pin;old_model=Mock();flow.model_client=old_model
+        prepared={'dependencies':flow._device_dependencies(),'conversion':{'scope':'fixture'}};flow.prepared=prepared
+        candidate=Mock();candidate.prepare.return_value={'status':'ready'};bound=Mock()
+        flow.model_service_fact={'service_pid':11,'worker_pid':12,'fact':{'instance_id':'unchanged'}}
+        with patch.object(flow,'snapshot',return_value={'busy':False}),patch.object(flow,'_revoke_device_review'), \
+                patch.object(flow,'_new_client',side_effect=[candidate,bound]), \
+                patch.object(flow,'_refresh_model_fact'),patch.object(flow,'_model_gate',return_value={'ready':True}):
+            result=flow._prepare_model(_selection=(base['model_id'],selected),still_current=lambda:True)
+        self.assertTrue(result['reused']);self.assertIs(flow.client,pin);self.assertIs(flow.prepared,prepared)
+        memory.reconfigure.assert_called_once_with(bound);pin.close.assert_not_called()
+        old_model.close.assert_called_once();candidate.prepare.assert_called_once_with(ready_only=True)
+        self.assertEqual(flow.model_bundle['inference_options']['denoise_steps'],10)
 
     def test_camera_connection_failure_identifies_observation_stage_without_motion(self):
         self.prepare();self.cameras.latest_rgbd.side_effect=ConnectionRefusedError(111,'Connection refused')

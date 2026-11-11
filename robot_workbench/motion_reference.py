@@ -229,15 +229,16 @@ def _check_c2(coefficients,breaks):
 def infer_reference_policy(value):
     """Explicit current-infer policy; never changes legacy/research defaults."""
     expected=dict(schema='workbench.infer-reference-policy.v1',curve='cubic_c2_quintic_ends',
-        velocity_limit_rad_s=1.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
+        velocity_limit_rad_s=2.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=40.,
         boundary_scope='complete_prepared_segment',timing_policy='retime_allowed')
     if (not isinstance(value,dict)or set(value)!=set(expected)|{'max_execution_duration_s'}
             or any(value[k]!=v for k,v in expected.items() if k not in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
-            or any(type(value[k])not in(int,float) for k in('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s','max_execution_duration_s'))
+            or any(type(value[k])not in(int,float) for k in('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
             or any(not math.isfinite(value[k]) or not 0<value[k]<=expected[k] for k in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
-            or not math.isfinite(value['max_execution_duration_s'])or not 0<value['max_execution_duration_s']<=8.):
+            or value['max_execution_duration_s'] is not None and (type(value['max_execution_duration_s'])not in(int,float)
+                or not math.isfinite(value['max_execution_duration_s'])or value['max_execution_duration_s']<=0)):
         raise ValueError('explicit reviewed infer curve policy and complete-segment boundaries required')
-    result=dict(expected,max_execution_duration_s=float(value['max_execution_duration_s']))
+    result=dict(expected,max_execution_duration_s=value['max_execution_duration_s'])
     for key in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'):
         result[key]=float(value[key])
     return result
@@ -438,20 +439,31 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
     from arx_env.joint_head_real_motion import jaw_peak_scale
     jaw_scales=jaw_scales or {side:jaw_peak_scale(side)for side in ('left','right')}
     if set(jaw_scales)!={'left','right'}or any(not math.isfinite(v)or v<=0 for v in jaw_scales.values()):raise ValueError('finite positive jaw unit scales required')
-    jaw_velocity=max(float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
-        for side,slot in (('left',6),('right',13)))
-    scale=max(scale,jaw_velocity/40.)
+    jaw_velocities={side:float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
+        for side,slot in (('left',6),('right',13))}
+    jaw_velocity=max(jaw_velocities.values())
+    jaw_velocity_limit=policy['jaw_velocity_limit_mm_s']if policy is not None else 40.
+    scale=max(scale,jaw_velocity/jaw_velocity_limit)
     if scale>1.+1e-9 and timing_policy=='strict_duration':raise ValueError('strict 2s reference violates velocity/acceleration bounds')
     scale=scale*1.02 if scale>1 else 1.
     maximum_duration=policy['max_execution_duration_s']if policy is not None else 30.
-    if scale*duration>maximum_duration:raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound')
+    def duration_error(required):
+        joint=lambda i:('left'if i<7 else'right')+'_J'+str(i%7+1)
+        candidates=[(float(value)/velocity_limit,joint(axis),'velocity')for axis,value in zip(JOINTS,v)]
+        candidates += [(math.sqrt(float(value)/acceleration_limit),joint(axis),'acceleration')for axis,value in zip(JOINTS,a)]
+        candidates += [(value/jaw_velocity_limit,side+'_jaw','velocity')for side,value in jaw_velocities.items()]
+        factor,axis,constraint=max(candidates)
+        return ValueError(f'prepared path exceeds {maximum_duration:g}s bound; required_s={required:.6g}; '
+            f'source_s={duration:.6g}; limiting_axis={axis}; constraint={constraint}; scale={factor:.6g}')
+    if not math.isfinite(scale*duration):raise ValueError('retimed duration must be finite')
+    if maximum_duration is not None and scale*duration>maximum_duration:raise duration_error(scale*duration)
     refits=0
     if policy is not None and (np.any(v0!=0)or np.any(a0!=0)) and scale>1:
         # Stretching coefficients would silently change nonzero initial v/a.
         # Refit at the longer duration with the same physical boundary instead.
         for refits in range(1,9):
             breaks=breaks*scale
-            if breaks[-1]>maximum_duration:raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound')
+            if maximum_duration is not None and breaks[-1]>maximum_duration:raise duration_error(breaks[-1])
             fit_started=time.perf_counter()
             coefficients=_cubic_with_quintic_ends(breaks,sdk[:,JOINTS],v0[list(JOINTS)],a0[list(JOINTS)])
             fit_wall+=time.perf_counter()-fit_started
@@ -459,9 +471,10 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
             extrema_wall+=time.perf_counter()-extrema_started
             if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
                 raise ValueError('retimed curve exceeds joint command limits; no silent clipping')
-            jaw_velocity=max(float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
-                for side,slot in(('left',6),('right',13)))
-            scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit),jaw_velocity/40.)
+            jaw_velocities={side:float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
+                for side,slot in(('left',6),('right',13))}
+            jaw_velocity=max(jaw_velocities.values())
+            scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit),jaw_velocity/jaw_velocity_limit)
             if scale<=1.+1e-9:scale=1.;break
             scale*=1.02
         else:raise ValueError('bounded retiming did not preserve feasible initial derivatives')
@@ -490,7 +503,7 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
         metadata.update(planning_policy=policy,interpolation='CPU_C2_cubic_with_quintic_ends_to_SDK_linear_samples',
             initial_velocity_sdk14=v0.tolist(),initial_acceleration_sdk14=a0.tolist(),retiming_refits=refits,
             internal_derivatives='cubic_spline_solved_v_and_a; not_zeroed')
-    metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=40.)
+    metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=jaw_velocity_limit)
     digest=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode())
     for array in (breaks,coefficients,sdk[:,[6,13]]):digest.update(array.tobytes())
     metadata['reference_id']=digest.hexdigest()
@@ -545,12 +558,12 @@ def prepare_brake_after(reference, boundary_s, limits, **options):
     covers its committed native prefix before installing this candidate.
     """
     if (not isinstance(reference,PreparedReference)or type(boundary_s)not in(int,float)
-            or not math.isfinite(boundary_s)or not 0<boundary_s<30.):
+            or not math.isfinite(boundary_s)or boundary_s<=0.):
         raise ValueError('prepared reference and an interior/end brake boundary required')
     q,v,a=reference.sample([boundary_s])
     brake=prepare_brake(q[0],v[0],a[0],limits,
         source_sha256=reference.metadata['reference_id'],**options)
-    if boundary_s+brake.duration_s>30.:raise ValueError('prefix and brake exceed the 30s reference bound')
+    if not math.isfinite(boundary_s+brake.duration_s):raise ValueError('prefix and brake duration must be finite')
     starts=reference.breaks[reference.breaks<boundary_s]
     degree=max(reference.coefficients.shape[1],brake.coefficients.shape[1])
     def pad(c):return np.pad(c,((0,0),(degree-c.shape[1],0),(0,0)))

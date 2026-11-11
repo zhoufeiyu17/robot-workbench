@@ -59,7 +59,11 @@ class MotionReferenceTests(unittest.TestCase):
         np.testing.assert_allclose(a[0],a[2],atol=1e-5)
         _,v,a=candidate.sample([candidate.duration_s])
         np.testing.assert_allclose(v,0,atol=1e-12);np.testing.assert_allclose(a,0,atol=1e-12)
-        with self.assertRaises(ValueError):prepare_brake_after(reference,31.,limits,
+        extended=prepare_brake_after(reference,31.,limits,
+            duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
+        self.assertGreater(extended.duration_s,31.)
+        np.testing.assert_allclose(extended.sample([31.])[0],reference.sample([31.])[0],atol=1e-12)
+        with self.assertRaises(ValueError):prepare_brake_after(reference,float('inf'),limits,
             duration_s=.5,velocity_limit=.25,acceleration_limit=1.)
 
     def test_online_joint_reference_has_consistent_derivatives_and_c2_knots(self):

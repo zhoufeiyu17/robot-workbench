@@ -222,6 +222,7 @@ class ControlOwnerService:
         self.lock=threading.Lock();self.requests=OrderedDict();self.maintenance=None;self.stop_serial=0
         self.event_lock=threading.Lock();self.events=deque(maxlen=8192);self.event_sequence=0
         self.profile_sha256=profile_sha256;self.inference=None;self.last_runtime_nonce=None
+        self.inference_state=None;self.inference_state_lock=threading.Lock()
         self.identity=_identity()
         self.descriptor_path=self.root/'control-owner.json';socket_path=self.root/'control.sock'
         if socket_path.exists():raise ValueError('control socket already exists; inspect its owner before replacement')
@@ -379,6 +380,11 @@ class ControlOwnerService:
             from .pipeline_timing import timing
             if set(args)-{'after','limit'}:raise ValueError('unknown timing query')
             result=timing.snapshot(**args)
+            publisher=getattr(runtime,'ros_publisher',None)
+            if publisher is not None:
+                with publisher.lock:
+                    result['publication']=dict(sequences=dict(publisher.sequences),error=publisher.error,
+                        dropped=publisher.dropped,thread_alive=publisher.thread.is_alive())
             bridge=self.inference
             inputs=getattr(bridge,'ros_inputs',None);node=getattr(bridge,'ros_node',None)
             if inputs is not None and node is not None:
@@ -389,7 +395,8 @@ class ControlOwnerService:
                         sample_count=len(cache.samples),error=cache.error,
                         latest_state_sequence=latest.sequence if latest else None,
                         latest_state_source_ns=latest.source_time_ns if latest else None,
-                        resolver_error=bridge.ros_error,callback_errors=list(node.errors))
+                        resolver_error=bridge.ros_error,callback_errors=list(node.errors),
+                        state_callback_errors=list(bridge.ros_state_node.errors))
             return result
         if operation=='inspect':return self.inspect()
         if operation=='snapshot':return self.inspect(args.get('business'))
@@ -537,6 +544,8 @@ class ControlOwnerService:
     def close(self):
         if self.device.runtime is not None:raise ValueError('normal supported release or verified protected retirement required before Owner service exit')
         if self.inference is not None:self.inference.close();self.inference=None
+        if self.inference_state is not None:
+            self.inference_state[1].close();self.inference_state=None
         self.server.shutdown();self.server.server_close()
         _shutdown_encoder(self.event_encoder)
         _shutdown_encoder(self.read_encoder)

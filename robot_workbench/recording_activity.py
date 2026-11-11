@@ -122,3 +122,54 @@ def activity_summary(value):
             or value['started_wall_ns']is not None and(type(value['started_wall_ns'])is not int or value['started_wall_ns']<=0)):
         raise ValueError('bounded recording activity health required')
     return value
+
+
+def inference_replay_segments(manifest):
+    """Project recorded configuration changes onto the compact video clock."""
+    import json
+    binding=manifest.get('binding')or{}
+    context=binding.get('execution_context')or{}
+    saved=context.get('inference_configuration')or{}
+    execution=((binding.get('control_policy')or{}).get('parameters')or{}).get('execution')or{}
+    base={key:saved.get(key)for key in ('model_id','model_label','backend','denoise_steps','execute_steps')}
+    if base['execute_steps']is None:base['execute_steps']=execution.get('execute_steps')
+    points=[]
+    for payload in (manifest.get('model_inputs')or{}).values():
+        metadata=json.loads(payload.get('metadata_json')or'{}')
+        model=(metadata.get('binding')or{}).get('model_binding')or{}
+        if not model.get('model_id'):continue
+        worker=model.get('worker_identity')or{}
+        stamp=(payload.get('observation')or{}).get('source_time_ns')
+        if type(stamp)is not int:continue
+        configuration=dict(base,model_id=model['model_id'],backend=model.get('backend'),
+                           denoise_steps=worker.get('inference_steps'))
+        if any(configuration[key]!=base[key]for key in ('model_id','backend','denoise_steps')):
+            configuration['model_label']=None
+        points.append((stamp,configuration))
+    points.sort(key=lambda row:row[0])
+    activity=manifest.get('recording_activity')
+    if activity is None:
+        return dict(schema='workbench.inference-replay.v1',configuration=points[0][1]if points else base,
+                    segments=[],reason='这条旧录像未记录模式片段时间轴')
+    axis=ActiveTimeAxis(activity)
+    segments=[]
+    for interval in axis.rows:
+        start=interval['start_source_ns'];end=interval['end_source_ns']
+        prior=[configuration for stamp,configuration in points if stamp<=start]
+        inside=[configuration for stamp,configuration in points if start<=stamp<end]
+        current=(inside[0]if interval['mode']=='MODEL'and inside else
+                 prior[-1]if prior else points[0][1]if points else base)
+        changes=[(start,current)]
+        if interval['mode']=='MODEL':
+            for stamp,configuration in points:
+                if start<stamp<end and configuration!=changes[-1][1]:changes.append((stamp,configuration))
+        for index,(stamp,configuration)in enumerate(changes):
+            stop=changes[index+1][0]if index+1<len(changes)else end
+            if len(segments)>=512:raise ValueError('recorded configuration timeline exceeds512 segments')
+            segments.append(dict(configuration,mode=interval['mode'],
+                start_s=(interval['effective_start_ns']+stamp-start)/1e9,
+                end_s=(interval['effective_start_ns']+stop-start)/1e9,
+                start_wall_ns=interval['start_wall_ns']+stamp-start,
+                end_wall_ns=interval['start_wall_ns']+stop-start))
+    return dict(schema='workbench.inference-replay.v1',configuration=points[0][1]if points else base,
+                segments=segments,duration_s=axis.duration_ns/1e9)

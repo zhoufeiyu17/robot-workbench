@@ -12,6 +12,29 @@ class ActivityTests(unittest.TestCase):
         return timeline.observe('inference_mode_transition',dict(op='normal_mode',requested_mode=mode,
             request_id=request,accepted=True,status='accepted',capture_wall_ns=1_790_000_000_000_000_000+ref.source_time_ns),ref,'run')
 
+    def test_replay_configuration_uses_recorded_model_changes_and_compact_time(self):
+        from robot_workbench.recording_activity import inference_replay_segments
+        timeline=ActivityTimeline('run','clock')
+        for mode,stamp,name in [('MODEL',10,'m1'),('HOLD',20,'h1'),('TEACH',30,'t1'),
+                                ('HOLD',35,'h2'),('MODEL',50,'m2'),('HOLD',55,'h3')]:
+            self.event(timeline,mode,stamp,name)
+        def recorded(stamp,steps):
+            return dict(observation=dict(source_time_ns=round(stamp*1e9)),metadata_json=json.dumps(
+                dict(binding=dict(model_binding=dict(model_id='wam-fixture-step1',backend='torch',
+                    worker_identity=dict(inference_steps=steps))))))
+        manifest=dict(recording_activity=timeline.manifest(),
+            binding=dict(control_policy=dict(parameters=dict(execution=dict(execute_steps=8)))),
+            model_inputs={'a':recorded(10.2,2),'b':recorded(15,4),'c':recorded(50.1,10)})
+        rows=inference_replay_segments(manifest)['segments']
+        self.assertEqual([(r['start_s'],r['end_s'],r['mode'],r['denoise_steps'])for r in rows],
+                         [(0.,5.,'MODEL',2),(5.,10.,'MODEL',4),(10.,15.,'TEACH',4),(15.,20.,'MODEL',10)])
+        self.assertTrue(all(r['execute_steps']==8 for r in rows))
+        self.assertTrue(all(r['model_id']=='wam-fixture-step1'for r in rows))
+        self.assertEqual(rows[2]['start_wall_ns'],1_790_000_030_000_000_000)
+        manifest['model_inputs']={}
+        missing=inference_replay_segments(manifest)['segments']
+        self.assertTrue(all(r['model_id']is None and r['denoise_steps']is None for r in missing))
+
     def test_model_and_teach_join_without_waiting_gaps(self):
         timeline=ActivityTimeline('run','clock')
         self.event(timeline,'HOLD',1,'initial');self.event(timeline,'MODEL',10,'model')
@@ -42,7 +65,7 @@ class ActivityTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','isolated Linux ROS and CPU codecs required')
 class ActiveCaptureTests(unittest.TestCase):
-    def test_real_recorder_skips_hold_flushes_segments_and_joins_all_cameras(self):
+    def test_real_recorder_skips_hold_flushes_segments_and_joins_all_cameras(self,active_gap=False):
         from robot_workbench.ros_data import RosNode,StreamRef,json_text
         from sensor_msgs.msg import Image
         from robot_workbench.ros_recording import capture_source
@@ -60,7 +83,7 @@ class ActiveCaptureTests(unittest.TestCase):
             source_clock_id='clock',topic='/wb_active_capture/control',message_type='workbench_interfaces/msg/DataEvent',
             kind='event',units='control',coordinate_frame='device',nominal_hz=30.,available=True,metadata={}))
         publishers={row['stream_id']:node.publisher(row['topic'],Image if row['kind']=='image'else getattr(node.types,'RobotState'if row['kind']=='state'else'DataEvent'))for row in descriptions}
-        lock=threading.Lock();stopped=threading.Event();sequence=0;state_sequence=0
+        lock=threading.RLock();stopped=threading.Event();sequence=0;state_sequence=0
         run='activity-run'
         def control(event,data):
             nonlocal sequence
@@ -69,19 +92,23 @@ class ActiveCaptureTests(unittest.TestCase):
                 publishers['control'].publish(node.types.DataEvent(reference=ref.message(),event=event,run_id=run,epoch=1,
                     payload_json=json_text(dict(data,capture_wall_ns=time.time_ns(),runtime_nonce='cpu-owner'))))
                 return stamp
-        def pump():
+        def state(stamp):
             nonlocal state_sequence
+            state_sequence+=1
+            ref=StreamRef('state','cpu_source','clock',stamp,state_sequence)
+            publishers['state'].publish(node.types.RobotState(reference=ref.message(),positions=[0.]*14,velocities=[0.]*14,
+                metadata_json=json_text(dict(sample_time_s=stamp/1e9,sample_wall_ns=time.time_ns(),runtime_nonce='cpu-owner',command_epoch=1,owner_pid=os.getpid()))))
+        def pump():
             while not stopped.is_set():
-                stamp=time.monotonic_ns();state_sequence+=1
-                for role in ('head','left','right'):
-                    image=Image()
-                    image.header.stamp.sec,image.header.stamp.nanosec=divmod(stamp,1_000_000_000)
-                    image.height=image.width=2;image.encoding='rgb8';image.step=6;image.data=bytes([state_sequence%255]*12)
-                    publishers[role].publish(image)
-                ref=StreamRef('state','cpu_source','clock',stamp,state_sequence)
-                publishers['state'].publish(node.types.RobotState(reference=ref.message(),positions=[0.]*14,velocities=[0.]*14,
-                    metadata_json=json_text(dict(sample_time_s=stamp/1e9,sample_wall_ns=time.time_ns(),runtime_nonce='cpu-owner',command_epoch=1,owner_pid=os.getpid()))))
-                control('feedback',{});stopped.wait(1/30)
+                with lock:
+                    stamp=time.monotonic_ns()
+                    for role in ('head','left','right'):
+                        image=Image()
+                        image.header.stamp.sec,image.header.stamp.nanosec=divmod(stamp,1_000_000_000)
+                        image.height=image.width=2;image.encoding='rgb8';image.step=6;image.data=bytes([state_sequence%255]*12)
+                        publishers[role].publish(image)
+                    state(stamp);control('feedback',{})
+                stopped.wait(1/30)
         worker=threading.Thread(target=pump);worker.start()
         def close_source():stopped.set();worker.join(3)
         self.addCleanup(close_source)
@@ -103,12 +130,24 @@ class ActiveCaptureTests(unittest.TestCase):
         initial={k:session.snapshot()['streams'][k]['received']for k in ('head','left','right')}
         time.sleep(.4);self.assertEqual(initial,{k:session.snapshot()['streams'][k]['received']for k in initial})
         self.assertTrue(list((session.directory/'camera').rglob('*.commit.json')),'paused tail must be committed before ending the session')
-        teach=mode('TEACH','t1');time.sleep(3.);held=mode('HOLD','h2');time.sleep(.2)
+        with lock:
+            teach=mode('TEACH','t1')
+            # Deliver a HOLD sample after the recorder has prefetched its prefix.
+            # Its deliberate exclusion must not become a gap in active TEACH.
+            time.sleep(.05);state(teach-1)
+        time.sleep(.3)
+        if active_gap:
+            with lock:state_sequence+=1
+        time.sleep(2.7);held=mode('HOLD','h2');time.sleep(.2)
         endpoint=time.monotonic_ns()
         session.finish({'control':sequence},dict(status='completed'),source_endpoints={row['stream_id']:
             dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions if row['kind']in('image','state')})
         self.assertTrue(session.done.wait(30),session.snapshot())
         manifest=json.loads((session.directory/'manifest.json').read_text())
+        if active_gap:
+            self.assertEqual(manifest['recording_outcome'],'incomplete')
+            self.assertTrue(any('source sequence gap'in issue for issue in manifest['issues']),manifest['issues'])
+            return
         self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
         expected=(end-start+held-teach)/1e9
         self.assertAlmostEqual(manifest['recording_activity']['effective_duration_ns']/1e9,expected,places=6)
@@ -145,6 +184,9 @@ class ActiveCaptureTests(unittest.TestCase):
             self.assertEqual(empty['playback']['streams'],{})
             self.assertFalse((idle.directory/'camera').exists())
             idle.close()
+
+    def test_real_recorder_still_rejects_state_gap_inside_active_interval(self):
+        self.test_real_recorder_skips_hold_flushes_segments_and_joins_all_cameras(active_gap=True)
 
 
 

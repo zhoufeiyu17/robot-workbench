@@ -325,7 +325,7 @@ class RosInputs:
         began=time.monotonic_ns()
         cache=self.caches[stream]
         if not cache.put(reference,value,size):return
-        timing.record('input.cache_put.'+stream,began,source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
+        timing.record('input.cache_put.'+stream,began,consumer=self.consumer,source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
         if stream in self.depth_for:
             self.pending_rgbd.add(reference)
             if sum(r.stream_id==stream for r in self.pending_rgbd)>cache.max_samples:

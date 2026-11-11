@@ -43,7 +43,7 @@ class HTTPTest(unittest.TestCase):
     def test_timing_read_is_bounded_and_does_not_build_state_or_connect(self):
         from robot_workbench.inference_workflow import InferenceWorkflow
         flow=InferenceWorkflow.__new__(InferenceWorkflow)
-        flow.device=self.device;flow.lock=threading.RLock();flow.current=None
+        flow.device=self.device;flow.lock=threading.RLock();flow.current=None;flow.client=None
         flow.pending_captures={};flow.selected_model_id='fixture';flow.selected_spec={'backend':'torch'};flow.cache_error=None
         self.device.workflows['inference']=flow
         url=self.url+'/api/inference-diagnostics?environment=fake&limit=0'
