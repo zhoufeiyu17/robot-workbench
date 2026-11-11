@@ -1593,7 +1593,102 @@ class _CaptureCamera:
             finally:self.done.set()
 
 
-def _seal_capture(root,spec,extra_issue=None,*,probe_cache=None):
+def _seal_written_capture(root,spec,index,extra_issue):
+    """Finalize producer-owned write facts without rescanning or auditing raw records."""
+    import numpy as np
+    from .inference_trace import write_json
+    from .pipeline_timing import timing
+    from .recording_activity import ActiveTimeAxis
+    from rgbd_segments import _safe
+    started=time.monotonic_ns();root=Path(root)
+    names={row['stream_id']for row in spec['source_descriptors']}
+    if (index.get('schema')!='workbench.written-capture-index.v1'
+            or set(index['streams'])-names or set(index['segments'])-names):
+        raise ValueError('producer index belongs to another capture layout')
+    finish=json.loads((root/'finish.json').read_text());binding=json.loads((root/'binding.json').read_text())
+    revision=max([int(p.stem.rsplit('r',1)[-1])for p in root.glob('manifest-r[0-9]*.json')],default=0)+1
+    issues=[extra_issue]if extra_issue else[];streams={};files={};models={'model_input':{},'model_result':{}}
+    activity=ActiveTimeAxis(finish['recording_activity'])if 'recording_activity'in finish else None
+    for descriptor in spec['source_descriptors']:
+        name=descriptor['stream_id'];fact=index['streams'].get(name);count=fact['count']if fact else 0
+        if type(count)is not int or count<0:raise ValueError('bounded producer sample count required')
+        if descriptor['required']and not count and (activity is None or activity.duration_ns):
+            issues.append(name+': producer reported no samples')
+        stream=dict(committed=count,last_sequence=count,final_sequence=count,missing=0,
+            source_time_range=fact['source_time_range']if fact else[],coverage_failed_conditions=0,tail_error=None,
+            raw_validation='not_requested')
+        if fact:
+            pin=fact['journal'];files[pin['path']]={k:pin[k]for k in ('size_bytes','sha256')}
+            if pin['path']!=name+'.jsonl'or fact['time_index']!=name+'.times.u64':
+                raise ValueError('written index stream path differs')
+            stream.update(written_prefix_bytes=pin['size_bytes'],written_prefix_sha256=pin['sha256'])
+        if activity is not None:
+            effective_count=0;effective_range=[]
+            if count:
+                stamps=np.memmap(_safe(root,fact['time_index']),dtype='<u8',mode='r',shape=(count,))
+                clock=descriptor['source_clock_id'];kind='source_ns'if clock==activity.clock_id else'wall_ns'
+                if clock not in (activity.clock_id,'host_wall'):raise ValueError('recorded activity has no mapping for this source clock')
+                for interval in activity.rows:
+                    first=int(np.searchsorted(stamps,interval['start_'+kind],side='left'))
+                    last=int(np.searchsorted(stamps,interval['end_'+kind],side='left'))
+                    if last<=first:continue
+                    effective_count+=last-first
+                    start=activity.offset_ns(clock,int(stamps[first]));end=activity.offset_ns(clock,int(stamps[last-1]))
+                    effective_range=[effective_range[0]if effective_range else start,end]
+                del stamps
+            stream.update(effective_count=effective_count,effective_time_range_ns=effective_range)
+        streams[name]=stream
+        model_kind=descriptor.get('source_ref',{}).get('source',{}).get('kind')
+        if count and model_kind in models:
+            with _safe(root,fact['journal']['path']).open()as records:
+                for _ in range(count):
+                    payload=json.loads(records.readline())['payload'];models[model_kind][payload['request_id']]=payload
+                    if model_kind=='model_result':
+                        pin=payload['output_ref'];files[pin['path']]={k:pin[k]for k in ('size_bytes','sha256')}
+    gap_name=f'gaps-r{revision:06d}.jsonl';(root/gap_name).write_text('')
+    segment_name=f'segments-r{revision:06d}.jsonl'
+    with(root/segment_name).open('x')as rows:
+        for name,segments in index['segments'].items():
+            for segment in segments:
+                path=f"camera/{name}/{segment['segment']:06d}.commit.json"
+                rows.write(json.dumps(dict(stream_id=name,segment=path,**_capture_file(root/path)))+'\n')
+    decisions=[]
+    for request,payload in models['model_input'].items():
+        metadata=json.loads(payload['metadata_json'])
+        if 'stall_recovery'in metadata:
+            decisions.append(dict(request_id=request,run_id=payload['run_id'],epoch=payload['epoch'],
+                source_time_ns=payload['reference']['source_time_ns'],**metadata['stall_recovery']))
+    if decisions:
+        with(root/'stall_recovery.jsonl').open('w')as rows:
+            for row in decisions:rows.write(json.dumps(row,allow_nan=False)+'\n')
+    for name in ('capture.json','binding.json','finish.json','finish-request.json',gap_name,segment_name,'written-index.json','artifacts.jsonl','stall_recovery.jsonl'):
+        if(root/name).exists():files[name]=_capture_file(root/name)
+    manifest=dict(schema='workbench.capture-manifest.v1',capture_session_id=spec['capture_session_id'],binding=binding,
+        purpose_profile=spec['purpose_profile'],recording_outcome='incomplete'if issues else'complete',
+        control_terminal=finish['control_terminal'],streams=streams,issues=issues,files=files,gaps_ref=gap_name,
+        segments_ref=segment_name,seal_revision=revision,coverage_scope='live producer write counts and final source barrier',
+        raw_validation='not_requested',model_inputs=models['model_input'],model_results=models['model_result'],
+        model_input_validation=dict(metadata_and_references='not_requested',pixel_reconstruction='not_requested',
+                                    scope='producer records retained without post-stop raw audit'))
+    if activity is not None:manifest['recording_activity']=finish['recording_activity']
+    timing.record('recording.seal.index',started)
+    export_started=time.monotonic_ns()
+    try:
+        from segmented_playback import export_capture
+        playback=export_capture(root,manifest,root/f'replay-r{revision:06d}',verify_raw=False)
+        manifest['playback']=playback
+        files.update({path:{k:pin[k]for k in ('size_bytes','sha256')}for path,pin in playback['files'].items()})
+    except Exception as error:manifest['playback_error']=str(error)
+    finally:timing.record('recording.seal.export_playback',export_started)
+    timing.record('recording.seal.total',started,capture_session_id=spec['capture_session_id'])
+    manifest['pipeline_timing']=timing.snapshot(limit=0)
+    write_json(root/f'manifest-r{revision:06d}.json',manifest);write_json(root/'manifest.json',manifest)
+    write_json(root/'pipeline-timing.json',dict(stage='complete',timing=timing.snapshot(limit=64)))
+    return manifest
+
+
+def _seal_capture(root,spec,extra_issue=None,*,probe_cache=None,live_index=None):
+    if live_index is not None:return _seal_written_capture(root,spec,live_index,extra_issue)
     """Verify the on-disk prefix and sequence barrier; never alter event files."""
     from .inference_trace import write_json
     from .pipeline_timing import timing

@@ -13,6 +13,8 @@ from pathlib import Path
 import queue
 import re
 import select
+import shutil
+import struct
 import sys
 import threading
 import time
@@ -125,15 +127,19 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     from .recording_process import _CaptureEvents, _capture_file, _encode, _seal_capture, _archive_capture_payload
     from .inference_trace import write_json
     from rgbd_segments import SegmentWriter
+    from segmented_playback import require_packet_remux_codec
     root=Path(root)
     from .managed_services import process_identity
     writer_identity=process_identity(os.getpid())
     if recover:
-        manifest=_seal_capture(root,spec,'recovered after recorder exit; no motion replay')
+        live_path=root/'written-index.json'
+        live_index=json.loads(live_path.read_text())if live_path.exists()else None
+        manifest=_seal_capture(root,spec,'recovered after recorder exit; no motion replay',live_index=live_index)
         state=dict(state=manifest['recording_outcome'],prepared=True,ready=False,done=True,
             capture_session_id=spec['capture_session_id'],worker_pid=__import__('os').getpid(),
             manifest_ref='manifest.json',seal_revision=manifest['seal_revision'],streams=manifest['streams'],writer_identity=writer_identity)
         write_json(root/'status.json',state);sys.stdout.write(_encode(state));sys.stdout.flush();return
+    require_packet_remux_codec(shutil.which('ffmpeg')or'ffmpeg')
     refs=[r['source_ref']for r in spec['source_descriptors']]
     if any(r['kind']!='ros'for r in refs)or len({(r['namespace'],r['domain_id'])for r in refs})!=1:
         raise ValueError('one explicit ROS domain/namespace required; mixed source transports rejected')
@@ -141,8 +147,9 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
     ros=RosNode(root.name.replace('-','_'),namespace=refs[0]['namespace'],domain_id=refs[0]['domain_id'],localhost_only=False)
     events=_CaptureEvents(spec['resource_budget']['event_queue_bytes'])
     lock=threading.RLock();errors={};active=False;binding=None;terminal=None;ending_at=None
-    activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={};control_gap_start=None
+    activity=None;activity_prefix_ns=0;observed_last={};written_groups={};prefilled_until={};control_gap_start=None;fast_seal=False
     received={k:0 for k in sources};flushed=dict(received);first={};last={};files={};segments={};model_results=set();artifact_index=None
+    time_files={};journal_hashes={};journal_bytes={}
     # Run-local codec facts survive the process LRU. No pixels are cached; each
     # reuse still verifies the current file bytes against the content digest.
     probe_cache={}
@@ -181,6 +188,11 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         try:future.result(timeout=30.)
         except Exception as error:fault(stream,error)
         finally:pending_images.pop(stream,None)
+    def replay_frames(rows):
+        with lock:
+            if activity is None:return list(range(len(rows)))
+            return [index for index,row in enumerate(rows)if activity.sample_group(
+                row['ros_reference']['source_clock_id'],row['ros_reference']['source_time_ns'])is not None]
     state=dict(state='preparing',prepared=False,ready=False,done=False,ingress_closed=False,capture_session_id=spec['capture_session_id'],
         worker_pid=os.getpid(),writer_identity=writer_identity,streams={},source_errors=errors,binding=None)
     def admit(ref,value,group=None,prefill=False):
@@ -284,7 +296,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         source_qos=dict(inputs.reliability),
                         degraded=bool(errors or missing),missing_streams=missing,source_errors=dict(errors),binding=binding,
                         available_streams=[k for k in sources if k not in missing],streams={k:dict(received=v,committed=committed[k],
-                            last_sequence=v,source_sequence=last[k].sequence if k in last else None)for k,v in received.items()},
+                            last_sequence=v,source_sequence=last[k].sequence if k in last else None,
+                            **({'browser_encoding':segments[k].replay_status()}if k in segments else{}))for k,v in received.items()},
                         data_queue=events.snapshot(),heartbeat_monotonic_s=time.monotonic())
                     if activity is not None:state['recording_activity']=activity.summary()
                     if state['state']=='preparing'and prepared:state['state']='prepared'
@@ -319,10 +332,17 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         began=time.monotonic_ns()
         stream=ref.stream_id
         with file_locks[stream]:
-            if stream not in files:files[stream]=(root/(stream+'.jsonl')).open('x')
+            if stream not in files:
+                files[stream]=(root/(stream+'.jsonl')).open('x')
+                if fast_seal:
+                    time_files[stream]=(root/(stream+'.times.u64')).open('xb')
+                    journal_hashes[stream]=hashlib.sha256();journal_bytes[stream]=0
             row=dict(sequence=received[stream]+1,source_time=ref.source_time_ns/1e9,received_monotonic_s=time.monotonic(),
                 recorded_wall_ns=time.time_ns(),payload=payload)
-            files[stream].write(_encode(row))
+            encoded=_encode(row);files[stream].write(encoded)
+            if fast_seal:
+                raw=encoded.encode();journal_hashes[stream].update(raw);journal_bytes[stream]+=len(raw)
+                time_files[stream].write(struct.pack('<Q',ref.source_time_ns))
             if not received[stream]:first[stream]=ref
             received[stream]+=1;last[stream]=ref
         timing.record('recording.append.'+stream,began,source_time_ns=ref.source_time_ns,source_sequence=ref.sequence)
@@ -351,7 +371,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
         if source['kind']=='image':
             writer=segments.get(ref.stream_id)
             if writer is None:writer=segments[ref.stream_id]=SegmentWriter(root/'camera',ref.stream_id,
-                pixel_format='rgb8-depth16le'if value.get('depth')is not None else'rgb8',probe_cache=probe_cache)
+                pixel_format='rgb8-depth16le'if value.get('depth')is not None else'rgb8',probe_cache=probe_cache,
+                replay_select=replay_frames)
             meta=dict(value['metadata'],schema='workbench.ros-image.v1',ros_reference=ref.__dict__)
             frame=writer.add_pixels(meta,value['rgb'],value.get('depth'),value['width'],value['height'])
             append(ref,dict(frame_ref=dict(segment='camera/'+frame['segment'],frame=frame['frame']),metadata=meta))
@@ -402,6 +423,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                         if not state['ready']:raise ValueError(state.get('error')or'capture sources/resources not ready')
                         with emit_lock:
                             binding=command['binding'];write_json(root/'binding.json',binding);state['state']='bound'
+                            fast_seal=binding['business_kind']=='inference'
                             policy=(binding.get('execution_context')or{}).get('recording_activity')
                             if policy is not None:
                                 from .recording_activity import ActivityTimeline,POLICY
@@ -503,6 +525,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             if relevant and ref.stream_id in first and first[ref.stream_id].source_time_ns<=ref.source_time_ns<=round(end*1e9):
                 fault(ref.stream_id,'original RGB sample has no matching depth or metadata at the final barrier')
         for stream,out in files.items():out.flush();__import__('os').fsync(out.fileno());out.close()
+        for out in time_files.values():out.flush();os.fsync(out.fileno());out.close()
         if artifact_index is not None:artifact_index.flush();__import__('os').fsync(artifact_index.fileno());artifact_index.close()
         for stream,source in sources.items():
             if source['kind']=='image':
@@ -521,10 +544,16 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
             finish['recording_activity']=activity.manifest()
             state['recording_activity']=activity.summary()
         write_json(root/'finish.json',finish)
+        live_index=dict(schema='workbench.written-capture-index.v1',
+            streams={name:dict(count=received[name],source_time_range=[first[name].source_time_ns/1e9,last[name].source_time_ns/1e9],
+                journal=dict(path=name+'.jsonl',size_bytes=journal_bytes[name],sha256=journal_hashes[name].hexdigest()),
+                time_index=name+'.times.u64')for name in files},
+            segments={name:list(writer.segments)for name,writer in segments.items()})if fast_seal else None
+        if live_index is not None:write_json(root/'written-index.json',live_index)
         state.update(ingress_closed=True,ready=False,source_errors=dict(errors),degraded=bool(errors))
         write_json(root/'status.json',state);emit(persist=False)
         manifest=_seal_capture(root,spec,'; '.join(errors.values())or terminal.get('control_terminal',{}).get('recording_error'),
-            probe_cache=probe_cache)
+            probe_cache=probe_cache,live_index=live_index)
         state.update(state=manifest['recording_outcome'],done=True,ready=False,manifest_ref='manifest.json',
             seal_revision=manifest['seal_revision'],streams=manifest['streams'],source_errors=dict(errors),degraded=bool(manifest['issues']))
         write_json(root/'status.json',state);emit(persist=False)

@@ -23,6 +23,8 @@ python tests/test_mixed366.py
 python tests/test_model_session.py
 python tests/test_wam_mem.py
 python tests/test_wam_mem_source.py
+python tests/test_model_release.py
+python tests/test_model_install.py
 python tests/test_docker_model_service.py
 python tests/test_environment_exit.py
 python tests/test_reclaim_control.py
@@ -32,6 +34,7 @@ python tests/test_recording_event_budget.py
 python tests/test_recording_admission.py
 python tests/test_recording_process.py
 python tests/test_recording_activity.py
+python tests/test_streaming_replay.py
 python tests/test_recording_memory.py
 python tests/test_recording_segments.py
 python tests/test_recording_quality.py

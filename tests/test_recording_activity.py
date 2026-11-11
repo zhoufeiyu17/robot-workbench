@@ -130,6 +130,7 @@ class ActiveCaptureTests(unittest.TestCase):
         initial={k:session.snapshot()['streams'][k]['received']for k in ('head','left','right')}
         time.sleep(.4);self.assertEqual(initial,{k:session.snapshot()['streams'][k]['received']for k in initial})
         self.assertTrue(list((session.directory/'camera').rglob('*.commit.json')),'paused tail must be committed before ending the session')
+        self.assertTrue(list((session.directory/'camera').rglob('*.browser.json')),'browser encoding must finish during capture')
         with lock:
             teach=mode('TEACH','t1')
             # Deliver a HOLD sample after the recorder has prefetched its prefix.
@@ -144,6 +145,8 @@ class ActiveCaptureTests(unittest.TestCase):
             dict(source_clock_id='clock',source_time=endpoint/1e9)for row in descriptions if row['kind']in('image','state')})
         self.assertTrue(session.done.wait(30),session.snapshot())
         manifest=json.loads((session.directory/'manifest.json').read_text())
+        self.assertEqual(manifest['raw_validation'],'not_requested')
+        self.assertNotIn('recording.seal.verify_streams',manifest['pipeline_timing']['stages'])
         if active_gap:
             self.assertEqual(manifest['recording_outcome'],'incomplete')
             self.assertTrue(any('source sequence gap'in issue for issue in manifest['issues']),manifest['issues'])
@@ -153,6 +156,8 @@ class ActiveCaptureTests(unittest.TestCase):
         self.assertAlmostEqual(manifest['recording_activity']['effective_duration_ns']/1e9,expected,places=6)
         self.assertEqual(len(manifest['playback']['streams']),3)
         for video in manifest['playback']['streams'].values():
+            self.assertEqual(video['encoding']['mode'],'streaming_segments')
+            self.assertGreater(video['encoding']['reused_segments'],0)
             self.assertLess(abs(video['duration_s']-expected),.08)
             self.assertLess(max(b-a for a,b in zip(video['frame_offsets_s'],video['frame_offsets_s'][1:])),.15)
         self.assertGreater(manifest['streams']['state']['effective_count'],0)

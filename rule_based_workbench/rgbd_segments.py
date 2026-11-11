@@ -206,7 +206,7 @@ def _check_probe(path, manifest, kind, ffprobe, timeout_s, **kwargs):
 
 class SegmentWriter:
     def __init__(self, root, camera, segment_frames=120, ffmpeg='ffmpeg', ffprobe='ffprobe', timeout_s=30,
-                 commit_executor=None, pixel_format='rgb8-depth16le',probe_cache=None):
+                 commit_executor=None, pixel_format='rgb8-depth16le',probe_cache=None,replay_select=None):
         started = time.monotonic()
         if not isinstance(camera, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', camera):
             raise ValueError('safe camera name required')
@@ -223,6 +223,7 @@ class SegmentWriter:
         self.directory.mkdir(exist_ok=False)
         self.segment_frames, self.ffmpeg, self.ffprobe, self.timeout_s = segment_frames, ffmpeg, ffprobe, timeout_s
         self.probe_cache=probe_cache
+        self.replay_select=replay_select
         self.segments, self.children = [], {}
         self.meta = None
         self.closed = self.aborted = False
@@ -236,7 +237,14 @@ class SegmentWriter:
         self.timings = dict(commit_segments=0, commit_wall_s=0., commit_peak_wall_s=0.,
                             pending_wait_wall_s=0., pending_wait_peak_wall_s=0.,
                             codec_finalize_wall_s=0., probe_wall_s=0., persist_hash_wall_s=0., last_commit=None,
-                            directory_setup_wall_s=time.monotonic()-started, first_frame=None)
+                            directory_setup_wall_s=time.monotonic()-started, first_frame=None,
+                            replay_frames=0,replay_segments=0,replay_failed_segments=0,replay_last_error=None)
+
+    def replay_status(self):
+        with self._lock:
+            return dict(encoded_frames=self.timings['replay_frames'],encoded_segments=self.timings['replay_segments'],
+                pending_segments=sum(not future.done()for future,_ in self._pending),buffered_frames=self.count,
+                failed_segments=self.timings['replay_failed_segments'],last_error=self.timings['replay_last_error'])
 
     def _check_active(self):
         if self.aborted:
@@ -463,6 +471,32 @@ class SegmentWriter:
                 os.close(fd)
             detail['persist_hash_wall_s'] = time.monotonic() - before
             detail['status'] = 'committed'
+            if self.replay_select is not None:
+                from segmented_playback import encode_browser_segment
+                from robot_workbench.pipeline_timing import timing
+                before_ns=time.monotonic_ns()
+                try:
+                    with (self.root/manifest['files']['frames']['path']).open('rb')as frames:
+                        rows=[json.loads(line)for line in frames]
+                    indices=self.replay_select(rows)
+                    source=self.root/manifest['files']['rgb']['path']
+                    destination=source.with_suffix('.browser.mp4')
+                    def run(argv,**_):
+                        child=self._spawn(argv,self.timeout_s)
+                        try:child.finish()
+                        finally:child.abort();self._forget(child)
+                    encoded=encode_browser_segment(self.root,manifest,indices,destination,ffmpeg=self.ffmpeg,runner=run)
+                    sidecar=source.with_suffix('.browser.json');partial=sidecar.with_suffix('.incoming')
+                    partial.write_text(json.dumps(encoded,separators=(',',':'))+'\n');partial.replace(sidecar)
+                    detail['replay_frames']=len(indices)
+                    with self._lock:
+                        self.timings['replay_frames']+=len(indices);self.timings['replay_segments']+=1
+                    timing.record('recording.replay.encode',before_ns,camera=self.camera,frames=len(indices))
+                except Exception as error:
+                    detail['replay_error']=str(error)
+                    with self._lock:
+                        self.timings['replay_failed_segments']+=1;self.timings['replay_last_error']=str(error)[:512]
+                    timing.record('recording.replay.encode',before_ns,outcome='error',camera=self.camera,error=str(error))
             return manifest
         finally:
             for child in snapshot['children'].values():

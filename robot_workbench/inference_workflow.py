@@ -1863,7 +1863,7 @@ class InferenceWorkflow:
             primary='inference_prepare' if self.prepared is None else 'execute' if self.status=='awaiting_review' else 'inference_preview'
             ingress_closed=bool(run and(not run_recording or getattr(run.get('recorder'),'ingress_closed',False)))
             busy=self.busy or active or saving and not ingress_closed
-            if saving and ingress_closed and not active:message='控制已保持，旧录像正在后台校验与导出；可准备下一轮。'
+            if saving and ingress_closed and not active:message='控制已保持，旧录像正在后台封装与导出；可准备下一轮。'
             operator_task=deepcopy(getattr(self,'operator_task',{}))
             if operator_task.get('status')=='running'and operator_task.get('phase')!='waiting_inference_hold':busy=True
             model_gate=self._model_gate();model_ready=model_gate['ready'] is True

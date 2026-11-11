@@ -1437,7 +1437,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const background=value.background_recordings||[];
     const activity=value.recording_enabled&&value.operator_session?state?.runtime?.recording?.recording_activity:null;
     const activityText=value.recording_enabled===false?'本轮录制已关闭，不保存结果和视频。':activity?`${activity.active_mode?'正在录制 '+activity.active_mode:'等待中，不录制'} · 有效录制 ${Number(activity.effective_duration_s).toFixed(1)} 秒`:'';
-    setText('inference-recording-status',[activityText,...background.map(row=>`Run ${row.run_id}：${row.ingress_closed?'取流已关闭，后台校验与导出中':'正在确认尾部落盘'}${row.error?' · '+row.error:''}`)].filter(Boolean).join('；'));
+    setText('inference-recording-status',[activityText,...background.map(row=>`Run ${row.run_id}：${row.ingress_closed?'取流已关闭，后台封装与导出中':'正在确认尾部落盘'}${row.error?' · '+row.error:''}`)].filter(Boolean).join('；'));
     const steps=state?.inference_execution?.execute_steps??value.execute_steps??15;
     const operator=value.operator_task;
     const modelActive=value.normal_mode?.mode==='MODEL'||['RESUMING','MODEL_ADMITTED'].includes(value.normal_mode?.transition_stage)||

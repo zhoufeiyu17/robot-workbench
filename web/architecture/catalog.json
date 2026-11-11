@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.4801059424db",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f2f031f532cb",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -238,7 +238,8 @@
         "model_session.py",
         "mixed366.py",
         "mixed366_runtime.py",
-        "robot_workbench/wam.py"
+        "robot_workbench/wam.py",
+        "robot_workbench/model_install.py"
       ],
       "sources": [
         "transport",
@@ -2813,7 +2814,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "80293437b48c65ff63a146c692dbc928d92ed1f67368f40c5927a78e0913dcae",
+        "fingerprint": "951ccb7b05526584a9ec956b9b7a2bf3903f10717ac0927808cb169d20f42a29",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2937,7 +2938,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "9e7eb6a89f478c4059e2349b26595ca6b2a1a32b8362e00abb10c6d9ae64c00a",
+        "fingerprint": "67103338f2ca413ff60cfc7ed3f8f640e32a104b1576229648d51b09bf462942",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3064,7 +3065,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "2ac733fe98b55c492b250f02a09d1af4743a8627d06b2dfec6839d2cee28e07d",
+        "fingerprint": "db850327e443bbb172f5c92f7a70ea4cc9298f0fee08dd9661626422b058d9b2",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3183,7 +3184,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "e5b51de2cca27689e9f82314b0af8860421e656ebc4bf0dec99ac786845675f6",
+        "fingerprint": "1d02cceda9dcc5245ae7e9e1eb71cd6c8312c20d24b7169a22d474347557fe75",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3397,7 +3398,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "f348809a369c1dad9397c55d0f41314017914433c2a26346c7d30482c7ec8cff",
+        "fingerprint": "5b20b771d0cf05b136906896739205f0ea6f70ca7508a1759c5ae8a485926315",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3560,7 +3561,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "d95ff5a4662c1db9db5774d121510d8f8c30a322a2614635b87bc218fa0eb8d6",
+        "fingerprint": "461077758959ebc6ed7bcdc5e705a2b9cb7c00ea45e9e4310c25a0639bcad598",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3697,7 +3698,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "7f8ed830f020b1456ee31c4acafdecf41cd738de7d75baa338c3e467ffe7125f",
+        "fingerprint": "9dd36137b73edeb73ce11e05b97dca0c42f8201be33a43940863679a09914873",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3839,7 +3840,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "76d37d18ec42e2e4253bcffeb5f70d3ece186b91fc26ca91c09f37bf0115e7b4",
+        "fingerprint": "4538fac467423be0c567185a970c039691d1997d94cf83e96badc124e0c2679d",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3965,7 +3966,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "f176043e9f175a9a318f1b038347e80f66dd43e2403e852a6ac4622cc5263bdf",
+        "fingerprint": "982a43af2af8b3baa93b6a95b4d9836ac58b43d68729904daaa5ae813084409a",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4094,7 +4095,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "22607e491f323cde21da3bea8bca41737bdb7af99d8692aab1e8821ef45d4ae4",
+        "fingerprint": "84d5331a3bf339fac31cef3465501f173dc21ec8176cd6feda22d57046f72556",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4220,7 +4221,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "50bb452fa1fda48cf42ff95b3512da234587a2da781651245eda85c191a1f450",
+        "fingerprint": "9b2f1ad3a9f87ae7694e7a37e2d3a79ff1a07884e7e8e4e41a2953a364122acc",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10692,5 +10693,48 @@
     "legacy": "derive known fields from frozen ModelInput and ControlPolicy; explicit unknown if absent",
     "frequency": "selected recording only; excluded from routine state polling",
     "status": "Published; CPU/HTTP/management proxy/UI checks, historical manifest projection and actual three-camera browser playback verified"
+  },
+  "model_installation": {
+    "status": "implemented_pending_acceptance",
+    "release_schema": "workbench.model-release.v1",
+    "target_schema": "workbench.model-install-target.v1",
+    "files": [
+      "robot_workbench/model_install.py",
+      "scripts/install_model.py"
+    ],
+    "reuse": [
+      "RegisteredCatalog",
+      "wam.verify_registry",
+      "wam_mem.verify_registry"
+    ],
+    "producer_mapping": "in_progress",
+    "publication": "atomic checkpoint backend directory rename",
+    "validation": [
+      "interrupted transfer resume",
+      "concurrent repeat",
+      "both Torch families and sampling variants",
+      "producer dependency completeness",
+      "target install and catalog readback"
+    ]
+  },
+  "streaming_replay": {
+    "status": "implemented_pending_long_acceptance",
+    "files": [
+      "robot_workbench/ros_recording.py",
+      "rule_based_workbench/rgbd_segments.py",
+      "rule_based_workbench/segmented_playback.py"
+    ],
+    "sidecar_schema": "workbench.browser-segment.v1",
+    "encoding": "CPU per committed raw segment",
+    "finalization": "verify selection then packet-copy with exact PTS/DTS/duration",
+    "minimum_ffmpeg_major": 7,
+    "observability": "stream.browser_encoding and recording.replay.encode",
+    "validation": [
+      "active-prefix boundary",
+      "same decoded pixels after packet copy",
+      "microsecond PTS and final hold",
+      "corrupt derivative rebuilt",
+      "long inference/TEACH and recording latency"
+    ]
   }
 }

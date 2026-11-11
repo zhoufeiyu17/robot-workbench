@@ -1,7 +1,9 @@
 """Derive browser replay directly from lossless segments, without PNG staging."""
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import json
 import math
+import re
 from pathlib import Path
 import shutil
 import statistics
@@ -18,16 +20,92 @@ CAMERAS = ('base_0', 'left_wrist_0', 'right_wrist_0')
 _EXPORT_WORKERS = 3  # One bounded, single-thread codec path per declared camera.
 
 
+@lru_cache(maxsize=8)
+def require_packet_remux_codec(ffmpeg):
+    version=subprocess.check_output([ffmpeg,'-version'],text=True,timeout=5).splitlines()[0]
+    match=re.search(r'ffmpeg version (?:n)?(\d+)\.',version)
+    if match is None or int(match[1])<7:
+        raise ValueError('streaming browser replay requires FFmpeg7+ packet timing-file support')
+    return version
+
+
 def _setpts(offsets):
     """N is the decoded frame index. Balanced branches avoid parser-depth limits."""
-    def branch(start, end):
-        if end - start == 1:
-            return str(offsets[start])
-        middle = (start + end) // 2
-        return f'if(lt(N,{middle}),{branch(start, middle)},{branch(middle, end)})'
     if not offsets or offsets[0] != 0 or any(b <= a for a, b in zip(offsets, offsets[1:])):
         raise ValueError('strictly increasing microsecond frame offsets required')
-    return branch(0, len(offsets))
+    return _frame_expression(offsets)
+
+
+def _frame_expression(values):
+    def branch(start, end):
+        if end - start == 1:
+            return str(values[start])
+        middle = (start + end) // 2
+        return f'if(lt(N,{middle}),{branch(start, middle)},{branch(middle, end)})'
+    return branch(0, len(values))
+
+
+def encode_browser_segment(root, manifest, indices, destination, *, ffmpeg='ffmpeg', runner=subprocess.run):
+    """Encode one committed raw segment; timestamps are assigned at final remux."""
+    root, destination = Path(root), Path(destination)
+    # The owned child sanitizes PATH before nice launches the codec.
+    ffmpeg = shutil.which(ffmpeg) or ffmpeg
+    if indices != sorted(set(indices)) or any(type(i)is not int or not 0<=i<manifest['frame_count']for i in indices):
+        raise ValueError('ordered source frame selection required')
+    source = _safe(root, manifest['files']['rgb']['path'])
+    result = dict(schema='workbench.browser-segment.v1', source_rgb=manifest['files']['rgb'],
+                  source_frames=manifest['files']['frames'], indices=indices, file=None)
+    if not indices:return result
+    selection = '+'.join(f'eq(n,{i})'for i in indices)
+    command = [ffmpeg,'-nostdin','-v','error','-n','-threads','1','-filter_threads','1','-i',str(source),
+        '-vf',f"select='{selection}',setpts=N/(30*TB)",'-frames:v',str(len(indices)),'-an',
+        '-c:v','libx264','-threads','1','-preset','fast','-crf','24','-pix_fmt','yuv420p','-bf','0',
+        '-vsync','vfr','-video_track_timescale','1000000',str(destination)]
+    nice = shutil.which('nice')
+    if nice:command = [nice,'-n','10',*command]
+    runner(command, check=True, timeout=60, capture_output=True)
+    result['file'] = dict(path=str(destination.relative_to(root)),size_bytes=destination.stat().st_size,
+                          sha256=sha256(destination))
+    return result
+
+
+def _browser_parts(root, manifests, selected, temporary, run, ffmpeg):
+    """Reuse live encodes, rebuilding only missing or differently selected segments."""
+    parts=[];reused=rebuilt=0
+    for index,(manifest,indices)in enumerate(zip(manifests,selected)):
+        if not indices:continue
+        source=_safe(root,manifest['files']['rgb']['path'])
+        sidecar=source.with_suffix('.browser.json');cached=None
+        try:
+            if sidecar.stat().st_size>64*1024:raise ValueError('oversized replay sidecar')
+            candidate=json.loads(sidecar.read_bytes())
+            if (candidate.get('schema')!='workbench.browser-segment.v1' or candidate.get('indices')!=indices
+                    or candidate.get('source_rgb')!=manifest['files']['rgb']
+                    or candidate.get('source_frames')!=manifest['files']['frames']):
+                raise ValueError('live replay selection differs from final activity')
+            pin=candidate['file'];path=_safe(root,pin['path'])
+            if path.stat().st_size!=pin['size_bytes'] or sha256(path)!=pin['sha256']:
+                raise ValueError('live replay bytes changed')
+            cached=path
+        except (OSError,ValueError,KeyError,TypeError):pass
+        if cached is None:
+            # The caller's temporary directory is inside the capture camera root.
+            cached=temporary/f'rebuilt-{index}.mp4'
+            encode_browser_segment(root,manifest,indices,cached,ffmpeg=ffmpeg,runner=run)
+            rebuilt+=1
+        else:reused+=1
+        parts.append(cached)
+    return parts,dict(reused_segments=reused,rebuilt_segments=rebuilt)
+
+
+def _remux_browser(parts,destination,offsets,tail,temporary,run,ffmpeg):
+    concat=temporary/'browser.concat';filters=temporary/'packet-timing.txt'
+    concat.write_text('ffconcat version 1.0\n'+''.join("file '"+str(p).replace("'","'\\''")+"'\n"for p in parts))
+    durations=[b-a for a,b in zip(offsets,offsets[1:])]+[tail]
+    filters.write_text("setts=ts='"+_setpts(offsets)+"':duration='"+_frame_expression(durations)+"':time_base=1/1000000")
+    run([ffmpeg,'-nostdin','-v','error','-n','-f','concat','-safe','0','-i',str(concat),'-map','0:v:0',
+         '-c:v','copy','-/bsf:v',str(filters),'-video_track_timescale','1000000','-movflags','+faststart',
+         str(destination)],check=True,timeout=120,capture_output=True)
 
 
 def _pinned(root, raw, name):
@@ -81,16 +159,19 @@ def _camera_inputs(root, raw, camera):
     return rows, paths
 
 
-def _probe_video(path, runner, offsets_us, duration_us):
-    payload = json.loads(runner(['ffprobe', '-v', 'error', '-threads', '1', '-select_streams', 'v:0', '-count_frames',
-        '-show_entries', 'stream=codec_name,pix_fmt,width,height,nb_read_frames,duration:frame=best_effort_timestamp_time',
-        '-show_frames', '-of', 'json', str(path)], check=True, timeout=120, capture_output=True, text=True).stdout)
-    streams, frames = payload.get('streams', []), payload.get('frames', [])
+def _probe_video(path, runner, offsets_us, duration_us, *, decode=True):
+    unit = 'frame' if decode else 'packet'
+    count_key = 'nb_read_' + unit + 's'
+    time_key = 'best_effort_timestamp_time' if decode else 'pts_time'
+    payload = json.loads(runner(['ffprobe', '-v', 'error', '-threads', '1', '-select_streams', 'v:0', '-count_' + unit + 's',
+        '-show_entries', f'stream=codec_name,pix_fmt,width,height,{count_key},duration:{unit}={time_key}',
+        '-show_' + unit + 's', '-of', 'json', str(path)], check=True, timeout=120, capture_output=True, text=True).stdout)
+    streams, frames = payload.get('streams', []), payload.get(unit + 's', [])
     if (len(streams) != 1 or streams[0].get('codec_name') != 'h264' or streams[0].get('pix_fmt') != 'yuv420p'
-            or int(streams[0].get('nb_read_frames', -1)) != len(offsets_us) or len(frames) != len(offsets_us)):
+            or int(streams[0].get(count_key, -1)) != len(offsets_us) or len(frames) != len(offsets_us)):
         raise ValueError('browser replay codec/frame count differs')
     for frame, expected in zip(frames, offsets_us):
-        actual = float(frame.get('best_effort_timestamp_time', 'nan')) * 1e6
+        actual = float(frame.get(time_key, 'nan')) * 1e6
         if not math.isfinite(actual) or abs(actual - expected) > 1.000001:
             raise ValueError('source replay frame PTS differs by more than 1 microsecond')
     actual_duration = float(streams[0].get('duration', 'nan')) * 1e6
@@ -242,7 +323,7 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
     return manifest
 
 
-def export_capture(root, manifest, output, *, probe_cache=None):
+def export_capture(root, manifest, output, *, probe_cache=None,verify_raw=True):
     """Reuse source-time replay checks for the generic CaptureSession format."""
     root,output=Path(root),Path(output)
     output.mkdir(exist_ok=False)
@@ -252,10 +333,11 @@ def export_capture(root, manifest, output, *, probe_cache=None):
     if 'recording_activity'in manifest:
         from robot_workbench.recording_activity import ActiveTimeAxis
         activity=ActiveTimeAxis(manifest['recording_activity'])
-    spec=json.loads(_pinned(root,manifest,'capture.json').read_text())
+    def source_file(name):return _pinned(root,manifest,name)if verify_raw else _safe(root,name)
+    spec=json.loads(source_file('capture.json').read_text())
     descriptors={row['stream_id']:row for row in spec['source_descriptors']}
     segment_pins={row['segment']:{key:row[key] for key in ('size_bytes','sha256')}
-                  for row in _rows(_pinned(root,manifest,manifest['segments_ref']))}
+                  for row in _rows(source_file(manifest['segments_ref']))}
     def run(arguments,**kwargs):
         arguments=[ffprobe if arguments[0]=='ffprobe' else arguments[0],*arguments[1:]]
         return subprocess.run(arguments,**kwargs)
@@ -266,11 +348,11 @@ def export_capture(root, manifest, output, *, probe_cache=None):
             descriptor=descriptors[identity]
             if not state.get('committed') or descriptor['kind']!='video' or 'source_ref' not in descriptor:return None
             rows=[]
-            with _pinned(root,manifest,identity+'.jsonl').open('rb') as source:
+            with source_file(identity+'.jsonl').open('rb') as source:
                 for _ in range(state['committed']):
                     rows.append(json.loads(source.readline()))
             if not rows:return None
-            paths=[];previous=None;metadata_rows=None;active_segment=None;frame_index=0
+            paths=[];manifests=[];segment_names=[];previous=None;metadata_rows=None;active_segment=None;frame_index=0
             for row in rows:
                 ref=row['payload']['frame_ref'];meta=row['payload']['metadata'];segment=ref['segment']
                 if segment!=active_segment:
@@ -278,20 +360,23 @@ def export_capture(root, manifest, output, *, probe_cache=None):
                         raise ValueError('capture replay skipped segment frames')
                     if segment!=f'camera/{identity}/{len(paths):06d}.commit.json':
                         raise ValueError('capture replay requires ordered segment prefix')
-                    commit=_pinned(root,{'files':segment_pins},segment)
-                    verified=verify_segment(root/'camera',str(commit.relative_to(root/'camera')),ffprobe=ffprobe,probe_cache=probe_cache)
-                    metadata_rows=list(_rows(_safe(root/'camera',verified['files']['frames']['path'])))
+                    commit=_pinned(root,{'files':segment_pins},segment)if verify_raw else _safe(root,segment)
+                    verified=(verify_segment(root/'camera',str(commit.relative_to(root/'camera')),ffprobe=ffprobe,probe_cache=probe_cache)
+                              if verify_raw else json.loads(commit.read_text()))
+                    metadata_rows=list(_rows(_safe(root/'camera',verified['files']['frames']['path'])))if verify_raw else None
                     paths.append(_safe(root/'camera',verified['files']['rgb']['path']))
+                    manifests.append(verified);segment_names.append(segment)
                     active_segment=segment;frame_index=0
-                if ref['frame']!=frame_index or frame_index>=len(metadata_rows) or meta!=metadata_rows[frame_index]:
+                if verify_raw and (ref['frame']!=frame_index or frame_index>=len(metadata_rows) or meta!=metadata_rows[frame_index]):
                     raise ValueError('capture replay metadata or frame order differs')
                 clock=dict(environment=meta['environment'],clock_domain=meta.get('clock_domain'),source_clock_id=meta.get('source_clock_id'))
                 stamp=(meta['source_time_ns'],None)if meta.get('schema')=='workbench.ros-image.v1'else sample_stamp(meta,clock)
-                if (meta.get('capture_instance_id')!=descriptor['source_instance_id']
+                if verify_raw and (meta.get('capture_instance_id')!=descriptor['source_instance_id']
                         or (clock['source_clock_id'] or clock['clock_domain'])!=descriptor['source_clock_id']
                         or row['source_time']!=stamp[0]/1e9):
                     raise ValueError('capture replay source identity or timestamp differs')
-                previous=assert_progress(previous,stamp);frame_index+=1
+                if verify_raw:previous=assert_progress(previous,stamp)
+                frame_index+=1
             selected=list(range(len(rows)));effective=None;origin_ns=0
             if activity is not None:
                 clock_id=descriptor['source_clock_id']
@@ -320,17 +405,30 @@ def export_capture(root, manifest, output, *, probe_cache=None):
                 select="select='"+'+'.join(f'between(n,{first},{last})'for first,last in spans)+"',"
             filters.write_text(select+"settb=1/1000000,setpts='"+_setpts(offsets)+"'\n")
             destination=output/(identity+'.mp4')
-            # Same source-PTS/final-duration contract as legacy replay above.
-            run([ffmpeg,'-nostdin','-v','error','-n','-threads','1','-filter_threads','1','-f','concat','-safe','0',
-                 '-r',f'1000000/{tail}','-i',str(concat),'-filter_script:v',str(filters),'-frames:v',str(len(kept)),'-an','-c:v','libx264','-threads','1','-preset','fast',
-                 '-crf','24','-pix_fmt','yuv420p','-bf','0',
-                 '-vsync','vfr','-enc_time_base','1:1000000','-video_track_timescale','1000000','-movflags','+faststart',
-                 str(destination)],check=True,timeout=300)
-            probe=_probe_video(destination,run,offsets,offsets[-1]+tail)
+            encoding=dict(mode='post_stop_encode',reused_segments=0,rebuilt_segments=len(paths))
+            if any(path.with_suffix('.browser.json').exists()for path in paths):
+                groups={name:[]for name in segment_names}
+                for row in kept:
+                    ref=row['payload']['frame_ref'];groups[ref['segment']].append(ref['frame'])
+                with tempfile.TemporaryDirectory(dir=root/'camera',prefix='replay-')as stage:
+                    stage=Path(stage)
+                    parts,counts=_browser_parts(root/'camera',manifests,list(groups.values()),stage,run,ffmpeg)
+                    _remux_browser(parts,destination,offsets,tail,stage,run,ffmpeg)
+                encoding=dict(mode='streaming_segments',**counts)
+            else:
+                # Existing captures have no live browser segments.
+                run([ffmpeg,'-nostdin','-v','error','-n','-threads','1','-filter_threads','1','-f','concat','-safe','0',
+                     '-r',f'1000000/{tail}','-i',str(concat),'-filter_script:v',str(filters),'-frames:v',str(len(kept)),'-an','-c:v','libx264','-threads','1','-preset','fast',
+                     '-crf','24','-pix_fmt','yuv420p','-bf','0',
+                     '-vsync','vfr','-enc_time_base','1:1000000','-video_track_timescale','1000000','-movflags','+faststart',
+                     str(destination)],check=True,timeout=300)
+            # These H.264 streams have no B frames, so packet PTS cover the
+            # display timeline without decoding the completed video again.
+            probe=_probe_video(destination,run,offsets,offsets[-1]+tail,decode=verify_raw)
             relative=str(destination.relative_to(root))
             pin=dict(size_bytes=destination.stat().st_size,sha256=sha256(destination),probe=probe)
             timing=dict(path=relative,frame_count=len(kept),first_source_time=stamps[0],
-                                   frame_offsets_s=[value/1e6 for value in offsets],duration_s=(offsets[-1]+tail)/1e6)
+                frame_offsets_s=[value/1e6 for value in offsets],duration_s=(offsets[-1]+tail)/1e6,encoding=encoding)
             if activity is not None:timing.update(effective_origin_ns=origin_ns,source_clock_id=descriptor['source_clock_id'])
             return identity,relative,pin,timing
         with ThreadPoolExecutor(max_workers=_EXPORT_WORKERS,thread_name_prefix='capture-export')as workers:
