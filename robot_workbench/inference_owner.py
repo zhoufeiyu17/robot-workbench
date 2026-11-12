@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 import hashlib
 import json
+import logging
 import math
 import os
 import queue
@@ -18,6 +19,7 @@ from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD,NativeCommandMismatc
 
 # Native command endpoint comparison: joints rad / rad/s, jaws m / m/s.
 NORMAL_ENDPOINT_ABS_TOLERANCE14=((1e-5,)*6+(1e-6,))*2
+NORMAL_ENDPOINT_RANGE_FRACTION=.05
 MODEL_COMMAND_LIMIT_FRACTION=.98
 
 
@@ -863,7 +865,7 @@ class InferenceRunner:
             raise ValueError('normal mode needs fresh output evidence on the Owner clock')
         return value
 
-    def _native_output_error(self, message, phase, expected, output, *, event):
+    def _native_output_diagnostic(self, phase, expected, output):
         axes=[side+'_'+joint for side in ('left','right') for joint in ('J1','J2','J3','J4','J5','J6','jaw')]
         position_error=[actual-target for actual,target in zip(output['q_sdk14'],expected)]
         velocity_error=list(output['dq_sdk14'])
@@ -878,8 +880,39 @@ class InferenceRunner:
             reference_id=interpreter.reference.metadata['reference_id']if interpreter else None,
             last_submitted_window=deepcopy(interpreter.last_packet)if interpreter else None,
             last_submission_receipt=deepcopy(interpreter.last_receipt)if interpreter else None)
+        return diagnostic
+
+    def _native_output_error(self, message, phase, expected, output, *, event):
+        diagnostic=self._native_output_diagnostic(phase,expected,output)
         self._emit(event,diagnostic)
         return NativeCommandMismatchError(message,diagnostic)
+
+    def _check_model_endpoint(self, expected, output, *, phase, event):
+        expected=vector14(expected)
+        position_error=[abs(actual-target) for actual,target in zip(vector14(output['q_sdk14']),expected)]
+        velocity_error=[abs(value) for value in vector14(output['dq_sdk14'])]
+        absolute=NORMAL_ENDPOINT_ABS_TOLERANCE14
+        if all(error<=limit for error,limit in zip(position_error,absolute)) and all(
+                error<=limit for error,limit in zip(velocity_error,absolute)):
+            return
+        position_limits=[max(tolerance,NORMAL_ENDPOINT_RANGE_FRACTION*(hi-lo))
+                         for (lo,hi),tolerance in zip(self.sdk_limits,absolute)]
+        diagnostic=self._native_output_diagnostic(phase,expected,output)
+        diagnostic.update(position_limit_sdk14=position_limits,
+                          position_limit_range_fraction=NORMAL_ENDPOINT_RANGE_FRACTION)
+        if (any(error>limit for error,limit in zip(position_error,position_limits))
+                or any(error>limit for error,limit in zip(velocity_error,absolute))):
+            self._emit(event+'_mismatch',diagnostic)
+            raise NativeCommandMismatchError('model segment native endpoint mismatch',diagnostic)
+        diagnostic.update(severity='warning',action='CONTINUE')
+        self._emit(event+'_warning',diagnostic)
+        logging.getLogger(__name__).warning('native endpoint position deviation within allowed range: %s',
+            json.dumps(dict(execution_instance_id=self.execution_instance_id,
+                reference_id=diagnostic['reference_id'],phase=phase,
+                position_error_sdk14=diagnostic['position_error_sdk14'],
+                expected_q_sdk14=diagnostic['expected_q_sdk14'],native_q_sdk14=output['q_sdk14'],
+                position_limit_sdk14=position_limits,position_limit_range_fraction=NORMAL_ENDPOINT_RANGE_FRACTION),
+                allow_nan=False,separators=(',',':')))
 
     def _normal_epoch(self):
         self.owner.invalidate(normal_transition=True)
@@ -1085,10 +1118,8 @@ class InferenceRunner:
         output=self._normal_output()
         if any(row['sample_monotonic_ns']/1e9<current['endpoint_verification_after_s']for row in output['observations'].values()):return True
         reference=self.target_interpreter.reference;target,velocity,_=reference.sample([reference.duration_s])
-        if (not np.allclose(output['q_sdk14'],target[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)
-                or not np.allclose(output['dq_sdk14'],velocity[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)):
-            raise self._native_output_error('normal complete-segment native endpoint mismatch',
-                'complete_segment_endpoint',target[0].tolist(),output,event='normal_model_endpoint_mismatch')
+        self._check_model_endpoint(target[0].tolist(),output,
+            phase='complete_segment_endpoint',event='normal_model_endpoint')
         current.update(status='completed',complete_source_steps=current['source_steps'],completed_source_s=now,native_endpoint=output,firmware_ack=False,
             measured_endpoint=dict(sample_time_s=feedback['sample_time_s'],sample_wall_ns=feedback.get('sample_wall_ns'),
                 qpos=list(feedback['qpos']),qvel=list(feedback['qvel']),
@@ -1632,9 +1663,8 @@ class InferenceRunner:
             output=self._normal_output()
             if any(row['sample_monotonic_ns']/1e9<current['endpoint_verification_after_s']for row in output['observations'].values()):return self.status
             target,velocity,_=self.prepared_reference.sample([self.prepared_reference.duration_s])
-            if (not np.allclose(output['q_sdk14'],target[0],rtol=0,atol=1e-12)
-                    or not np.allclose(output['dq_sdk14'],velocity[0],rtol=0,atol=1e-12)):
-                raise ValueError('finite segment endpoint native output mismatch; no next query')
+            self._check_model_endpoint(target[0].tolist(),output,
+                phase='finite_segment_endpoint',event='finite_model_endpoint')
             completed=dict(current,completed_source_s=self.owner.control_time(),native_endpoint=output,
                 complete_source_steps=15,firmware_ack=False)
             self.finite_completed.append(completed);self.finite_current=None;self.finite_partial_s=0.

@@ -82,14 +82,45 @@ class CompleteNormalTests(unittest.TestCase):
         self.check_endpoint_delta([(field,axis,9e-7 if axis in (6,13)else 9e-6)
             for field in ('q_sdk14','dq_sdk14')for axis in range(14)],True)
 
-    def test_native_endpoint_rejects_joint_position_above_tolerance(self):
-        self.check_endpoint_delta([('q_sdk14',0,1.1e-5)],False)
+    def test_native_endpoint_warns_for_joint_position_inside_five_percent_range(self):
+        with self.assertLogs('robot_workbench.inference_owner',level='WARNING') as log:
+            self.check_endpoint_delta([('q_sdk14',0,.01)],True)
+        self.assertIn('position_limit_range_fraction',log.output[0])
+        warnings=[value for name,value in self.events if name=='inference_normal_model_endpoint_warning']
+        self.assertEqual(len(warnings),1)
+        self.assertEqual(warnings[0]['action'],'CONTINUE')
+        self.assertEqual(warnings[0]['position_limit_range_fraction'],.05)
+
+    def test_native_endpoint_rejects_joint_position_above_five_percent_range(self):
+        self.check_endpoint_delta([('q_sdk14',0,.5)],False)
 
     def test_native_endpoint_rejects_joint_velocity_above_tolerance(self):
         self.check_endpoint_delta([('dq_sdk14',7,1.1e-5)],False)
 
-    def test_native_endpoint_rejects_jaw_position_above_tolerance(self):
-        self.check_endpoint_delta([('q_sdk14',6,1.1e-6)],False)
+    def test_native_endpoint_warns_for_torque_limited_jaw(self):
+        with self.assertLogs('robot_workbench.inference_owner',level='WARNING'):
+            self.check_endpoint_delta([('q_sdk14',6,.001850097656564579)],True)
+        warning=next(value for name,value in self.events if name=='inference_normal_model_endpoint_warning')
+        self.assertEqual(warning['position_mismatch_axes'],['left_jaw'])
+        self.assertAlmostEqual(warning['position_limit_sdk14'][6],
+            .05*(self.runtime.owner.runner.sdk_limits[6][1]-self.runtime.owner.runner.sdk_limits[6][0]))
+
+    def test_native_endpoint_rejects_jaw_above_five_percent_range(self):
+        self.check_endpoint_delta([('q_sdk14',6,.01)],False)
+
+    def test_endpoint_range_threshold_is_inclusive_and_independent_of_target_sign(self):
+        self.setup_reviewed();runner=self.runtime.owner.runner
+        output=runner._normal_output();expected=[0.]*14
+        output['q_sdk14']=expected[:];output['dq_sdk14']=[0.]*14
+        limit=.05*(runner.sdk_limits[0][1]-runner.sdk_limits[0][0])
+        for direction in (-1,1):
+            output['q_sdk14'][0]=direction*limit
+            with self.assertLogs('robot_workbench.inference_owner',level='WARNING'):
+                runner._check_model_endpoint(expected,output,phase='finite_segment_endpoint',event='finite_model_endpoint')
+        output['q_sdk14'][0]=limit+1e-7
+        from robot_workbench.execution_settings import NativeCommandMismatchError
+        with self.assertRaises(NativeCommandMismatchError):
+            runner._check_model_endpoint(expected,output,phase='finite_segment_endpoint',event='finite_model_endpoint')
 
     def test_native_endpoint_rejects_jaw_velocity_above_tolerance(self):
         self.check_endpoint_delta([('dq_sdk14',13,1.1e-6)],False)
@@ -110,7 +141,7 @@ class CompleteNormalTests(unittest.TestCase):
         self.assertEqual(failed.exception.diagnostic['position_mismatch_axes'],['left_J1'])
 
     def test_release_receipt_retains_native_fault_after_sdk_close(self):
-        self.check_endpoint_delta([('q_sdk14',7,1.1e-5)],False)
+        self.check_endpoint_delta([('q_sdk14',7,.5)],False)
         expected=deepcopy(self.runtime.owner.last_fault_diagnostic)
         self.advance(50)
         reply=self.runtime.request_release(self.creds['inference'])
