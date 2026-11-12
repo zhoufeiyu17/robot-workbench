@@ -1030,6 +1030,8 @@ class Runtime:
                 calibration_snapshot_id=self.calibration_snapshot_id,
                 requested_monotonic_s=time.monotonic(), requested_wall_ns=time.time_ns(),
                 sdk_close_returned=False, message='释放已受理，等待 SDK 断开与设备锁收尾')
+            if self.owner.last_fault_diagnostic is not None:
+                self.release_receipt['fault_diagnostic']=deepcopy(self.owner.last_fault_diagnostic)
             return dict(result, release_receipt=deepcopy(self.release_receipt))
 
     def _idle_reason(self, *, include_in_flight=True, maintenance_actor=None):

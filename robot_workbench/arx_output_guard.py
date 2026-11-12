@@ -495,6 +495,16 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
     def terminate():
         evidence=terminate_sdk(child)
         if evidence is not None:process_evidence['terminations'].append(evidence)
+    def reap():
+        process_evidence['wait']=dict(status='started',started_monotonic_ns=time.monotonic_ns())
+        try:result=child.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process_evidence['wait'].update(status='timeout',observed_monotonic_ns=time.monotonic_ns())
+            raise
+        process_evidence['wait'].update(status='returned',returned_monotonic_ns=time.monotonic_ns())
+        process_evidence['returncode']=result
+        process_evidence['reaped_monotonic_ns']=time.monotonic_ns()
+        return result
     def persist(state, *, include_release_trace=False, **extra):
         value = dict(schema='arx_can_output_guard.v1',state=state,supervisor_pid=os.getpid(),
             child_pid=child.pid if child else None,wall_ns=time.time_ns(),timeout_s=TIMEOUT,
@@ -671,14 +681,7 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
             previous_batch=dict(selected_monotonic_ns=selected_ns,can_frames=can_frames,
                 can_batch_s=(can_done_ns-selected_ns)/1e9,can_batch_cpu_s=can_cpu_ns/1e9,
                 after_can_s=(cycle_done_ns-can_done_ns)/1e9)
-        process_evidence['wait']=dict(status='started',started_monotonic_ns=time.monotonic_ns())
-        try:result=child.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process_evidence['wait'].update(status='timeout',observed_monotonic_ns=time.monotonic_ns())
-            raise
-        process_evidence['wait'].update(status='returned',returned_monotonic_ns=time.monotonic_ns())
-        process_evidence['returncode']=result
-        process_evidence['reaped_monotonic_ns']=time.monotonic_ns()
+        result=reap()
         try:stack_capture.update(archive_memory_file(trace_memory,trace_path),archived=True)
         except OSError as error:stack_capture['archive_error']=str(error)
         if latch.phase!='idle' and not latch.reason:
@@ -691,7 +694,13 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         return result
     except BaseException as error:
         observe_failure(type(error).__name__+': '+str(error))
-        if child is not None:terminate()
+        if child is not None:
+            terminate()
+            try:reap()
+            except subprocess.TimeoutExpired:pass
+        if trace_memory is not None and process_evidence['returncode']is not None:
+            try:stack_capture.update(archive_memory_file(trace_memory,trace_path),archived=True)
+            except OSError as archive_error:stack_capture['archive_error']=str(archive_error)
         latch.trip('supervisor failed: '+str(error))
         try:persist('latched',include_release_trace=True,reason=latch.reason)
         except OSError:pass

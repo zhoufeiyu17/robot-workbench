@@ -42,6 +42,10 @@ class CompleteNormalTests(unittest.TestCase):
         else:
             self.assertEqual(runner.status,'FAULT');self.assertIn('native endpoint mismatch',runner.reason)
             self.assertTrue(any(name=='inference_normal_model_endpoint_mismatch'for name,_ in self.events))
+            diagnostic=self.runtime.owner.last_fault_diagnostic['native_command_mismatch']
+            self.assertEqual(diagnostic['phase'],'complete_segment_endpoint')
+            self.assertTrue(diagnostic['position_mismatch_axes']or diagnostic['velocity_mismatch_axes'])
+            self.assertIsNotNone(diagnostic['last_submitted_window'])
 
     def test_native_endpoint_accepts_declared_joint_and_jaw_position_velocity_errors(self):
         self.check_endpoint_delta([(field,axis,9e-7 if axis in (6,13)else 9e-6)
@@ -58,6 +62,32 @@ class CompleteNormalTests(unittest.TestCase):
 
     def test_native_endpoint_rejects_jaw_velocity_above_tolerance(self):
         self.check_endpoint_delta([('dq_sdk14',13,1.1e-6)],False)
+
+    def test_initial_hold_uses_declared_native_command_tolerances(self):
+        from unittest.mock import patch
+        from robot_workbench.execution_settings import NativeCommandMismatchError
+        self.setup_reviewed();runner=self.runtime.owner.runner
+        output=runner._normal_output()
+        for axis in range(14):
+            output['q_sdk14'][axis]+=9e-7 if axis in (6,13)else 9e-6
+            output['dq_sdk14'][axis]+=9e-7 if axis in (6,13)else 9e-6
+        with patch.object(runner,'_normal_output',return_value=output):
+            runner._verify_initial_hold()
+            output['q_sdk14'][0]+=2e-6
+            with self.assertRaises(NativeCommandMismatchError)as failed:runner._verify_initial_hold()
+        self.assertEqual(failed.exception.diagnostic['phase'],'initial_joint_hold')
+        self.assertEqual(failed.exception.diagnostic['position_mismatch_axes'],['left_J1'])
+
+    def test_release_receipt_retains_native_fault_after_sdk_close(self):
+        self.check_endpoint_delta([('q_sdk14',7,1.1e-5)],False)
+        expected=deepcopy(self.runtime.owner.last_fault_diagnostic)
+        self.advance(50)
+        reply=self.runtime.request_release(self.creds['inference'])
+        self.assertEqual(reply['release_receipt']['fault_diagnostic'],expected)
+        self.until(lambda: not self.runtime.owner.backend.is_connected)
+        self.runtime.close()
+        self.assertEqual(self.runtime.release_receipt['status'],'released')
+        self.assertEqual(self.runtime.release_receipt['fault_diagnostic'],expected)
 
     def test_production_model_continues_fresh_segments_without_raw_gate_transitions(self):
         self.setup_reviewed(40.);runner=self.runtime.owner.runner

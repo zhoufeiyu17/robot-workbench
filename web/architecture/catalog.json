@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.7cb85a21fdb3",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.748a3849c811",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -717,6 +717,28 @@
         "jaw_velocity_atol_m_s": 1e-06,
         "rtol": 0,
         "failure": "retain original native output, expected endpoint and tolerance in mismatch event; existing fault path unchanged"
+      },
+      "native_command_diagnostic": {
+        "comparison": "fixed-start, continued-hold and complete-segment native q/dq share joint 1e-5 and jaw 1e-6 absolute tolerances",
+        "units": "joint rad/rad/s; jaw m/m/s",
+        "producer": "InferenceRunner native command comparison and Owner.motion_fault",
+        "consumer": "last_fault_diagnostic.native_command_mismatch, persisted release operation result",
+        "fields": [
+          "phase",
+          "expected_q_sdk14",
+          "expected_dq_sdk14",
+          "native_output",
+          "absolute_tolerance_sdk14",
+          "position_error_sdk14",
+          "velocity_error_sdk14",
+          "position_mismatch_axes",
+          "velocity_mismatch_axes",
+          "begin_command",
+          "reference_id",
+          "last_submitted_window",
+          "last_submission_receipt"
+        ],
+        "optional_sdk_clock": "native_output.observations.<side>.command_sdk_time_s retains raw SDK command timestamp; null when unavailable"
       }
     },
     {
@@ -845,7 +867,8 @@
           "heartbeat": "source_tick.connected consumed by operator-input readiness; false clears incomplete gesture",
           "reconnect": "reopen disconnected device, ignore held repeat, no synthetic action or new preparation"
         }
-      }
+      },
+      "exception_exit_evidence": "Supervisor exception path terminates and waits for SDK child, records actual return code/reap time and archives bounded stack evidence. Wait timeout remains unconfirmed; fault stays latched."
     },
     {
       "id": "I09",
@@ -2810,11 +2833,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc01-cpu-verification.json",
           "sha256": "4501734a7debe267f3ac17a64597ec049bb7e518d59fc392d6e868f152566cf7",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "1168965b6b8eee5793e3f1b91ed6944644e02ee55ae3c1965e11190b4eabe710",
+        "fingerprint": "9fbf188ecbe1b9e20afcbc75fa28aada5a9ae59cb0e36267769fb5b5720c36d8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2934,11 +2957,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc02-cpu-verification.json",
           "sha256": "e32ad42a7b811b8e27ddfc7ec043a7e655d3bd111b62f57aedad9c394fdd594c",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "f5813f547ed78c0f3a7d26841030845f1f7d200fad291229b64ea2b864845a03",
+        "fingerprint": "1f978014391e93f4eb6d17e4cd740c1e8da326b9abf6c03af8443012822de9fa",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3061,11 +3084,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc03-cpu-verification.json",
           "sha256": "6429995f97a4ece88c8921ab191c379bcccb1c0e1ed102d210f65cf71e7a1fa7",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "f49b7fd34b8ee256ff93a7e1cf11b29d9126596087a0342d7d39aa43eec7b332",
+        "fingerprint": "1cfe85a601c8307664d8f6aad5ad81d976dd65fcc57fc32f390183a0cbc28c04",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3180,11 +3203,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc04-cpu-verification.json",
           "sha256": "9843ba68805e50ff201b2815fc69efa83fc5829d3756fc5ad870592aa52818f8",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "0e97f399ce0b46a2430a1aa7c6c7577eb242c4585d16d76a6ef989b1e02b1c68",
+        "fingerprint": "6012be72a12d8faad5c6bf31cfd6d02511b78de4457e993f6894c0859f92225d",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3394,11 +3417,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "5b20b771d0cf05b136906896739205f0ea6f70ca7508a1759c5ae8a485926315",
+        "fingerprint": "0815ccb467decc39dbdb5491be8ec044f3dc332d5b773dc4d023f6a8902729b0",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3552,7 +3575,7 @@
         "evidence": {
           "path": ".evidence/infer-pedal2-start-20261107-v1/recording-lifecycle-final-acceptance.json",
           "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
-          "matches_file": true,
+          "matches_file": false,
           "scope": [
             "durable ingress closure releases next-Run admission",
             "prepared HOLD parameter renewal for execution steps, duration and denoise",
@@ -3561,7 +3584,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "461077758959ebc6ed7bcdc5e705a2b9cb7c00ea45e9e4310c25a0639bcad598",
+        "fingerprint": "3344d0142790e2505552a39b147c0ca88b4db8106ff3b2fc34ae40b354b1f234",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3694,11 +3717,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc07-cpu-verification.json",
           "sha256": "a115474125adef5b3acfb2797b37a84c0131123ee3ccd98cdc91ef6aff1dd30a",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "5c8db4592f9054a3714ab3b9d32c1fff0ad29549de0c9d916953f1c4216fa484",
+        "fingerprint": "f2bc0bcd7e549a466c63d2f1d4f244d54f6266fe1fc38fcb904b27c7e8b3b1cf",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3836,11 +3859,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "4538fac467423be0c567185a970c039691d1997d94cf83e96badc124e0c2679d",
+        "fingerprint": "8df67f238765ca450266426d5951747d0e037f194d392a87d18ba673189515e9",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3962,11 +3985,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "982a43af2af8b3baa93b6a95b4d9836ac58b43d68729904daaa5ae813084409a",
+        "fingerprint": "402ae3e584fa4e88f61fe35d2ff6ed23fd60e74791463afc6d03f25c7c1feb64",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4091,11 +4114,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "84d5331a3bf339fac31cef3465501f173dc21ec8176cd6feda22d57046f72556",
+        "fingerprint": "b43d897d3bd16a62fc88adcffd2d48df3c508c84bab1c85684f0348afb489fdb",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4217,11 +4240,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": true,
+          "matches_file": false,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "9b2f1ad3a9f87ae7694e7a37e2d3a79ff1a07884e7e8e4e41a2953a364122acc",
+        "fingerprint": "14f8a7f666d537b14e7522846e8677ce9b72695a2ca4d6ff61dd6332854233b7",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },

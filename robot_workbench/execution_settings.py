@@ -583,6 +583,12 @@ def validate(value, *, environment=None, allow_legacy=False):
     return result
 
 
+class NativeCommandMismatchError(ValueError):
+    def __init__(self, message, diagnostic):
+        self.diagnostic = deepcopy(diagnostic)
+        super().__init__(message)
+
+
 class JointSpeedProtectionError(ValueError):
     def __init__(self, observation):
         self.observation=observation

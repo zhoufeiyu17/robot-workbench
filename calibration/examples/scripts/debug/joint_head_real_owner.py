@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'infra'))
 from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_command_sdk, mapping_identity, FEEDBACK_MAX_MM,command_max_mm,feedback_min_mm,feedback_max_mm
 from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, ControlTickGapError, arrival_tolerances, active_indices, feedback_to_command, observe_arm_positions
 from robot_workbench.joint_bounds import position_noise_rad, feedback_position_margin_rad, JointPositionBoundaryError
-from robot_workbench.execution_settings import JointSpeedProtectionError,FEEDBACK_TIMEOUT_S,NATIVE_WATCHDOG_TIMEOUT_S,DEFAULT_JOINT_TOLERANCE_RAD
+from robot_workbench.execution_settings import JointSpeedProtectionError,NativeCommandMismatchError,FEEDBACK_TIMEOUT_S,NATIVE_WATCHDOG_TIMEOUT_S,DEFAULT_JOINT_TOLERANCE_RAD
 from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRejected,SDKNativeFault,validate_native_faults
 from robot_workbench.target_interpreter import ReferenceFeedbackStaleError,ReferenceRevokedError
 
@@ -480,7 +480,9 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                         or not all(math.isfinite(x)for x in q+dq+row['kp']+row['kd']+[row['gripper_kp'],row['gripper_kd']])):
                     raise ReferenceWindowRejected('finite complete native command and gains required')
                 result['q_sdk14'].extend(q);result['dq_sdk14'].extend(dq);result['gains'][side]=row
-                result['observations'][side]=dict(controller_instance_id=instance_id,sequence=int(observation.sequence),sample_monotonic_ns=stamp)
+                command_stamp=getattr(cmd,'timestamp',None)
+                result['observations'][side]=dict(controller_instance_id=instance_id,sequence=int(observation.sequence),sample_monotonic_ns=stamp,
+                    command_sdk_time_s=(float(command_stamp)if isinstance(command_stamp,(int,float))and math.isfinite(command_stamp)else None))
             configs=self._robot_configs
             result['velocity_limits_sdk14']=(
                 [float(v)for side in('left','right')for v in(*configs[side].joint_vel_max,configs[side].gripper_vel_max)]
@@ -1342,6 +1344,8 @@ class Owner:
         if self.cancel_requested_reference(reason):return
         diagnostic = self.diagnostic_sample(self.current_feedback)
         diagnostic.update(reasons=['motion_fault'],error=str(reason))
+        if isinstance(reason,NativeCommandMismatchError):
+            diagnostic['native_command_mismatch']=deepcopy(reason.diagnostic)
         self.recoverable_fault = None
         self.recovery_feedback_limit_s = reason.maximum_age_s if isinstance(reason,ReferenceFeedbackStaleError)else FEEDBACK_TIMEOUT_S
         self.stop(reason)

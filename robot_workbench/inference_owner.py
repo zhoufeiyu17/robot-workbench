@@ -14,7 +14,7 @@ import weakref
 from .inference import InferenceLoop, StableTraySupport, audit_dynamics, vector14
 from .sample_clock import POLICY_DURATION_TOLERANCE_S
 from .wam import NATIVE_SCHEMA
-from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD
+from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD,NativeCommandMismatchError
 
 # Native command endpoint comparison: joints rad / rad/s, jaws m / m/s.
 NORMAL_ENDPOINT_ABS_TOLERANCE14=((1e-5,)*6+(1e-6,))*2
@@ -861,6 +861,24 @@ class InferenceRunner:
             raise ValueError('normal mode needs fresh output evidence on the Owner clock')
         return value
 
+    def _native_output_error(self, message, phase, expected, output, *, event):
+        axes=[side+'_'+joint for side in ('left','right') for joint in ('J1','J2','J3','J4','J5','J6','jaw')]
+        position_error=[actual-target for actual,target in zip(output['q_sdk14'],expected)]
+        velocity_error=list(output['dq_sdk14'])
+        interpreter=self.target_interpreter
+        diagnostic=dict(phase=phase,command_epoch=self.owner.epoch,
+            expected_q_sdk14=list(expected),expected_dq_sdk14=[0.]*14,native_output=deepcopy(output),
+            absolute_tolerance_sdk14=list(NORMAL_ENDPOINT_ABS_TOLERANCE14),
+            position_error_sdk14=position_error,velocity_error_sdk14=velocity_error,
+            position_mismatch_axes=[axis for axis,error,limit in zip(axes,position_error,NORMAL_ENDPOINT_ABS_TOLERANCE14)if abs(error)>limit],
+            velocity_mismatch_axes=[axis for axis,error,limit in zip(axes,velocity_error,NORMAL_ENDPOINT_ABS_TOLERANCE14)if abs(error)>limit],
+            begin_command=deepcopy(self.owner.last_begin_command),
+            reference_id=interpreter.reference.metadata['reference_id']if interpreter else None,
+            last_submitted_window=deepcopy(interpreter.last_packet)if interpreter else None,
+            last_submission_receipt=deepcopy(interpreter.last_receipt)if interpreter else None)
+        self._emit(event,diagnostic)
+        return NativeCommandMismatchError(message,diagnostic)
+
     def _normal_epoch(self):
         self.owner.invalidate(normal_transition=True)
         self.owner.active_epoch=self._epoch=self.owner.epoch
@@ -1065,10 +1083,8 @@ class InferenceRunner:
         reference=self.target_interpreter.reference;target,velocity,_=reference.sample([reference.duration_s])
         if (not np.allclose(output['q_sdk14'],target[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)
                 or not np.allclose(output['dq_sdk14'],velocity[0],rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)):
-            self._emit('normal_model_endpoint_mismatch',dict(reference_id=reference.metadata['reference_id'],
-                command_epoch=self.owner.epoch,expected_q_sdk14=target[0].tolist(),expected_dq_sdk14=velocity[0].tolist(),
-                native_output=output,absolute_tolerance_sdk14=list(NORMAL_ENDPOINT_ABS_TOLERANCE14)))
-            raise ValueError('normal complete-segment native endpoint mismatch')
+            raise self._native_output_error('normal complete-segment native endpoint mismatch',
+                'complete_segment_endpoint',target[0].tolist(),output,event='normal_model_endpoint_mismatch')
         current.update(status='completed',complete_source_steps=current['source_steps'],completed_source_s=now,native_endpoint=output,firmware_ack=False,
             measured_endpoint=dict(sample_time_s=feedback['sample_time_s'],sample_wall_ns=feedback.get('sample_wall_ns'),
                 qpos=list(feedback['qpos']),qvel=list(feedback['qvel']),
@@ -1327,15 +1343,15 @@ class InferenceRunner:
         expected=self.initialization['begin_command']['command_sdk14']
         if (any(row['sample_monotonic_ns']/1e9<self.initialization_source_s for row in output['observations'].values())
                 or any(output['gains'][side]['gripper_kp']<=0 for side in('left','right'))
-                or any(abs(output['q_sdk14'][i]-expected[i])>1e-12
+                or any(abs(output['q_sdk14'][i]-expected[i])>NORMAL_ENDPOINT_ABS_TOLERANCE14[i]
                        or abs(command['command_sdk14'][i]-expected[i])>1e-12 for i in(6,13))):
-            self._emit('initial_hold_mismatch',dict(expected_jaws_sdk=[expected[6],expected[13]],
-                output=output,begin_command=command,command_epoch=self.owner.epoch))
-            raise ValueError('strict initialized jaw hold changed; no reprepare or model admission')
+            raise self._native_output_error('strict initialized jaw hold changed; no reprepare or model admission',
+                'initial_jaw_hold',expected,output,event='initial_hold_mismatch')
         if self.config.get('reference_planning')is not None and (
-                any(abs(output['q_sdk14'][i]-expected[i])>1e-12 for i in range(14))
-                or any(abs(output['dq_sdk14'][i])>1e-12 for i in(*range(6),*range(7,13)))):
-            raise ValueError('synchronous start is not a fixed native q/dq hold; a moving boundary cannot be zeroed')
+                any(abs(output['q_sdk14'][i]-expected[i])>NORMAL_ENDPOINT_ABS_TOLERANCE14[i]for i in range(14))
+                or any(abs(output['dq_sdk14'][i])>NORMAL_ENDPOINT_ABS_TOLERANCE14[i]for i in(*range(6),*range(7,13)))):
+            raise self._native_output_error('synchronous start is not a fixed native q/dq hold; a moving boundary cannot be zeroed',
+                'initial_joint_hold',expected,output,event='initial_hold_mismatch')
         return output
 
     def _initialize_hold(self,feedback):
@@ -1366,11 +1382,12 @@ class InferenceRunner:
             import numpy as np
             previous=self.previous_native_hold;self.owner.command_gate();output=self._normal_output()
             if (previous.cancelled or previous.epoch!=self.owner.epoch
-                    or any(abs(output['dq_sdk14'][i])>1e-12 for i in(*range(6),*range(7,13)))
-                    or not np.allclose(output['q_sdk14'],sdk_target(self.initial_device14),rtol=0,atol=1e-12)
+                    or any(abs(output['dq_sdk14'][i])>NORMAL_ENDPOINT_ABS_TOLERANCE14[i]for i in(*range(6),*range(7,13)))
+                    or not np.allclose(output['q_sdk14'],sdk_target(self.initial_device14),rtol=0,atol=NORMAL_ENDPOINT_ABS_TOLERANCE14)
                     or any(not np.allclose(output['gains'][side][key],gains('normal_X5',side)[index])
                            for side in('left','right')for index,key in enumerate(('kp','kd')))):
-                raise ValueError('continued native hold identity/output/gains changed; reprepare required')
+                raise self._native_output_error('continued native hold identity/output/gains changed; reprepare required',
+                    'continued_hold',sdk_target(self.initial_device14),output,event='initial_hold_mismatch')
             self.owner.last_begin_command=dict(command_sdk14=output['q_sdk14'],source_outputs={'continuation':output},
                 epoch=self.owner.epoch,runtime_nonce=self.owner.runtime_nonce,firmware_ack=False)
             previous.revoke();self.owner.control.auto_aborted=False;self.owner.control.state=self.owner.states.READY

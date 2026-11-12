@@ -644,7 +644,7 @@ else:
 @unittest.skipUnless(sys.platform == 'linux', 'Linux timestamp and supervisor integration')
 class SupervisorTests(unittest.TestCase):
     def test_real_supervisor_child_and_kernel_rx_with_disabled_left_jaw(self):
-        for mode in ('release', 'loss', 'heartbeat','heartbeat_future','release_loss','release_loss_lie','quiesce','quiesce_bad','quiesce_late','trip_detail','exit23','segfault','ipc_closed'):
+        for mode in ('release', 'loss', 'heartbeat','heartbeat_future','release_loss','release_loss_lie','quiesce','quiesce_bad','quiesce_late','trip_detail','exit23','segfault','ipc_closed','network_down'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 pairs = [socket.socketpair(type=socket.SOCK_DGRAM) for _ in range(2)]
                 class FakeCan:
@@ -681,6 +681,11 @@ class SupervisorTests(unittest.TestCase):
                     def make_latch(*args,**kwargs):
                         value=latch_type(*args,**kwargs);latches.append(value);return value
                     def kill(child):terminated.append(child.pid);return terminate(child)
+                    receive_can=guard.receive_ready_can
+                    def receive(*args,**kwargs):
+                        if mode=='network_down'and latches[-1].phase=='active'and (Path(directory)/'active').exists():
+                            raise OSError(100,'Network is down')
+                        return receive_can(*args,**kwargs)
                     def read_trace(buffer,pid,**kwargs):
                         latch=latches[-1]
                         if latch.reason:
@@ -692,9 +697,15 @@ class SupervisorTests(unittest.TestCase):
                     with patch.object(guard, 'open_can', side_effect=lambda bus: readers[bus]),\
                             patch.object(guard,'FeedbackLatch',side_effect=make_latch),\
                             patch.object(guard,'terminate_sdk',side_effect=kill),\
-                            patch.object(guard.ReleaseTrace,'snapshot',read_trace):
-                        result = guard.supervise(profile,
-                            [sys.executable, '-c', SDK_STANDIN, str(ROOT), mode, directory])
+                            patch.object(guard.ReleaseTrace,'snapshot',read_trace),\
+                            patch.object(guard,'receive_ready_can',side_effect=receive):
+                        if mode=='network_down':
+                            with self.assertRaisesRegex(OSError,'Network is down'):
+                                guard.supervise(profile,[sys.executable,'-c',SDK_STANDIN,str(ROOT),mode,directory])
+                            result=json.loads((Path(directory)/'can-output-guard.json').read_text())['process_evidence']['returncode']
+                        else:
+                            result = guard.supervise(profile,
+                                [sys.executable, '-c', SDK_STANDIN, str(ROOT), mode, directory])
                     receipt = json.loads((Path(directory)/'can-output-guard.json').read_text())
                     trace=Path(receipt['stack_log'])
                     self.assertTrue(trace.is_file());self.assertEqual(trace.stat().st_mode&0o777,0o600)
@@ -721,7 +732,12 @@ class SupervisorTests(unittest.TestCase):
                         self.assertEqual(process['signal_sender'],'not_inferred')
                         self.assertIsNotNone(process['first_failure'])
                         self.assertIn(process['last_ipc']['action'],('activate','heartbeat','trip','releasing','retire_left','retire_right'))
-                        if mode in ('exit23','segfault'):
+                        if mode=='network_down':
+                            self.assertEqual(receipt['last_latch']['reason'],'supervisor failed: [Errno 100] Network is down')
+                            self.assertEqual(process['wait']['status'],'returned')
+                            self.assertEqual(process['returncode'],-signal.SIGKILL)
+                            self.assertTrue(receipt['stack_capture']['archived'])
+                        elif mode in ('exit23','segfault'):
                             if mode=='segfault':
                                 self.assertIn('Fatal Python error: Segmentation fault',trace.read_text())
                                 if result==-signal.SIGKILL:
