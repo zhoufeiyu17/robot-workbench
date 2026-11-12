@@ -87,6 +87,32 @@ WAM接入、ARX13既有验收及治理对账的
 
 接口字段、行为及文件定位的权威目录为 `web/architecture/catalog.json`，详细规范为 `docs/WORKBENCH_INTEGRATION_INTERFACE.md`。待讨论方案保存为候选证据，获批后进入权威目录。
 
+## 训练 checkpoint 的统一安装入口
+
+用户于 2026-11-12 要求在本项目内留档并复用以下安装方式。
+现有 WAM、WAM-MEM 家族的新 checkpoint 统一通过 `scripts/install_model.py` 安装，
+由训练端原生完成记录自动解析权重、训练指令、文本缓存、源码和依赖，生成制品清单并登记目标模型目录。
+家族适配器与目标运行时配置按部署环境复用，checkpoint 差异由制品清单表达。
+
+在仓库根目录执行，将占位符替换为已登记的配置名和训练端实验目录。
+
+```bash
+python3 scripts/install_model.py install \
+  --producer '<训练端配置名>' \
+  --family wam-mem \
+  --experiment '<训练端实验目录>' \
+  --target '<目标机配置名>'
+```
+
+- `--family` 支持 `wam` 和 `wam-mem`。省略 `--checkpoint` 时默认为 `latest`，选择完成记录已提交的最新 checkpoint。WAM 使用原生 `outputs/formal/latest.json`，WAM-MEM 在单一训练输出目录内按完成记录的 step 选择；存在多个输出目录时显式指定 `--checkpoint`。
+- 需要固定版本时使用 `--checkpoint '<实验内 checkpoint 相对路径>'`。已有发布清单可直接用 `install --source '<OSS 清单 URI>' --target '<目标机配置名>'` 安装。
+- 调度配置默认读取 `~/.config/robot-workbench/model-targets.json`，可用 `--targets` 指定其他配置。真实主机、路径、运行时和凭据位置由环境配置提供，具体部署回执保存在目标机及任务证据中。
+- 权重经 NAS → OSS 内网 → ARX 传输，Mac 负责命令调度与轻量回执。大权重沿用生产者身份、文件大小和传输 CRC，小型清单与配置核对摘要。
+- 安装支持中断后重试和重复执行复用，成功后原子登记模型目录。同一模型 ID 对应不同制品时明确报告冲突。安装完成、GPU 准备通过及真机执行验收分别记录。
+
+制品与目标配置契约见 [工作台集成接口](docs/WORKBENCH_INTEGRATION_INTERFACE.md) 中的
+“训练制品安装与采集期间回放编码”。新增模型家族或原生完成格式变化时，更新公共解析与相应隔离验收。
+
 ## 开发 Map 与续接
 
 - 开始、阻塞、实现和验证完成时，同步更新 `web/architecture/development-map.json` 中相应职责域和文件的状态、证据及下一步。每个逻辑变更结束后使用 `python3 scripts/development_map.py refresh --publish` 同步已授权的内网架构站点。
