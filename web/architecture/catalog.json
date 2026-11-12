@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f2f031f532cb",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.7cb85a21fdb3",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -2814,7 +2814,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "951ccb7b05526584a9ec956b9b7a2bf3903f10717ac0927808cb169d20f42a29",
+        "fingerprint": "1168965b6b8eee5793e3f1b91ed6944644e02ee55ae3c1965e11190b4eabe710",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2938,7 +2938,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "67103338f2ca413ff60cfc7ed3f8f640e32a104b1576229648d51b09bf462942",
+        "fingerprint": "f5813f547ed78c0f3a7d26841030845f1f7d200fad291229b64ea2b864845a03",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3065,7 +3065,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "db850327e443bbb172f5c92f7a70ea4cc9298f0fee08dd9661626422b058d9b2",
+        "fingerprint": "f49b7fd34b8ee256ff93a7e1cf11b29d9126596087a0342d7d39aa43eec7b332",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3184,7 +3184,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "1d02cceda9dcc5245ae7e9e1eb71cd6c8312c20d24b7169a22d474347557fe75",
+        "fingerprint": "0e97f399ce0b46a2430a1aa7c6c7577eb242c4585d16d76a6ef989b1e02b1c68",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3698,7 +3698,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "9dd36137b73edeb73ce11e05b97dca0c42f8201be33a43940863679a09914873",
+        "fingerprint": "5c8db4592f9054a3714ab3b9d32c1fff0ad29549de0c9d916953f1c4216fa484",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
