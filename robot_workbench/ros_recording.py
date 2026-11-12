@@ -225,7 +225,8 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                     if old and ref.sequence>old.sequence+1:
                         control_gap_start=min(control_gap_start or old.sequence+1,old.sequence+1)
                         fault('control_sequence','activity control source sequence gap')
-                    lifecycle=value.event in ('inference_mode_transition','inference_finish','inference_episode_stopped','stop','reference_cancelled')
+                    lifecycle=value.event in ('inference_mode_transition','inference_finish','inference_episode_stopped','stop','reference_cancelled',
+                                              'inference_normal_model_segment_started')
                     data=json_value(value.payload_json)if lifecycle else {}
                     if value.event=='inference_mode_transition'and data.get('runtime_nonce')!=source['source_instance_id']:
                         raise ValueError('recording mode receipt belongs to another Owner')
@@ -542,6 +543,7 @@ def capture_worker(root, spec, remaining=b'', *, recover=False):
                 elif control is not None and target is not None and control.sequence==target:activity.finish(control.source_time_ns)
                 else:raise ValueError('activity final control watermark required')
             finish['recording_activity']=activity.manifest()
+            finish['inference_planning_changes']=deepcopy(activity.planning_changes)
             state['recording_activity']=activity.summary()
         write_json(root/'finish.json',finish)
         live_index=dict(schema='workbench.written-capture-index.v1',

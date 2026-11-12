@@ -234,7 +234,8 @@ def infer_reference_policy(value):
     if (not isinstance(value,dict)or set(value)!=set(expected)|{'max_execution_duration_s'}
             or any(value[k]!=v for k,v in expected.items() if k not in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
             or any(type(value[k])not in(int,float) for k in('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
-            or any(not math.isfinite(value[k]) or not 0<value[k]<=expected[k] for k in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
+            or any(not math.isfinite(value[k]) or value[k]<=0 for k in ('velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'))
+            or value['acceleration_limit_rad_s2']>40.
             or value['max_execution_duration_s'] is not None and (type(value['max_execution_duration_s'])not in(int,float)
                 or not math.isfinite(value['max_execution_duration_s'])or value['max_execution_duration_s']<=0)):
         raise ValueError('explicit reviewed infer curve policy and complete-segment boundaries required')

@@ -1140,6 +1140,9 @@ class Application:
         policy_supported=bool(getattr(device.runtime,'supports_control_policy',False))
         allowed['control_policy']=dict(allowed=settings_allowed and policy_supported,
             reason=('当前Owner尚未提供统一策略接口' if not policy_supported else None if settings_allowed else settings_reason))
+        allowed['inference_planning_settings']=dict(
+            allowed=business=='inference' and policy_supported and execution_settings.get('planning_update_allowed')is True,
+            reason=execution_settings.get('planning_update_reason')or'请先接入并交接推理控制权限')
         connect_ready=device.runtime is None and not device.connecting and not (device.thread and device.thread.is_alive())
         allowed['connect'] = dict(allowed=bool(connect_ready and device.factory is not None),
                                   reason=('设备控制后端尚未配置' if device.factory is None else
@@ -1498,7 +1501,7 @@ class Application:
             response=dict(message='本次测试结束与清空记忆已受理'if body.get('end_test')else'本轮推理准备或执行已撤销，不会自动重试')
             with self.lock:self.requests[key]=dict(body=original_body,action=action,response=response)
             return response
-        if action not in ('preview_target','preview_overview','preview_mesh','preview_recover','mesh','select_result',*HISTORY_ACTIONS):
+        if action not in ('preview_target','preview_overview','preview_mesh','preview_recover','mesh','select_result','inference_planning_settings',*HISTORY_ACTIONS):
             with self.lock:
                 if any(row.get('status')=='running' and row.get('action')=='inference_run'
                         for (env,_),row in self.jobs.items() if env==environment):
@@ -1594,6 +1597,33 @@ class Application:
                 self.requests[key]=dict(body=original_body,action=action,response=result)
                 while len(self.requests)>256:self.requests.popitem(last=False)
             self.invalidate(environment,clear_manual=True)
+            return result
+        if action=='inference_planning_settings':
+            required={'environment','business','request_id','velocity_limit_rad_s','expected_revision'}
+            if business!='inference' or not required<=set(body) or set(body)-required-{'jaw_velocity_limit_mm_s'}:
+                raise ValueError('规划限速更新需要推理业务、限速和当前策略版本')
+            runtime=device.runtime
+            if runtime is None or not getattr(runtime,'supports_control_policy',False):
+                raise ValueError('当前Owner尚未提供统一策略接口')
+            with self.policy_write_lock:
+                with self.lock:
+                    job=self.jobs.get((environment,'inference'))or{}
+                    if job.get('status')=='running' and not job.get('execution_submitted'):
+                        raise ValueError('请等待本轮控制准备完成后更新规划限速')
+                    previous=self.requests.get(key)
+                    if previous:
+                        if previous['body']!=original_body or previous['action']!=action:
+                            raise ValueError('同一请求身份不可绑定不同操作')
+                        return previous['response']
+                changes={'planning.'+key:body[key]for key in ('velocity_limit_rad_s','jaw_velocity_limit_mm_s')if key in body}
+                policy=runtime.update_control_policy(device.credentials[business],dict(
+                    expected_revision=body['expected_revision'],changes=changes))
+                device.workflows['inference']._policy_cache_key=None
+                result=dict(control_policy=policy,message='规划限速已保存，从下一次模型 Infer 轨迹片段开始生效')
+                with self.lock:
+                    self.reviews.pop((environment,business),None)
+                    self.requests[key]=dict(body=original_body,action=action,response=result)
+                    while len(self.requests)>256:self.requests.popitem(last=False)
             return result
         if action=='control_policy':
             if set(body)!={'environment','business','request_id','changes','expected_revision'}:

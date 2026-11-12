@@ -2075,7 +2075,7 @@ function oneRunSnapshot(){
   const h=harness({business:'inference'}),value=oneRunSnapshot();
   value.workflow.id='timeline-run';value.workflow.busy=false;
   value.results=[{id:'capture-timeline-run-receipt',run_id:'timeline-run',kind:'control_recording',status:'completed'},
-    {id:'timeline-video',run_id:'timeline-run',kind:'replay',media:{id:'timeline-video',run_id:'timeline-run',
+    {id:'timeline-video',run_id:'timeline-run',kind:'replay',status:'complete',media:{id:'timeline-video',run_id:'timeline-run',
       kind:'replay',camera:'base_0',role:'source',ready:true,mime_type:'video/mp4',url:'/api/result-media?result_id=timeline-video'}}];
   h.app.start();h.reply(0,value);await settle();h.app.selectTab('results');await settle();
   const metadata=h.requests.findIndex(row=>row.url.startsWith('/api/inference-replay-metadata?'));
@@ -2373,8 +2373,8 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
 
 {
   const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
-  info.reference_planning={velocity_limit_rad_s:2};value.runtime.execution_settings={revision:4};
-  value.runtime.allowed_operations.control_policy={allowed:true};
+  info.reference_planning={velocity_limit_rad_s:2,jaw_velocity_limit_mm_s:40};value.runtime.execution_settings={revision:4};
+  value.runtime.allowed_operations.inference_planning_settings={allowed:true};
   h.app.start();h.reply(0,value);await settle();
   assert.equal(h.get('inference-parameter-settings').hidden,false);
   assert.equal(h.get('inference-planning-speed').value,'2');
@@ -2390,12 +2390,36 @@ console.log('PASS unified web: inference workspace/reviews/metrics/media, execut
   assert.equal(h.get('inference-planning-apply').disabled,true);
   assert.match(h.get('inference-planning-effective').textContent,/策略版本已变化/);
   h.get('inference-planning-reset').events.click();assert.equal(h.get('inference-planning-speed').value,'1');
-  value.revision++;value.runtime.allowed_operations.control_policy={allowed:false,reason:'MODEL active'};
+  value.revision++;value.runtime.allowed_operations.inference_planning_settings={allowed:false,reason:'MODEL active'};
   info.operator_session={run_id:'active'};info.normal_mode={mode:'MODEL',runner_status:'RUNNING'};
   h.app.poll();h.reply(h.requests.length-1,value);await settle();
   assert.equal(h.get('inference-planning-speed').disabled,true);
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0);
   h.app.selectTab('results');assert.equal(h.get('inference-parameter-settings').hidden,true);h.app.destroy();
+}
+
+for(const family of ['wam','wam-mem']){
+  const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
+  info.selected_model_id=family+'-fixture-step1';info.reference_planning={velocity_limit_rad_s:2,jaw_velocity_limit_mm_s:40};
+  value.runtime.execution_settings={revision:4};value.runtime.allowed_operations.inference_planning_settings={allowed:true};
+  info.operator_session={run_id:'same-run'};info.normal_mode={mode:'MODEL',runner_status:'RUNNING'};
+  h.app.start();h.reply(0,value);await settle();
+  h.get('inference-planning-speed').value='3';h.get('inference-planning-speed').events.input();
+  h.get('inference-planning-jaw-speed').value='60';h.get('inference-planning-jaw-speed').events.input();
+  h.get('inference-planning-apply').events.click();
+  const index=h.requests.length-1,request=h.requests[index];
+  assert.equal(request.url,'/api/actions/inference_planning_settings');
+  assert.equal(JSON.parse(request.options.body).velocity_limit_rad_s,3);
+  assert.equal(JSON.parse(request.options.body).jaw_velocity_limit_mm_s,60);
+  info.reference_planning.velocity_limit_rad_s=3;info.reference_planning.jaw_velocity_limit_mm_s=60;value.runtime.execution_settings.revision=5;value.revision++;
+  h.reply(index,{message:'saved',control_policy:{revision:5}});await settle();
+  for(let i=index+1;i<h.requests.length;i++)h.reply(i,value);
+  await settle();h.get('inference-planning-reset').events.click();
+  assert.equal(h.get('inference-planning-speed').value,'3');
+  assert.equal(h.get('inference-planning-jaw-speed').value,'60');
+  assert.equal(info.operator_session.run_id,'same-run');
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1);
+  h.app.destroy();
 }
 
 for(const recording of [false,true]){
@@ -2410,7 +2434,7 @@ for(const recording of [false,true]){
   h.app.destroy();
 }
 
-for(const change of ['steps','memory-steps','planning','memory-planning','duration','denoise','memory-denoise','stop','duration-run','recording-run']){
+for(const change of ['steps','memory-steps','duration','denoise','memory-denoise','stop','duration-run','recording-run']){
   const value=oneRunSnapshot(),info=value.workflow.inference,old='prepared-old',digest='a'.repeat(64),nextDigest='b'.repeat(64);
   Object.assign(value.runtime,{runtime_nonce:'connected-owner',command_epoch:7,stationary:true,stop_receipt:{accepted_monotonic_s:1}});
   value.workflow.id=old;value.workflow.busy=true;
@@ -2418,7 +2442,7 @@ for(const change of ['steps','memory-steps','planning','memory-planning','durati
   value.runtime.execution_settings={...value.runtime.execution_settings,revision:2};
   value.runtime.allowed_operations.control_policy={allowed:false,reason:'Run active'};
   value.runtime.allowed_operations.inference_execution_settings={allowed:false,reason:'Run active'};
-  Object.assign(info,{selected_model_id:'wam-fixture-step42',backend:'torch',normal_modes_enabled:true,reference_planning:{velocity_limit_rad_s:2},
+  Object.assign(info,{selected_model_id:'wam-fixture-step42',backend:'torch',normal_modes_enabled:true,reference_planning:{velocity_limit_rad_s:2,jaw_velocity_limit_mm_s:40},
     operator_controls:{timeout_s:30},normal_mode:{mode:'HOLD',runner_status:'RUNNING'},
     operator_session:{run_id:old,duration_s:120,seed:0,model_id:'wam-fixture-step42',expected_bundle_digest:digest},
     inference_options:{denoise_steps:2},inference_capabilities:{denoise_steps:{minimum:1,maximum:10,default:2}},
@@ -2540,6 +2564,7 @@ for(const change of ['steps','memory-steps','planning','memory-planning','durati
   const read=h.requests.at(-1);assert.match(read.url,/api\/inference-recordings/);
   read.resolve(response({recordings:[{run_id:'saved-one',started_wall_ns:1794280000000000000,state:'complete',deletable:true},{run_id:'saved-two',state:'incomplete',deletable:true},{run_id:'active',state:'recording',deletable:false,reason:'录制尚未结束'}]}));await settle();
   assert.equal(h.get('recording-files-list').querySelectorAll('input')[2].disabled,true);
+  assert.equal(h.get('recording-files-list').children[0].textContent,'','checkbox label has no null placeholder');
   h.get('recording-files-select').events.click();h.get('recording-files-delete').events.click();
   assert.equal(h.get('recording-files-confirm').open,true);assert.equal(h.get('recording-files-selection').children.length,2);
   assert.equal(h.requests.filter(row=>row.options.method==='POST').length,0,'selection and preview never delete');

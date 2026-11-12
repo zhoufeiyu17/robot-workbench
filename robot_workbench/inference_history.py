@@ -229,8 +229,6 @@ class InferenceHistory:
                 if binding.get('run_id')!=run or binding.get('business_kind')!='inference':
                     raise ValueError('录制归属不符')
                 state=json.loads((capture/'status.json').read_text());states.append(state.get('state','unknown'))
-                if not(state.get('done')is True and state.get('ingress_closed')is True):
-                    reason=reason or '录制或封存尚未结束'
                 created=(capture/'capture.json').stat().st_mtime_ns
                 stamp=min(stamp,created)if stamp else created
         except (OSError,ValueError,TypeError)as error:reason=reason or str(error)
@@ -246,17 +244,19 @@ class InferenceHistory:
                 except ValueError:continue
         return sorted(rows,key=lambda row:(row['started_wall_ns']or 0,row['run_id']),reverse=True)
 
-    def delete_recordings(self,run_ids,*,active=()):
+    def delete_recordings(self,run_ids,*,active=(),discard=None):
         if (not isinstance(run_ids,list)or not 1<=len(run_ids)<=100
                 or any(not isinstance(run,str)for run in run_ids)or len(set(run_ids))!=len(run_ids)):
             raise ValueError('select one to100 distinct recording Runs')
         with ExitStack()as locks:
-            paths=[]
-            for run in run_ids:
-                row,path,captures=self._recording(run,active)
+            selected=[self._recording(run,active) for run in run_ids]
+            for row,_,_ in selected:
                 if not row['deletable']:raise ValueError(row['reason'])
+            paths=[]
+            for run,(_,path,captures) in zip(run_ids,selected):
                 for capture in captures:
                     if not(capture/'writer.lock').exists()and self.deleted(run):continue
+                    if discard is not None:discard(run,capture)
                     fd=os.open(capture/'writer.lock',os.O_RDWR|os.O_NOFOLLOW);locks.callback(os.close,fd)
                     try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
                     except BlockingIOError:raise ValueError('录制写入进程尚未退出，不能删除')from None
@@ -309,14 +309,19 @@ class InferenceHistory:
             self._append(db,entries)
         return True
 
-    def page(self, *, before=None, after=None):
+    def page(self, *, before=None, after=None, playable_only=False):
         if (before is not None and after is not None or any(type(v) is not int or not 0 < v < 2**63
                 for v in (before, after) if v is not None)):
             raise ValueError('one positive inference history cursor required')
         with closing(_connect(self.path, readonly=True)) as db, db:
             db.execute('BEGIN')
-            where, args, order = ('WHERE seq<?', (before,), 'DESC') if before is not None else (
-                ('WHERE seq>?', (after,), 'ASC') if after is not None else ('', (), 'DESC'))
+            eligible="""EXISTS (SELECT 1 FROM results WHERE results.run=runs.seq
+                AND path LIKE '%.mp4' AND json_extract(result,'$.media.ready')=1
+                AND (json_extract(result,'$.details.recording_outcome')='complete'
+                     OR json_extract(result,'$.status') IN ('complete','valid')))""" if playable_only else '1'
+            where, args, order = (' AND seq<?', (before,), 'DESC') if before is not None else (
+                (' AND seq>?', (after,), 'ASC') if after is not None else ('', (), 'DESC'))
+            where='WHERE '+eligible+where
             candidates = db.execute('SELECT seq,id,bytes FROM runs '+where+' ORDER BY seq '+order+' LIMIT ?',
                                     (*args, PAGE_RUNS)).fetchall()
             selected = []; size = 0
@@ -327,11 +332,11 @@ class InferenceHistory:
             ids = [row[0] for row in selected]
             rows = db.execute('SELECT result FROM results WHERE run IN ('+','.join('?' for _ in ids)+') ORDER BY seq', ids) if ids else []
             results = [json.loads(row[0], parse_constant=_finite) for row in rows]
-            older = bool(ids and db.execute('SELECT 1 FROM runs WHERE seq<? LIMIT 1', (min(ids),)).fetchone())
-            newer = bool(ids and db.execute('SELECT 1 FROM runs WHERE seq>? LIMIT 1', (max(ids),)).fetchone())
+            older = bool(ids and db.execute('SELECT 1 FROM runs WHERE '+eligible+' AND seq<? LIMIT 1', (min(ids),)).fetchone())
+            newer = bool(ids and db.execute('SELECT 1 FROM runs WHERE '+eligible+' AND seq>? LIMIT 1', (max(ids),)).fetchone())
             return dict(schema='inference_results_page.v1', results=results, run_ids=[row[1] for row in selected],
-                total_runs=db.execute('SELECT COUNT(*) FROM runs').fetchone()[0],
-                total_results=db.execute('SELECT COUNT(*) FROM results').fetchone()[0],
+                total_runs=db.execute('SELECT COUNT(*) FROM runs WHERE '+eligible).fetchone()[0],
+                total_results=db.execute('SELECT COALESCE(SUM(count),0) FROM runs WHERE '+eligible).fetchone()[0],
                 page_run_limit=PAGE_RUNS, page_byte_limit=PAGE_BYTES, result_bytes=size,
                 older_cursor=min(ids) if older else None, newer_cursor=max(ids) if newer else None)
 

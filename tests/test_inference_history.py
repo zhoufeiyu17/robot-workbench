@@ -42,7 +42,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_recording_delete_protects_active_writers_and_scopes_the_whole_batch(self):
         first,_,_=self.capture('first');second,_,_=self.capture('second',done=False)
-        with self.assertRaises(ValueError):self.history.delete_recordings(['first','second'])
+        with self.assertRaises(ValueError):self.history.delete_recordings(['first','second'],active=['second'])
         self.assertTrue(first.is_dir());self.assertEqual(self.history.page()['total_runs'],2)
         with self.assertRaises(ValueError):self.history.delete_recordings(['first'],active=['first'])
         with (first/'writer.lock').open('r+')as writer:
@@ -53,6 +53,20 @@ class HistoryTests(unittest.TestCase):
         outside=self.root/'outside';outside.mkdir();(self.root/'inference-link').symlink_to(outside,target_is_directory=True)
         with self.assertRaises(ValueError):self.history.delete_recordings(['link'])
         self.assertTrue(outside.is_dir());self.assertTrue(second.is_dir())
+
+    def test_abandoned_unsealed_recording_is_deletable_after_writer_exit(self):
+        directory,_,_=self.capture('abandoned',done=False)
+        self.assertTrue(self.history.recordings()[0]['deletable'])
+        self.assertEqual(self.history.delete_recordings(['abandoned'])['deleted_run_ids'],['abandoned'])
+        self.assertFalse(directory.exists())
+
+    def test_playback_pages_exclude_incomplete_and_unplayable_runs(self):
+        for run,status,ready in [('complete','complete',True),('broken','incomplete',True),('pending','complete',False)]:
+            row=dict(id=run,run_id=run,kind='replay',status=status,media=dict(ready=ready))
+            self.history.append([(row,self.root/(run+'.mp4'))])
+        page=self.history.page(playable_only=True)
+        self.assertEqual(page['run_ids'],['complete']);self.assertEqual(page['total_runs'],1)
+        self.assertIsNone(page['newer_cursor']);self.assertIsNone(page['older_cursor'])
 
     def test_deleted_recordings_cannot_return_from_late_index_updates_or_restart(self):
         first,row,video=self.capture('first');second,_,_=self.capture('second')

@@ -67,8 +67,8 @@
     </section>
     <section id="inference-planning-settings" class="panel" aria-labelledby="inference-planning-title">
       <h2 id="inference-planning-title">规划限速</h2>
-      <p>设置整段轨迹的关节速度上限，下一轮推理生效。</p>
       <label>关节规划速度 · rad/s<input id="inference-planning-speed" type="number" min="0.001" step="0.1" disabled></label>
+      <label>夹爪规划速度 · mm/s<input id="inference-planning-jaw-speed" type="number" min="0.001" step="1" disabled></label>
       <div class="manual-actions"><button id="inference-planning-apply" disabled>保存规划限速</button><button id="inference-planning-reset" disabled>重新读取</button></div>
       <p id="inference-planning-effective" role="status" aria-live="polite"></p>
     </section>
@@ -200,7 +200,7 @@
 
     <section id="results-pane" class="panel full-pane" hidden><div class="panel-heading"><h2>结果与回放</h2><label>业务<select id="results-business"><option value="calibration">标定候选与图像</option><option value="collection">数采记录与回放</option><option value="inference">推理记录与回放</option><option value="research">控制研究记录</option></select></label><span id="results-context" class="muted"></span></div><p class="hint">结果归属所显示的业务与设备环境。回放不会执行动作，选择结果不会自动安装；质量未通过的结果仍可只读检查。</p><details id="installed-group" open hidden><summary>当前安装组与 active 文件校验</summary><dl id="installed-details" class="detail-list"></dl></details><div id="delete-tools" class="delete-tools" hidden><button id="delete-all" disabled>预览删除全部原始批次</button><p id="delete-all-reason" class="action-reason"></p><p class="hint">删除前须核对具体范围并再次确认。标定版本、依赖快照、当前安装组和到位统计保留。</p></div><div id="results-list"></div>
       <details id="recording-files" class="deletion-preview" hidden><summary>录制文件管理</summary>
-        <p class="hint">按整条任务管理：删除时一并清理三路视频、原始帧和关联推理结果。正在录制或封存的任务不能删除。</p>
+        <p class="hint">删除整条任务的三路视频、原始帧及关联推理结果。当前活动任务须先结束，后台封存会先停止再清理。</p>
         <div class="manual-actions"><button id="recording-files-refresh">刷新文件列表</button><button id="recording-files-select">选择可删除任务（最多 100 条）</button><button id="recording-files-delete" class="danger" disabled>删除所选任务</button></div>
         <p id="recording-files-status" class="hint" role="status"></p><div id="recording-files-list"></div>
       </details>

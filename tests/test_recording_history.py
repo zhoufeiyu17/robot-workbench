@@ -109,6 +109,15 @@ class CommonCaptureIndexTest(unittest.TestCase):
         media.write_text('{}')
         with self.assertRaisesRegex(ValueError,'changed'):reopened.media('calibration',row['id'])
 
+    def test_long_recording_manifest_above_eight_mib_registers(self):
+        from robot_workbench.collection_history import _pin
+        self.index.close();self.index.closed.clear()
+        event=self.sealed(1);path=Path(event['manifest_ref']['path'])
+        manifest=json.loads(path.read_text());manifest['long_recording_metadata']='x'*(9*1024**2)
+        path.write_text(json.dumps(manifest));event['manifest_ref'].update(_pin(path))
+        self.assertTrue(self.index.register(event))
+        self.assertEqual(self.index.page('calibration')['total_runs'],1)
+
     def test_foreign_root_device_business_and_changed_manifest_are_refused(self):
         from copy import deepcopy
         from robot_workbench.collection_history import CaptureResults

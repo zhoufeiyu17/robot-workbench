@@ -62,7 +62,7 @@ class HTTPTest(unittest.TestCase):
         fixture.capture('saved');fixture.capture('active',done=False)
         history=fixture.history
         self.device.workflows['inference']=SimpleNamespace(recording_files=lambda run_ids=None:
-            history.recordings()if run_ids is None else history.delete_recordings(run_ids))
+            history.recordings(active=['active'])if run_ids is None else history.delete_recordings(run_ids,active=['active']))
         url=self.url+'/api/inference-recordings?environment=fake&business=inference'
         listing=json.loads(self.http.open(url).read())['recordings']
         self.assertEqual({r['run_id']for r in listing},{'saved','active'})

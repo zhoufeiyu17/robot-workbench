@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 CAMERAS=('base_0','left_wrist_0','right_wrist_0')
 SCHEMA='collection_history_source.v1'
+CAPTURE_METADATA_BYTES=64*1024**2
 
 
 def _file(root,value,*,allow_empty=False):
@@ -376,7 +377,7 @@ def _capture_started_wall_ns(manifest_path,expected_digest):
     """Bounded metadata projection for both new and existing immutable Runs."""
     try:
         path=Path(manifest_path)
-        if path.stat().st_size>8*1024**2 or _pin(path)['sha256']!=expected_digest:return None
+        if path.stat().st_size>CAPTURE_METADATA_BYTES or _pin(path)['sha256']!=expected_digest:return None
         manifest=json.loads(path.read_text());activity=manifest.get('recording_activity')
         if activity is not None:return activity['intervals'][0]['start_wall_ns']if activity.get('intervals')else None
         streams=list((manifest.get('playback')or{}).get('streams',{}))or list(manifest.get('streams',{}))
@@ -429,7 +430,7 @@ class CaptureResults:
         except queue.Full:self.rescan.set();self.error='capture result index queue full; sealed files retained for reconciliation'
 
     def _read(self,path):
-        if path.stat().st_size>8*1024**2:raise ValueError('bounded capture receipt/manifest required')
+        if path.stat().st_size>CAPTURE_METADATA_BYTES:raise ValueError('capture receipt/manifest exceeds 64 MiB')
         return json.loads(path.read_text())
 
     def _checked_ref(self,ref):
@@ -469,8 +470,6 @@ class CaptureResults:
                     or manifest.get('seal_revision')!=revision or (manifest.get('binding')or{}).get('run_id')!=run
                     or manifest['binding'].get('business_kind')!=business or manifest['binding'].get('policy_hash')!=policy):
                 raise ValueError('capture manifest identity changed')
-            for relative,pin in manifest.get('files',{}).items():
-                if _pin(_file(manifest_path.parent,relative,allow_empty=True))!=pin:raise ValueError('capture member changed')
         elif revision!=0:raise ValueError('sealed capture manifest missing')
         pin=_pin(path);outcome=(receipt.get('recording')or{}).get('recording_outcome','incomplete')
         controller=receipt.get('controller')or{};base=dict(seal_revision=revision,policy_hash=policy,
@@ -495,6 +494,7 @@ class CaptureResults:
         return False if self.closed.is_set()else history.replace_capture_run(rows,preserve_other_results=business=='inference')
 
     def _scan(self):
+        self.error=None
         def receipts():
             with os.scandir(self.root)as directories:
                 for directory in directories:
@@ -523,8 +523,9 @@ class CaptureResults:
                 finally:self.queue.task_done()
             except Exception as error:self.error=str(error)
 
-    def page(self,business,*,before=None,after=None):
-        page=self.histories[business].page(before=before,after=after)
+    def page(self,business,*,before=None,after=None,playable_only=False):
+        page=self.histories[business].page(before=before,after=after,playable_only=playable_only)
+        page['index_error']=self.error
         for row in page['results']:
             details=row.get('details')or{};revision=details.get('seal_revision');run=row.get('run_id')
             if 'started_wall_ns'in details or revision is None or not run:continue

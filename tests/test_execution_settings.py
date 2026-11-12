@@ -251,7 +251,10 @@ class SettingsTest(unittest.TestCase):
         integers=merge_control_policy(parameters,{'planning.acceleration_limit_rad_s2':20},environment='fake')
         self.assertEqual(policy_hash(floats),policy_hash(integers))
         with self.assertRaises(ValueError):
-            merge_control_policy(parameters,{'arrival.jaw_mm':3.,'planning.velocity_limit_rad_s':2.0001},environment='fake')
+            merge_control_policy(parameters,{'arrival.jaw_mm':3.,'planning.acceleration_limit_rad_s2':40.0001},environment='fake')
+        raised=merge_control_policy(parameters,{'planning.velocity_limit_rad_s':3.,'planning.jaw_velocity_limit_mm_s':60.},environment='fake')
+        self.assertEqual(raised['planning']['velocity_limit_rad_s'],3.)
+        self.assertEqual(raised['planning']['jaw_velocity_limit_mm_s'],60.)
         self.assertEqual(parameters['arrival']['jaw_mm'],2.)
 
     def test_common_guard_uses_policy_and_preserves_boundaries_and_times(self):

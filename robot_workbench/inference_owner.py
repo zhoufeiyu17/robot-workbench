@@ -206,7 +206,7 @@ def configuration(value):
                 or any(type(normal[k])not in(int,float)or not math.isfinite(normal[k])or normal[k]<=0
                        for k in('brake_duration_s','velocity_limit','acceleration_limit','gain_transition_s'))
                 or normal['brake_duration_s']>30
-                or normal['velocity_limit']>(2. if result.get('reference_planning')else .25)
+                or normal['velocity_limit']>(result['reference_planning']['velocity_limit_rad_s']if result.get('reference_planning')else .25)
                 or normal['acceleration_limit']>(40. if result.get('reference_planning')else 1.)
                 or normal['gain_transition_s']>normal['brake_duration_s'] or result.get('bounded_live_prediction')
                 or type(normal['teach_kd_scale'])not in(int,float)or not math.isfinite(normal['teach_kd_scale'])or not 0<=normal['teach_kd_scale']<=1
@@ -434,6 +434,7 @@ class InferenceRunner:
         self.normal_single_segment=bool(self.normal_planned and self.normal_config['recording_required']and self.config['duration_s']==.5)
         self.normal_observation_floor=None
         self.normal_segment=None
+        self.pending_planning_update=None
         self.mode='INITIALIZING'if self.normal_config else'MODEL'
         self.mode_receipts={};self._mode_payloads={};self.normal_job=None
         self.normal_ended=False
@@ -1029,7 +1030,9 @@ class InferenceRunner:
             command_epoch=self.owner.epoch,source_clock_id=self.owner.execution_clock_id,
             reference_id=reference.metadata['reference_id'],source_duration_s=steps/30.,source_steps=steps,
             execution_duration_s=reference.duration_s,start_source_s=origin,end_source_s=origin+reference.duration_s,
-            observation_source_s=self._accepted_chunk_source_time,status='executing',complete_source_steps=0)
+            observation_source_s=self._accepted_chunk_source_time,status='executing',complete_source_steps=0,
+            planning_velocity_limit_rad_s=reference.metadata['planning_policy']['velocity_limit_rad_s'],
+            planning_jaw_velocity_limit_mm_s=reference.metadata['planning_policy']['jaw_velocity_limit_mm_s'])
         self._emit('normal_model_segment_started',deepcopy(self.normal_segment))
         return True
 
@@ -1499,6 +1502,16 @@ class InferenceRunner:
             if self.initialization_source_s is not None and observation['source_time']<=self.initialization_source_s:return False
             if self.finite_observation_floor is not None and observation['source_time']<=self.finite_observation_floor:return False
             if self.normal_planned and observation['source_time']<=self.normal_observation_floor:return False
+            update = getattr(self, 'pending_planning_update', None)
+            if update is not None:
+                planning, policy = update
+                self.config['reference_planning'] = planning
+                self.normal_config['velocity_limit'] = planning['velocity_limit_rad_s']
+                self.guard_policy = policy
+                self._bound_guard = None
+                guard = getattr(self.owner, 'control_guard', None)
+                if guard is not None:self.owner.control_guard = guard.with_policy(policy)
+                self.pending_planning_update = None
             import numpy as np
             request=dict(request_id=secrets.token_hex(16),seed=self.config['seed'],task=self.config['task'],
                 observation=observation,applied_history=np.empty((0,14),np.float32))

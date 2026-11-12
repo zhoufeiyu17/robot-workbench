@@ -7,6 +7,17 @@ from robot_workbench.recording_activity import ActivityTimeline,ActiveTimeAxis,P
 
 
 class ActivityTests(unittest.TestCase):
+    def test_planning_speed_changes_follow_submitted_segment_time(self):
+        from robot_workbench.recording_activity import inference_replay_segments
+        timeline=ActivityTimeline('run','clock')
+        self.event(timeline,'MODEL',10,'model');self.event(timeline,'HOLD',20,'hold')
+        result=inference_replay_segments(dict(recording_activity=timeline.manifest(),
+            binding=dict(control_policy=dict(parameters=dict(planning=dict(velocity_limit_rad_s=2.,jaw_velocity_limit_mm_s=40.)))),
+            inference_planning_changes=[dict(source_time_ns=12_000_000_000,planning_velocity_limit_rad_s=1.,planning_jaw_velocity_limit_mm_s=30.)]))
+        rows=result['segments']
+        self.assertEqual([(r['start_s'],r['end_s'],r['planning_velocity_limit_rad_s'])for r in rows],[(0.,2.,2.),(2.,10.,1.)])
+        self.assertEqual([r['planning_jaw_velocity_limit_mm_s']for r in rows],[40.,30.])
+
     def event(self,timeline,mode,stamp,request):
         ref=SimpleNamespace(source_clock_id='clock',source_time_ns=round(stamp*1e9))
         return timeline.observe('inference_mode_transition',dict(op='normal_mode',requested_mode=mode,
@@ -125,7 +136,13 @@ class ActiveCaptureTests(unittest.TestCase):
         session.start();time.sleep(.5)
         self.assertFalse((session.directory/'camera').exists(),'HOLD must not start video encoding')
         def mode(value,request):return control('inference_mode_transition',dict(op='normal_mode',requested_mode=value,request_id=request,accepted=True,status='accepted'))
-        start=mode('MODEL','m1');time.sleep(2.8);end=mode('HOLD','h1')
+        start=mode('MODEL','m1')
+        control('inference_normal_model_segment_started',dict(start_source_s=start/1e9,
+            planning_velocity_limit_rad_s=1.5,planning_jaw_velocity_limit_mm_s=40.))
+        time.sleep(1.4)
+        control('inference_normal_model_segment_started',dict(start_source_s=time.monotonic(),
+            planning_velocity_limit_rad_s=1.,planning_jaw_velocity_limit_mm_s=60.))
+        time.sleep(1.4);end=mode('HOLD','h1')
         time.sleep(.7)
         initial={k:session.snapshot()['streams'][k]['received']for k in ('head','left','right')}
         time.sleep(.4);self.assertEqual(initial,{k:session.snapshot()['streams'][k]['received']for k in initial})
@@ -152,6 +169,8 @@ class ActiveCaptureTests(unittest.TestCase):
             self.assertTrue(any('source sequence gap'in issue for issue in manifest['issues']),manifest['issues'])
             return
         self.assertEqual(manifest['recording_outcome'],'complete',manifest['issues'])
+        changes=manifest['inference_planning_changes']
+        self.assertEqual([(r['planning_velocity_limit_rad_s'],r['planning_jaw_velocity_limit_mm_s'])for r in changes],[(1.5,40.),(1.,60.)])
         expected=(end-start+held-teach)/1e9
         self.assertAlmostEqual(manifest['recording_activity']['effective_duration_ns']/1e9,expected,places=6)
         self.assertEqual(len(manifest['playback']['streams']),3)

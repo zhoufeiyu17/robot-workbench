@@ -189,10 +189,10 @@ def validate_control_parameters(parameters, *, environment,business=None):
             result['execution'][key] = float(value)
     planning = result.get('planning')
     if planning:
-        maxima = dict(velocity_limit_rad_s=2., acceleration_limit_rad_s2=40., jaw_velocity_limit_mm_s=40.)
-        if set(planning) != set(maxima) or any(type(v) not in (int, float) or not math.isfinite(v)
-                or not 0 < v <= maxima[k] for k, v in planning.items()):
-            raise ValueError('planning limits must fit the supported2rad/s,40rad/s2,40mm/s profile')
+        fields={'velocity_limit_rad_s','acceleration_limit_rad_s2','jaw_velocity_limit_mm_s'}
+        if set(planning) != fields or any(type(v) not in (int, float) or not math.isfinite(v)
+                or v<=0 for v in planning.values()) or planning['acceleration_limit_rad_s2']>40.:
+            raise ValueError('规划速度须为有限正数，加速度上限为40 rad/s²')
         if environment == 'physical' and (not result['measured']['enabled']
                 or planning['velocity_limit_rad_s'] > result['measured']['limit_rad_s']):
             raise ValueError('planning velocity requires enabled and sufficient measured-speed protection')
@@ -333,6 +333,9 @@ class _BoundGuard:
             context['joint_limits']=[_guard_vector(pair,2,'joint limits')for pair in limits]
         self._policy={key:deepcopy(policy[key])for key in ('revision','policy_hash','parameters')}
         self._context=context
+
+    def with_policy(self, policy):
+        return _BoundGuard(policy, self._context)
 
     def evaluate(self,signal,phase):
         required={'G01':{'expected_identity'},'G05':{'training_rgb_pair_error_s'},'G06':{'training_state_pair_error_s'},

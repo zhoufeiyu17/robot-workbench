@@ -564,8 +564,12 @@ class Runtime:
             if business not in BUSINESSES:
                 raise ValueError('unknown business')
             reason = ('请先交接控制权限：当前由 '+self.holder if business != self.holder else self._idle_reason(include_in_flight=False))
+            planning_reason = ('请先交接推理控制权限' if business != 'inference' or business != self.holder
+                               else self._planning_update_reason())
             return dict(revision=self.execution_settings_revision, business=business,
                 settings=self._execution_policy(business), update_allowed=reason is None, update_reason=reason,
+                planning_update_allowed=planning_reason is None, planning_update_reason=planning_reason,
+                planning_limits=self._planning_limits()if business=='inference'else None,
                 legacy_passive_guards=business == 'calibration' and business not in self.execution_settings_policies,
                 fake_error_available=self.environment == 'fake' and callable(getattr(self.owner.backend, 'configure_error_model', None)))
 
@@ -574,6 +578,20 @@ class Runtime:
         parameters = control_parameters(self._execution_policy(business), configuration=configuration, business=business)
         self._overlay_policy_values(business,parameters,configuration)
         return parameters
+
+    def _planning_limits(self):
+        outputs=(self.owner.last_begin_command or{}).get('source_outputs',{}).values()
+        native=next((row.get('velocity_limits_sdk14')for row in outputs
+                     if isinstance(row.get('velocity_limits_sdk14'),list)and len(row['velocity_limits_sdk14'])==14),None)
+        limits={}
+        if native is not None:
+            from arx_env.joint_head_real_motion import jaw_peak_scale
+            limits=dict(velocity_limit_rad_s=min(native[i]for i in (*range(6),*range(7,13))),
+                jaw_velocity_limit_mm_s=min(native[slot]*jaw_peak_scale(side)for side,slot in (('left',6),('right',13))))
+        protection=self._execution_policy('inference')['speed_protection']
+        if protection['enabled']:
+            limits['velocity_limit_rad_s']=min(limits.get('velocity_limit_rad_s',protection['limit_rad_s']),protection['limit_rad_s'])
+        return limits
 
     def _overlay_policy_values(self,business,parameters,configuration):
         origins=self._policy_origins.get(business,{})
@@ -678,15 +696,19 @@ class Runtime:
         return self._update_policy(credential, settings=settings, expected_revision=expected_revision)
 
     def _update_policy(self, credential, *, settings=None, changes=None, expected_revision=None):
-        with self._preview_boundary(), self.owner.lock:
+        planning_only = bool(changes) and set(changes) <= {'planning.velocity_limit_rad_s','planning.jaw_velocity_limit_mm_s'}
+        with (self.lock if planning_only else self._preview_boundary()), self.owner.lock:
             business = self._authenticate(credential)
             future_steps = (business == 'inference' and changes is not None
                             and set(changes) == {'execution.execute_steps'})
             if business != self.holder and not future_steps:
                 raise PermissionError('请先交接控制权限：当前由 '+self.holder+' 持有')
-            reason = self._idle_reason()
+            reason = self._planning_update_reason() if planning_only and business == 'inference' else self._idle_reason()
             if reason:
                 raise ValueError(reason)
+            runner = self.owner.runner
+            live_planning = bool(planning_only and business == 'inference' and getattr(runner,'normal_planned',False)
+                                 and runner.status=='RUNNING' and not runner.normal_ended)
             if expected_revision is not None and expected_revision != self.execution_settings_revision:
                 raise ValueError('control policy revision changed; read it again before committing')
             old = self._execution_policy(business)
@@ -700,8 +722,12 @@ class Runtime:
                     parameters[group] = updated[group]
                 parameters['execution']['fake_error'] = updated['execution']['fake_error']
             parameters=validate_control_parameters(parameters,environment=self.environment,business=business)
+            if planning_only and business=='inference':
+                for name,maximum in self._planning_limits().items():
+                    if parameters['planning'][name]>maximum:
+                        raise ValueError(f'规划限速 {name} 超过当前设备／保护上限 {maximum:g}')
             configuration = self._configuration_from_policy(self.inference_configuration, parameters) if business == 'inference' else self.inference_configuration
-            if business == self.holder:
+            if business == self.holder and not live_planning:
                 self._configure_fake_error(settings)  # Memory-only backend configuration; never sends a target.
             value = self.export_execution_settings()
             value['revision'] += 1
@@ -728,7 +754,7 @@ class Runtime:
         except BaseException:
             with self.lock, self.owner.lock:
                 self.settings_write_pending = False
-                if business == self.holder:self._configure_fake_error(old)
+                if business == self.holder and not live_planning:self._configure_fake_error(old)
             raise
         with self.lock, self.owner.lock:
             self.settings_write_pending = False
@@ -741,6 +767,11 @@ class Runtime:
             else:
                 self.execution_settings_policies = value['policies']
             if business == 'inference':self.inference_configuration = configuration
+            if live_planning:
+                if self.owner.runner is runner and not runner.normal_ended:
+                    runner.pending_planning_update = (deepcopy(configuration['reference_planning']),
+                                                      self.control_policy_snapshot('inference'))
+                return self.control_policy_snapshot(business)
             if business == self.holder:
                 self.owner.execution_error_settings = deepcopy(settings)
                 # The completed native reference still owns the physical HOLD.
@@ -754,6 +785,23 @@ class Runtime:
             self.owner.inference_payloads.clear()
             getattr(self.owner,'reference_payloads',{}).clear()
             return self.control_policy_snapshot(business) if changes is not None else self.execution_settings_snapshot(business)
+
+    def _planning_update_reason(self):
+        runner = self.owner.runner
+        if not getattr(runner, 'normal_planned', False) or runner.normal_ended or runner.status!='RUNNING':
+            return self._idle_reason(include_in_flight=False)
+        if self.settings_write_pending or self.maintenance_active:
+            return '配置保存或维护正在进行'
+        owner = self.owner
+        if not owner.backend.is_connected or not owner.feedback_healthy:
+            return '需要已连接且反馈健康的控制会话'
+        if owner.stop_requested or owner.release_requested or not owner.commands.empty():
+            return '控制命令正在处理'
+        if runner.normal_single_segment or runner.mode not in ('MODEL', 'HOLD', 'TEACH') or runner.normal_job:
+            return '请等待当前模式切换完成'
+        if runner.status in ('STOPPED', 'FAULT'):
+            return '当前推理控制会话已停止'
+        return None
 
     def _authenticate(self, credential):
         if self.fd is None:

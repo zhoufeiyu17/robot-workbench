@@ -90,7 +90,7 @@ ControlPolicy。顶部RGB在预处理前用同形零数组替换，腕部RGB、s
 ModelInput复用现有metadata_json保存干预决定和实际种子，黑屏输入使用可重建的
 `wam_zero_head_bicubic256_wan_bf16`转换。常驻记录器保留原始ROS图像、验证实际输入摘要，
 封存时从原ModelInput日志生成`stall_recovery.jsonl`，包含失败模型请求的干预记录。
-记录服务在线协议现为`workbench.recording-service.v7`，同时提供下文的取流关闭证明，旧组合在绑定时拒绝。v7要求录制服务加载支持2 rad/s的当前策略校验。服务明确拒绝bind/start后，客户端核验writer仍处于prepared/bound及同一绑定，发送正常结束请求并等待封存与真实退出，保留失败原因及已有结束请求。
+记录服务在线协议现为`workbench.recording-service.v8`，提供取流关闭证明、显式录制丢弃及可调规划限速的策略校验，旧组合在绑定时拒绝。服务明确拒绝bind/start后，客户端核验writer仍处于prepared/bound及同一绑定，发送正常结束请求并等待封存与真实退出，保留失败原因及已有结束请求。
 Owner和SDK继续消费原动作契约。方案、用例及发布状态见
 `.evidence/infer-pedal2-start-20261107-v1/wam-trick-design.json`和本目录统一进度记录。
 维护触发为检测单位、步数语义、转换格式、Run配置或录制协议变化。
@@ -400,7 +400,7 @@ I06候选验证覆盖真实本地子进程IPC、重复绑定复用、缺绑定�
 
 读取入口为`GET /api/control-policy?environment=...&business=...`，返回`revision/policy_hash/parameters/origins/editable_paths/update_allowed/update_reason`。提交入口为`POST /api/actions/control_policy`，复用HTTP层`environment/business/request_id`，策略负载仅为`expected_revision`与`changes`。`changes`是非空的点分字段映射，例如`{"planning.velocity_limit_rad_s":0.5,"execution.execute_steps":30}`；只有读取结果声明的`editable_paths`可修改。Owner RPC分别为`control_policy_snapshot`和`control_policy`，后者的负载严格限定为上述两个字段。
 
-当前参数包含实测速度保护`measured`、跟踪`tracking`、到位`arrival`、`execution.fake_error`及下述`recording`策略。推理业务增加`execution.execute_steps`，默认15、范围1至60；已绑定的模型配置可提供`planning`、`observation.maximum_age_s`和`model.reference_supply_timeout_s`。未提供的能力不作为可编辑字段。规划参数支持关节速度至2 rad/s、加速度至40 rad/s²、夹爪速度至40 mm/s；实际配置由ControlPolicy提供，physical规划速度不得高于启用的实测速度保护。普通在线Infer使用`max_execution_duration_s=null`，按速度和加速度约束重定时。完整片段及制动预留受本轮总时长约束。观测有效期与供给期限使用各自的ControlPolicy字段。通用生命周期其余策略继续按对应契约接入。
+当前参数包含实测速度保护`measured`、跟踪`tracking`、到位`arrival`、`execution.fake_error`及下述`recording`策略。推理业务增加`execution.execute_steps`，默认15、范围1至60；已绑定的模型配置可提供`planning`、`observation.maximum_age_s`和`model.reference_supply_timeout_s`。未提供的能力不作为可编辑字段。关节与夹爪规划速度为有限正数，保存时核验当前SDK能力，physical关节规划速度不得高于启用的实测速度保护；加速度上限为40 rad/s²，实际配置由ControlPolicy提供。普通在线Infer使用`max_execution_duration_s=null`，按速度和加速度约束重定时。完整片段及制动预留受本轮总时长约束。观测有效期与供给期限使用各自的ControlPolicy字段。通用生命周期其余策略继续按对应契约接入。
 
 更新先认证业务、核验持权/空闲和`expected_revision`，完整校验后原子替换存储，再提交内存状态并撤销旧预览；写盘失败保留旧版本和摘要。写盘期间禁止新动作进入，但不占用Owner控制锁或HTTP Stop路径。新Run冻结`revision/policy_hash/parameters`到已有执行上下文，既有Run不得在执行中修改策略。唯一兼容例外是其他业务空闲持权时修改下一次infer执行步数，该操作不改变当前持权业务的有效参数。
 
@@ -535,6 +535,25 @@ ROS 录制器在每个原始分段提交时，通过其有界后台任务调用�
 
 验收覆盖安装中断与并发重复、两种 Torch 家族目录/准备/参数更新、活动区间边界、源时间戳、
 尾帧时长、旧录制恢复、浏览器分段损坏与重建，以及长录制期间控制和观测延迟。
+
+### 规划限速热更新与录制管理
+
+`POST /api/actions/inference_planning_settings` 提交 `expected_revision`、关节
+`velocity_limit_rad_s` 及夹爪 `jaw_velocity_limit_mm_s`。复用 Owner 的原子策略保存，
+MODEL、HOLD、TEACH 的稳定阶段可接受更新，下一次模型请求使用新规划限速。
+已提交片段保留原参考与时序。有限正数校验、物理实测速度保护、原生 SDK 速度能力均参与准入，
+加速度保持当前 40 rad/s² 上限。页面从 Owner 回读保存值和可用速度上限。
+
+片段开始事件记录实际关节和夹爪规划限速，录制器以片段起点保存
+`inference_planning_changes`，回放按视频时间展示生效配置。旧录像从冻结 ControlPolicy
+提取初始限速，缺失字段明确显示为未记录。
+
+文件管理允许删除已结束或异常中断 Run，包括封存未结束的任务。当前活动 Run 继续拒绝删除。
+录制服务的 `discard` 按既有目录与 Run 绑定退出自有 writer，确认文件锁可取得后持久化丢弃标记；
+业务索引写入删除标记后清理所选目录。服务重启、重复请求和迟到索引通知均遵循删除标记。
+回放任务分页只包含完整且媒体就绪的 Run，录制文件列表继续提供失败与不完整条目。
+回放索引读取清单和回执的上限为 64 MiB，登记失败在页面显示。
+索引校验其回执、清单和回放文件，原始采集内容沿用采集阶段的记录。
 
 ### 原生命令起点与终点诊断
 

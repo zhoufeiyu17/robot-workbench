@@ -83,7 +83,7 @@ class NormalBackend(shared.WindowBackend):
 
     def read_execution_output(self):
         return dict(q_sdk14=self.native_values('q_sdk14',self.clock()),dq_sdk14=self.native_values('dq_sdk14',self.clock()),
-            velocity_limits_sdk14=([2.]*6+[.04])*2,
+            velocity_limits_sdk14=getattr(self,'native_velocity_limits',([2.]*6+[.04])*2),
             gains=deepcopy(self.mode_gains),observations={s:dict(sequence=round(self.clock()*1e6),
                 sample_monotonic_ns=round(self.clock()*1e9),controller_instance_id='cpu-'+s)for s in('left','right')},firmware_ack=False)
 

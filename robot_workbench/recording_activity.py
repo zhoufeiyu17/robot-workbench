@@ -6,17 +6,32 @@ import math
 POLICY='model_teach_compact_v1'
 SCHEMA='workbench.recording-activity.v1'
 MODES=frozenset(('MODEL','TEACH'))
+PLANNING_FIELDS=('planning_velocity_limit_rad_s','planning_jaw_velocity_limit_mm_s')
 
 
 class ActivityTimeline:
     def __init__(self,run_id,clock_id):
         self.run_id,self.clock_id=run_id,clock_id
         self.intervals=[];self.current=None;self.latest_source_ns=0
+        self.planning_changes=[]
 
     def observe(self,event,data,reference,run_id):
         if reference.source_clock_id!=self.clock_id:raise ValueError('activity control clock changed')
         self.latest_source_ns=max(self.latest_source_ns,reference.source_time_ns)
         if not isinstance(data,dict)or self.run_id not in (run_id,data.get('session_id'),data.get('execution_instance_id')):
+            return None
+        if event=='inference_normal_model_segment_started':
+            speed=data.get('planning_velocity_limit_rad_s')
+            if speed is None:return None
+            planning={key:data[key]for key in PLANNING_FIELDS if key in data}
+            stamp=data.get('start_source_s')
+            if (type(speed)not in(int,float)or not math.isfinite(speed)or speed<=0
+                    or type(stamp)not in(int,float)or not math.isfinite(stamp)or stamp<0):
+                raise ValueError('recorded planning limit and source time must be finite')
+            if any(type(value)not in(int,float)or not math.isfinite(value)or value<=0 for value in planning.values()):
+                raise ValueError('recorded planning limits must be finite and positive')
+            if not self.planning_changes or any(self.planning_changes[-1].get(key)!=value for key,value in planning.items()):
+                self.planning_changes.append(dict(source_time_ns=round(stamp*1e9),**planning))
             return None
         target=None;request=data.get('request_id','')
         if event=='inference_mode_transition':
@@ -131,8 +146,26 @@ def inference_replay_segments(manifest):
     context=binding.get('execution_context')or{}
     saved=context.get('inference_configuration')or{}
     execution=((binding.get('control_policy')or{}).get('parameters')or{}).get('execution')or{}
-    base={key:saved.get(key)for key in ('model_id','model_label','backend','denoise_steps','execute_steps')}
+    base={key:saved.get(key)for key in ('model_id','model_label','backend','denoise_steps','execute_steps',*PLANNING_FIELDS)}
     if base['execute_steps']is None:base['execute_steps']=execution.get('execute_steps')
+    if base['planning_velocity_limit_rad_s']is None:
+        base['planning_velocity_limit_rad_s']=(((binding.get('control_policy')or{}).get('parameters')or{}).get('planning')or{}).get('velocity_limit_rad_s')
+    if base['planning_jaw_velocity_limit_mm_s']is None:
+        base['planning_jaw_velocity_limit_mm_s']=(((binding.get('control_policy')or{}).get('parameters')or{}).get('planning')or{}).get('jaw_velocity_limit_mm_s')
+    planning=manifest.get('inference_planning_changes')or[]
+    previous=-1
+    for change in planning:
+        stamp=change.get('source_time_ns');speed=change.get('planning_velocity_limit_rad_s')
+        if (type(stamp)is not int or stamp<previous or type(speed)not in(int,float)or not math.isfinite(speed)or speed<=0):
+            raise ValueError('ordered recorded planning changes required')
+        if 'planning_jaw_velocity_limit_mm_s'in change:
+            jaw=change['planning_jaw_velocity_limit_mm_s']
+            if type(jaw)not in(int,float)or not math.isfinite(jaw)or jaw<=0:raise ValueError('positive recorded jaw speed required')
+        previous=stamp
+    planning_times=[change['source_time_ns']for change in planning]
+    def planning_at(stamp):
+        index=bisect_right(planning_times,stamp)-1
+        return {key:planning[index].get(key,base[key])if index>=0 else base[key]for key in PLANNING_FIELDS}
     points=[]
     for payload in (manifest.get('model_inputs')or{}).values():
         metadata=json.loads(payload.get('metadata_json')or'{}')
@@ -142,10 +175,17 @@ def inference_replay_segments(manifest):
         stamp=(payload.get('observation')or{}).get('source_time_ns')
         if type(stamp)is not int:continue
         configuration=dict(base,model_id=model['model_id'],backend=model.get('backend'),
-                           denoise_steps=worker.get('inference_steps'))
+                           denoise_steps=worker.get('inference_steps'),**planning_at(stamp))
         if any(configuration[key]!=base[key]for key in ('model_id','backend','denoise_steps')):
             configuration['model_label']=None
         points.append((stamp,configuration))
+    points.sort(key=lambda row:row[0])
+    model_points=list(points)
+    model_times=[stamp for stamp,_ in model_points]
+    for change in planning:
+        stamp=change['source_time_ns'];index=bisect_right(model_times,stamp)-1
+        current=model_points[max(0,index)][1]if model_points else base
+        points.append((stamp,dict(current,**planning_at(stamp))))
     points.sort(key=lambda row:row[0])
     activity=manifest.get('recording_activity')
     if activity is None:
@@ -159,6 +199,7 @@ def inference_replay_segments(manifest):
         inside=[configuration for stamp,configuration in points if start<=stamp<end]
         current=(inside[0]if interval['mode']=='MODEL'and inside else
                  prior[-1]if prior else points[0][1]if points else base)
+        current=dict(current,**planning_at(start))
         changes=[(start,current)]
         if interval['mode']=='MODEL':
             for stamp,configuration in points:

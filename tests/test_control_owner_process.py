@@ -210,6 +210,7 @@ def _owner_process(root,ready,closing,heartbeat=None,tripped=None,fixture_mode=N
         if fixture_mode=='ros_workflow_wam':
             from test_normal_modes import NormalBackend
             raw=NormalBackend(clock)
+            raw.native_velocity_limits=([5.]*6+[.3])*2
         else:
             raw=WindowBackend(clock);raw.target_interpreter_profile='x5_shared_precision_v1'
         if fixture_mode in('ros_workflow','ros_workflow_sim','ros_workflow_wam'):
@@ -558,7 +559,12 @@ class ControlOwnerProcessTests(unittest.TestCase):
         try:
             publishers={};declarations=[]
             width,height=(640,480)if long_session else(224,224)
-            clock=client.control_inputs()['calibration_feedback']['source_clock_id']
+            deadline=time.monotonic()+5
+            feedback=client.control_inputs()['calibration_feedback']
+            while feedback is None:
+                self.assertLess(time.monotonic(),deadline,'initial control feedback was not published')
+                time.sleep(.01);feedback=client.control_inputs()['calibration_feedback']
+            clock=feedback['source_clock_id']
             for role,name in CAMERAS.items():
                 descriptor=dict(device_id=parent.id,stream_id=name,source_instance_id='camera',source_clock_id=clock,
                     topic='/wb_process_state/'+name,message_type='sensor_msgs/msg/Image',kind='image',units='rgb8',
@@ -643,12 +649,28 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     for name in ('inference_run','inference_teach','inference_home'):
                         self.assertTrue(state['runtime']['allowed_operations'][name]['allowed'],state['runtime']['allowed_operations'][name])
                 state_consumers=set()
-                def run(identity,duration=3.,prepare_only=False):
+                def planning_speed(speed,identity):
+                    deadline=time.monotonic()+10
+                    while not get()['runtime']['allowed_operations']['inference_planning_settings']['allowed']:
+                        self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                    run_id=flow.current['id'];policy=app.control_policy('fake','inference')
+                    result=action('inference_planning_settings',dict(request_id=identity,
+                        velocity_limit_rad_s=speed,jaw_velocity_limit_mm_s=30.+speed,expected_revision=policy['revision']))
+                    self.assertEqual(result['control_policy']['parameters']['planning']['velocity_limit_rad_s'],speed)
+                    self.assertEqual(get()['workflow']['inference']['reference_planning']['velocity_limit_rad_s'],speed)
+                    self.assertEqual(get()['workflow']['inference']['reference_planning']['jaw_velocity_limit_mm_s'],30.+speed)
+                    self.assertEqual(flow.current['id'],run_id);self.assertEqual(client.nonce,nonce)
+                def run(identity,duration=3.,prepare_only=False,update_speed=None):
                     state=get();info=state['workflow']['inference']
                     action('inference_run',dict(request_id=identity,model_id=info['selected_model_id'],
                         expected_bundle_digest=info['bundle_digest'],expected_context=info['run_context'],
                         state_wall_ns=state['server_wall_ns'],seed=7,duration_s=duration,recording_enabled=False,
                         prepare_only=prepare_only,physical_clearance=True,scene_reset=True))
+                    if update_speed is not None:
+                        deadline=time.monotonic()+10
+                        while (get()['workflow']['inference']['normal_mode']or{}).get('mode')!='MODEL':
+                            self.assertLess(time.monotonic(),deadline);time.sleep(.02)
+                        planning_speed(update_speed,identity+'-speed')
                     wait_job();held()
                     state_consumers.add(flow.pipeline_diagnostics(limit=1)['owner']['data']['observation_input']['consumer'])
                     self.assertEqual(len(state_consumers),1,'same Owner reuses its ready state subscription across Runs')
@@ -662,7 +684,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                 run('speed-policy-bind',prepare_only=True);end('speed-policy-stop')
                 policy=app.control_policy('fake','inference')
                 updated=action('control_policy',dict(request_id='speed-policy-update',
-                    changes={'planning.velocity_limit_rad_s':2.},expected_revision=policy['revision']))
+                    changes={'planning.velocity_limit_rad_s':2.,'measured.limit_rad_s':4.},expected_revision=policy['revision']))
                 self.assertEqual(app.control_policy('fake','inference')['parameters']['planning']['velocity_limit_rad_s'],2.)
                 for steps in (1,8,20,32):
                     state=get();action('inference_execution_settings',dict(request_id='length-'+str(steps),
@@ -698,6 +720,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     run(identity+'-hold',prepare_only=True);run(identity+'-infer');end(identity+'-end')
                     self.assertEqual(service.prepare_attempts,loads)
                 run('alternating-hold',prepare_only=True)
+                planning_speed(3.,'held-speed')
                 for cycle in range(3):
                     run('alternating-model-'+str(cycle))
                     state=get();action('inference_teach',dict(request_id='teach-'+str(cycle),
@@ -705,6 +728,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     deadline=time.monotonic()+10
                     while app.operator_tasks['fake']['phase']!='teaching':
                         self.assertLess(time.monotonic(),deadline,app.operator_tasks['fake']);time.sleep(.02)
+                    planning_speed(1.+cycle*.1,'teach-speed-'+str(cycle))
                     time.sleep(10)
                     state=get();action('inference_teach',dict(request_id='teach-exit-'+str(cycle),
                         runtime_nonce=nonce,epoch=state['runtime']['command_epoch']))
@@ -712,7 +736,7 @@ class ControlOwnerProcessTests(unittest.TestCase):
                     while app.operator_tasks['fake']['status']=='running':
                         self.assertLess(time.monotonic(),deadline,app.operator_tasks['fake']);time.sleep(.02)
                     held();print('PARAMETER_ACCEPTANCE '+json.dumps({'family':flow.selected_model_id,'takeover_s':10,'cycle':cycle+1}),flush=True)
-                end('before-long');run('long-hold',duration=60.,prepare_only=True);run('long-infer',duration=60.);end('long-end')
+                end('before-long');run('long-hold',duration=60.,prepare_only=True);run('long-infer',duration=60.,update_speed=.9);end('long-end')
                 self.assertGreater(len(model.requests),1);self.assertEqual(service.prepare_attempts,loads)
                 if memory_parameters:
                     flow.client.memory_flow.begin('continue')

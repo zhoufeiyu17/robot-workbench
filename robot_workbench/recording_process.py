@@ -31,7 +31,7 @@ from .ros_data import bounded_value as _capture_value, BoundedQueue as _CaptureE
 
 ROOT=Path(__file__).resolve().parents[1]
 LIMIT=4*1024*1024
-RECORDING_SERVICE_SCHEMA='workbench.recording-service.v7'
+RECORDING_SERVICE_SCHEMA='workbench.recording-service.v8'
 
 
 def _capture_spec(request_id, sources, purpose, resource_budget):
@@ -483,7 +483,7 @@ class RecordingService:
             for entry in os.scandir(self.registry):
                 if not entry.is_file(follow_symlinks=False):continue
                 saved=json.loads(Path(entry.path).read_text());directory=self._directory(saved['directory'])
-                if saved.get('sealed')is True:continue
+                if saved.get('sealed')is True or saved.get('discarded')is True:continue
                 writer=_CaptureWriter(directory,saved['spec'],python=self.python)
                 writer.events.max_bytes=saved['spec']['resource_budget']['event_queue_bytes']//2
                 writer.producer_identity=saved.get('producer_identity')
@@ -585,7 +585,28 @@ class RecordingService:
         directory=self._directory(request.pop('directory'));key=str(directory)
         with self.lock:
             if self.stopping:raise ValueError('recording service is stopping')
+            pin=self.registry/(hashlib.sha256(key.encode()).hexdigest()+'.json')
+            if pin.exists() and json.loads(pin.read_text()).get('discarded'):
+                if action=='discard':return dict(discarded=True,writer_exited=True)
+                raise ValueError('recording was discarded')
             writer=self.sessions.get(key)
+            if action=='discard':
+                binding=json.loads((directory/'binding.json').read_text())
+                if (set(request)!={'run_id'} or binding.get('run_id')!=request['run_id']
+                        or binding.get('business_kind')!='inference'
+                        or directory.parent.parent.name!='inference-'+request['run_id']):
+                    raise ValueError('discard requires the bound inference Run')
+                if writer is not None:
+                    writer.close(timeout=0)
+                    state=self._state(writer)
+                    if not state['writer_exited']:raise ValueError('recording writer exit is unconfirmed')
+                with (directory/'writer.lock').open('r+')as guard:
+                    try:fcntl.flock(guard,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    except BlockingIOError:raise ValueError('recording writer is still owned elsewhere')from None
+                    spec=writer.spec if writer is not None else json.loads((directory/'capture.json').read_text())
+                    write_json(pin,dict(directory=key,spec=spec,discarded=True))
+                self.sessions.pop(key,None)
+                return dict(discarded=True,writer_exited=True)
             if writer is None:
                 # ponytail: at most 64 active Runs; use indexed admission if concurrent devices ever need more.
                 for old in list(self.sessions):
@@ -1671,6 +1692,7 @@ def _seal_written_capture(root,spec,index,extra_issue):
         model_input_validation=dict(metadata_and_references='not_requested',pixel_reconstruction='not_requested',
                                     scope='producer records retained without post-stop raw audit'))
     if activity is not None:manifest['recording_activity']=finish['recording_activity']
+    if 'inference_planning_changes'in finish:manifest['inference_planning_changes']=finish['inference_planning_changes']
     timing.record('recording.seal.index',started)
     export_started=time.monotonic_ns()
     try:
@@ -1904,6 +1926,7 @@ def _seal_capture(root,spec,extra_issue=None,*,probe_cache=None,live_index=None)
             metadata_and_references=('failed'if issues else'passed')if model_indexes['model_input']else'not_applicable',
             pixel_reconstruction='not_requested',scope='recorded structure, source references and input/result coverage')
     if activity is not None:manifest['recording_activity']=deepcopy(finish['recording_activity'])
+    if 'inference_planning_changes'in finish:manifest['inference_planning_changes']=deepcopy(finish['inference_planning_changes'])
     if activity_policy is not None and activity is None:manifest['playback_error']='recording activity timeline unavailable; unfiltered replay prohibited'
     elif any('source_ref' in source for source in spec['source_descriptors']):
         export_started=time.monotonic_ns();phase('export_playback')

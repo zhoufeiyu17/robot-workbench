@@ -22,6 +22,37 @@ class CompleteNormalTests(unittest.TestCase):
     def setup_reviewed(self,duration=.5):
         self.setup_modes(recording=True,finish_kind='dagger_reset_v1',initial_mode='HOLD',reviewed=True,reviewed_duration_s=duration)
 
+    def test_planning_update_preserves_current_segment_and_applies_next(self):
+        self.setup_reviewed(40.);runner=self.runtime.owner.runner
+        request,_=self.request('MODEL');self.completed(request)
+        self.until(lambda:runner.normal_segment is not None and runner.normal_segment['status']=='executing')
+        first=deepcopy(runner.normal_segment);old=runner.config['reference_planning']['velocity_limit_rad_s']
+        policy=self.runtime.control_policy_snapshot('inference')
+        changed=self.runtime.update_control_policy(self.creds['inference'],dict(expected_revision=policy['revision'],
+            changes={'planning.velocity_limit_rad_s':old/2,'planning.jaw_velocity_limit_mm_s':25.}))
+        self.assertEqual(changed['parameters']['planning']['velocity_limit_rad_s'],old/2)
+        self.assertEqual(runner.normal_segment,first)
+        self.until(lambda:runner.normal_segment['reference_id']!=first['reference_id'])
+        self.assertEqual(runner.normal_segment['planning_velocity_limit_rad_s'],old/2)
+        self.assertEqual(runner.normal_segment['planning_jaw_velocity_limit_mm_s'],25.)
+        self.assertEqual(self.runtime.owner.runner,runner)
+        self.assertTrue(self.runtime.execution_settings_path.is_file())
+
+    def test_live_planning_rejects_stale_revision_and_preserves_failed_write(self):
+        from unittest.mock import patch
+        self.setup_reviewed(40.);runner=self.runtime.owner.runner
+        policy=self.runtime.control_policy_snapshot('inference')
+        update=dict(expected_revision=policy['revision'],changes={'planning.velocity_limit_rad_s':.2})
+        with self.assertRaisesRegex(ValueError,'revision'):
+            self.runtime.update_control_policy(self.creds['inference'],dict(update,expected_revision=policy['revision']+1))
+        with patch('pathlib.Path.write_text',side_effect=OSError('disk failure')):
+            with self.assertRaises(OSError):self.runtime.update_control_policy(self.creds['inference'],update)
+        self.assertEqual(self.runtime.control_policy_snapshot('inference')['parameters'],policy['parameters'])
+        self.assertIsNone(runner.pending_planning_update);self.assertFalse(self.runtime.settings_write_pending)
+        for field,value in [('planning.velocity_limit_rad_s',3.),('planning.jaw_velocity_limit_mm_s',50.)]:
+            with self.assertRaisesRegex(ValueError,'上限'):
+                self.runtime.update_control_policy(self.creds['inference'],dict(expected_revision=policy['revision'],changes={field:value}))
+
     def check_endpoint_delta(self,changes,accepted):
         from unittest.mock import patch
         self.setup_reviewed();runner=self.runtime.owner.runner

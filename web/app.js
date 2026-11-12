@@ -56,7 +56,7 @@ Object.assign(STAGE_LABELS,{'inference.prepare':'加载与预热推理模型','i
 const degrees=value=>value*180/Math.PI;
 const radians=value=>Number((Number(value)*Math.PI/180).toPrecision(15));
 const seconds=value=>Number.isFinite(value)?value.toFixed(1)+' 秒':'尚无记录';
-const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',model_ready:'模型已就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',passed:'通过',failed:'失败',rejected:'未执行',expired:'确认已过期',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
+const STATUS = {unknown:'未知',idle:'空闲',ready:'就绪',model_ready:'模型已就绪',running:'进行中',executing:'执行中',verifying:'核验中',settling:'等待稳定',awaiting_capture:'等待采图',planning:'规划中',capturing:'采集中',recording:'录制中',fitting:'求解中',completed:'已完成',complete:'完整',incomplete:'不完整',sealing:'封存中',deleting:'清理中',passed:'通过',failed:'失败',rejected:'未执行',expired:'确认已过期',invalid:'无效',stopped:'已停止',stopping:'正在停止',pending:'等待中',unavailable:'不可用',awaiting_review:'等待审阅',awaiting_confirmation:'等待确认',not_started:'尚未开始',not_applicable:'不适用',valid:'有效',damping:'阻尼保持',position:'位置保持',manual_damping:'手动阻尼保持'};
 const reasonText=value=>({'motion or capture is still active':'当前动作或采集尚未结束','holding/control state is not confirmed':'保持/控制状态尚未确认，请查看设备诊断'}[value]||value);
 const textValue = value => value == null ? '未知' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 const statusText = value => ({unconfigured:'业务服务未配置',connecting:'正在连接',candidate:'候选结果',diagnostic_readonly:'只读诊断',quality_failed:'质量未通过',incomplete_left:'左腕未通过',incomplete_right:'右腕未通过',incomplete_both:'双腕未通过'}[String(value).toLowerCase()] || STATUS[String(value).toLowerCase()] || textValue(value));
@@ -600,8 +600,10 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
       ?inferenceLabel({model_id:row.model_id,label:row.model_label}).replace(/\s*·\s*\d+步(?:去噪|输出)/g,'')
       :'模型未记录';
     const backend={anyinfer:'SO',torch:'Torch'}[row.backend]||row.backend||'后端未记录';
-    if(row.mode==='TEACH')return `人工接管 · 绑定模型 ${model} · ${backend} · 绑定去噪 ${row.denoise_steps??'未记录'} 步 · 绑定执行 ${row.execute_steps??'未记录'} 点`;
-    return `模型执行 · ${model} · ${backend} · 去噪 ${row.denoise_steps??'未记录'} 步 · 执行 ${row.execute_steps??'未记录'} 点`;
+    const planning=(Number.isFinite(row.planning_velocity_limit_rad_s)?`关节限速 ${row.planning_velocity_limit_rad_s} rad/s`:'关节限速未记录')+
+      (Number.isFinite(row.planning_jaw_velocity_limit_mm_s)?` · 夹爪限速 ${row.planning_jaw_velocity_limit_mm_s} mm/s`:' · 夹爪限速未记录');
+    if(row.mode==='TEACH')return `人工接管 · 绑定模型 ${model} · ${backend} · 绑定去噪 ${row.denoise_steps??'未记录'} 步 · 绑定执行 ${row.execute_steps??'未记录'} 点 · 绑定${planning}`;
+    return `模型执行 · ${model} · ${backend} · 去噪 ${row.denoise_steps??'未记录'} 步 · 执行 ${row.execute_steps??'未记录'} 点 · ${planning}`;
   }
   function renderReplayConfiguration(){
     if(!replayMetadata)return;
@@ -1207,19 +1209,26 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   let inferencePlanningDirty=false,inferencePlanningRevision=null,inferencePlanningContext=null;
   function renderInferencePlanning(reset=false){
     const value=inferenceInfo().reference_planning?.velocity_limit_rad_s;
+    const jawValue=inferenceInfo().reference_planning?.jaw_velocity_limit_mm_s;
     const currentRevision=state?.runtime?.execution_settings?.revision;
     const identity=JSON.stringify([key(),serverInstance,state?.runtime?.runtime_nonce,inferenceInfo().selected_model_id]);
     if(reset||identity!==inferencePlanningContext){inferencePlanningDirty=false;inferencePlanningRevision=null;inferencePlanningContext=identity;}
-    const available=Number.isFinite(value)&&Number.isInteger(currentRevision);
-    const input=el('inference-planning-speed');
-    if(!inferencePlanningDirty){input.value=available?String(value):'';inferencePlanningRevision=currentRevision;}
-    const speed=Number(input.value),stale=available&&inferencePlanningRevision!==currentRevision;
-    const gate=preparedParameterHold()?{allowed:!inferenceParameterUpdate,reason:'正在应用参数并重新准备'}:permission('control_policy');
-    input.disabled=!available||!gate.allowed;
+    const available=Number.isFinite(value)&&Number.isFinite(jawValue)&&Number.isInteger(currentRevision);
+    const input=el('inference-planning-speed'),jawInput=el('inference-planning-jaw-speed');
+    const limits=state?.runtime?.execution_settings?.planning_limits||{};
+    for(const [node,maximum]of [[input,limits.velocity_limit_rad_s],[jawInput,limits.jaw_velocity_limit_mm_s]]){
+      if(Number.isFinite(maximum))node.max=String(maximum);else node.removeAttribute('max');
+    }
+    if(!inferencePlanningDirty){input.value=available?String(value):'';jawInput.value=available?String(jawValue):'';inferencePlanningRevision=currentRevision;}
+    const speed=Number(input.value),jawSpeed=Number(jawInput.value),stale=available&&inferencePlanningRevision!==currentRevision;
+    const gate=inferenceParameterUpdate?{allowed:false,reason:'正在应用其他推理参数'}:permission('inference_planning_settings');
+    input.disabled=jawInput.disabled=!available||!gate.allowed;
     el('inference-planning-reset').disabled=!available;
-    el('inference-planning-apply').disabled=!available||!gate.allowed||!inferencePlanningDirty||stale||!Number.isFinite(speed)||speed<=0;
-    setText('inference-planning-effective',available?`当前生效 ${value} rad/s。`+
-      (stale?'策略版本已变化，请重新读取后修改。':inferencePlanningDirty?'草稿未保存。':'')+
+    const limitError=Number.isFinite(limits.velocity_limit_rad_s)&&speed>limits.velocity_limit_rad_s?`关节上限 ${limits.velocity_limit_rad_s} rad/s。`:
+      Number.isFinite(limits.jaw_velocity_limit_mm_s)&&jawSpeed>limits.jaw_velocity_limit_mm_s?`夹爪上限 ${limits.jaw_velocity_limit_mm_s} mm/s。`:'';
+    el('inference-planning-apply').disabled=!available||!gate.allowed||!inferencePlanningDirty||stale||!Number.isFinite(speed)||speed<=0||!Number.isFinite(jawSpeed)||jawSpeed<=0||!!limitError;
+    setText('inference-planning-effective',available?`关节 ${value} rad/s · 夹爪 ${jawValue} mm/s。应用后从下一次 Infer 轨迹片段生效。`+
+      (stale?'策略版本已变化，请重新读取后修改。':limitError|| (inferencePlanningDirty?'草稿未保存。':''))+
       (!gate.allowed?' '+gate.reason:''):'接入设备后读取规划参数。');
   }
   function inferenceSeed(){
@@ -1939,7 +1948,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
   function renderRecordingFiles(){
     const box=el('recording-files-list');box.replaceChildren();
     for(const row of recordingFiles){
-      const label=make('label',null,'check-label'),input=make('input');input.type='checkbox';input.checked=recordingSelection.has(row.run_id);
+      const label=make('label',undefined,'check-label'),input=make('input');input.type='checkbox';input.checked=recordingSelection.has(row.run_id);
       input.disabled=recordingFilesBusy||!row.deletable;
       input.addEventListener('change',()=>{if(input.checked)recordingSelection.add(row.run_id);else recordingSelection.delete(row.run_id);renderRecordingFiles();});
       label.append(input,make('span',`${recordingTaskTime(row.started_wall_ns)||'时间未知'} · ${row.run_id.slice(0,8)} · ${statusText(row.state)}${row.reason?' · '+row.reason:''}`));box.append(label);
@@ -1989,7 +1998,8 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-history-older').disabled=resultsBrowsing||!page?.older_cursor;
     el('inference-history-newer').disabled=resultsBrowsing||!page?.newer_cursor;
     el('inference-history-latest').disabled=resultsBrowsing||!resultsCursor;
-    setText('inference-history-page-info',resultsBrowsing?'正在读取历史页…':page?`本页 ${page.run_ids.length} 个任务 · 共 ${page.total_runs} 个任务／${page.total_results} 项结果`:'');
+    setText('inference-history-page-info',resultsBrowsing?'正在读取历史页…':page?`本页 ${page.run_ids.length} 个任务 · 共 ${page.total_runs} 个任务／${page.total_results} 项结果`+
+      (page.index_error?' · 部分录制登记失败：'+page.index_error:''):'');
   }
   function browseInferenceHistory(direction){
     if(resultsBrowsing||!state?.results_page)return;
@@ -2027,9 +2037,12 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const runFor=entry=>entry.run_id||entry.media?.run_id||(state?.results_page?entry.id:currentRun)||currentRun;
     const allMedia=[...(state?.media||[]),...(state?.workflow?.replay||[]),...allResults.map(row=>row.media).filter(Boolean)].filter(row=>row.kind==='replay');
     const captureRow=row=>row.details?.seal_revision!==undefined||row.id?.startsWith('capture-');
-    const collection=context.business!=='calibration'||!!state?.results_page,runs=new Set([currentRun,...allMedia.map(runFor),...allResults.map(runFor)]);
+    const collection=context.business!=='calibration'||!!state?.results_page;
+    const playableRuns=state?.results_page?.run_ids||allResults.filter(row=>row.media?.ready&&
+      (row.details?.recording_outcome==='complete'||['complete','valid'].includes(row.status))).map(runFor);
+    const runs=new Set(context.business==='inference'?playableRuns:[currentRun,...allMedia.map(runFor),...allResults.map(runFor)]);
     const nextHistoryRun=collection&&runs.has(historySelections.get(historyKey()))?historySelections.get(historyKey()):
-      (resultsCursor||context.business!=='inference')&&state?.results_page?.run_ids.length?state.results_page.run_ids[0]:currentRun;
+      state?.results_page?.run_ids.length?state.results_page.run_ids[0]:context.business==='inference'?[...runs][0]??null:currentRun;
     if(nextHistoryRun!==historyRun)pausePair();historyRun=nextHistoryRun;
     el('collection-history-controls').hidden=!collection;
     const historyLabel=context.business==='inference'?'推理任务':context.business==='collection'?'数采任务':'控制录制任务';
@@ -2037,7 +2050,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('collection-history-run').setAttribute('aria-label',historyLabel);
     const runTime=run=>recordingTaskTime((run===currentRun?state?.runtime?.recording?.recording_activity?.started_wall_ns:null)
       ??allResults.find(row=>runFor(row)===run&&Number.isFinite(row.details?.started_wall_ns))?.details.started_wall_ns);
-    const runLabel=run=>{const stamp=runTime(run);return stamp?`${stamp} · ${run===currentRun?'当前':historyLabel}`:run===currentRun?'当前任务（尚未录制）':`时间未知 · ${historyLabel}`;};
+    const runLabel=run=>{const stamp=runTime(run);if(context.business==='inference')return `${stamp||'时间未知'} · ${run.slice(0,8)} · 完整`;return stamp?`${stamp} · ${run===currentRun?'当前':historyLabel}`:run===currentRun?'当前任务（尚未录制）':`时间未知 · ${historyLabel}`;};
     const selector=el('collection-history-run'),optionsKey=JSON.stringify([key(),currentRun,[...runs].map(run=>[run,runLabel(run)])]);
     if(selector.dataset.options!==optionsKey){selector.dataset.options=optionsKey;selector.replaceChildren();
       for(const run of runs){const option=make('option',runLabel(run));option.value=run;option.title=run==='__current__'?'尚未生成当前任务':run;selector.append(option);}
@@ -2391,6 +2404,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
         else {executionSettingsDirty=false;executionSettingsRevision=null;}
       }
       if(action==='inference_execution_settings'&&requestContext===key()&&requestInstance===serverInstance&&!controller.signal.aborted){inferenceStepsDirty=false;inferenceStepsRevision=null;}
+      if(action==='inference_planning_settings'&&requestContext===key()&&requestInstance===serverInstance&&!controller.signal.aborted){inferencePlanningDirty=false;inferencePlanningRevision=null;dismissInferenceRun();}
       if(action==='control_policy'&&requestContext===key()&&requestInstance===serverInstance&&!controller.signal.aborted){
         fillControlPolicy(result.control_policy);
         if(Object.hasOwn(body.changes,'planning.velocity_limit_rad_s')){inferencePlanningDirty=false;inferencePlanningRevision=null;}
@@ -2509,11 +2523,13 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('inference-execute-steps').addEventListener('input',()=>{inferenceStepsDirty=true;renderInferenceSteps();});
     el('inference-steps-reset').addEventListener('click',()=>renderInferenceSteps(true));
     el('inference-planning-speed').addEventListener('input',()=>{inferencePlanningDirty=true;renderInferencePlanning();});
+    el('inference-planning-jaw-speed').addEventListener('input',()=>{inferencePlanningDirty=true;renderInferencePlanning();});
     el('inference-planning-reset').addEventListener('click',()=>renderInferencePlanning(true));
     el('inference-planning-apply').addEventListener('click',()=>{
       if(el('inference-planning-apply').disabled)return;
-      const settings={expected_revision:inferencePlanningRevision,changes:{'planning.velocity_limit_rad_s':Number(el('inference-planning-speed').value)}};
-      void renewPreparedParameters(()=>send('control_policy',settings,'parameter-renewal'));
+      const settings={expected_revision:inferencePlanningRevision,velocity_limit_rad_s:Number(el('inference-planning-speed').value),
+        jaw_velocity_limit_mm_s:Number(el('inference-planning-jaw-speed').value)};
+      void send('inference_planning_settings',settings);
     });
     el('inference-steps-apply').addEventListener('click',()=>{if(!el('inference-steps-apply').disabled){const settings={execute_steps:Number(el('inference-execute-steps').value),expected_revision:inferenceStepsRevision};void renewPreparedParameters(()=>send('inference_execution_settings',settings,'parameter-renewal'));}});
     el('environment').addEventListener('change',()=>{

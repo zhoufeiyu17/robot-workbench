@@ -1311,7 +1311,9 @@ class InferenceWorkflow:
                         model_id=self.selected_model_id,model_label=self.selected_spec['label'],
                         backend=self.selected_spec.get('backend'),
                         denoise_steps=(self.selected_spec.get('inference_options')or{}).get('denoise_steps'),
-                        execute_steps=configuration['execute_steps'])
+                        execute_steps=configuration['execute_steps'],
+                        planning_velocity_limit_rad_s=(configuration.get('reference_planning')or{}).get('velocity_limit_rad_s'),
+                        planning_jaw_velocity_limit_mm_s=(configuration.get('reference_planning')or{}).get('jaw_velocity_limit_mm_s'))
                     if self.ros_plane is not None and configuration.get('normal_modes')and configuration.get('normal_initial_mode')=='HOLD':
                         from .recording_activity import POLICY
                         recorder_config['execution_context']['recording_activity']=POLICY
@@ -1953,7 +1955,9 @@ class InferenceWorkflow:
                 clocks='join monotonic_ns only within the same boot_id; source stamps retain their declared clock'))
 
     def results_page(self, *, before=None, after=None):
-        return self.history.page(before=before, after=after)
+        if self.capture_results is not None:
+            return self.capture_results.page('inference',before=before,after=after,playable_only=True)
+        return self.history.page(before=before,after=after,playable_only=True)
 
     def replay_metadata(self,run_id):
         if self.capture_results is None:return dict(segments=[],reason='这条录像没有公共录制元数据')
@@ -1962,9 +1966,15 @@ class InferenceWorkflow:
     def recording_files(self,run_ids=None):
         with self.lock:
             run=self.current;active=[]
-            if run and(run.get('ended_wall')is None or run.get('recorder')and not run['recorder'].done.is_set()):
+            if run and run.get('ended_wall')is None:
                 active.append(run['id'])
-        return self.history.recordings(active=active)if run_ids is None else self.history.delete_recordings(run_ids,active=active)
+        if run_ids is None:return self.history.recordings(active=active)
+        def discard(run_id,directory):
+            from .recording_process import recording_call
+            descriptor=os.environ.get('WORKBENCH_RECORDING_SERVICE')
+            if not descriptor:raise ValueError('录制服务未登记，无法确认写入进程退出')
+            recording_call(descriptor,'discard',directory=str(directory),run_id=run_id,timeout=15)
+        return self.history.delete_recordings(run_ids,active=active,discard=discard)
 
     def media(self, identity):
         if getattr(self,'capture_results',None) is not None and identity.startswith('capture-'):

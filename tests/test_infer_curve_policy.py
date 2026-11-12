@@ -112,6 +112,8 @@ class InferCurvePolicyTests(unittest.TestCase):
         source,limits=self.fixture()
         with self.assertRaisesRegex(ValueError,'start q/v/a'):self.prepare(source,limits,initial_velocity_sdk14=None)
         invalid=deepcopy(POLICY);invalid['jaw_velocity_limit_mm_s']=80.
+        self.assertEqual(self.prepare(source,limits,planning_policy=invalid).metadata['planning_policy']['jaw_velocity_limit_mm_s'],80.)
+        invalid['jaw_velocity_limit_mm_s']=-1.
         with self.assertRaises(ValueError):self.prepare(source,limits,planning_policy=invalid)
 
     def test_legacy_default_is_unchanged_and_profile_is_scoped_and_frozen(self):

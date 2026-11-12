@@ -63,6 +63,26 @@ def tearDownModule():stop_recording_fixture(recording_fixture)
 
 
 class ResidentRecordingTest(unittest.TestCase):
+    def test_discard_unfinished_recording_reaps_writer_and_prevents_recreation(self):
+        from robot_workbench.recording_process import CaptureSession,recording_call
+        fixture=start_recording_fixture()
+        session=None
+        try:
+            session=CaptureSession.create(self.root/'inference-discarded'/'capture',request_id='discarded',
+                source_descriptors=[self.source],purpose_profile='data_required')
+            session.prepare();session.bind(run_id='discarded',business_kind='inference',policy_hash='a'*64);session.start()
+            descriptor=Path(fixture[1].name)/'service/service.json'
+            with self.assertRaisesRegex(ValueError,'bound inference'):
+                recording_call(descriptor,'discard',directory=str(session.directory),run_id='other')
+            result=recording_call(descriptor,'discard',directory=str(session.directory),run_id='discarded')
+            self.assertTrue(result['writer_exited']);self.assertTrue(result['discarded'])
+            self.assertTrue(recording_call(descriptor,'discard',directory=str(session.directory),run_id='discarded')['discarded'])
+            with self.assertRaisesRegex(ValueError,'discarded'):
+                recording_call(descriptor,'recover',directory=str(session.directory))
+        finally:
+            if session is not None:session.close()
+            stop_recording_fixture(fixture)
+
     def test_load_observer_timeout_preserves_writer_and_accepts_its_later_seal(self):
         self.test_closed_ingress_allows_another_run_but_service_stop_waits_for_old_writer(load_observer=True)
 
@@ -198,7 +218,7 @@ recorder._capture_worker()
         from robot_workbench.recording_process import _recording_descriptor,RECORDING_SERVICE_SCHEMA
         with tempfile.TemporaryDirectory()as folder:
             path=Path(folder)/'old-recording.json'
-            for version in ('v3','v6'):
+            for version in ('v3','v6','v7'):
                 path.write_text(json.dumps(dict(schema='workbench.recording-service.'+version)));path.chmod(0o600)
                 with self.assertRaisesRegex(ValueError,'protocol version mismatch'):_recording_descriptor(path)
             path.write_text(json.dumps(dict(schema=RECORDING_SERVICE_SCHEMA)))
