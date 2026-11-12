@@ -295,7 +295,7 @@ def _root_real_parts(rows):
     return roots
 
 
-def _extrema_batched(coefficients,breaks):
+def _extrema_batched(coefficients,breaks,*,per_interval=False):
     """Full polynomial extrema, vectorized in normalized segment time [0,1]."""
     c=np.asarray(coefficients,dtype=float);b=np.asarray(breaks,dtype=float)
     if (c.ndim!=3 or c.shape[2]!=12 or not 2<=c.shape[1]<=6 or b.shape!=(len(c)+1,)
@@ -312,9 +312,9 @@ def _extrema_batched(coefficients,breaks):
         for coefficient in rows.T:values=values*candidates+coefficient[:,None]
         values/=np.repeat(widths,12)[:,None]**order
         if not np.isfinite(values).all():raise ValueError('nonfinite polynomial extrema; no path admission')
-        bounds.append((values.min(axis=1).reshape(-1,12).min(axis=0),
-                       values.max(axis=1).reshape(-1,12).max(axis=0)))
+        bounds.append((values.min(axis=1).reshape(-1,12),values.max(axis=1).reshape(-1,12)))
         rows=derivative
+    if not per_interval:bounds=[(low.min(axis=0),high.max(axis=0))for low,high in bounds]
     return bounds[0][0],bounds[0][1],np.maximum(abs(bounds[1][0]),abs(bounds[1][1])),np.maximum(abs(bounds[2][0]),abs(bounds[2][1]))
 
 
@@ -362,6 +362,83 @@ class PreparedReference:
         q,dq,_=self.sample(times)
         return dict(schema=SCHEMA,reference_id=self.metadata['reference_id'],
                     relative_times_s=times.tolist(),q_sdk14=q.tolist(),dq_sdk14=dq.tolist())
+
+
+
+def _retime_local(breaks,sdk,limits,initial_velocity,initial_acceleration,*,velocity_limit,
+                  acceleration_limit,jaw_scales,jaw_velocity_limit,maximum_duration,
+                  brake_duration=None,coefficients=None):
+    """Extend violating intervals with shared Hermite joins and fixed outer q/v/a."""
+    original=np.diff(breaks).copy();widths=original.copy();bounds=np.asarray(limits)[list(JOINTS)]
+    if maximum_duration is not None and breaks[-1]>maximum_duration:
+        raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound; required_s={breaks[-1]:.6g}')
+    if coefficients is None:
+        coefficients=_cubic_with_quintic_ends(breaks,sdk[:,JOINTS],initial_velocity,initial_acceleration)
+    original_coefficients=np.asarray(coefficients).copy()
+    knot_velocity=np.vstack([coefficients[:,-2],np.zeros(12)])
+    knot_acceleration=np.vstack([2*coefficients[:,-3],np.zeros(12)])
+    reasons=[set()for _ in widths]
+    for iteration in range(33):
+        breaks=np.r_[0.,np.cumsum(widths)]
+        if iteration:
+            # Each shared join has one q/v/a. Only adjacent stretched intervals
+            # reduce that join's derivatives; physical outer boundaries stay fixed.
+            knot_scale=np.ones(len(sdk))
+            ratios_to_source=widths/original
+            knot_scale[1:-1]=np.maximum(ratios_to_source[:-1],ratios_to_source[1:])
+            velocity=knot_velocity/knot_scale[:,None]
+            acceleration=knot_acceleration/knot_scale[:,None]**2
+            coefficients=original_coefficients.copy()
+            affected=np.flatnonzero((widths!=original)|(knot_scale[:-1]!=1.)|(knot_scale[1:]!=1.))
+            for i in affected:
+                coefficients[i]=_quintic_end(sdk[i,list(JOINTS)],sdk[i+1,list(JOINTS)],
+                    velocity[i],velocity[i+1],acceleration[i],acceleration[i+1],widths[i])
+        lo,hi,v,a=_extrema_batched(coefficients,breaks,per_interval=True)
+        if np.any(lo<bounds[:,0]-1e-9)or np.any(hi>bounds[:,1]+1e-9):
+            raise ValueError('retimed curve exceeds joint command limits; no silent clipping')
+        jaw=np.abs(np.diff(sdk[:,[6,13]],axis=0))/widths[:,None]*np.asarray(jaw_scales)
+        ratios=np.ones((len(widths),14));ratios[:,JOINTS]=np.maximum(v/velocity_limit,np.sqrt(a/acceleration_limit))
+        ratios[:,[6,13]]=jaw/jaw_velocity_limit
+        factors=np.maximum(1.,ratios.max(axis=1))
+        for index in np.flatnonzero(factors>1.+1e-9):
+            axis=int(np.argmax(ratios[index]));side='left'if axis<7 else'right'
+            reasons[index].add(side+('_jaw'if axis%7==6 else '_J'+str(axis%7+1)))
+        if brake_duration is not None:
+            low,high,pv,pa=_brake_envelope_bounds(coefficients,breaks,brake_duration,per_interval=True)
+            failed=(np.any(low<bounds[:,0]-1e-10,axis=1)|np.any(high>bounds[:,1]+1e-10,axis=1)
+                    |np.any(pv>velocity_limit+1e-10,axis=1)|np.any(pa>acceleration_limit+1e-10,axis=1))
+            margin=np.maximum(0.,np.minimum(lo-bounds[:,0],bounds[:,1]-hi))
+            def stretch(quadratic,linear,limit):
+                limit=np.broadcast_to(limit,v.shape)
+                positive=limit>0
+                result=np.ones_like(v)
+                result[~positive&((quadratic!=0)|(linear!=0))]=np.inf
+                result[positive]=(linear[positive]+np.sqrt(linear[positive]**2+
+                    4*limit[positive]*quadratic[positive]))/(2*limit[positive])
+                return result.max(axis=1)
+            reserve=np.maximum.reduce([np.ones(len(widths)),
+                stretch(a*brake_duration**2/12,v*brake_duration/2,margin),
+                stretch((4/27)*a*brake_duration,v,velocity_limit),
+                stretch(a,1.5*v/brake_duration,acceleration_limit)])
+            factors[failed]=np.maximum(factors[failed],reserve[failed])
+            for index in np.flatnonzero(failed):reasons[index].add('normal_brake_reserve')
+        changed=factors>1.+1e-9
+        if not changed.any():
+            _check_c2(coefficients,breaks)
+            changes=[dict(interval=int(i),input_start_s=float(sum(original[:i])),
+                original_duration_s=float(original[i]),duration_s=float(widths[i]),
+                scale=float(widths[i]/original[i]),constraints=sorted(reasons[i]))
+                for i in np.flatnonzero(widths>original)]
+            return breaks,coefficients,v.max(axis=0),a.max(axis=0),float(jaw.max()),iteration,changes
+        proposed=widths.copy();proposed[changed]*=factors[changed]*1.02
+        if not np.isfinite(proposed).all():raise ValueError('local interval has no finite brake reserve')
+        if maximum_duration is not None and proposed.sum()>maximum_duration:
+            interval,axis=np.unravel_index(int(np.argmax(ratios)),ratios.shape)
+            label=('left'if axis<7 else'right')+('_jaw'if axis%7==6 else '_J'+str(axis%7+1))
+            raise ValueError(f'prepared path exceeds {maximum_duration:g}s bound; required_s={proposed.sum():.6g}; '
+                f'limiting_axis={label}; interval={interval}; constraints={sorted(reasons[interval])}')
+        widths=proposed
+    raise ValueError('local retiming did not converge to continuous feasible intervals')
 
 
 def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
@@ -457,28 +534,15 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
         return ValueError(f'prepared path exceeds {maximum_duration:g}s bound; required_s={required:.6g}; '
             f'source_s={duration:.6g}; limiting_axis={axis}; constraint={constraint}; scale={factor:.6g}')
     if not math.isfinite(scale*duration):raise ValueError('retimed duration must be finite')
-    if maximum_duration is not None and scale*duration>maximum_duration:raise duration_error(scale*duration)
-    refits=0
-    if policy is not None and (np.any(v0!=0)or np.any(a0!=0)) and scale>1:
-        # Stretching coefficients would silently change nonzero initial v/a.
-        # Refit at the longer duration with the same physical boundary instead.
-        for refits in range(1,9):
-            breaks=breaks*scale
-            if maximum_duration is not None and breaks[-1]>maximum_duration:raise duration_error(breaks[-1])
-            fit_started=time.perf_counter()
-            coefficients=_cubic_with_quintic_ends(breaks,sdk[:,JOINTS],v0[list(JOINTS)],a0[list(JOINTS)])
-            fit_wall+=time.perf_counter()-fit_started
-            extrema_started=time.perf_counter();low,high,v,a=extrema(coefficients,breaks)
-            extrema_wall+=time.perf_counter()-extrema_started
-            if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
-                raise ValueError('retimed curve exceeds joint command limits; no silent clipping')
-            jaw_velocities={side:float(np.max(np.abs(np.diff(sdk[:,slot]))/np.diff(breaks)))*jaw_scales[side]
-                for side,slot in(('left',6),('right',13))}
-            jaw_velocity=max(jaw_velocities.values())
-            scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit),jaw_velocity/jaw_velocity_limit)
-            if scale<=1.+1e-9:scale=1.;break
-            scale*=1.02
-        else:raise ValueError('bounded retiming did not preserve feasible initial derivatives')
+    if policy is None and maximum_duration is not None and scale*duration>maximum_duration:raise duration_error(scale*duration)
+    refits=0;local_changes=[];local_retiming_wall=0.
+    if policy is not None:
+        local_started=time.perf_counter()
+        breaks,coefficients,v,a,jaw_velocity,refits,local_changes=_retime_local(
+            breaks,sdk,limits,v0[list(JOINTS)],a0[list(JOINTS)],velocity_limit=velocity_limit,
+            acceleration_limit=acceleration_limit,jaw_scales=[jaw_scales[side]for side in('left','right')],
+            jaw_velocity_limit=jaw_velocity_limit,maximum_duration=maximum_duration,coefficients=coefficients)
+        local_retiming_wall=time.perf_counter()-local_started;scale=1.
     else:
         breaks=breaks*scale
         coefficients=coefficients.copy()
@@ -503,13 +567,16 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
         _check_c2(coefficients,breaks)
         metadata.update(planning_policy=policy,interpolation='CPU_C2_cubic_with_quintic_ends_to_SDK_linear_samples',
             initial_velocity_sdk14=v0.tolist(),initial_acceleration_sdk14=a0.tolist(),retiming_refits=refits,
-            internal_derivatives='cubic_spline_solved_v_and_a; not_zeroed')
-    metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=jaw_velocity_limit)
+            internal_derivatives='shared_C2_boundaries; physical_initial_and_zero_terminal_preserved',
+            retiming_scope='local_intervals',local_retiming=local_changes)
+        if local_changes:metadata['interpolation']='CPU_C2_local_Hermite_retiming_to_SDK_linear_samples'
+    metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=jaw_velocity_limit,
+        jaw_unit_scales_mm_per_sdk_m=dict(jaw_scales))
     digest=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode())
     for array in (breaks,coefficients,sdk[:,[6,13]]):digest.update(array.tobytes())
     metadata['reference_id']=digest.hexdigest()
     if timing is not None:timing.update(imports_s=imports_wall,fit_s=fit_wall,extrema_s=extrema_wall,
-        prepare_total_s=time.perf_counter()-started,retiming_refits=refits)
+        prepare_total_s=time.perf_counter()-started,retiming_refits=refits,local_retiming_s=local_retiming_wall)
     return PreparedReference(_frozen(breaks),_frozen(coefficients),_frozen(sdk[:,[6,13]]),metadata)
 
 
@@ -597,7 +664,7 @@ def prepare_brake_after(reference, boundary_s, limits, **options):
     return PreparedReference(_frozen(breaks),_frozen(c),_frozen(jaws),meta)
 
 
-def _brake_envelope_bounds(coefficients,breaks,duration_s):
+def _brake_envelope_bounds(coefficients,breaks,duration_s,*,per_interval=False):
     """All-time bounds retaining the correlation of q(t), v(t), and a(t).
 
     Brake position bases lie in [0,T/2] and [0,T²/12], velocity bases
@@ -612,8 +679,10 @@ def _brake_envelope_bounds(coefficients,breaks,duration_s):
     def extent(corners):
         sequence=np.concatenate(corners)
         timeline=np.r_[0.,np.cumsum(np.tile(widths,len(corners)))]
-        low,high,_,_=_extrema_batched(sequence,timeline)
-        return low,high
+        low,high,_,_=_extrema_batched(sequence,timeline,per_interval=True)
+        low=low.reshape(len(corners),len(q),12).min(axis=0)
+        high=high.reshape(len(corners),len(q),12).max(axis=0)
+        return (low,high)if per_interval else(low.min(axis=0),high.max(axis=0))
     low,high=extent([q,q+t*v/2,q+t*t*a/12,q+t*v/2+t*t*a/12])
     vl,vh=extent([np.zeros_like(v),v,4*t*a/27,v+4*t*a/27])
     al,ah=extent([-a/3,a,-1.5*v/t-a/3,-1.5*v/t+a])
@@ -621,7 +690,7 @@ def _brake_envelope_bounds(coefficients,breaks,duration_s):
 
 
 def retime_for_brake_reserve(reference,limits,*,duration_s,velocity_limit,acceleration_limit,maximum_duration_s):
-    """Stretch the existing zero-boundary curve to satisfy its normal brake proof."""
+    """Extend only intervals that fail the all-times normal brake proof."""
     if not isinstance(reference,PreparedReference):raise ValueError('analytic reference required for brake reserve')
     _check_c2(reference.coefficients,reference.breaks)
     _,start_v,start_a=reference.sample([0.])
@@ -631,47 +700,29 @@ def retime_for_brake_reserve(reference,limits,*,duration_s,velocity_limit,accele
         raise ValueError('explicit positive normal brake budgets required')
     bounds=np.asarray(limits,dtype=float)
     if bounds.shape!=(14,2)or not np.isfinite(bounds).all():raise ValueError('finite SDK position limits required')
-    lo,hi,v,a=_extrema_batched(reference.coefficients,reference.breaks)
-    margin=np.minimum(lo-bounds[list(JOINTS),0],bounds[list(JOINTS),1]-hi)
-    def stretch(quadratic,linear,limit):
-        limit=np.broadcast_to(limit,v.shape)
-        if np.any(limit<0)or np.any((limit==0)&((quadratic!=0)|(linear!=0))):
-            return math.inf
-        positive=limit>0
-        scale=np.ones_like(v)
-        scale[positive]=(linear[positive]+np.sqrt(linear[positive]**2+4*limit[positive]*quadratic[positive]))/(2*limit[positive])
-        return float(max(scale))
-    scale=max(1.,stretch(a*duration_s**2/12,v*duration_s/2,margin),
-        stretch((4/27)*a*duration_s,v,velocity_limit),stretch(a,1.5*v/duration_s,acceleration_limit))
-    if scale>1.:scale*=1.02  # Same timing margin as the existing reference planner.
-    if reference.duration_s*scale>maximum_duration_s:
-        maximum_scale=maximum_duration_s/reference.duration_s
-        powers=np.arange(reference.coefficients.shape[1]-1,-1,-1)
-        def feasible(value):
-            c=reference.coefficients/value**powers[None,:,None]
-            lo,hi,pv,pa=_brake_envelope_bounds(c,reference.breaks*value,duration_s)
-            return (np.all(lo>=bounds[list(JOINTS),0]-1e-10)
-                and np.all(hi<=bounds[list(JOINTS),1]+1e-10)
-                and max(pv)<=velocity_limit+1e-10 and max(pa)<=acceleration_limit+1e-10)
-        if maximum_scale<1. or not feasible(maximum_scale):
-            raise ValueError('complete model segment lacks normal brake reserve within execution budget')
-        low,high=1.,maximum_scale
-        if feasible(low):high=low
-        else:
-            for _ in range(6):
-                middle=(low+high)/2
-                if feasible(middle):high=middle
-                else:low=middle
-        scale=min(high*1.02,maximum_scale)
-    if scale==1.:
+    sdk=np.zeros((len(reference.breaks),14))
+    sdk[:-1,JOINTS]=reference.coefficients[:,-1]
+    sdk[-1]=reference.sample([reference.duration_s])[0][0]
+    sdk[:,[6,13]]=reference.jaws
+    policy=reference.metadata.get('planning_policy')
+    if policy is None:raise ValueError('local brake retiming requires the bound infer planning policy')
+    from arx_env.joint_head_real_motion import jaw_peak_scale
+    jaw_scales=reference.metadata.get('jaw_unit_scales_mm_per_sdk_m') or {side:jaw_peak_scale(side)for side in('left','right')}
+    breaks,c,v,a,jaw_velocity,refits,changes=_retime_local(reference.breaks,sdk,bounds,
+        start_v[0,list(JOINTS)],start_a[0,list(JOINTS)],velocity_limit=velocity_limit,
+        acceleration_limit=acceleration_limit,jaw_scales=[jaw_scales[side]for side in('left','right')],
+        jaw_velocity_limit=policy['jaw_velocity_limit_mm_s'],maximum_duration=maximum_duration_s,
+        brake_duration=duration_s,coefficients=reference.coefficients)
+    if not changes:
         check_brake_reserve(reference,limits,duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit)
         return reference
-    breaks=reference.breaks*scale;c=reference.coefficients.copy()
-    for i,power in enumerate(range(c.shape[1]-1,-1,-1)):c[:,i]/=scale**power
     meta=dict(reference.metadata);parent=meta.pop('reference_id')
-    meta.update(parent_reference_id=parent,duration_s=float(breaks[-1]),normal_brake_time_scale=scale,
-        max_velocity_rad_s=float(max(v)/scale),max_acceleration_rad_s2=float(max(a)/scale**2),
-        max_jaw_velocity_mm_s=meta['max_jaw_velocity_mm_s']/scale,
+    meta.update(parent_reference_id=parent,duration_s=float(breaks[-1]),
+        normal_brake_time_scale=float(breaks[-1]/reference.duration_s),
+        normal_brake_retiming_scope='local_intervals',normal_brake_local_retiming=changes,
+        interpolation='CPU_C2_local_Hermite_retiming_to_SDK_linear_samples',
+        max_velocity_rad_s=float(max(v)),max_acceleration_rad_s2=float(max(a)),
+        max_jaw_velocity_mm_s=jaw_velocity,
         normal_brake_reserve_policy=dict(duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit))
     identity=hashlib.sha256(json.dumps(meta,sort_keys=True).encode())
     for array in(breaks,c,reference.jaws):identity.update(array.tobytes())

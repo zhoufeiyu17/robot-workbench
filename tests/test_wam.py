@@ -145,6 +145,19 @@ class WamInputWorkflowTests(unittest.TestCase):
         event('mode_transition',dict(target='HOLD'))
         self.assertEqual(recovery.choose(7)['observed_steps'],0)
 
+    def test_stall_sampling_uses_local_execution_point_times(self):
+        recovery=wam.StallRecovery({'left':80.,'right':89.})
+        recovery.event('normal_model_segment_started',dict(request_id='local',source_steps=3,
+            start_source_s=10.,execution_duration_s=1.1,source_point_times_s=[.1,1.,1.1]),1)
+        recovery.event('feedback',dict(source_time=10.1,device_state14=[0.]*14),2)
+        self.assertEqual(recovery.step,1)
+        recovery.event('feedback',dict(source_time=10.8,device_state14=[0.]*14),3)
+        self.assertEqual(recovery.step,1)
+        recovery.event('feedback',dict(source_time=11.,device_state14=[0.]*14),4)
+        self.assertEqual(recovery.step,2)
+        recovery.event('feedback',dict(source_time=11.1,device_state14=[0.]*14),5)
+        self.assertEqual(recovery.step,3);self.assertEqual(len(recovery.samples),3)
+
     def test_missing_feedback_and_control_event_gaps_cannot_trigger_stall(self):
         recovery=wam.StallRecovery({'left':80.,'right':89.})
         recovery.event('normal_model_segment_started',dict(request_id='one',start_source_s=10.,

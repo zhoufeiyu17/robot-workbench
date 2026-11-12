@@ -102,6 +102,8 @@ class VariableStepsTests(unittest.TestCase):
                 runner._epoch=2;runner.initial_device14=[0.]*14;runner.target_interpreter=None
                 runner.initialization_source_s=100.;runner.previous_native_hold=None
                 runner.sdk_limits=[[-3.,3.]]*6+[[0.,.082]]+[[-3.,3.]]*6+[[0.,.082]]
+                from robot_workbench.inference_owner import device_limits
+                runner.limits=device_limits(runner.sdk_limits)
                 runner.reference_executor=None;runner.normal_config=runner.config['normal_modes'];runner.normal_planned=True
                 runner.adapter=NS(decode=lambda row,held:dict(final_device14=row.tolist()))
                 runner._record=Mock();runner._emit=Mock();runner._queue_native=Mock()

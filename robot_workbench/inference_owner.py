@@ -1064,6 +1064,7 @@ class InferenceRunner:
             command_epoch=self.owner.epoch,source_clock_id=self.owner.execution_clock_id,
             reference_id=reference.metadata['reference_id'],source_duration_s=steps/30.,source_steps=steps,
             execution_duration_s=reference.duration_s,start_source_s=origin,end_source_s=origin+reference.duration_s,
+            source_point_times_s=reference.breaks[1:].tolist(),
             observation_source_s=self._accepted_chunk_source_time,status='executing',complete_source_steps=0,
             planning_velocity_limit_rad_s=reference.metadata['planning_policy']['velocity_limit_rad_s'],
             planning_jaw_velocity_limit_mm_s=reference.metadata['planning_policy']['jaw_velocity_limit_mm_s'])

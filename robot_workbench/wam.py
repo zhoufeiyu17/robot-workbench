@@ -62,14 +62,20 @@ class StallRecovery:
             if name=='normal_model_segment_started':
                 if self.segment and self.step<self.segment['source_steps']:
                     self.reset('incomplete_segment')
-                self.segment=deepcopy(value);self.step=0;self.last_sample=None
+                times=np.asarray(value.get('source_point_times_s',
+                    np.arange(1,value['source_steps']+1)*value['execution_duration_s']/value['source_steps']),dtype=float)
+                if (times.shape!=(value['source_steps'],)or not np.isfinite(times).all()
+                        or times[0]<=0 or np.any(np.diff(times)<=0)
+                        or not np.isclose(times[-1],value['execution_duration_s'],rtol=0,atol=1e-9)):
+                    self.reset('invalid_segment_timeline');return
+                self.segment=dict(deepcopy(value),source_point_times_s=times.tolist());self.step=0;self.last_sample=None
             if name!='feedback' or self.segment is None:return
             segment=self.segment;stamp=value['source_time']
             if self.last_sample is not None and stamp<=self.last_sample:return
-            spacing=segment['execution_duration_s']/segment['source_steps']
-            step=min(segment['source_steps'],int((stamp-segment['start_source_s']+1e-9)/spacing))
+            times=segment['source_point_times_s']
+            step=int(np.searchsorted(times,stamp-segment['start_source_s']+1e-9,side='right'))
             if step<=self.step or step<1:return
-            due=segment['start_source_s']+step*spacing
+            due=segment['start_source_s']+times[step-1]
             vector=np.asarray(value['device_state14'],dtype=float)
             if vector.shape!=(14,) or not np.isfinite(vector).all():
                 self.reset('invalid_feedback');return

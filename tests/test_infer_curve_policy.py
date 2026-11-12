@@ -51,6 +51,64 @@ class InferCurvePolicyTests(unittest.TestCase):
         finally:executor.shutdown(wait=True,cancel_futures=True)
         with self.assertRaises(RuntimeError):executor.submit(os.getpid)
 
+    def test_local_jaw_retiming_preserves_all_other_interval_durations(self):
+        source,limits=self.fixture(32/30)
+        q=np.zeros((33,14));q[16:,6]=.04;source['device_targets14']=q.tolist()
+        reference=self.prepare(source,limits,planning_policy=dict(POLICY,max_execution_duration_s=None))
+        widths=np.diff(reference.breaks);normal=np.delete(widths,15)
+        np.testing.assert_allclose(normal,1/30,rtol=0,atol=1e-14)
+        self.assertAlmostEqual(widths[15],1.02)
+        self.assertEqual([row['interval']for row in reference.metadata['local_retiming']],[15])
+        self.assertEqual(reference.metadata['local_retiming'][0]['constraints'],['left_jaw'])
+        self.assertLessEqual(reference.metadata['max_jaw_velocity_mm_s'],40.)
+        _check_c2(reference.coefficients,reference.breaks)
+
+    def test_local_joint_velocity_change_preserves_remote_safe_intervals(self):
+        source,limits=self.fixture(32/30)
+        q=np.zeros((33,14));q[:,0]=np.r_[np.zeros(12),np.linspace(0,.1,9),np.full(12,.1)]
+        source['device_targets14']=q.tolist()
+        reference=self.prepare(source,limits,planning_policy=dict(POLICY,
+            velocity_limit_rad_s=.1,max_execution_duration_s=None))
+        widths=np.diff(reference.breaks)
+        np.testing.assert_allclose(widths[:5],1/30,atol=1e-14,rtol=0)
+        np.testing.assert_allclose(widths[-5:],1/30,atol=1e-14,rtol=0)
+        self.assertTrue(np.any(widths[12:20]>1/30))
+        self.assertLessEqual(reference.metadata['max_velocity_rad_s'],.1+1e-9)
+        self.assertLessEqual(reference.metadata['max_acceleration_rad_s2'],40.+1e-9)
+        _check_c2(reference.coefficients,reference.breaks)
+
+    def test_local_brake_reserve_keeps_safe_prefix_timing_and_all_knots(self):
+        from robot_workbench.motion_reference import retime_for_brake_reserve,check_brake_reserve
+        source,limits=self.fixture(32/30)
+        q=np.zeros((33,14));q[:,1]=np.linspace(.23,-.049,33);q[:,[6,13]]=.04
+        source['device_targets14']=q.tolist();limits[1]=[-.05,3.5]
+        policy=dict(POLICY,velocity_limit_rad_s=4.,jaw_velocity_limit_mm_s=60.,max_execution_duration_s=None)
+        reference=self.prepare(source,limits,planning_policy=policy)
+        result=retime_for_brake_reserve(reference,limits,duration_s=.2,velocity_limit=4.,
+            acceleration_limit=40.,maximum_duration_s=4120.)
+        np.testing.assert_array_equal(result.breaks[:28],reference.breaks[:28])
+        np.testing.assert_array_equal(result.coefficients[:26],reference.coefficients[:26])
+        self.assertLess(result.duration_s,3.)
+        self.assertEqual([row['interval']for row in result.metadata['normal_brake_local_retiming']],[27,28,29,30,31])
+        for chunk in np.array_split(result.breaks,2):
+            positions,_,_=result.sample(chunk)
+            for stamp,position in zip(chunk,positions):
+                index=int(np.flatnonzero(result.breaks==stamp)[0]);np.testing.assert_allclose(position,q[index],atol=1e-12)
+        _check_c2(result.coefficients,result.breaks)
+        check_brake_reserve(result,limits,duration_s=.2,velocity_limit=4.,acceleration_limit=40.)
+        # The run budget may admit or reject a curve; it cannot set its speed.
+        other=retime_for_brake_reserve(reference,limits,duration_s=.2,velocity_limit=4.,
+            acceleration_limit=40.,maximum_duration_s=10.)
+        np.testing.assert_array_equal(result.breaks,other.breaks)
+        np.testing.assert_array_equal(result.coefficients,other.coefficients)
+
+    def test_per_interval_extrema_reduce_to_existing_complete_curve_proof(self):
+        source,limits=self.fixture();r=self.prepare(source,limits)
+        local=_extrema_batched(r.coefficients,r.breaks,per_interval=True)
+        complete=_extrema_batched(r.coefficients,r.breaks)
+        reduced=[local[0].min(axis=0),local[1].max(axis=0),local[2].max(axis=0),local[3].max(axis=0)]
+        for actual,expected in zip(reduced,complete):np.testing.assert_array_equal(actual,expected)
+
     def test_internal_derivatives_are_not_forced_to_zero_and_only_outer_ends_stop(self):
         source,limits=self.fixture();r=self.prepare(source,limits)
         q,v,a=r.sample(r.breaks)
@@ -248,10 +306,10 @@ class FiniteInferTests(unittest.TestCase):
         runner=self.prepare();read=self.raw.read_execution_output
         def changed():
             value=read()
-            if runner.finite_stage=='verifying_endpoint':value['q_sdk14'][0]+=.001
+            if runner.finite_stage=='verifying_endpoint':value['q_sdk14'][0]+=.4
             return value
         self.raw.read_execution_output=changed;self.run_to_stop(runner)
-        self.assertEqual(runner.status,'FAULT');self.assertIn('endpoint native output mismatch',runner.reason)
+        self.assertEqual(runner.status,'FAULT');self.assertIn('native endpoint mismatch',runner.reason)
         self.assertEqual(len(runner.finite_completed),0);self.assertEqual(len(self.requests),1)
 
     def test_initial_native_velocity_is_not_silently_reset_to_zero(self):
