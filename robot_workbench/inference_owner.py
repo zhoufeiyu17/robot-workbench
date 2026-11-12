@@ -18,6 +18,7 @@ from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD,NativeCommandMismatc
 
 # Native command endpoint comparison: joints rad / rad/s, jaws m / m/s.
 NORMAL_ENDPOINT_ABS_TOLERANCE14=((1e-5,)*6+(1e-6,))*2
+MODEL_COMMAND_LIMIT_FRACTION=.98
 
 
 def digest(value):
@@ -519,7 +520,7 @@ class InferenceRunner:
             return runner._prepare_native_response(*args)
         limits=self.limits
         from .inference_model import model_family,NOHISTORY_MODELS
-        self.loop = InferenceLoop(predict=predict_before_deadline, decode=lambda row, _state: adapter.decode(row, held),
+        self.loop = InferenceLoop(predict=predict_before_deadline, decode=lambda row, _state: runner_ref()._decode_model_target(row,held),
             device_to_model=adapter.device_to_model,
             audit=lambda rows, prior:audit_dynamics(rows, prior, position_limits=limits,
                 velocity_limits=velocity, acceleration_limits=acceleration),
@@ -1773,6 +1774,19 @@ class InferenceRunner:
         device=target[:];device[6]=command_gap_mm('left',target[6]);device[13]=command_gap_mm('right',target[13])
         return target,device
 
+    def _decode_model_target(self,row,held):
+        import numpy as np
+        decoded=self.adapter.decode(row,held)
+        original=vector14(decoded['final_device14'])
+        limits=np.asarray(self.limits,dtype=float)
+        inner=np.clip(limits*MODEL_COMMAND_LIMIT_FRACTION,limits[:,0,None],limits[:,1,None])
+        clipped=np.clip(original,inner[:,0],inner[:,1])
+        projections=list(decoded.get('projections',[]))
+        projections.extend(dict(axis=int(axis),requested=float(original[axis]),final=float(clipped[axis]),
+            delta=float(clipped[axis]-original[axis]),reason='model_command_limit_98_percent')
+            for axis in np.flatnonzero(original!=clipped))
+        return dict(decoded,final_device14=clipped.tolist(),projections=projections)
+
     def _prepare_native_response(self,response,request):
         """Model-query worker only. No SDK calls, no Owner state mutation."""
         from .pipeline_timing import timing
@@ -1793,7 +1807,7 @@ class InferenceRunner:
         if raw.shape!=(model_capabilities(self.config)[0],14)or raw.dtype.kind not in 'fiu'or not np.isfinite(raw).all():
             raise ValueError('model response requires finite action14 matching the bound horizon')
         held=list(self.initial_device14)
-        converted=[self.adapter.decode(row,held)['final_device14']for row in raw[:self.config['execute_steps']]]
+        converted=[self._decode_model_target(row,held)['final_device14']for row in raw[:self.config['execute_steps']]]
         jaws=np.asarray(converted)[:,[6,13]]
         decision=self._guard_decision('G17',dict(minimum=jaws.min(axis=0).tolist(),maximum=jaws.max(axis=0).tolist()),
             request['observation']['source_time'],self.owner.control_time(),request['request_id'],phase='model_command')
