@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 from urllib.request import build_opener,ProxyHandler
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-from scripts.workbench_deploy import http_json,Blocked,require,handoff_collection,ensure_camera_inputs,startup_operation
+from scripts.workbench_deploy import http_json,Blocked,require,handoff_collection,ensure_camera_inputs,startup_operation,old_owner_files,unit_state
 
 
 def acquire_control(config):
@@ -84,6 +84,10 @@ def start(config):
                 and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',model['unit']),
                 f'external {role} requires an explicit supported user_unit mapping before any service startup')
             external_units.add(model['unit'])
+        if manager.get('control_lifecycle','managed')=='managed' and manager.get('control_owner_descriptor'):
+            if unit_state(services['control_owner']['unit'])['MainPID']=='0':
+                old_owner_files(dict(owner_descriptor=manager['control_owner_descriptor'],
+                    device_id=manager['device_id'],services=services),apply=True)
         if not takeover and manager.get('control_lifecycle','managed')=='managed' and manager.get('collection_handoff'):
             handoff=handoff_collection(manager['collection_handoff'],manager['device_id'],stop_active=False)
     units=([recording_unit]if recording_unit else [])+[unit for unit in config['units']if unit!=recording_unit]
@@ -97,10 +101,11 @@ def start(config):
     while time.monotonic()<deadline:
         try:
             current=http_json(url+'/api/environment?environment=physical&view=summary')
-            if current.get('health',{}).get('backend_reachable')and current.get('target',{}).get('services',{}).get('model'):break
+            if (current.get('health',{}).get('backend_reachable')and current.get('target',{}).get('services',{}).get('model')
+                    and (not takeover or current.get('health',{}).get('control_owner_reachable')is True)):break
         except (OSError,ValueError,Blocked):pass
         time.sleep(.2)
-    else:raise Blocked('UI or model HTTP endpoint unavailable; inspect services')
+    else:raise Blocked('UI, model HTTP or control Owner unavailable; inspect services')
     if recording_unit:
         require(current.get('health',{}).get('recording_service',{}).get('ready')is True,
             'resident recording service readiness unconfirmed; inspect its registered service')

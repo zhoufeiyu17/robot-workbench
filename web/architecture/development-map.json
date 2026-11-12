@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 528,
-  "updated_at": "2026-11-11T18:53:55.495912+00:00",
+  "revision": 531,
+  "updated_at": "2026-11-12T02:56:01.228875+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -459,7 +459,7 @@
         "sha256": "c97c70de12a61b547c63cc5d2ea038ee27556a61603e9215a666147b0dbab1e5",
         "matches_file": false
       },
-      "fingerprint": "560163b1fb21faa25a76be31b51d89fc56d703b74fa54ba0fbc05478f6d8502f",
+      "fingerprint": "5a3d0fdd1f987c4f6606d749d1e7ded0f8c60832d72aa630e17a3acb43be7e86",
       "verified_fingerprint": null
     },
     {
@@ -483,7 +483,7 @@
         "sha256": "4d8d3f33e6519c15ded56782fdf35a58969542a2858d46eb68e76d937f3dae40",
         "matches_file": true
       },
-      "fingerprint": "4416ec6b4262df572c16909924dbd34195a434519a54e2ca48f4a543eff7ce7d",
+      "fingerprint": "16f7956ffa68834623cba45ab575675eaf4bbab9ff859ec8a9b3a5af6eebbacb",
       "verified_fingerprint": null
     },
     {
@@ -517,7 +517,7 @@
         "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
         "matches_file": true
       },
-      "fingerprint": "f3b7338b73ee012330e02a5b9907e4fcd2bd170347569b3ec07eb97485cf203d",
+      "fingerprint": "68300a79c50a9833d9536c90627ed7b126e88eabfa46af9ea4e62dda04d82682",
       "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
     },
     {
@@ -2368,7 +2368,7 @@
           }
         ]
       },
-      "fingerprint": "4416ec6b4262df572c16909924dbd34195a434519a54e2ca48f4a543eff7ce7d"
+      "fingerprint": "16f7956ffa68834623cba45ab575675eaf4bbab9ff859ec8a9b3a5af6eebbacb"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2595,7 +2595,7 @@
           }
         ]
       },
-      "fingerprint": "4416ec6b4262df572c16909924dbd34195a434519a54e2ca48f4a543eff7ce7d",
+      "fingerprint": "16f7956ffa68834623cba45ab575675eaf4bbab9ff859ec8a9b3a5af6eebbacb",
       "verified_fingerprint": null
     },
     "robot_workbench/maintenance.py": {
@@ -3059,18 +3059,18 @@
     },
     "scripts/start_registered_workbench.py": {
       "state": "verified",
-      "note": "ARX6 desktop cold acceptance and scoped CPU/ROS/UI regression passed; explicit automatic CAN takeover, early webpage, no repeated source/config scans.",
-      "next": "",
+      "note": "Desktop startup quarantines verified prior-boot Owner remnants before service startup and waits for inert Owner reachability before takeover.",
+      "next": "Maintain cross-boot, same-boot refusal, live-socket and readiness regression coverage.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T04:19:16.046991+00:00",
+      "updated_at": "2026-11-12T02:55:19.043368+00:00",
       "evidence": {
-        "path": ".evidence/arx6-startup-rebind-20261109-v1/delivery-acceptance.json",
-        "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
+        "path": "tests/test_manual_startup.py",
+        "sha256": "889e6cee6913fafc75db7ce35afdaf848d44a8fea2635b13d6af127d090c824b",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "1f451cdf2f6244409a350b353a0ca9eaf0c4a6030bdc41848fb2cf2b273e17ae",
+        "sha256": "da26207f03a6be71bbb25ddd3b28d9d6be0e2c6ea0b400e31575a1a5c2d95507",
         "imports": [
           "robot_workbench/state_contract.py",
           "scripts/workbench_deploy.py"
@@ -3083,23 +3083,23 @@
           }
         ]
       },
-      "fingerprint": "dacc01367b1c9b6db87f2c6798fdfd4710d050d9d3487d998901370ab54ca53f",
-      "verified_fingerprint": "2b99e6c5d7b9cc716c6b08df3bae61b45cd531283b786bd94e17df30f888209c"
+      "fingerprint": "dee62149d7c29740e1ef0058bd7e8880708cb5b061456d46edf251b683a79aee",
+      "verified_fingerprint": "dee62149d7c29740e1ef0058bd7e8880708cb5b061456d46edf251b683a79aee"
     },
     "scripts/workbench_deploy.py": {
       "state": "verified",
-      "note": "ARX6 desktop cold acceptance and scoped CPU/ROS/UI regression passed; explicit automatic CAN takeover, early webpage, no repeated source/config scans.",
-      "next": "",
+      "note": "Prior-boot quarantine checks filesystem identity and rejects any socket still registered in the kernel before archiving remnants.",
+      "next": "Keep the startup cleanup shared across registered entrypoints.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T04:19:16.915118+00:00",
+      "updated_at": "2026-11-12T02:56:00.285962+00:00",
       "evidence": {
-        "path": ".evidence/arx6-startup-rebind-20261109-v1/delivery-acceptance.json",
-        "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
+        "path": "tests/test_workbench_deploy.py",
+        "sha256": "b3c8ebaaa6478ba7e35e23339261f15f03f2f1cde469551aceead4df8dd8e582",
         "matches_file": true
       },
       "source": {
         "exists": true,
-        "sha256": "ef827acd2cb073eb59d63dd3ecc7ee285c87bd525f6f1a85a0043453034f1ea7",
+        "sha256": "e2742031f9acca06cd1178ac8e304581f18fe107dda05d073eaf8236ebcbabcd",
         "imports": [
           "robot_workbench/camera_owner.py",
           "robot_workbench/control_owner.py",
@@ -3120,8 +3120,8 @@
           }
         ]
       },
-      "fingerprint": "4416ec6b4262df572c16909924dbd34195a434519a54e2ca48f4a543eff7ce7d",
-      "verified_fingerprint": "a2e2e4983e347f6677c0c001835893edcb1220f119bf1fa17a4fade37b05d603"
+      "fingerprint": "16f7956ffa68834623cba45ab575675eaf4bbab9ff859ec8a9b3a5af6eebbacb",
+      "verified_fingerprint": "16f7956ffa68834623cba45ab575675eaf4bbab9ff859ec8a9b3a5af6eebbacb"
     },
     "scripts/serve_inference_model.py": {
       "state": "baseline",
@@ -3916,7 +3916,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "8783b7d4447dc273610fa01af825b804a664cf5d4a01be98ae793467b8d7b5f8"
+      "fingerprint": "4ddcc2acdf1d07d9260615eb9c1a86d37872fcb690ed4bbd6b60a5f189a954ef"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -4072,24 +4072,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-08T01:34:54.323141+00:00",
-      "kind": "domain",
-      "ids": [
-        "infer-session"
-      ],
-      "state": "active",
-      "note": "WAM可选trick按用户授权假设实施，复用ROS控制反馈、原始图像引用和请求seed"
-    },
-    {
-      "at": "2026-11-08T02:16:32.506881+00:00",
-      "kind": "domain",
-      "ids": [
-        "infer-session"
-      ],
-      "state": "implemented",
-      "note": "WAM可选trick v26已上线；ROS控制来源/唯一模型步、黑屏seed与sole recorder重建通过，实际HOLD准备和完整封存通过"
-    },
     {
       "at": "2026-11-08T02:16:33.430108+00:00",
       "kind": "file",
@@ -5032,9 +5014,27 @@
       ],
       "state": "verified",
       "note": "Stream-copy reuses live browser segments; packet timing/count and decoded output agree. Long target capture sealed within the requested latency."
+    },
+    {
+      "at": "2026-11-12T02:55:19.043548+00:00",
+      "kind": "file",
+      "ids": [
+        "scripts/start_registered_workbench.py"
+      ],
+      "state": "verified",
+      "note": "Desktop startup quarantines verified prior-boot Owner remnants before service startup and waits for inert Owner reachability before takeover."
+    },
+    {
+      "at": "2026-11-12T02:56:00.286105+00:00",
+      "kind": "file",
+      "ids": [
+        "scripts/workbench_deploy.py"
+      ],
+      "state": "verified",
+      "note": "Prior-boot quarantine checks filesystem identity and rejects any socket still registered in the kernel before archiving remnants."
     }
   ],
   "unmapped_files": [],
-  "source_head": "60e8c239dbf5388cfcf54bd03b2b9f1df42cc68b",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.f2f031f532cb"
+  "source_head": "80e6aa48c8598bb3421b9cd0dd8bd8a6278d7e31",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.7cb85a21fdb3"
 }

@@ -567,6 +567,9 @@ def old_owner_files(m, apply=False):
     require(d.get('socket_path')==str(root/'control.sock') and d.get('token_file')==str(root/'control-token'), 'Owner descriptor paths differ')
     for p in [descriptor,*leftovers]:
         st=p.lstat();require(not p.is_symlink() and st.st_uid==os.getuid() and not st.st_mode&0o077,'unsafe stale Owner file')
+    for line in Path('/proc/net/unix').read_text().splitlines():
+        fields=line.split(maxsplit=7)
+        require(len(fields)<8 or fields[7]!=d['socket_path'],'Owner socket is still registered in the kernel; inspect its live owner')
     if apply:
         require(unit_state(m['services']['control_owner']['unit'])['MainPID']=='0','Owner started during cleanup')
         for p in Path('/proc').iterdir():

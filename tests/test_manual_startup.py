@@ -53,7 +53,7 @@ class ManualStartupTests(unittest.TestCase):
             profile=Path(folder)/'manager.json';profile.write_text(json.dumps(dict(services={'control_owner':{},'cameras':{'unit':'registered-images.service'}},
                 control_lifecycle='managed',collection_handoff={'registered':True},device_id='cpu')))
             config=dict(manager_profile=str(profile),connect_control=True,units=['registered-images.service','robot-workbench-ui.service'],url='http://127.0.0.1:18868')
-            state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':True})
+            state=dict(health={'backend_reachable':True,'control_owner_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':True})
             with patch('scripts.start_registered_workbench.subprocess.run')as service,patch('scripts.start_registered_workbench.handoff_collection')as handoff,\
                     patch('scripts.start_registered_workbench.acquire_control',return_value=dict(sdk_acquisitions=1,reused=False,job_id='takeover'))as acquire,\
                     patch('scripts.start_registered_workbench.http_json',side_effect=[state,state,{'workflow':{'manual_queue':{'available':True}}}]):
@@ -77,6 +77,31 @@ class ManualStartupTests(unittest.TestCase):
                     patch('scripts.start_registered_workbench.http_json',side_effect=[state,{'workflow':{'manual_queue':{'available':True}}}]):
                 self.assertEqual(start(config)['sdk_acquisitions'],0)
             self.assertEqual(events,['idle_web_stopped','software_started'])
+
+    def test_prior_boot_owner_cleanup_precedes_services_and_takeover(self):
+        with TemporaryDirectory() as folder:
+            profile=Path(folder)/'manager.json'
+            manager=dict(device_id='cpu',control_owner_descriptor=str(Path(folder)/'control-owner.json'),
+                services={'control_owner':{'unit':'fixture-owner.service'}},collection_handoff={'registered':True})
+            profile.write_text(json.dumps(manager))
+            config=dict(manager_profile=str(profile),connect_control=True,
+                units=['fixture-owner.service'],url='http://127.0.0.1:18868')
+            state=dict(health={'backend_reachable':True,'control_owner_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':True})
+            waiting=dict(state,health={'backend_reachable':True,'control_owner_reachable':False})
+            events=[]
+            with patch('scripts.start_registered_workbench.unit_state',return_value={'MainPID':'0'}), \
+                    patch('scripts.start_registered_workbench.old_owner_files',side_effect=lambda *a,**kw:events.append('archived'))as cleanup, \
+                    patch('scripts.start_registered_workbench.subprocess.run',side_effect=lambda *a,**kw:events.append('started')), \
+                    patch('scripts.start_registered_workbench.acquire_control',side_effect=lambda *a:events.append('takeover')or{}), \
+                    patch('scripts.start_registered_workbench.http_json',side_effect=[waiting,state,state,{'workflow':{'manual_queue':{'available':True}}}]):
+                start(config)
+            self.assertEqual(events,['archived','started','takeover'])
+            self.assertTrue(cleanup.call_args.kwargs['apply'])
+            with patch('scripts.start_registered_workbench.unit_state',return_value={'MainPID':'0'}), \
+                    patch('scripts.start_registered_workbench.old_owner_files',side_effect=Blocked('same-boot remnants')), \
+                    patch('scripts.start_registered_workbench.subprocess.run')as commands:
+                with self.assertRaisesRegex(Blocked,'same-boot'):start(config)
+                commands.assert_not_called()
 
     def test_registered_target_and_all_camera_inputs_are_ready_before_return(self):
         with TemporaryDirectory() as folder:

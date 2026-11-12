@@ -349,6 +349,11 @@ class StartupTest(unittest.TestCase):
         descriptor.write_text(json.dumps(value))
         with self.assertRaisesRegex(d.Blocked,'same-boot'):d.old_owner_files(self.m)
         value['identity']['boot_id']='previous-boot';descriptor.write_text(json.dumps(value))
+        (root/'control.sock').unlink()
+        with socket.socket(socket.AF_UNIX)as live:
+            live.bind(str(root/'control.sock'));live.listen();(root/'control.sock').chmod(0o600)
+            with self.assertRaisesRegex(d.Blocked,'registered in the kernel'):d.old_owner_files(self.m,apply=True)
+            self.assertTrue(token.exists());self.assertTrue(descriptor.exists())
         self.assertEqual(len(d.old_owner_files(self.m)),2)
         with patch.object(d,'unit_state',return_value={'MainPID':'0'}):d.old_owner_files(self.m,apply=True)
         archived=list(root.glob('prior-boot-*'));self.assertEqual(len(archived),1);self.assertTrue((archived[0]/'control-token').is_file());self.assertFalse(token.exists())
