@@ -1765,7 +1765,7 @@ class WorkbenchManager:
                         if execution.get('status')in ('failed','rejected','expired'):raise OperationError('home_failed',execution.get('message')or'回零未完成')
                         recording=state.get('recording')
                         if (execution.get('status')=='completed'and state.get('stationary')and not state.get('automatic_enabled')
-                                and (not recording or recording.get('done')is True)):
+                                and (not recording or recording.get('ingress_closed')is True or recording.get('done')is True)):
                             completed.append(dict(arm=side,review_id=review['id'],command_epoch=state['command_epoch'],
                                 run_id=state.get('execution_instance_id')))
                             break
@@ -1841,13 +1841,29 @@ class WorkbenchManager:
             if collection.get('robot_vin')!=self.config['device_id']or(runtime.get('connected')and collection.get('manager_alive')is not False):
                 raise OperationError('control_owner_conflict','数采控制归属冲突或未知，未回零或释放')
         result=dict(action='exit_workbench',before=before,sdk_was_disconnected=runtime.get('connected')is False,steps=[],collection_started=False)
+        model=self.health_cache.get('model_service')or{}
+        if model.get('loaded')is True and model.get('status')=='ready' and model.get('model_id') and model.get('bundle_digest'):
+            selection=dict(schema='workbench.inference-startup.v1',model_id=model['model_id'],
+                expected_bundle_digest=model['bundle_digest'])
+            try:
+                private_save(self.root/'inference-startup.json',selection)
+                result['inference_startup']=dict(saved=True,**selection)
+            except OSError as error:
+                result['inference_startup']=dict(saved=False,error=str(error))
         report=progress
         def progress(phase,fraction=None,detail=None):
             report(phase,fraction=fraction,detail=dict(exit=deepcopy(result),current=detail))
         if runtime.get('connected'):
             result['stop']=self.stop_current_control(request,progress)
             result['home']=self.home_for_exit(request,progress)
-            self.refresh();progress('releasing_control')
+            deadline=time.monotonic()+self.timeouts['operation']
+            while True:
+                health=self.refresh()
+                if not health.get('busy') and not (health.get('runtime')or{}).get('automatic_enabled'):break
+                progress('waiting_control_stop')
+                if time.monotonic()>=deadline:raise OperationError('home_busy','回零后的业务收尾尚未确认，保留控制保持')
+                time.sleep(.1)
+            progress('releasing_control')
             # The reviewed normal-home route authorizes withdrawing hold. This is
             # the legacy release acknowledgement, not a new claim of human support.
             release=self._run('release_control',dict(request,expected_target=self.target(),arms_supported=True),progress)

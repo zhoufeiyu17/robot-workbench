@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.ea2fa9a27b1d",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.3ccd08168642",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -549,7 +549,14 @@
       "status": "implemented",
       "transport": "工作线程 CPU 准备 → OwnerInference bridge → Owner；PreparedReference wire 当前为 breaks / coefficients / jaws / metadata。 用户已批准归并原Raw回放入口，经prepared_reference参数进入既有control_reference.preview及共同执行出口。",
       "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。 Raw回放沿原部署前2源秒、倍率≤1、≤513样本、速度≤1rad/s与当前实测保护、5rad/s²准备加速度及≤30s预算校验。",
-      "model_capability_consumer": "已批准Owner/翻译使用现有action_contract及native绑定决定形状/历史/边界；不解释checkpoint名称，不新增SDK字段或阈值。"
+      "model_capability_consumer": "已批准Owner/翻译使用现有action_contract及native绑定决定形状/历史/边界；不解释checkpoint名称，不新增SDK字段或阈值。",
+      "local_retiming": {
+        "scope": "online inference intervals",
+        "policy": "Retain durations of intervals that pass limits. Extend violating joint velocity, acceleration, jaw velocity or brake-reserve intervals and recheck analytic extrema.",
+        "continuity": "Keep target knots and physical outer q/v/a. Shared Hermite derivatives join locally retimed intervals; unaffected remote polynomial coefficients remain identical.",
+        "evidence": "local_retiming and normal_brake_local_retiming contain interval index, input time, before/after duration, scale and triggering constraints; application audit displays reference metadata.",
+        "consumer": "TargetInterpreter evaluates actual breaks; WAM stall recovery consumes source_point_times_s for crossed source-point timing."
+      }
     },
     {
       "id": "I05",
@@ -727,16 +734,19 @@
       "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。 用户已批准按部署版本恢复raw_state_enabled可选接线；getter时间区间和各臂独立SDK时钟分别保留。",
       "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
       "normal_native_endpoint_comparison": {
-        "scope": "normal complete-segment native output command versus planned endpoint; not physical tracking tolerance",
+        "scope": "model segment native output command versus planned endpoint",
         "joint_position_atol_rad": 1e-05,
         "joint_velocity_atol_rad_s": 1e-05,
         "jaw_position_atol_m": 1e-06,
         "jaw_velocity_atol_m_s": 1e-06,
         "rtol": 0,
-        "failure": "retain original native output, expected endpoint and tolerance in mismatch event; existing fault path unchanged"
+        "failure": "Position deviation above five percent of axis range or endpoint velocity deviation above absolute tolerance retains diagnostic and follows existing fault path.",
+        "position_warning_range_fraction": 0.05,
+        "position_warning_basis": "per-axis SDK command upper limit minus lower limit",
+        "warning": "Position deviation above absolute tolerance and at or below five percent of axis range emits a warning and continues; saved to Owner service log and active recording control stream."
       },
       "native_command_diagnostic": {
-        "comparison": "fixed-start, continued-hold and complete-segment native q/dq share joint 1e-5 and jaw 1e-6 absolute tolerances",
+        "comparison": "Fixed-start and continued-hold retain joint 1e-5 and jaw 1e-6 absolute tolerances. Model endpoint positions use the declared five-percent range warning band; endpoint velocities retain the absolute tolerances.",
         "units": "joint rad/rad/s; jaw m/m/s",
         "producer": "InferenceRunner native command comparison and Owner.motion_fault",
         "consumer": "last_fault_diagnostic.native_command_mismatch, persisted release operation result",
@@ -2855,7 +2865,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "15c58b879bdb5ee44f90c47c63a7f640966f3bebba600939bb3baa2bc7c691e6",
+        "fingerprint": "931ae65ced375685166b44d7a13253865869397637b18a3399ce46611e4d6a59",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2979,7 +2989,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "b863ccd3f4bac1ec689676b19f2f370c2925ea5df57e5ceeb81b0ea56877280e",
+        "fingerprint": "890bc741ca50dacd1642c151dc63249b79c83311439404e72d4f4aded91317f6",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3106,7 +3116,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "74054c11035d34d34405e0476fcfe5855182da2090e2fddca52e5cf3c2591d53",
+        "fingerprint": "52bdd3e74d9dddc8014528cd46509c528e86d6c04c6f3df5a098001d134582be",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3225,7 +3235,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "21fc118f9677380cc0a5f1362038c6a5e617e863be3342555103e4e5570b6827",
+        "fingerprint": "9a2c6fb58632b08a02197229584d290f613dafbf67f0069848273ca139d104b8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3439,7 +3449,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "dffbe4507530092ef8292025f88af8f28252a59ac24fd9f87a7f874206b4faef",
+        "fingerprint": "47546bc68a22500f558f3a45faa54095c01f914e46196d5c7c9c73e92606edae",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3602,7 +3612,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "dc52e78424406e34f2be028330aaece4d6a8cc445bc4c98b149d0c6acf3fc8d5",
+        "fingerprint": "cc87eb192f8df3f432f8e522fca4f72b9b748968172cebc9ac0c8f272d44e1c0",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3739,7 +3749,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "c5fbe6ae7fd1fb09fb82ee84c8da72cae3d46b77cc21023fe5ca942da2b8b4a1",
+        "fingerprint": "c1992f56a60189233dfc1bf079d1a1178467f08169fabf081106569d12f9e566",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3881,7 +3891,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "f5f71744c2cbc5924703bad8f02687db031728f8464e628db21e44707dc28204",
+        "fingerprint": "2aa54be5c37499c9335531922d657b66b6f955a2987eb84dd577fea03ba24752",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4007,7 +4017,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "63b649e76c32d534045871401f6ea24c7a777f078c2d2426a8fb48b2b2dd3b71",
+        "fingerprint": "abc4ebe56d2113d1526438b9474b3544e3f440d256f50a7b2988ab7e7e02da23",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4136,7 +4146,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "ad2bab6a91e0f97f961becbbd2c341cd2fbdfea3f450d2937704b746d4c2f550",
+        "fingerprint": "ae4bd0fe748e344e1580d20e4ec4e590da4e77edb8c619540332c12074604e53",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4262,7 +4272,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "7b9a13674e35706c8712f7c5a0c8f914fa1a3931c397c9e7341fcf00cd22144e",
+        "fingerprint": "a93a780df4730f2b6981d2b71193f6269aeb987c7dda328772fdbbf1c6069cec",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10557,7 +10567,7 @@
       "real_head_chunks": 1
     },
     "semantics": {
-      "step": "one measured feedback sample per crossed model source point, retimed uniform source grid; duplicate feedback ignored",
+      "step": "one measured feedback sample per crossed model source point using source_point_times_s; historical events without that field use their uniform grid; duplicate feedback ignored",
       "history": "bounded90 points at30Hz; source gaps or missing steps reset",
       "intervention": "before preprocessing replace only original head RGB with zeros_like; same32-output model chunk per request, execution length retains selected prefix",
       "seed": "per stalled request secrets.randbits(63), exclude configured and previous random seed; request-local value only",

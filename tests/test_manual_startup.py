@@ -121,14 +121,28 @@ class ManualStartupTests(unittest.TestCase):
                 camera_read.assert_called_once()
 
     def test_failed_warmup_is_not_reported_as_a_successful_desktop_start(self):
-        state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},
-            model={'ready':False},active_job=dict(job_id='warm1',request={'action':'prepare_model'}))
+        state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':False})
         config=dict(units=['robot-workbench-test.service'],url='http://127.0.0.1:18868')
         with patch('scripts.start_registered_workbench.subprocess.run'),patch(
-                'scripts.start_registered_workbench.http_json',side_effect=[state,
-                    {'workflow':{'manual_queue':{'available':True}}},{'status':'failed'}])as api:
+                'scripts.start_registered_workbench.http_json',side_effect=[state,{'workflow':{'manual_queue':{'available':True}}}]),patch(
+                'scripts.start_registered_workbench.startup_operation',side_effect=Blocked('model preparation failed')):
             with self.assertRaisesRegex(Blocked,'preparation failed'):start(config)
-        self.assertEqual(api.call_count,3)
+
+    def test_cold_start_restores_saved_model_selection(self):
+        with TemporaryDirectory() as folder:
+            root=Path(folder);profile=root/'manager.json'
+            profile.write_text(json.dumps(dict(services={},state_root=folder)))
+            (root/'inference-startup.json').write_text(json.dumps(dict(schema='workbench.inference-startup.v1',
+                model_id='fixture-model',expected_bundle_digest='a'*64)))
+            config=dict(manager_profile=str(profile),units=[],url='http://localhost:1234')
+            cold=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':7}}},model={'ready':False})
+            hot=dict(cold,model={'ready':True})
+            with patch('scripts.start_registered_workbench.http_json',side_effect=[cold,
+                    {'workflow':{'manual_queue':{'available':True}}},hot]),patch(
+                    'scripts.start_registered_workbench.startup_operation',return_value={'job_id':'model'})as operation:
+                self.assertEqual(start(config)['model_status'],'ready')
+            operation.assert_called_once_with(config,'prepare_model',timeout=360,
+                parameters=dict(model_id='fixture-model',expected_bundle_digest='a'*64))
 
     def test_registered_recording_starts_first_and_requires_its_own_readiness(self):
         with TemporaryDirectory()as tmp:

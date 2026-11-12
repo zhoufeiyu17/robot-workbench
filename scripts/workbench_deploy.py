@@ -22,6 +22,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler, Request
 
@@ -620,24 +621,44 @@ def warm_model(m, timeout=360, expected_model=None, expected_backend=None):
     raise Blocked('model preparation deadline exceeded; inspect job '+job_id+'; not resubmitted')
 
 
-def startup_operation(m, action, *, timeout=30, arms_supported=False):
-    """Submit one existing, target-fenced manager operation; never replay an unknown result."""
-    current=api(m,'/api/environment?environment=physical&view=summary')
-    operation=current.get('operations',{}).get(action)or{}
-    require(operation.get('allowed')is True,operation.get('disabled_reason')or action+' unavailable')
-    result=http_json(m['url']+'/api/operations/action',dict(action=action,
-        request_id='startup-'+action+'-'+secrets.token_hex(12),expected_target=current['target'],
-        arms_supported=arms_supported,parameters={}),headers={'Origin':m['url'],'X-CSRF-Token':current['csrf'],
-        'X-Workbench-Deployment':current['deployment']['sha256']})
-    job_id=result['job_id'];deadline=time.monotonic()+timeout
+def startup_operation(m, action, *, timeout=30, arms_supported=False, parameters=None):
+    """Wait for admission; retry only explicit pre-execution refusals."""
+    deadline=time.monotonic()+timeout;job_id=None
     while time.monotonic()<deadline:
+        if job_id is None:
+            current=api(m,'/api/environment?environment=physical&view=summary')
+            operation=current.get('operations',{}).get(action)or{}
+            active=current.get('active_job')
+            if isinstance(active,str):active=(current.get('jobs')or{}).get(active)
+            if (isinstance(active,dict) and (active.get('request')or{}).get('action')==action
+                    and (active['request'].get('parameters')or{})==(parameters or{})):
+                job_id=active['job_id']
+            if job_id is None and operation.get('allowed')is not True:
+                health=current.get('health')or{}
+                require(current.get('active_job') or health.get('busy') or
+                    (current.get('activity')or{}).get('busy') or not health.get('backend_reachable',True),
+                    operation.get('disabled_reason')or action+' unavailable')
+                time.sleep(.2);continue
+            if job_id is None:
+                try:
+                    result=http_json(m['url']+'/api/operations/action',dict(action=action,
+                        request_id='startup-'+action+'-'+secrets.token_hex(12),expected_target=current['target'],
+                        arms_supported=arms_supported,parameters=parameters or{}),headers={'Origin':m['url'],
+                        'X-CSRF-Token':current['csrf'],'X-Workbench-Deployment':current['deployment']['sha256']})
+                except HTTPError as error:
+                    refusal=json.loads(error.read(8192))
+                    if refusal.get('code')not in ('precondition_failed','target_changed'):raise
+                    time.sleep(.2);continue
+                job_id=result['job_id']
         job=api(m,'/api/operations/jobs/'+job_id+'?environment=physical')
         if job['status']not in ('queued','running','cancel_requested'):
+            if job['status']=='failed' and (job.get('error')or{}).get('code')in ('precondition_changed','target_changed'):
+                job_id=None;time.sleep(.2);continue
             require(job['status']=='succeeded'and(job.get('verification')or{}).get('ok')is True,
                 action+' failed/unconfirmed; inspect job '+job_id+': '+str((job.get('error')or{}).get('message')or job.get('unknown_reason')or job['status']))
             return dict(job_id=job_id)
         time.sleep(.2)
-    raise Blocked(action+' deadline exceeded; inspect job '+job_id+'; not resubmitted')
+    raise Blocked(action+' deadline exceeded; inspect '+('job '+job_id if job_id else 'operation admission'))
 
 
 def ensure_camera_inputs(m, *, state=None, timeout=30):

@@ -362,4 +362,31 @@ class StartupTest(unittest.TestCase):
             with self.assertRaises(BlockingIOError):
                 with d.startup_lock(self.root/'lock'):pass
 
+class StartupOperationTest(unittest.TestCase):
+    def ready(self):
+        return dict(health={'backend_reachable':True},operations={'prepare_model':{'allowed':True}},
+            target={'device_id':'fixture'},csrf='test',deployment={'sha256':'test'})
+
+    def test_explicit_pre_execution_refusal_is_retried_with_new_request(self):
+        states=[self.ready(),dict(status='failed',error={'code':'precondition_changed'}),
+            self.ready(),dict(status='succeeded',verification={'ok':True})]
+        with patch.object(d,'api',side_effect=states),patch.object(d,'http_json',side_effect=[{'job_id':'first'},{'job_id':'second'}])as submit,patch.object(d.time,'sleep'):
+            result=d.startup_operation({'url':'http://localhost:1234'},'prepare_model')
+        self.assertEqual(result['job_id'],'second')
+        self.assertNotEqual(submit.call_args_list[0].args[1]['request_id'],submit.call_args_list[1].args[1]['request_id'])
+
+    def test_unknown_result_is_not_replayed(self):
+        with patch.object(d,'api',side_effect=[self.ready(),dict(status='unknown',unknown_reason='reply missing')]),patch.object(
+                d,'http_json',return_value={'job_id':'only'})as submit:
+            with self.assertRaisesRegex(d.Blocked,'unconfirmed'):d.startup_operation({'url':'http://localhost:1234'},'prepare_model')
+        self.assertEqual(submit.call_count,1)
+
+    def test_matching_running_operation_is_joined_without_submission(self):
+        state=self.ready();state.update(active_job=dict(job_id='existing',request={'action':'prepare_model','parameters':{}}))
+        state['operations']['prepare_model']['allowed']=False
+        with patch.object(d,'api',side_effect=[state,dict(status='succeeded',verification={'ok':True})]),patch.object(d,'http_json')as submit:
+            self.assertEqual(d.startup_operation({'url':'http://localhost:1234'},'prepare_model')['job_id'],'existing')
+        submit.assert_not_called()
+
+
 if __name__=='__main__':unittest.main()

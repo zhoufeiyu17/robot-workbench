@@ -110,6 +110,26 @@ class EnvironmentExitTest(unittest.TestCase):
         self.assertTrue(result['completed']);m._request_control_stop.assert_not_called()
         self.assertEqual([x[0].split('/')[-1]for x in requests],['handoff','manual_preview','manual_execute'])
 
+    def test_home_can_advance_when_ingress_closed_while_export_continues(self):
+        m=object.__new__(WorkbenchManager);m.port=18878;m.environment='physical';m.timeouts={'state':.1,'operation':.2}
+        m.target=lambda:dict(backend_instance='backend');m.health_cache={'runtime':{'runtime_nonce':'cpu'}}
+        m._request_control_stop=Mock()
+        runtime=dict(connected=True,feedback_healthy=True,stationary=True,automatic_enabled=False,
+            state='READY',runtime_nonce='cpu',command_epoch=2,holder='calibration')
+        state=dict(server_instance_id='backend',csrf='fixture',runtime=runtime,workflow={},
+            manual=dict(jaw_gaps_mm=[30.,30.],jaw_command_ranges_mm=[[0,80],[0,80]],positions=[0.]*12))
+        def transport(port,path,body=None,**kwargs):
+            if body is None:return deepcopy(state)
+            if path.endswith('/manual_preview'):
+                state['workflow']['review']=dict(id='review',request_job_id='prep');return {'job_id':'prep'}
+            if path.endswith('/manual_execute'):
+                state['manual']['execution']=dict(id='review',status='completed')
+                runtime['recording']=dict(done=False,ingress_closed=True);return {}
+            raise AssertionError(path)
+        with patch('robot_workbench.management.json_request',side_effect=transport):
+            self.assertTrue(m.home_for_exit({'request_id':'home'},Mock())['completed'])
+        self.assertFalse(runtime['recording']['done']);m._request_control_stop.assert_not_called()
+
     def test_home_waits_for_recording_seal_and_timeout_never_reports_completion(self):
         for finishes in (True,False):
             with self.subTest(finishes=finishes):
@@ -227,6 +247,18 @@ class EnvironmentExitTest(unittest.TestCase):
         m=self.manager(False);m.rows['control_owner'].update(state='stopped',running=False)
         result=self.run_exit(m);m.home_for_exit.assert_not_called();m.stop_current_control.assert_not_called()
         self.assertTrue(result['sdk_was_disconnected']);self.assertNotIn('release_control',m.calls)
+
+    def test_exit_saves_the_verified_loaded_model_for_next_start(self):
+        import json,tempfile
+        from pathlib import Path
+        m=self.manager()
+        with tempfile.TemporaryDirectory() as folder:
+            m.root=Path(folder)
+            m.health_cache['model_service']=dict(loaded=True,status='ready',model_id='fixture-model',bundle_digest='a'*64)
+            result=self.run_exit(m,action='exit_workbench')
+            saved=json.loads((m.root/'inference-startup.json').read_text())
+            self.assertEqual(saved,dict(schema='workbench.inference-startup.v1',model_id='fixture-model',expected_bundle_digest='a'*64))
+            self.assertTrue(result['inference_startup']['saved'])
 
     def test_failed_home_or_unconfirmed_release_never_reaches_service_shutdown(self):
         m=self.manager();m.home_for_exit.side_effect=OperationError('home_failed','home failed')

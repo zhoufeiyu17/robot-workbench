@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Start registered software services and return only after selected-model readiness."""
-import argparse,json,re,secrets,subprocess,time
+import argparse,json,re,subprocess,time
 from pathlib import Path
 import sys
 from urllib.request import build_opener,ProxyHandler
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
-from scripts.workbench_deploy import http_json,Blocked,require,handoff_collection,ensure_camera_inputs,startup_operation,old_owner_files,unit_state
+from scripts.workbench_deploy import http_json,Blocked,require,handoff_collection,ensure_camera_inputs,startup_operation,old_owner_files,unit_state,startup_lock
 
 
 def acquire_control(config):
@@ -127,31 +127,27 @@ def start(config):
             if pedal.get('state')=='ready':break
             require(time.monotonic()<deadline,'pedal input not ready: '+str(pedal.get('error')or pedal.get('state')))
             time.sleep(.1)
-    if current.get('model',{}).get('ready'):return dict(ui_ready=True,manual_planning_ready=True,model_status='ready',reused=True,url=url,sdk_acquisitions=(control or{}).get('sdk_acquisitions',0),control=control,collection_handoff=handoff)
-    active=current.get('active_job');jobs=current.get('jobs',{})
-    if isinstance(active,str):active=jobs.get(active)
-    if active:
-        require(active.get('request',{}).get('action')=='prepare_model','another management operation is active')
-        job_id=active['job_id']
-    else:
-        op=current.get('operations',{}).get('prepare_model',{})
-        require(op.get('allowed')is True,op.get('disabled_reason')or'model preparation unavailable')
-        result=http_json(url+'/api/operations/action',dict(action='prepare_model',request_id='startup-'+secrets.token_hex(12),expected_target=current['target'],arms_supported=False,parameters={}),headers={'Origin':url,'X-CSRF-Token':current['csrf'],'X-Workbench-Deployment':current['deployment']['sha256']})
-        job_id=result['job_id']
-    deadline=time.monotonic()+360
-    while time.monotonic()<deadline:
-        job=http_json(url+'/api/operations/jobs/'+job_id+'?environment=physical')
-        if job['status']not in('queued','running','cancel_requested'):
-            require(job['status']=='succeeded'and(job.get('verification')or{}).get('ok')is True,
-                'model preparation failed/unconfirmed; inspect job '+job_id)
-            current=http_json(url+'/api/environment?environment=physical&view=summary')
-            require(current.get('model',{}).get('ready')is True,'selected model readiness changed after preparation')
-            return dict(ui_ready=True,manual_planning_ready=True,model_status='ready',job_id=job_id,reused=bool(active),url=url,sdk_acquisitions=(control or{}).get('sdk_acquisitions',0),control=control,collection_handoff=handoff)
-        time.sleep(.2)
-    raise Blocked('model preparation deadline exceeded; inspect job '+job_id+'; not resubmitted')
+    parameters={}
+    saved_path=Path(manager['state_root'])/'inference-startup.json' if config.get('manager_profile') and manager.get('state_root') else None
+    if saved_path is not None and saved_path.is_file():
+        saved=json.loads(saved_path.read_text())
+        require(saved.get('schema')=='workbench.inference-startup.v1','unsupported saved inference startup configuration')
+        parameters={key:saved[key]for key in ('model_id','expected_bundle_digest')}
+    if current.get('model',{}).get('ready'):
+        return dict(ui_ready=True,manual_planning_ready=True,model_status='ready',reused=True,url=url,
+            sdk_acquisitions=(control or{}).get('sdk_acquisitions',0),control=control,collection_handoff=handoff)
+    result=startup_operation(config,'prepare_model',timeout=360,parameters=parameters)
+    current=http_json(url+'/api/environment?environment=physical&view=summary')
+    require(current.get('model',{}).get('ready')is True,'selected model readiness changed after preparation')
+    return dict(ui_ready=True,manual_planning_ready=True,model_status='ready',job_id=result['job_id'],reused=False,url=url,
+        sdk_acquisitions=(control or{}).get('sdk_acquisitions',0),control=control,collection_handoff=handoff)
+
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',type=Path,required=True)
-    p.add_argument('--open-page-only',action='store_true');a=p.parse_args();config=json.loads(a.config.read_text())
+    p.add_argument('--open-page-only',action='store_true')
+    a=p.parse_args();config=json.loads(a.config.read_text())
     if a.open_page_only:open_page(config)
-    else:print(json.dumps(start(config),ensure_ascii=False))
+    else:
+        with startup_lock(a.config.absolute().with_suffix('.startup.lock')):
+            print(json.dumps(start(config),ensure_ascii=False))
