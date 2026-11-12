@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.05f5e46118f4",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.df0fba801541",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -607,7 +607,7 @@
       ],
       "status": "implemented",
       "transport": "当前部署使用完整admission。新候选经SDK代理绑定上下文一次，逐窗口复用既有AF_UNIX RPC授权代号，worker在提交前/后就地核验。",
-      "compatibility": "Owner统一workbench.control_owner.v2；SDK连接能力workbench.sdk-execution-context.v1在绑定时精确核验。明确的已资格原生API配置继续有效；不回退不匹配的在线协议。Stop撤销generation。",
+      "compatibility": "Owner统一workbench.control_owner.v2；SDK连接能力workbench.sdk-execution-context.v2在绑定时精确核验。明确的已资格原生API配置继续有效；不回退不匹配的在线协议。Stop撤销generation。",
       "field_contracts": [
         {
           "name": "controller_profile",
@@ -626,7 +626,7 @@
         {
           "name": "limits.velocity_limit_rad_s / acceleration_limit_rad_s2 / jaw_velocity_limit_mm_s",
           "consumer": "SDK worker 本地接纳",
-          "purpose": "接纳位置步进、速度、加速度和当前输出衔接；数值由公共策略投影。",
+          "purpose": "规划重定时阈值投影，供执行窗口及原生输出衔接的偏差记录。",
           "frequency": "声明规划策略的执行资格绑定时",
           "validation": "有限正数、实际原生能力和夹爪单位校验"
         },
@@ -695,7 +695,8 @@
         }
       ],
       "native_home": "start_native_home(side) per arm, current authorized Owner generation; native interpolation and gains run on existing SDK feedback thread; side completion in raw feedback; complete native defaults include gripper opening",
-      "manual_hold": "set_damping_hold(manual=false)以实测关节和夹爪开口建立有界停止保持；新鲜静止后begin恢复正常增益并建立HOLD"
+      "manual_hold": "set_damping_hold(manual=false)以实测关节和夹爪开口建立有界停止保持；新鲜静止后begin恢复正常增益并建立HOLD",
+      "planning_deviation": "SDK execution contextv2 records planning_limit_observations for joint velocity, acceleration and jaw speed, within windows and from native output to first point. Existing native capabilities, position/time/epoch checks remain enforced."
     },
     {
       "id": "I07",
@@ -1458,9 +1459,9 @@
         "准备"
       ],
       "site": "translation",
-      "current": "ControlPolicy可调；保存核验当前SDK能力与实测速度保护，执行阶段按同一限速重定时",
-      "enforcement": "拦截",
-      "action": "允许重定时；不可行则拒绝",
+      "current": "ControlPolicy规划阈值；执行窗口偏差仅记录",
+      "enforcement": "记录",
+      "action": "规划时重定时，执行时observe/CONTINUE",
       "policy_key": "planning.velocity_limit_rad_s",
       "sources": [
         "planning",
@@ -1496,9 +1497,9 @@
         "准备"
       ],
       "site": "translation",
-      "current": "40 rad/s²",
-      "enforcement": "拦截",
-      "action": "重定时与刹车包络验证",
+      "current": "ControlPolicy规划阈值；执行窗口偏差仅记录",
+      "enforcement": "记录",
+      "action": "规划时重定时，执行时observe/CONTINUE",
       "policy_key": "planning.acceleration_limit_rad_s2",
       "sources": [
         "planning",
@@ -1516,9 +1517,9 @@
         "下发"
       ],
       "site": "translation",
-      "current": "ControlPolicy可调，受当前SDK夹爪速度能力约束",
-      "enforcement": "拦截",
-      "action": "重定时并验证夹爪变化",
+      "current": "ControlPolicy规划阈值；执行窗口偏差仅记录",
+      "enforcement": "记录",
+      "action": "规划时重定时，执行时observe/CONTINUE",
       "policy_key": "planning.jaw_velocity_limit_mm_s",
       "sources": [
         "planning",
@@ -2850,11 +2851,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc01-cpu-verification.json",
           "sha256": "4501734a7debe267f3ac17a64597ec049bb7e518d59fc392d6e868f152566cf7",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "05ab104690f4eb68a925492d5c0cd862ad6e334312a9c9e7e1ba66e7f6704b42",
+        "fingerprint": "641d29359e40b6c68c414f9bf608dfb8ad703ab471185ae4ad7faef5afc0c9ba",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2974,11 +2975,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc02-cpu-verification.json",
           "sha256": "e32ad42a7b811b8e27ddfc7ec043a7e655d3bd111b62f57aedad9c394fdd594c",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "e74f2232aecb8fefef393ed4eab6714e70d3edf76743516f34308e352970312f",
+        "fingerprint": "04bf133a2b14d0ce3ba3ac972700d327411c338f24aefb97e69c31967c33068f",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3101,11 +3102,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc03-cpu-verification.json",
           "sha256": "6429995f97a4ece88c8921ab191c379bcccb1c0e1ed102d210f65cf71e7a1fa7",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "2dba211b6d337eaf11562886537d7b9f98bfffef4b279e3349148629e3b7ca48",
+        "fingerprint": "321eb07f6a4e61a606e4c6f69da1868b36cb62ef012076d0cd51e1fd61a92063",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3220,11 +3221,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc04-cpu-verification.json",
           "sha256": "9843ba68805e50ff201b2815fc69efa83fc5829d3756fc5ad870592aa52818f8",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "1b1f3bd71df0c881235387e9c52f9b92a0efa7d7c12acce58bf4c0788c2695d6",
+        "fingerprint": "c9b6ae48213d25d5353b1c16251738559bc7b54523419588b525dc8ea61e5942",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3434,11 +3435,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "839799f7a122d9bf87e1acc11ca9383dc0cf750c5dba92ba7e7323accc0164a3",
+        "fingerprint": "0326083de387f832c5db758d32f1a3ab5cdcaa7081870449fc65d2d2f2e61490",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3592,7 +3593,7 @@
         "evidence": {
           "path": ".evidence/infer-pedal2-start-20261107-v1/recording-lifecycle-final-acceptance.json",
           "sha256": "2de0d92d4365760df1bb7e57b677fdf5ca8adf08b51377a9e07c866168dd06c0",
-          "matches_file": false,
+          "matches_file": true,
           "scope": [
             "durable ingress closure releases next-Run admission",
             "prepared HOLD parameter renewal for execution steps, duration and denoise",
@@ -3601,7 +3602,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "488bdd73ff07eba3e1c4b8ecfd86a7822175418745a1c098649d563e74cece08",
+        "fingerprint": "f689a497686eb0d1d408eedecdbbfff233d3cda3188c203e62837c9e8ef003db",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3734,11 +3735,11 @@
         "evidence": {
           "path": ".evidence/architecture-p1-20261105-v1/sc07-cpu-verification.json",
           "sha256": "a115474125adef5b3acfb2797b37a84c0131123ee3ccd98cdc91ef6aff1dd30a",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "dcb0c2ea56b2e44bbf22a220e527d565140325aff03512e4182f1479f4ba63a2",
+        "fingerprint": "f0d704f2a5111669167581f9e3252c2e539e119b595adc6273edceb1d5e5e8e8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3876,11 +3877,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "bdb75732d66508f4594a729529107e01cf3bc46d87ea04b27f3d2c26c033a7cf",
+        "fingerprint": "252cfcb8e4e075ad9c8f6b95d9c2e7ed58d869dd5c1fd0b2a2ad92a9f1b6c082",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4002,11 +4003,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "6ae59adc15cc28c34df3a87b817bdccec853281bdd47a4e5187da6ec86748573",
+        "fingerprint": "a4a9540bba61e5f8b3bd4d890f53a797f6b4356e0cf4de5d7bf02b89ff29e565",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4131,11 +4132,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "51fbee265b849f3c9a16da9c92f34f60400ae5509071376f4f50f325eec30ab2",
+        "fingerprint": "9fcf8a8a2c8eb17328e5e085a5e1992bf43e58539ede112daea726d0cdc72776",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4257,11 +4258,11 @@
         "evidence": {
           "path": ".evidence/wam-arx13-acceptance-20261107-v1/final-bounded-acceptance.json",
           "sha256": "91b58b62fe48e242445c52efbc31fead18ce9d293e3abc690e99b8bb0809b8ca",
-          "matches_file": false,
+          "matches_file": true,
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "a3fb168962e711d0278ccdf968173a5cfed55d79b39fbc9aa38f544d3a52de0c",
+        "fingerprint": "16765e995acf38f364f5b84521111762cdfb7cad0d7706079e6c811deffa6207",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },

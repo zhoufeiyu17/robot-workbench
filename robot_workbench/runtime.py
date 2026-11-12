@@ -1182,6 +1182,7 @@ class Runtime:
                 or not owner.feedback_healthy or not owner.stationary or owner.pedal_snapshot()[1:]!=(False,True)):
             return False
         feedback=owner.cache.get('calibration_feedback')or{}
+        if not owner.recovery_feedback_valid(feedback,owner.cache.get('joint_limits')):return False
         if not 0<=owner.control_time()-feedback.get('sample_time_s',-1)<=.1:return False
         if self.environment=='physical':
             guard=feedback.get('can_output_guard')or{};heartbeat=guard.get('heartbeat_monotonic_s')

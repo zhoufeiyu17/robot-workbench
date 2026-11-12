@@ -31,7 +31,17 @@ class InPlaceSoftwareStopTest(unittest.TestCase):
         self.assertIsNone(self.runtime.owner.recoverable_fault,'eligibility reads must not clear or mutate fault')
 
     def test_explicit_recovery_keeps_connection_and_requires_new_review(self):
+        self.check_explicit_recovery()
+
+    def test_explicit_recovery_accepts_valid_jaw_feedback_above_command_bound(self):
+        self.check_explicit_recovery(jaw_feedback=.082394)
+
+    def check_explicit_recovery(self,jaw_feedback=None):
         self.legacy_fault();runtime=self.runtime;owner=runtime.owner;nonce=runtime.nonce;count=len(self.raw.packets)
+        if jaw_feedback is not None:
+            self.raw.q[13]=jaw_feedback
+            self.advance(50)
+            self.assertTrue(owner.recovery_ready())
         snapshot=runtime.snapshot(self.creds['calibration']);self.assertEqual(snapshot['recoverable_fault'],owner.control.reason)
         self.assertFalse(snapshot['allowed_operations']['preview']['allowed'])
         class Actor:
@@ -51,12 +61,15 @@ class InPlaceSoftwareStopTest(unittest.TestCase):
         self.assertTrue(result[0]['recovered']);self.assertFalse(result[0]['motion_resumed']);self.assertEqual(runtime.nonce,nonce)
         self.assertEqual(len(self.raw.packets),count);self.assertIsNone(self.raw.window);self.assertIsNone(owner.runner)
         self.assertEqual(owner.control.state,owner.states.STOPPED)
+        if jaw_feedback is not None:self.assertEqual(self.raw.q[13],jaw_feedback)
         self.advance(60);self.assertEqual(len(self.raw.packets),count)
         review=runtime.submit(self.creds['calibration'],dict(action='preview_workbench',waypoints=[dict(q12=[.02]+[0.]*11,speeds12=[.1]*12,jaw_gap_mm=[40.,40.])]))
         self.confirm('calibration',review);self.advance(60);self.assertGreater(len(self.raw.packets),count)
 
     def test_unknown_or_changed_evidence_never_enables_recovery(self):
         self.legacy_fault();r=self.runtime;o=r.owner
+        invalid=deepcopy(o.cache['calibration_feedback']);invalid['qpos'][13]=.095
+        self.assertFalse(o.recovery_feedback_valid(invalid,o.cache['joint_limits']))
         with patch.object(o.control,'reason','unknown fault'):self.assertFalse(r._software_stop_recovery_ready())
         with patch.object(o,'stationary',False):self.assertFalse(r._software_stop_recovery_ready())
         with patch.object(o,'feedback_healthy',False):self.assertFalse(r._software_stop_recovery_ready())

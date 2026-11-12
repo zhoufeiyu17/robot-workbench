@@ -865,31 +865,42 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             for side in sides:
                 start,end=ARM_SLICES[side];limits=np.asarray(self.get_joint_position_limits(side))[:6]
                 if (np.any(q[:,start:end]<limits[:,0])or np.any(q[:,start:end]>limits[:,1])
-                        or np.max(np.abs(dq[:,start:end]))>velocity_limit
+                        or np.any(np.abs(dq[:,start:end])>(np.asarray(self._robot_configs[side].joint_vel_max)if limits_policy is not None else velocity_limit))
                         or np.any(q[:,end]<0)or np.any(q[:,end]>self.config.gripper_width_m+1e-8)
                         or np.any(dq[:,[6,13]]!=0)):
                     raise ReferenceWindowRejected('prepared reference exceeds SDK command bounds')
-                if common and np.any(np.abs(np.diff(dq[:,start:end],axis=0))>acceleration_limit*np.diff(times)[:,None]+1e-7):
+                if common and limits_policy is None and np.any(np.abs(np.diff(dq[:,start:end],axis=0))>acceleration_limit*np.diff(times)[:,None]+1e-7):
                     raise ReferenceWindowRejected('shared reference exceeds acceleration admission bound')
-                if limits_policy is not None:
-                    jaw_scale = self._execution_jaw_scales[side]
-                    if (np.any(abs(np.diff(q[:,start:end],axis=0)) > velocity_limit*np.diff(times)[:,None]+1e-8)
-                            or np.any(abs(np.diff(q[:,end]))*jaw_scale > limits_policy['jaw_velocity_limit_mm_s']*np.diff(times)+1e-8)):
-                        raise ReferenceWindowRejected('reference position/jaw step exceeds bound execution limits')
+            planning_observations=[]
             if limits_policy is not None:
-                output = self.read_execution_output()
+                output=self.read_execution_output()
+                intervals=np.diff(times)
+                thresholds=(('joint_velocity',velocity_limit,'rad/s'),
+                            ('joint_acceleration',acceleration_limit,'rad/s²'),
+                            ('jaw_velocity',limits_policy['jaw_velocity_limit_mm_s'],'mm/s'))
                 for side in sides:
-                    start, end = ARM_SLICES[side]
-                    elapsed = times[0] - output['observations'][side]['sample_monotonic_ns']/1e9
-                    if (elapsed <= 0 or np.any(abs(q[0,start:end]-np.asarray(output['q_sdk14'][start:end])) > velocity_limit*elapsed+1e-8)
-                            or np.any(abs(dq[0,start:end]-np.asarray(output['dq_sdk14'][start:end])) > acceleration_limit*elapsed+1e-7)
-                            or abs(q[0,end]-output['q_sdk14'][end])*self._execution_jaw_scales[side] > limits_policy['jaw_velocity_limit_mm_s']*elapsed+1e-8):
-                        raise ReferenceWindowRejected('current-output boundary exceeds bound execution limits; '
-                            f'side={side}, interval_s={elapsed:.9g}, '
-                            f'joint_delta_rad={np.max(abs(q[0,start:end]-np.asarray(output["q_sdk14"][start:end]))):.9g}, '
-                            f'velocity_delta_rad_s={np.max(abs(dq[0,start:end]-np.asarray(output["dq_sdk14"][start:end]))):.9g}, '
-                            f'jaw_delta_mm={abs(q[0,end]-output["q_sdk14"][end])*self._execution_jaw_scales[side]:.9g}, '
-                            f'limits_rad_s_rad_s2_mm_s={velocity_limit:g}/{acceleration_limit:g}/{limits_policy["jaw_velocity_limit_mm_s"]:g}')
+                    start,end=ARM_SLICES[side]
+                    elapsed=times[0]-output['observations'][side]['sample_monotonic_ns']/1e9
+                    if elapsed<=0:raise ReferenceWindowRejected('native output timestamp must precede the first future point')
+                    jaw_scale=self._execution_jaw_scales[side]
+                    window_values=(max(float(np.max(abs(dq[:,start:end]))),
+                                       float(np.max(abs(np.diff(q[:,start:end],axis=0))/intervals[:,None]))),
+                                   float(np.max(abs(np.diff(dq[:,start:end],axis=0))/intervals[:,None])),
+                                   float(np.max(abs(np.diff(q[:,end]))*jaw_scale/intervals)))
+                    boundary_values=(float(np.max(abs(q[0,start:end]-np.asarray(output['q_sdk14'][start:end]))))/elapsed,
+                                     float(np.max(abs(dq[0,start:end]-np.asarray(output['dq_sdk14'][start:end]))))/elapsed,
+                                     float(abs(q[0,end]-output['q_sdk14'][end])*jaw_scale)/elapsed)
+                    for phase,values in (('within_window',window_values),('current_output_boundary',boundary_values)):
+                        deviations=[dict(quantity=name,observed=observed,threshold=limit,unit=unit)
+                                    for observed,(name,limit,unit)in zip(values,thresholds)if observed>limit+1e-6]
+                        if deviations:
+                            observation=dict(side=side,phase=phase,deviations=deviations,
+                                first_point_source_s=float(times[0]),native_sample_source_s=output['observations'][side]['sample_monotonic_ns']/1e9,
+                                action='record_only')
+                            if phase=='current_output_boundary':
+                                observation.update(native_q_sdk7=output['q_sdk14'][start:end+1],native_dq_sdk7=output['dq_sdk14'][start:end+1],
+                                    first_q_sdk7=q[0,start:end+1].tolist(),first_dq_sdk7=dq[0,start:end+1].tolist())
+                            planning_observations.append(observation)
             mark('command_guard')
             try:self.command_guard()
             except BaseException:
@@ -942,6 +953,7 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                 queued_until_host_s=float(times[-1]),host_to_sdk_offset_s=first['offset_s'],
                 clock_uncertainty_s=first['uncertainty_s'],clock_mappings=clocks,frames=len(times),queued_host_s=time.monotonic(),
                 controller_profile=target_interpreter_profile or 'normal_X5',firmware_ack=False)
+            if limits_policy is not None:self._prepared_reference['planning_limit_observations']=planning_observations
             self._prepared_reference['native_reference_api']=packet_api
             self._prepared_reference['velocity_source']='sdk_position_only' if position_only else 'prepared_dq'
             if 'torque_bias_sdk6'in packet:self._prepared_reference['torque_bias_last_sdk6']=bias[-1,:6].tolist()
@@ -1271,8 +1283,16 @@ class Owner:
                 return {'queued': 'confirm', 'plan_sha256': plan.sha256, 'sequence_id': plans[0].sha256}
             raise ValueError('unsupported action or fields')
 
+    def recovery_feedback_valid(self, feedback, limits):
+        try:
+            command=feedback_to_command(feedback['qpos'],limits,environment=self.position_environment)
+            return all(lo<=q<=hi for q,(lo,hi)in zip(command,limits))
+        except (KeyError,TypeError,ValueError):
+            return False
+
     def recovery_ready(self):
         f = self.cache.get('calibration_feedback') or {}
+        if not self.recovery_feedback_valid(f,self.cache.get('joint_limits')):return False
         boundary=getattr(self,'position_boundary_fault',None)
         if boundary and self.recoverable_fault==boundary['reason']:
             limits=self.cache.get('joint_limits');q=f.get('qpos')
@@ -1593,7 +1613,7 @@ class Owner:
                 if action == 'recover':
                     with self.lock:
                         if (epoch != self.epoch or review != self.pedal_snapshot() or not self.recovery_ready()
-                                or any(not lo <= q <= hi for q, (lo, hi) in zip(bounded, limits))):
+                                or not self.recovery_feedback_valid(feedback,limits)):
                             self.event('recover_rejected', reason='owner/feedback/pedal changed')
                             continue
                         reason = self.recoverable_fault or self.control.reason

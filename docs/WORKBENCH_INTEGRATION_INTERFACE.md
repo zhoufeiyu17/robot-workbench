@@ -382,15 +382,15 @@ I04恢复原 `preview_workbench.sampled_trajectory` 入口，schema为 `workbenc
 
 ### I06按消费者和变化频率传递
 
-用户已确认I06字段分工，并要求将接口审查三条规则写入本仓库 `AGENTS.md`。当前候选使用 `workbench.sdk-execution-context.v1` 能力协商。Owner保存Run身份、逻辑epoch、完整规划策略及其业务关联。SDK worker通过既有RPC授权代号核验当前命令资格。
+用户已确认I06字段分工，并要求将接口审查三条规则写入本仓库 `AGENTS.md`。当前候选使用 `workbench.sdk-execution-context.v2` 能力协商。Owner保存Run身份、逻辑epoch、完整规划策略及其业务关联。SDK worker通过既有RPC授权代号核验当前命令资格。
 
-`bind_execution_context` 在执行资格建立时确认 `controller_profile`、`jaw_calibration_id` 及声明的 `limits`。limits仅包含关节速度、关节加速度、夹爪速度三个实际执行边界，来源为公共策略投影。既有未声明新规划策略的路径沿已登记适配器默认检查。原有SDK位置插值对照模式的 `velocity_source` 同样放在绑定配置中。worker核对已安装配置、夹爪单位转换和原生速度能力后返回 `{bound:true}`。
+`bind_execution_context` 在执行资格建立时确认 `controller_profile`、`jaw_calibration_id` 及声明的 `limits`。limits包含关节速度、关节加速度、夹爪速度三个规划重定时阈值，来源为公共策略投影。既有未声明新规划策略的路径沿已登记适配器默认检查。原有SDK位置插值对照模式的 `velocity_source` 同样放在绑定配置中。worker核对已安装配置、夹爪单位转换和原生速度能力后返回 `{bound:true}`。
 
 同一generation的绑定内容固定，重复请求幂等返回。SDK代理复用已确认绑定，配置变化先更换generation。每次新审阅执行也撤销先前SDK输出授权。Stop、worker替换及其他撤权之后，必须重新绑定。绑定请求携带捕获时的外层generation，绑定期间撤权会拒绝后续窗口。
 
 逐窗口RPC外层继续使用 `id/generation/deadline`。窗口体仅携带 `reference_id/active_arm/host_times_s/q_sdk14/dq_sdk14`，实际存在额外力矩时携带 `torque_bias_sdk14`。省略力矩字段表示全零额外力矩。worker从本次已绑定配置解释窗口，SDK轨迹帧继续使用原单位和原生API。`reference_id`保留一份，用于原生接纳回执及末端保持来源关联。逐窗口传输中的完整policy、policy摘要、Run实例和重复generation均已移到各自需要的层级。
 
-Owner对模型参考与当前Run策略进行核验，worker就地执行形状、时限、位置、速度、加速度、夹爪步进及当前输出衔接检查。策略绑定仅使用已安装原生能力元数据，窗口接纳仍读取真实当前输出。业务调用方在Owner能力声明中要求 `sdk_execution_context_v1`，旧worker在完整规划路径的准备阶段明确拒绝。传统调用的兼容范围由相应版本与模式检查控制。
+Owner核对模型参考与当前Run策略，G13/G15/G16超差产生observe/CONTINUE记录。worker核验形状、时限、位置和原生能力，规划速度、规划加速度及夹爪速度的窗口内与当前输出衔接超差写入planning_limit_observations，窗口继续提交。关节实测峰值保护继续由G14执行。策略绑定仅使用已安装原生能力元数据，窗口接纳仍读取真实当前输出。业务调用方在Owner能力声明中要求 `sdk_execution_context_v1`，旧worker在完整规划路径的准备阶段明确拒绝。传统调用的兼容范围由相应版本与模式检查控制。
 
 I06候选验证覆盖真实本地子进程IPC、重复绑定复用、缺绑定拒绝、绑定中Stop、旧generation拒绝、配置更新、worker重建、冗余字段拒绝、原生边界和夹爪单位。完整片段实现同步归并既有默认15步、1至60步配置、源时长乘4的单段预算及段间零速供给流程。保留当前录制回调和独立夹爪接口的既有范围。相关过程证据位于 `.evidence/architecture-p1-20261105-v1/`，最终资格以该目录的当前进度及验证回执为准。
 
@@ -557,6 +557,8 @@ MODEL、HOLD、TEACH 的稳定阶段可接受更新，下一次模型请求使�
 
 ### 原生命令起点与终点诊断
 
+显式故障恢复的准入与Owner执行阶段复用既有反馈范围和保持命令映射，核验可形成的合法保持命令。原始夹爪反馈保留，确认恢复沿用静止、心跳、故障及权限条件。
+
 固定起点、保持续接与完整片段终点的原生 q/dq 比较共用关节 `1e-5 rad / rad/s`、
 夹爪 `1e-6 m / m/s` 的绝对误差。内部 begin 命令的身份与内容一致性继续由原回执核对。
 超差异常携带阶段、期望 q/dq、原生输出、逐轴差值、超差轴、比较阈值，以及最后提交窗口和回执，
@@ -646,7 +648,7 @@ GPU 单模块与页面 DOM 通过不能代替上述链路通过。模型数值�
 
 ### P1输入与轨迹规则归并（2026-11-05已批准）
 
-G13/G15/G16使用I01现有`planning.velocity_limit_rad_s/acceleration_limit_rad_s2/jaw_velocity_limit_mm_s`，G21使用`execution.execute_steps`，G22核对单段时长为有限正数。Infer在接纳完整轨迹前统一调用I05，轨迹的峰值计算、重定时和SDK本地边界核验继续保留。`execution_settings.py`补入原`trajectory-check`文件映射，不新增策略身份或逐窗口完整配置。动态峰值沿用既有1e-10数值计算余量；步数必须为完整整数；普通在线Infer由G23核对整轮剩余时间，夹爪重定时读取已冻结的`planning.jaw_velocity_limit_mm_s`。
+G13/G15/G16使用I01现有`planning.velocity_limit_rad_s/acceleration_limit_rad_s2/jaw_velocity_limit_mm_s`，G21使用`execution.execute_steps`，G22核对单段时长为有限正数。Infer在接纳完整轨迹前统一调用I05，轨迹的峰值计算、重定时和SDK本地边界核验继续保留。`execution_settings.py`补入原`trajectory-check`文件映射，不新增策略身份或逐窗口完整配置。规划动态峰值超差记录为observe，重定时继续使用同一阈值。步数必须为完整整数；普通在线Infer由G23核对整轮剩余时间，夹爪重定时读取已冻结的`planning.jaw_velocity_limit_mm_s`。
 
 I01的`observation`组新增`state_max_age_s/max_camera_span_s`，默认均为0.1秒，仅可在既有已验证上限内收紧。前者由业务输入管理和Owner核验配对反馈年龄，后者由输入管理核验三相机时间跨度；`maximum_age_s`继续管理图像及整体观测年龄。G02/G03/G04使用现有I05字段，采样时刻与检查时刻分别保留。训练配对25/12ms仍仅诊断，本轮没有将它们变为拦截条件。
 

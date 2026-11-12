@@ -121,15 +121,39 @@ class PreparedBackendTests(unittest.TestCase):
             self.assertEqual(receipt['reference_id'],'a'*64)
             self.assertEqual(len(backend._controllers['left'].future),2)
             dq[1,0]=1.1
-            with self.assertRaises(ReferenceWindowRejected):backend.queue_reference(dict(packet,dq_sdk14=dq.tolist()))
+            observed=backend.queue_reference(dict(packet,dq_sdk14=dq.tolist()))['planning_limit_observations']
+            self.assertEqual({d['quantity']for row in observed for d in row['deviations']},{'joint_velocity','joint_acceleration'})
             dq[1,0]=.3;q[:,6]=[0.,.002]
-            with self.assertRaisesRegex(ReferenceWindowRejected,'jaw step'):backend.queue_reference(dict(packet,q_sdk14=q.tolist()))
+            observed=backend.queue_reference(dict(packet,q_sdk14=q.tolist()))['planning_limit_observations']
+            self.assertTrue(any(d['quantity']=='jaw_velocity'for row in observed for d in row['deviations']))
             q[:,6]=0.;q[:,0]=[.04,.043]
-            with self.assertRaisesRegex(ReferenceWindowRejected,'current-output'):backend.queue_reference(dict(packet,q_sdk14=q.tolist()))
+            observed=backend.queue_reference(dict(packet,q_sdk14=q.tolist()))['planning_limit_observations']
+            self.assertTrue(any(row['phase']=='current_output_boundary'for row in observed))
+            q[:,0]=3.1
+            with self.assertRaisesRegex(ReferenceWindowRejected,'SDK command bounds'):backend.queue_reference(dict(packet,q_sdk14=q.tolist()))
+            dq[1,0]=5.1
+            with self.assertRaisesRegex(ReferenceWindowRejected,'SDK command bounds'):backend.queue_reference(dict(packet,dq_sdk14=dq.tolist()))
         with self.assertRaisesRegex(ReferenceWindowRejected,'configuration'):
             backend.bind_execution_context(dict(context,jaw_calibration_id='d'*64))
         oversized=dict(context,limits=dict(context['limits'],velocity_limit_rad_s=6.))
         with self.assertRaisesRegex(ReferenceWindowRejected,'native velocity'):backend.bind_execution_context(oversized)
+
+    def test_reported_jaw_boundary_deviation_is_recorded_and_window_is_submitted(self):
+        backend=self.context_backend()
+        backend.bind_execution_context(dict(controller_profile='normal_X5',jaw_calibration_id='c'*64,
+            limits=dict(velocity_limit_rad_s=3.,acceleration_limit_rad_s2=40.,jaw_velocity_limit_mm_s=50.)))
+        q=np.zeros((2,14));q[:,6]=.025
+        native=[0.]*14;native[6]=.025+1.667706/(.083*1000/.082)
+        backend.read_execution_output=lambda:dict(q_sdk14=native,dq_sdk14=[0.]*14,
+            observations={side:dict(sample_monotonic_ns=1_000_000_000_000)for side in ('left','right')})
+        packet=dict(reference_id='a'*64,active_arm='both',host_times_s=[1000.029160378,1000.049160378],
+            q_sdk14=q.tolist(),dq_sdk14=np.zeros_like(q).tolist())
+        with patch('time.monotonic',return_value=1000.):receipt=backend.queue_reference(packet)
+        row=receipt['planning_limit_observations'][0]
+        self.assertEqual((row['phase'],row['action']),('current_output_boundary','record_only'))
+        self.assertEqual(row['deviations'][0]['quantity'],'jaw_velocity')
+        self.assertAlmostEqual(row['deviations'][0]['observed'],1.667706/.029160378,places=5)
+        self.assertEqual(len(backend._controllers['left'].future),2)
 
     def test_raw_feedback_uses_same_sample_for_fk_and_preserves_optional_gaps(self):
         module=ModuleType('arx_env.backends.arx5_backend')

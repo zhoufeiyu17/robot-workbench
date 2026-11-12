@@ -289,11 +289,13 @@ class Guard:
             elif signal['rule_id'] in ('G13','G15','G16'):passed=0<=observed<=limit+1e-10
             else:passed = 0 <= observed <= limit if signal['rule_id'] in ('G02','G03','G04') else abs(observed) <= limit
         if type(enabled) is not bool:raise ValueError('boolean guard enabled required')
+        planning_audit=signal['rule_id']in ('G13','G15','G16')
+        if planning_audit and observed>=0 and not passed:override='observe'
         verdict = override or (('pass' if passed else 'observe' if not enabled else 'reject') if recording else (
             'observe' if not enabled else 'pass' if passed else 'reject')
         )
         return dict(rule_id=signal['rule_id'], phase=phase, signal_id=signal['signal_id'],
-                    verdict=verdict, severity='error' if verdict == 'reject' else 'warning' if (recording or signal['rule_id'] in cls._bound_rules) and not passed else 'info',
+                    verdict=verdict, severity='error' if verdict == 'reject' else 'warning' if (recording or planning_audit or signal['rule_id'] in cls._bound_rules) and not passed else 'info',
                     action=failure if verdict == 'reject' else 'CONTINUE',
                     observed=observed, limit=limit, unit=unit, comparison=comparison,
                     revision=policy['revision'], policy_hash=policy['policy_hash'],

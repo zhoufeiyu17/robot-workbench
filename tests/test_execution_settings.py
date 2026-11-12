@@ -290,8 +290,10 @@ class SettingsTest(unittest.TestCase):
                 self.assertEqual(result['verdict'],'pass')
                 self.assertEqual(result['limit'],limit)
                 self.assertEqual(result['policy_hash'],policy['policy_hash'])
-                for value in (limit+1e-8,-1):
-                    self.assertEqual(Guard.evaluate(dict(signal,observed=value),'submission',policy)['action'],'REJECT_PLAN')
+                exceeded=Guard.evaluate(dict(signal,observed=limit+1e-8),'submission',policy)
+                self.assertEqual(exceeded['action'],'REJECT_PLAN'if rule=='G21'else'CONTINUE')
+                self.assertEqual(exceeded['verdict'],'reject'if rule=='G21'else'observe')
+                self.assertEqual(Guard.evaluate(dict(signal,observed=-1),'submission',policy)['action'],'REJECT_PLAN')
                 if rule=='G21':
                     self.assertEqual(Guard.evaluate(dict(signal,observed=steps-.5),'submission',policy)['verdict'],'reject')
             self.assertEqual(policy['parameters']['execution']['execute_steps'],steps)

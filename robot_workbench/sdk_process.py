@@ -16,7 +16,7 @@ from .release_trace import memory_file, archive_memory_file
 from .execution_settings import NATIVE_WATCHDOG_TIMEOUT_S
 
 LIMIT = 65536
-EXECUTION_CONTEXT_SCHEMA = 'workbench.sdk-execution-context.v1'
+EXECUTION_CONTEXT_SCHEMA = 'workbench.sdk-execution-context.v2'
 METHODS = {'connect', 'close', 'begin', 'send', 'set_damping_hold',
            'read_calibration_state', 'get_bimanual_joint_position_limits', 'read_gains',
            'enable_collection_arm','queue_reference','configure_motion_gains','read_execution_output','set_execution_gains',
