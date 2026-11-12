@@ -19,6 +19,44 @@ sys.path[:0]=[str(ROOT),str(ROOT/'tests'),str(ROOT/'calibration'),str(ROOT/'cali
 
 
 class EventRouteTests(unittest.TestCase):
+    def test_ros_terminal_event_references_history_before_message_budget_check(self):
+        from robot_workbench.runtime import Runtime
+        from robot_workbench.ros_data import bounded_value
+        from test_owner_clock import calibration,Safety,ClockBackend
+        history=[{'qpos':[.1]*14,'detail':'x'*2048} for _ in range(400)]
+        fields=dict(reason='operator stop',epoch=2,history=history,
+            motion_record=dict(schema='motion-feedback-record.v1',plan_sha256='a'*64,
+                sample_count=400,status='READY',rows=history,native_samples=history))
+        original=deepcopy(fields)
+        with self.assertRaisesRegex(ValueError,'message bound'):bounded_value(fields)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime=Runtime(calibration,Safety,lambda:ClockBackend(lambda:10.,source_clock_id='cpu_clock'),
+                device_id='cpu_robot',environment='fake',lock_root=directory,control_clock=lambda:10.)
+            published=[]
+            def publish(name,value,**identity):
+                snapshot,cost=bounded_value(value)
+                self.assertLess(cost,2048)
+                published.append((name,snapshot,identity))
+                return True
+            runtime.ros_publisher=SimpleNamespace(event=publish)
+            runtime.owner.execution_instance_id='test-run'
+            try:
+                for name in ('stop','motion_state'):
+                    self.assertTrue(runtime.owner.event(name,**fields))
+                for name,value,identity in published:
+                    self.assertEqual(value['history_ref'],'control.jsonl')
+                    self.assertEqual(value['motion_record']['rows_ref'],'control.jsonl')
+                    self.assertEqual(value['motion_record']['sample_count'],400)
+                    self.assertNotIn('history',value)
+                    self.assertNotIn('rows',value['motion_record'])
+                    self.assertNotIn('native_samples',value['motion_record'])
+                    self.assertEqual(identity['run_id'],'test-run')
+                self.assertEqual(fields,original)
+            finally:
+                runtime.ros_publisher=None
+                runtime.owner.backend.is_connected=False
+                runtime.close()
+
     def test_missing_ros_feedback_is_visible_without_relabelling_hardware_health(self):
         from robot_workbench.service import Device
         device=Device('cpu','fake',None)
@@ -139,6 +177,9 @@ class RosRunTests(unittest.TestCase):
         for business in ('calibration','collection','research'):
             with self.subTest(business=business):self.run_control_business(business)
 
+    def test_large_motion_history_seals_and_releases_maintenance_gate(self):
+        self.run_control_business('calibration',large_terminal_history=True)
+
     def test_previous_run_seal_event_cannot_break_current_control_source_barrier(self):
         self.run_control_business('collection',previous_seal_event=True)
 
@@ -151,7 +192,7 @@ class RosRunTests(unittest.TestCase):
     def test_codec_failure_seals_verified_prefix_and_releases_maintenance_gate(self):
         self.run_control_business('calibration',missing_codec=True)
 
-    def run_control_business(self,business,*,reject_registration=False,missing_codec=False,previous_seal_event=False,deferred_health_heartbeat=False):
+    def run_control_business(self,business,*,reject_registration=False,missing_codec=False,previous_seal_event=False,deferred_health_heartbeat=False,large_terminal_history=False):
         from sensor_msgs.msg import Image
         from robot_workbench.ros_data import RosNode,descriptor_message
         from robot_workbench.recording_process import capture_control
@@ -266,10 +307,14 @@ class RosRunTests(unittest.TestCase):
                 for writer in publishers.values():
                     frame=Image(width=2,height=2,step=6,encoding='rgb8',data=bytes(range(12)))
                     frame.header.stamp.sec=stamp//10**9;frame.header.stamp.nanosec=stamp%10**9;writer.publish(frame)
-            publish();review=runtime.submit(credentials[business],command);confirm(review);direct_health=False
+            publish();review=runtime.submit(credentials[business],command);confirm(review);direct_health=False;history_injected=False
             deadline=time.monotonic()+25
             while time.monotonic()<deadline:
                 advance();publish();recording=runtime.owner.recording
+                runner=runtime.owner.runner
+                if large_terminal_history and not history_injected and hasattr(runner,'native_rows'):
+                    runner.native_rows.extend([{'synthetic_history':'x'*4096} for _ in range(256)])
+                    history_injected=True
                 if recording is not None and recording.done.is_set():break
                 if recording is not None and recording.ready.is_set()and not direct_health:
                     wire=consumer.channel.call('snapshot')['recording']
@@ -312,12 +357,24 @@ class RosRunTests(unittest.TestCase):
                     boundaries=boundaries,owner_execution_id=runtime.owner.execution_instance_id,
                     capture_execution_id=recording.execution_instance_id,publisher_sequences=runtime.ros_publisher.sequences))
             self.assertEqual(recording.snapshot()['recording_outcome'],'complete',recording.snapshot())
+            if large_terminal_history:
+                self.assertTrue(history_injected)
+                self.assertEqual(runtime.ros_publisher.dropped,0)
+                self.assertIsNone(runtime.ros_publisher.error)
+                self.assertFalse(recording.thread.is_alive())
+                runtime.begin_maintenance();runtime.end_maintenance()
             self.assertEqual(recording.manifest['binding']['business_kind'],business)
             self.assertTrue((recording.capture.directory/'receipt.json').is_file())
             self.assertEqual(len(recording.manifest['playback']['streams']),3)
             self.assertGreater(recording.manifest['streams']['state']['committed'],0)
             events=[json.loads(row)['payload']for row in (recording.root/'control.jsonl').read_text().splitlines()]
             self.assertTrue(any(row['event']=='command'and row['data'].get('phase')=='returned'for row in events))
+            if large_terminal_history:
+                terminal=[row['data']['motion_record'] for row in events
+                    if row['event']=='motion_state' and isinstance(row['data'].get('motion_record'),dict)]
+                self.assertTrue(terminal)
+                self.assertEqual(terminal[-1]['rows_ref'],'control.jsonl')
+                self.assertNotIn('native_samples',terminal[-1])
             if previous_seal_event:
                 old=[row for row in events if row['event']=='control_capture_sealed']
                 self.assertEqual(len(old),1)

@@ -355,7 +355,15 @@ class Runtime:
                     event_topic=plane['namespace']+'/control/events')
             original_event=self.owner.event
             def captured_event(name,**fields):
+                compact=fields
+                if name not in ('feedback','command','source_target','native_reference_window'):
+                    compact={key:value for key,value in fields.items()if key!='history'}
+                    if 'history'in fields:compact['history_ref']='control.jsonl'
+                    if isinstance(compact.get('motion_record'),dict):
+                        compact['motion_record']={key:value for key,value in compact['motion_record'].items()if key not in('rows','native_samples')}
+                        compact['motion_record']['rows_ref']='control.jsonl'
                 if self.ros_publisher is not None:
+                    fields=compact
                     from .inference_trace import clean
                     if isinstance(fields.get('raw'),dict) and 'qpos'in fields['raw']:
                         sample=fields['raw'].get('sample_time_s')
@@ -368,11 +376,6 @@ class Runtime:
                     return self.ros_publisher.event(name,clean(fields),run_id=run_id,
                         epoch=self.owner.epoch,source_time_ns=round(self.owner.control_time()*1e9))
                 if name not in ('feedback','command','source_target','native_reference_window'):
-                    compact={key:value for key,value in fields.items()if key!='history'}
-                    if 'history'in fields:compact['history_ref']='control.jsonl'
-                    if isinstance(compact.get('motion_record'),dict):
-                        compact['motion_record']={key:value for key,value in compact['motion_record'].items()if key not in('rows','native_samples')}
-                        compact['motion_record']['rows_ref']='control.jsonl'
                     self._capture_event('owner_event',event=name,data=compact)
                 return original_event(name,**fields)
             self.owner.event=captured_event
