@@ -40,7 +40,17 @@ def main():
     route.add_argument('--target')
     route.add_argument('--target-profile', type=Path)
     install.add_argument('--targets', type=Path, default=Path.home()/'.config/robot-workbench/model-targets.json')
+    lock=commands.add_parser('lock-runtime',help='Freeze target runtime versions and bind existing model manifests')
+    lock_route=lock.add_mutually_exclusive_group(required=True)
+    lock_route.add_argument('--target')
+    lock_route.add_argument('--target-profile',type=Path)
+    lock.add_argument('--targets',type=Path,default=Path.home()/'.config/robot-workbench/model-targets.json')
     args = parser.parse_args()
+    if args.command=='lock-runtime' and args.target:
+        target=json.loads(args.targets.read_bytes())['targets'][args.target]
+        if target['ssh'].startswith('-'):raise ValueError('explicit SSH destination required')
+        command=[target['python'],target['installer'],'lock-runtime','--target-profile',target['profile']]
+        return subprocess.run(['ssh','-o','BatchMode=yes',*target.get('ssh_args',[]),target['ssh'],shlex.join(command)],check=True).returncode
     if args.command == 'install' and args.target:
         targets = json.loads(args.targets.read_bytes())
         target = targets['targets'][args.target]
@@ -74,6 +84,10 @@ def main():
     if sys.platform == 'darwin':
         raise ValueError('Run asset export on the training host; install using --target from this computer')
     from robot_workbench.model_install import read_json, export_release, OssSource, install_release,resolve_training_release,digest,install_lock,publish_release
+    if args.command=='lock-runtime':
+        from robot_workbench.model_install import lock_runtimes
+        print(json.dumps(lock_runtimes(args.target_profile)))
+        return 0
     if args.command == 'export':
         result = export_release(read_json(args.spec), args.source_root, args.output)
         print(json.dumps(dict(status='exported', model_id=result['model_id'], manifest=str(args.output))))

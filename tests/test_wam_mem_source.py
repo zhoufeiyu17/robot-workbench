@@ -13,20 +13,34 @@ from robot_workbench import wam_mem as memory
 @unittest.skipUnless(os.environ.get('WAM_MEMORY_ORACLE_SOURCE'), 'frozen training source CPU environment required')
 class FrozenPolicyParity(unittest.TestCase):
     def test_real_context_commit_and_readonly_prediction_match_training_policy(self):
+        for steps in (16,32):
+            with self.subTest(execute_actions=steps):self.check_policy(steps)
+
+    def check_policy(self,steps):
         root=Path(os.environ['WAM_MEMORY_ORACLE_SOURCE'])
-        sys.path[:0]=[str(root/'src'),str(root/'tests')]
+        sys.path.insert(0,str(root/'src' if (root/'src').is_dir() else root))
         import torch
-        from fixtures import Codec,small_config
+        from world_memory.config import Config
         from world_memory.inference import Policy
         from world_memory.models.world import WorldActionModel
         from world_memory.normalization import Normalization
 
         torch.set_num_threads(2);torch.manual_seed(731)
-        config=small_config()
+        config=Config()
+        for key,value in dict(width=32,action_width=32,ffn=64,action_ffn=64,layers=2,
+                heads=2,head_dim=16,time_dim=32,text_dim=16,memory_tokens=4,
+                history_queries=1,recall_tokens=2,recall_query_dim=16,checkpoint_blocks=False).items():
+            setattr(config.model,key,value)
+        config.data.image_size=64
+        class Codec:
+            def encode(self,value):
+                pooled=torch.nn.functional.interpolate(value.float().mean(1,keepdim=True),
+                    size=(value.shape[2],value.shape[3]//16,value.shape[4]//16))
+                return pooled.repeat(1,48,1,1,1)/255.
         config.data.views=['main','left','right'];config.data.main_view='main'
         config.data.action_dim=config.data.state_dim=14
         config.data.relative_action_dims=0;config.data.control_frequency=30
-        config.data.action_horizon=config.data.execute_actions=32
+        config.data.action_horizon=32;config.data.execute_actions=steps
         config.data.action_normalization='zscore'
         config.model.memory_update='gated_residual';config.model.first_frame_anchor=True
         config.inference.denoising_steps=2;config.validate()
@@ -53,14 +67,14 @@ class FrozenPolicyParity(unittest.TestCase):
             return value
 
         with torch.no_grad():
-            for index in (0,32,64):
+            for index in (0,steps,steps*2):
                 current=request(index)
                 rgb={role:current['observation']['images'][name]for role,name in zip(('main','left','right'),memory.wam.CAMS)}
                 stamp=current['observation']['source_time']-100.
                 original.observe(rgb,stamp)
                 torch.manual_seed(current['seed']+candidate.calls)
-                expected=original.act('fixture',current['observation']['model_state14'])['execute'].numpy()
-                if index:candidate.infer(request(index,'observe','TEACH'if index==32 else'MODEL_EXECUTING'))
+                expected=original.act('fixture',current['observation']['model_state14'])['actions'].numpy()
+                if index:candidate.infer(request(index,'observe','TEACH'if index==steps else'MODEL_EXECUTING'))
                 result=candidate.infer(current)
                 np.testing.assert_array_equal(result['action14'],expected)
                 torch.testing.assert_close(policy.memory,original.memory,rtol=0,atol=0)

@@ -1813,7 +1813,7 @@ for(const unavailable of ['disconnected','old-backend','not-holder']){
   h.app.destroy();
 }
 function inferenceSnapshot(){
-  const value=snapshot();value.runtime.holder='inference';value.runtime.allowed_operations.inference_prepare={allowed:true};value.runtime.allowed_operations.inference_preview={allowed:true};value.runtime.allowed_operations.execute={allowed:true};
+  const value=snapshot();value.runtime.holder='inference';value.runtime.allowed_operations.inference_preview={allowed:true};value.runtime.allowed_operations.execute={allowed:true};
   value.workflow={id:'inference-round-1',revision:1,status:'ready',busy:false,stage_id:'inference.idle',message:'推理环境就绪',primary_action:{id:'inference_preview',label:'准备本轮推理',allowed:true},outcomes:{},
     inference:{model:{id:'base379-010-29450',label:'Base379 · epoch 010 / step 29450',loaded:true},duration_s:40,seed:7,
       metrics:{elapsed_source_s:12.4,remaining_source_s:27.6,elapsed_wall_s:31.2,queries:4,predictions:3,submitted:372,completed:370,last_infer_wall_s:.42},
@@ -1832,7 +1832,7 @@ function inferenceSnapshot(){
 function oneRunSnapshot(){
   const value=inferenceSnapshot(),id='base566-epoch007-step58982',digest='a'.repeat(64);
   Object.assign(value.runtime,{connected:true,holder:'inference'});
-  Object.assign(value.runtime.allowed_operations,{inference_run:{allowed:true},inference_select:{allowed:true},inference_refresh:{allowed:false}});
+  Object.assign(value.runtime.allowed_operations,{inference_run:{allowed:true},inference_refresh:{allowed:false}});
   Object.assign(value.workflow.inference,{selected_model_id:id,bundle_digest:digest,model_ready:true,
     run_context:{server_instance_id:value.server_instance_id,device_id:value.device.id,connected:true,workflow_generation:1},
     models:[{id,label:'Base566 epoch007',selectable:true,status:'ready',bundle_digest:digest},

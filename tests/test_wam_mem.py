@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import unittest
 
 import numpy as np
@@ -108,7 +108,8 @@ class Policy:
     def act(self,instruction,proprio):
         rgb,timestamp=self.pending;self.pending=None;self.acts+=1
         self.memory=self._context(rgb,timestamp,instruction,proprio).memory;self.times.append(timestamp)
-        return {'execute':np.full((32,14),self.memory,np.float32)}
+        actions=np.full((32,14),self.memory,np.float32)
+        return {'actions':actions,'execute':actions[:getattr(getattr(self.config,'data',None),'execute_actions',32)]}
 
 
 class Worker:
@@ -128,6 +129,62 @@ class Worker:
 
 
 class MemoryTests(unittest.TestCase):
+    def test_sixteen_step_sampler_matches_teach_and_survives_clear(self):
+        client=SimpleNamespace(model_bundle={'training_execute_actions':16},
+            memory_clear=Mock(return_value={'audit':{'memory':{}}}))
+        flow=mem.MemorySession(client,None,'source')
+        try:
+            for phase in ('MODEL_EXECUTING','TEACH'):
+                flow.begin('fresh');blocks=[]
+                for index in range(33):
+                    obs=RealTrajectorySampling.observation(index)
+                    blocks.extend(flow.sampler.offer(obs,phase=phase,grid_time=obs['source_time']))
+                self.assertEqual([b['effective_index']for b in blocks],[0,16,32])
+            flow.clear('clear',epoch=1)
+            self.assertEqual(flow.sampler.stride,16)
+        finally:flow.close()
+
+    def test_manifest_training_execution_length_is_verified(self):
+        with TemporaryDirectory() as directory:
+            value=registry();value['root']=directory
+            path=Path(directory)/'metadata/training-config.json'
+            path.parent.mkdir();raw=json.dumps({'data':{'execute_actions':16}}).encode();path.write_bytes(raw)
+            value['files'].append(dict(path='metadata/training-config.json',bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest()))
+            value['bundle_sha256']=hashlib.sha256(json.dumps(sorted(value['files'],key=lambda r:r['path']),sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            bundle=mem.descriptor(value)
+            self.assertEqual(bundle['training_execute_actions'],16)
+            bundle['training_execute_actions']=33
+            with self.assertRaisesRegex(ValueError,'execution length'):mem.validate_descriptor(bundle)
+            path.write_text('{}')
+            with self.assertRaisesRegex(ValueError,'configuration differs'):mem.descriptor(value)
+
+    def test_model_selection_preserves_independent_execution_length(self):
+        from robot_workbench.inference_workflow import InferenceWorkflow
+        flow=InferenceWorkflow.__new__(InferenceWorkflow)
+        flow.device=SimpleNamespace(maintenance=True);flow.selected_model_id='prior';flow.generation=4
+        flow.model_bundle={'training_execute_actions':16}
+        flow._model_selection=Mock(return_value=('new',flow.model_bundle,'digest'))
+        flow._prepare_model=Mock(return_value={'model_ready':True})
+        flow.set_execution_steps=Mock(side_effect=AssertionError('model loading cannot change execution length'))
+        for steps in (1,16,20,32):
+            flow.execute_steps=steps
+            result=flow.operations_prepare_model(model_id='new',still_current=lambda:True)
+            self.assertTrue(result['model_ready'])
+            self.assertEqual(flow.execute_steps,steps)
+        flow.set_execution_steps.assert_not_called()
+        flow.selected_model_id='new';flow.set_execution_steps.reset_mock()
+        flow.operations_prepare_model(model_id='new',still_current=lambda:True)
+        flow.set_execution_steps.assert_not_called()
+
+    def test_sixteen_step_execution_preserves_full_prediction_and_memory(self):
+        policy=Policy();policy.config.data=SimpleNamespace(execute_actions=16)
+        memory=mem.PhaseMemory(policy,'fixture instruction',lambda seed:None)
+        result=memory.infer(request())
+        self.assertEqual(result['action14'].shape,(32,14))
+        self.assertEqual(result['audit']['memory']['sampling_stride'],16)
+        self.assertEqual(policy.times,[0.])
+        self.assertEqual(memory.observations,1)
+
     def test_hot_sampling_keeps_exclusive_memory_lease_and_rejects_other_changes(self):
         from robot_workbench.inference_model import model_bundle_digest
         worker=Worker();variants=mem.variants(registry())

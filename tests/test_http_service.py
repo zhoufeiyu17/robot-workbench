@@ -345,10 +345,6 @@ class HTTPTest(unittest.TestCase):
             def invalidate(self):self.generation+=1
             cancel=invalidate
             def refresh_models(self):calls.append('refresh');return {'models':[]}
-            def select_model(self,model_id,expected_bundle_digest=None):
-                if expected_bundle_digest!=self.digest:raise ValueError('digest changed')
-                self.generation+=1;calls.append('select');return {'model_ready':True}
-            def prepare_model(self,**_):calls.append('prepare');return {'model_ready':True}
             def step(self,name):
                 calls.append(name)
                 if pause==name:entered.set();release.wait(2)
@@ -383,13 +379,16 @@ class HTTPTest(unittest.TestCase):
             time.sleep(.01)
         self.fail('inference job did not finish: '+str(job))
 
-    def test_inference_model_selection_does_not_connect_sdk(self):
+    def test_catalog_refresh_and_removed_model_actions_do_not_connect_sdk(self):
         flow,calls,_,_=self.infer_run_fixture()
-        for action,extra in (('inference_refresh',{}),('inference_select',dict(model_id=flow.model_id,expected_bundle_digest=flow.digest)),('inference_prepare',{})):
-            self.assertTrue(self.state('inference')['runtime']['allowed_operations'][action]['allowed'])
-            self.action(action,business='inference',**extra);self.wait_infer_job('completed')
-            self.assertIsNone(self.device.runtime)
-        self.assertEqual(calls,['refresh','select','prepare'])
+        self.assertTrue(self.state('inference')['runtime']['allowed_operations']['inference_refresh']['allowed'])
+        self.action('inference_refresh',business='inference');self.wait_infer_job('completed')
+        for action in ('inference_select','inference_prepare'):
+            self.assertNotIn(action,self.state('inference')['runtime']['allowed_operations'])
+            with self.assertRaises(HTTPError) as error:self.action(action,business='inference')
+            self.assertEqual(error.exception.code,409)
+        self.assertIsNone(self.device.runtime)
+        self.assertEqual(calls,['refresh'])
 
     def test_one_run_hands_off_existing_connection_and_executes_once_for_one_confirmation(self):
         flow,calls,_,_=self.infer_run_fixture();self.connect();body=self.infer_run_body()
@@ -513,7 +512,7 @@ class HTTPTest(unittest.TestCase):
 
     def test_inference_uses_shared_holder_and_once_per_round_review(self):
         self.connect();calls=[]
-        flow=SimpleNamespace(generation=0,results=lambda:[],allowed=lambda action:dict(allowed=action in ('inference_prepare','inference_preview','execute','cancel'),reason=None))
+        flow=SimpleNamespace(generation=0,results=lambda:[],allowed=lambda action:dict(allowed=action in ('inference_preview','execute','cancel'),reason=None))
         flow.snapshot=lambda:dict(status='idle',busy=False,stage_id='inference.idle',outcomes={},
             primary_action=dict(id='inference_preview',allowed=True,label='准备本轮推理'),inference=dict(duration_s=40,seed=7,model=dict(id='base379-010-29450',loaded=True)))
         flow.invalidate=lambda:setattr(flow,'generation',flow.generation+1)
@@ -534,12 +533,10 @@ class HTTPTest(unittest.TestCase):
             deadline=time.monotonic()+2
             while self.app.jobs.get(('fake','inference'),{}).get('status')=='running' and time.monotonic()<deadline:time.sleep(.01)
             self.assertEqual(self.app.jobs[('fake','inference')]['status'],'completed')
-        self.action('inference_prepare',business='inference',seed=7,duration_s=40);finish()
-        for action,extra in [('inference_prepare',dict(reference_feedforward_sha256='a'*64)),
-                             ('inference_preview',dict(torque_bias_sdk6=[[0.]*6]))]:
+        for action,extra in [('inference_preview',dict(torque_bias_sdk6=[[0.]*6]))]:
             with self.assertRaises(HTTPError):self.action(action,business='inference',seed=7,duration_s=40,**extra)
         self.action('inference_preview',business='inference',seed=7,duration_s=40,reference_feedforward_sha256='a'*64);finish()
-        self.assertEqual([name for name,_ in calls],['inference_prepare','inference_preview'])
+        self.assertEqual([name for name,_ in calls],['inference_preview'])
         self.assertEqual(calls[-1][1]['reference_feedforward_sha256'],'a'*64)
         review=self.state('inference')['workflow']['review'];self.assertEqual(review['seed'],7);self.assertEqual(review['duration_s'],40)
         with self.assertRaises(HTTPError):self.action('execute',business='inference',review_id=review['id'],seed=8,duration_s=40,physical_clearance=True)
@@ -553,7 +550,7 @@ class HTTPTest(unittest.TestCase):
         self.assertNotIn(('fake','inference'),self.app.reviews)
         self.assertEqual(self.device.runtime.holder,'collection')
         for body in (dict(model_path='/tmp/model'),dict(duration_s=-41),dict(seed=-1),dict(seed=True)):
-            with self.assertRaises(HTTPError):self.action('inference_prepare',business='inference',**body)
+            with self.assertRaises(HTTPError):self.action('inference_preview',business='inference',**body)
 
     def test_inference_history_shares_media_route_without_connecting(self):
         path=Path(self.temp.name)/'infer.mp4';path.write_bytes(b'0123456789')

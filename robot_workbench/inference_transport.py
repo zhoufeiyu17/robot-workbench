@@ -338,6 +338,7 @@ class ModelService:
             raise ValueError('selected checkpoint bundle identity changed')
         if not self.lock.acquire(blocking=False):
             raise ValueError('model worker busy; preparation was not queued')
+        runtime_preflight=False
         try:
             candidate = self.client
             identity = None
@@ -358,6 +359,12 @@ class ModelService:
                 candidate = self.client_factory(selected)
             elif self.client_refresh is not None and not self.status()['loaded']:
                 candidate = self.client_refresh(self.client)
+            if ((candidate is not self.client or not self.status()['loaded'])
+                    and model_family(requested) in ('wam','wam-mem') and hasattr(candidate,'registry')):
+                from .model_runtime import verify_registered
+                runtime_preflight=True
+                verify_registered(candidate.registry)
+                runtime_preflight=False
             if candidate is not self.client:
                 reused=False
                 if getattr(candidate, 'model_id', None) != requested:
@@ -396,8 +403,9 @@ class ModelService:
                         timing=deepcopy(warm.get('audit',{}).get('timing'))))
             return dict(**metadata, worker_identity=self.status()['worker_identity'],reused=bool(reused))
         except Exception as error:
-            self.client.close()
-            self._set(status='error', loaded=False, error=str(error))
+            if not runtime_preflight:
+                self.client.close()
+                self._set(status='error', loaded=False, error=str(error))
             raise
         finally:
             self._set(busy=False);self.lock.release()

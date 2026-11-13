@@ -363,7 +363,15 @@ def install_release(release, target, download):
             raise ValueError('runtime family/backend differs from release')
         python = Path(runtime['python'])
         if not python.is_absolute() or not python.is_file():raise ValueError('registered target interpreter missing')
+    from . import model_runtime
     shared={}
+    for backend, spec in release['backends'].items():
+        runtime=target['runtimes'][spec['runtime_id']]
+        pin=runtime.get('environment_lock')
+        expected=model_runtime.read_pin(pin)
+        model_runtime.verify(runtime['python'],expected)
+        name=model_runtime.lock_path(backend)
+        shared[name]=dict(path=name,source=pin['path'],bytes=Path(pin['path']).stat().st_size,sha256=pin['sha256'])
     for spec in release['backends'].values():
         for row in target['runtimes'][spec['runtime_id']].get('shared_files',[]):
             relative_path(row['path'])
@@ -381,6 +389,15 @@ def install_release(release, target, download):
                 raise ValueError('installed model assets changed')
             rows = [r for r in RegisteredCatalog(catalog_root).rows() if r.get('model_id') == identity]
             if not rows or not all(r['selectable'] for r in rows):raise ValueError('installed catalog entry is inconsistent')
+            for backend,spec in release['backends'].items():
+                registered=next((r['registry']for r in rows if r['backend']==backend),None)
+                if registered is None:raise ValueError('installed model backend is missing')
+                runtime=target['runtimes'][spec['runtime_id']]
+                lock_name=model_runtime.lock_path(backend)
+                lock=next((r for r in registered['files']if r['path']==lock_name),{})
+                if (str(model_runtime.interpreter(registered))!=runtime['python']
+                        or lock.get('sha256')!=runtime['environment_lock']['sha256']):
+                    raise ValueError('installed model runtime mapping differs from the target runtime')
             return dict(receipt, reused=True)
         staging = asset_root / '.install' / (identity + '-' + release_id)
         staging.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -468,3 +485,64 @@ def install_release(release, target, download):
         rows = [r for r in RegisteredCatalog(catalog_root).rows() if r.get('model_id') == identity]
         if not rows or not all(r['selectable'] for r in rows):raise ValueError('published model catalog verification failed')
         return receipt
+
+
+def lock_runtimes(profile_path):
+    """Freeze declared environments and bind existing WAM catalog entries atomically."""
+    from . import model_runtime, wam, wam_mem
+    from .inference_catalog import RegisteredCatalog
+    profile_path=Path(profile_path).resolve(strict=True)
+    with install_lock(profile_path.with_suffix(profile_path.suffix+'.runtime.lock')):
+        target=read_json(profile_path)
+        if (target.get('schema')!=TARGET_SCHEMA
+                or target['machine_id_sha256']!=hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest()):
+            raise ValueError('runtime lock target host identity differs')
+        pins={}
+
+        def freeze(python, existing=None):
+            python=str(python)
+            if python in pins:
+                if existing is not None and model_runtime.read_pin(existing)!=model_runtime.read_pin(pins[python]):
+                    raise ValueError('one interpreter has conflicting runtime locks')
+                return pins[python]
+            path=profile_path.parent/'runtime-locks'/(hashlib.sha256(python.encode()).hexdigest()+'.json')
+            if existing is not None:
+                pin=existing
+                model_runtime.verify(python,model_runtime.read_pin(pin))
+            elif path.exists():
+                pin=dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                model_runtime.verify(python,model_runtime.read_pin(pin))
+            else:
+                write_json(path,model_runtime.capture(python))
+                pin=dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+            pins[python]=pin
+            return pin
+
+        for runtime in target['runtimes'].values():
+            runtime['environment_lock']=freeze(runtime['python'],runtime.get('environment_lock'))
+        write_json(profile_path,target)
+        migrated=[]
+        manifests={row['manifest_path']for row in RegisteredCatalog(target['catalog_root']).rows()if row.get('selectable')}
+        for manifest_name in sorted(manifests):
+            manifest=Path(manifest_name)
+            registry=read_json(manifest)
+            if not (wam.is_model_id(registry.get('model_id')) or wam_mem.is_model_id(registry.get('model_id'))):continue
+            if registry.get('backend','torch') not in ('torch','anyinfer'):continue
+            identity=registry['model_id']
+            with install_lock(Path(target['asset_root'])/'.install'/(identity+'.lock')):
+                registry=read_json(manifest)
+                python=model_runtime.interpreter(registry)
+                pin=freeze(python)
+                registry['python']=str(python)
+                root=Path(registry['root']).resolve(strict=True)
+                name=model_runtime.lock_path(registry.get('backend','torch'))
+                path=root/name
+                if path.exists() and path.read_bytes()!=Path(pin['path']).read_bytes():
+                    raise ValueError('existing model environment lock differs')
+                write_json(path,model_runtime.read_pin(pin))
+                row=dict(path=name,bytes=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                registry['files']=[r for r in registry['files']if r['path']!=name]+[row]
+                registry['bundle_sha256']=digest(sorted(registry['files'],key=lambda r:r['path']))
+                write_json(manifest,registry)
+                migrated.append(identity)
+        return dict(status='locked',environments=len(pins),models=migrated)

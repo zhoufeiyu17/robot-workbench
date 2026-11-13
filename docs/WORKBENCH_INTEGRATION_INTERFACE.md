@@ -485,6 +485,14 @@ UI 可编辑草稿并区分正在应用、准备成功与旧录像后台封存�
 WAM-MEM 同样允许在 HOLD 下将执行长度更新为 1–32 步。模型仍返回完整 32 步预测，
 Owner 只规划并执行前 N 步，再使用新观测推理；未执行的预测不作为动作写入记忆。
 参数更新沿用上述 Run 更新流程及同模型／设备的记忆租约复用，不加载权重或重接 SDK。
+模型选择、加载与重新预热统一使用 `/api/operations/action` 的 `prepare_model`，参数为
+`model_id` 和 `expected_bundle_digest`。旧 `/api/actions/inference_select`、
+`/api/actions/inference_prepare` 及业务回调包装已移除。模型就绪后，现有控制准备流程调用
+内部 `bind_device`，目录刷新继续使用 `inference_refresh`。
+安装包中的 `metadata/training-config.json` 经清单校验后提供 `training_execute_actions`。
+该字段决定训练时序对应的 MEM 采样间隔，在线执行长度继续由工作台独立设置为 1–32 步。
+切换 checkpoint 和去噪热更新均保留当前执行长度。预测接口始终返回完整 32 步，
+训练配置的 `execute_actions` 不自动写入在线执行设置。旧安装包缺少该配置时沿用 32 步 MEM 间隔。
 WAM-MEM 去噪能力以已登记制品为准，当前支持 1–10 步、默认 2 步。仅更新步数时保留
 权重、worker、同一独占记忆租约及其时钟／revision；不执行会重置记忆的合成预热。
 `workbench.wam-memory-phase.v4` 的 leased `/prepare memory_sampling` 核对原绑定和新模型描述，
@@ -496,7 +504,8 @@ WAM-MEM 去噪能力以已登记制品为准，当前支持 1–10 步、默认 
 
 v4 统一真实数据写入协议已通过隔离验收。Owner 在真实反馈上附加 `workbench.memory-activity.v1`，按反馈源时间和
 command epoch 标记 MODEL_EXECUTING、TEACH 或等待／保持。业务端仅在前两种阶段推进
-统一有效样本计数，选择第 0、32、64……个真实观测写入记忆，等待和切换期间保留实际时间差。
+统一有效样本计数，按训练 `execute_actions` 选择真实观测写入记忆；32 步模型使用
+第 0、32、64……个样本，16 步模型使用第 0、16、32……个样本。等待和切换期间保留实际时间差。
 首次启动的真实观测建立初始记忆。相邻实测状态生成 q-next GT 审计，缺帧和等待不补造动作。
 
 已核对的 T01、T02_1 训练快照均将历史 executed-control 条件掩码设为 false。适配器遵循
@@ -537,9 +546,23 @@ Owner 的状态订阅按 Runtime 实例常驻，推理绑定、测试结束和�
 引用和已资格运行时。运行时 ID 解析为家族、后端及 Python 路径。机器路径与凭据引用保存在
 目标配置中。Mac 入口只通过已配置 SSH 目标调用安装器，权重直接从 OSS 内网进入目标主机。
 
+运行时配置的 `environment_lock` 固定环境 JSON 的路径和 SHA256。锁文件使用
+`workbench.model-runtime.v1`，保存 Python 完整版本、实现、ABI、平台架构及按解释器路径
+解析的依赖包版本。已资格环境通过统一入口初始化并绑定历史可选模型。
+
+```bash
+python3 scripts/install_model.py lock-runtime --target '<目标机配置名>'
+```
+
+安装器在下载前核对运行时，将锁文件加入模型包的 `runtime/<backend>-environment.json`
+及文件清单，因此模型 bundle 身份包含环境身份。新 worker 加载前再次核对版本；失败时保留
+已有健康 worker。运行期间的推理请求和同 worker 去噪更新沿用既有绑定。重复初始化核对已有
+锁，依赖漂移明确拒绝。环境升级使用独立环境和相应运行时配置。已有权重保留原文件与来源回执。
+
 安装事务使用模型锁、分文件续传记录和共享资产缓存。完整文件与家族描述检查通过后一次性
 发布全部后端目录，已安装的同一 release 重复调用返回复用回执，同模型 ID 的不同 release
-明确报告冲突。目录发现完成与 GPU 加载完成分别记录，当前模型选择与控制权由原业务接口管理。
+明确报告冲突。目录发现完成与 GPU 加载完成分别记录，模型选择与加载由 `prepare_model`
+运维入口管理，控制权继续通过控制生命周期入口管理。
 生产者入口从 WAM 的原生 COMPLETE/trainer_state/训练 contract 和冻结源码清单解析制品。
 WAM-MEM 从 complete.json 或 weights-only export.json、config/run、依赖表及精确文本缓存
 解析制品。checkpoint 提交与整作业完成分别记录。当前源码身份清单随制品保存，目标运行时

@@ -20,7 +20,7 @@ from robot_workbench.inference_workflow import InferenceWorkflow
 
 ROOT = Path(__file__).resolve().parents[1]
 BUSINESSES = ('calibration', 'collection', 'inference', 'research')
-INFERENCE_MODEL_TOOLS = ('inference_refresh','inference_select','inference_prepare')
+INFERENCE_MODEL_TOOLS = ('inference_refresh',)
 INFERENCE_TOOLS = (*INFERENCE_MODEL_TOOLS, 'inference_preview')
 WARM_C_ACTIONS = ('generate_plan','execute','install',*CALIBRATION_TOOLS)
 WARM_C_REASON = '当前为复用标定的数采诊断；完整标定请使用空库验收入口'
@@ -1219,7 +1219,7 @@ class Application:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
         if readiness is not None and primary and primary['id'] in ('execute','manual_execute') and not allowed[primary['id']]['allowed']:
             primary.update(allowed=False,reason=allowed[primary['id']]['reason'])
-        if primary and primary['id'] not in ('prepare_collection','inference_run',*INFERENCE_MODEL_TOOLS) and (not runtime['connected'] or holder != business):
+        if primary and primary['id'] not in ('prepare_collection','prepare_model','inference_run',*INFERENCE_MODEL_TOOLS) and (not runtime['connected'] or holder != business):
             primary.update(allowed=False,reason='请先连接设备' if not runtime['connected'] else '请先交接控制权限：当前由 '+str(holder)+' 持有')
         if business=='collection':
             for action in (*COLLECTION_TOOLS,'execute'):
@@ -1409,7 +1409,7 @@ class Application:
         if action in (*INFERENCE_TOOLS,'inference_run'):
             if body.get('wam_stall_recovery')and not getattr(device.workflows.get('inference'),'wam_stall_recovery_available',True):
                 raise ValueError('当前部署未开放 Trick，请使用普通推理')
-            extra=({'model_id','expected_bundle_digest'} if action=='inference_select' else set())
+            extra=set()
             if action=='inference_preview':extra|={'reference_feedforward_sha256','recording_enabled'}
             if action=='inference_run':extra|={'model_id','expected_bundle_digest','expected_context','state_wall_ns','physical_clearance','scene_reset','arms_supported','prepare_only','wam_stall_recovery','memory_start','recording_enabled'}
             if business!='inference' or set(body)-{'environment','business','request_id','seed','duration_s'}-extra:
@@ -1903,16 +1903,10 @@ class Application:
             if action=='precision_notes':return study.notes(body['record_id'],body['text'],body['expected_revision'])
         if action=='connect':return device.connect(body)
         if action=='prepare_collection':return device.collection_preparation.retry()
-        if business=='inference' and action in INFERENCE_MODEL_TOOLS:
+        if business=='inference' and action=='inference_refresh':
             workflow=device.workflows.get('inference')
-            if workflow is None:raise ValueError('推理工作流未配置')
-            if action=='inference_refresh':return workflow.refresh_models()
-            if action=='inference_select':
-                return workflow.select_model(body.get('model_id'),expected_bundle_digest=body.get('expected_bundle_digest'))
-            if device.runtime is not None and device.runtime.holder=='inference':
-                return workflow.action(action,body)  # Preserve the connected prepare/bind diagnostic flow.
-            if hasattr(workflow,'prepare_model'):return workflow.prepare_model(seed=body.get('seed',0))
-            return workflow.action(action,body)  # Legacy fixed-model diagnostic endpoint.
+            if workflow is None:raise ValueError('推理业务未配置')
+            return workflow.refresh_models()
         runtime=device.runtime
         if runtime is None and action not in ('mesh','select_result',*HISTORY_ACTIONS):raise ValueError('请先连接设备')
         if runtime is not None and runtime.holder != business and action not in ('mesh','select_result','cancel',*HISTORY_ACTIONS):

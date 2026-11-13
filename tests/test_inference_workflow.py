@@ -135,8 +135,7 @@ class InferenceWorkflowTests(unittest.TestCase):
             for action in actions:
                 before=snapshot.call_count
                 result=flow.allowed(action)
-                needs_run=action in ('select_model','inference_select_model','cancel',
-                                     'inference_prepare','inference_preview','execute')
+                needs_run=action in ('cancel','inference_preview','execute')
                 self.assertEqual(snapshot.call_count-before,int(needs_run),action)
                 if not needs_run:
                     self.assertEqual(result['allowed'],action in
@@ -670,16 +669,18 @@ class InferenceWorkflowTests(unittest.TestCase):
         flow=InferenceWorkflow(self.device,Path(self.temp.name)/'infer',camera_service=self.cameras,
             model_endpoint='http://127.0.0.1:1234',model_token_file='/not-opened-in-cpu-test',
             profile_provider=lambda:(self.profile,self.binding),**kwargs)
-        def operation(parameters):
-            self.model_operations.append(deepcopy(parameters));self.device.maintenance=True
-            try:return flow.operations_prepare_model(**parameters,still_current=lambda:True)
-            finally:self.device.maintenance=False
-        flow.model_prepare_operation=operation
         return flow
 
+    def prepare_model(self,flow=None,*,seed=None,**parameters):
+        flow=flow or self.workflow
+        if seed is not None:flow.seed=seed
+        self.model_operations.append(deepcopy(parameters));self.device.maintenance=True
+        try:return flow.operations_prepare_model(**parameters,still_current=lambda:True)
+        finally:self.device.maintenance=False
+
     def prepare(self):
-        self.workflow.prepare_model(seed=7)
-        self.workflow.action('inference_prepare',{'seed':7,'duration_s':40})
+        self.prepare_model(seed=7)
+        self.workflow.bind_device()
         self.workflow._refresh_observation()
 
     def test_execution_length_persists_validates_and_revokes_old_review(self):
@@ -781,7 +782,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.addCleanup(workflow.close)
         with patch.object(workflow,'_binding',side_effect=AssertionError('offline preparation must not bind device')),\
              patch.object(self.cameras,'latest_rgbd',side_effect=AssertionError('offline preparation must not acquire cameras')):
-            result=workflow.select_model(rows[0]['model_id'],rows[0]['bundle_digest'])
+            result=self.prepare_model(workflow,model_id=rows[0]['model_id'],expected_bundle_digest=rows[0]['bundle_digest'])
         snapshot=workflow.snapshot()['inference']
         self.assertTrue(result['model_ready']);self.assertTrue(snapshot['model_ready'])
         self.assertFalse(snapshot['control_ready']);self.assertIsNone(workflow.prepared)
@@ -790,8 +791,8 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.assertEqual(snapshot['catalog_root'],'/model-host/checkpoints')
         self.assertNotIn('model_descriptor',snapshot['models'][0]);self.assertEqual(self.submitted,[])
         self.assertFalse(snapshot['models'][2]['selectable']);self.assertTrue(snapshot['models'][2]['id'].startswith('unavailable-'))
-        with self.assertRaisesRegex(ValueError,'下载中'):workflow.select_model(rows[1]['model_id'])
-        with self.assertRaisesRegex(ValueError,'身份已变化'):workflow.select_model(rows[0]['model_id'],'f'*64)
+        with self.assertRaisesRegex(ValueError,'下载中'):self.prepare_model(workflow,model_id=rows[1]['model_id'])
+        with self.assertRaisesRegex(ValueError,'身份已变化'):self.prepare_model(workflow,model_id=rows[0]['model_id'],expected_bundle_digest='f'*64)
         with self.assertRaisesRegex(ValueError,'连接设备'):workflow.bind_device()
 
     def test_continuous_mapping_and_disabled_right_assumption_are_exactly_once(self):
@@ -812,7 +813,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         self.feedback['gripper_feedback_valid']=[True,False];self.feedback['qpos'][13]=0.
         workflow=self.make_workflow(model_id='base566-epoch005-step42130',disabled_grippers=('right',))
         self.addCleanup(workflow.close)
-        workflow.prepare_model();generation=workflow.generation;workflow.bind_device();workflow._refresh_observation()
+        self.prepare_model(workflow);generation=workflow.generation;workflow.bind_device();workflow._refresh_observation()
         self.assertEqual(workflow.generation,generation+1)
         generation=workflow.generation
         self.assertEqual(workflow.cache['observation']['device_state14'][13],83.)
@@ -830,22 +831,22 @@ class InferenceWorkflowTests(unittest.TestCase):
         rows=self.checkpoint_rows()
         workflow=self.make_workflow(model_id=rows[0]['model_id'],model_catalog_provider=lambda:rows)
         self.addCleanup(workflow.close)
-        workflow.select_model(rows[0]['model_id'])
+        self.prepare_model(workflow,model_id=rows[0]['model_id'])
         self.owner.pending={'old':((SimpleNamespace(kind='inference'),),2,0,123,[])}
         self.owner.inference_payloads={'old':{}}
         self.device.runtime.reviewed_plans={'old':{'business':'inference'}}
         loop=SimpleNamespace(generation=1,history=[1],applied=[1],_commands=[1],_outstanding=1)
         self.owner.runner=SimpleNamespace(status='READY',loop=loop,outstanding=1)
-        workflow.select_model(rows[1]['model_id'])
+        self.prepare_model(workflow,model_id=rows[1]['model_id'])
         self.assertEqual(self.owner.pending,{})
         self.assertEqual(loop.history,[]);self.assertEqual(loop._commands,[]);self.assertIsNone(loop._outstanding)
         self.assertEqual(workflow.selected_model_id,rows[1]['model_id'])
         workflow.busy=True
-        with self.assertRaisesRegex(ValueError,'未结束'):workflow.select_model(rows[0]['model_id'])
+        with self.assertRaisesRegex(ValueError,'未结束'):self.prepare_model(workflow,model_id=rows[0]['model_id'])
         workflow.busy=False
         self.device.runtime.holder='collection';self.owner.runner.status='RUNNING'
         self.owner.pending={'collection':object()};self.device.runtime.reviewed_plans={'collection':{'business':'collection'}}
-        workflow.prepare_model(force=True)
+        self.prepare_model(workflow)
         self.assertEqual(set(self.owner.pending),{'collection'})
         self.assertEqual(set(self.device.runtime.reviewed_plans),{'collection'})
 
@@ -980,7 +981,7 @@ class InferenceWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'已变化'):self.workflow.action('inference_preview',{'seed':9})
         def interrupted(_,**kwargs):self.workflow.invalidate();return {'model':'discarded'}
         with patch.object(Model,'prepare',interrupted):
-            with self.assertRaisesRegex(ValueError,'已撤销'):self.workflow.prepare_model(seed=2)
+            with self.assertRaisesRegex(ValueError,'已撤销'):self.prepare_model(seed=2)
         self.assertIsNone(self.workflow.prepared)
 
     def test_business_missing_model_never_prepares_and_selection_has_one_operation(self):
@@ -990,17 +991,17 @@ class InferenceWorkflowTests(unittest.TestCase):
                 flow=self.make_workflow();self.addCleanup(flow.close)
                 before=list(Model.calls)
                 with self.assertRaisesRegex(ValueError,'先选择并准备模型'):
-                    flow.action('inference_prepare',{'seed':3})
+                    flow.bind_device()
                 with self.assertRaises(ValueError):flow.preview_episode()
                 self.assertEqual(Model.calls,before)
-                flow.model_prepare_operation=None
-                with self.assertRaisesRegex(ValueError,'运维 Operation'):flow.select_model(flow.selected_model_id)
+                self.assertFalse(hasattr(flow,'select_model'))
+                self.assertFalse(hasattr(flow,'prepare_model'))
                 self.assertEqual(Model.calls,before)
         self.device.environment='fake';flow=self.workflow
-        before=len(self.model_operations);flow.select_model(flow.selected_model_id)
+        before=len(self.model_operations);self.prepare_model(flow,model_id=flow.selected_model_id)
         self.assertEqual(len(self.model_operations),before+1)
         loads=sum(not ready for _,ready in Model.calls)
-        flow.select_model(flow.selected_model_id)
+        self.prepare_model(flow,model_id=flow.selected_model_id)
         self.assertEqual(len(self.model_operations),before+2)
         self.assertEqual(sum(not ready for _,ready in Model.calls),loads)
         with patch.object(flow,'snapshot',side_effect=AssertionError('environment status read business state')):

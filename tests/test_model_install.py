@@ -28,6 +28,10 @@ class InstallTests(unittest.TestCase):
             catalog_root=str(self.root/'catalog'), gpu_uuid='GPU-00000000-0000-0000-0000-000000000001',
             machine_id_sha256=hashlib.sha256(Path('/etc/machine-id').read_bytes()).hexdigest(),
             runtimes={name:dict(family=name, backend='torch', python=sys.executable)for name in ('wam','wam-mem')})
+        from robot_workbench import model_runtime
+        lock=self.root/'environment.json';install.write_json(lock,model_runtime.capture(sys.executable))
+        pin=dict(path=str(lock),sha256=hashlib.sha256(lock.read_bytes()).hexdigest())
+        for runtime in self.target['runtimes'].values():runtime['environment_lock']=pin
         self.downloads = []
 
     def release(self, family='wam', name='fixture', step=42):
@@ -71,6 +75,17 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(len(rows),10);self.assertTrue(all(r['selectable']for r in rows))
             self.assertEqual({r['manifest']['inference_options']['denoise_steps']for r in rows},set(range(1,11)))
             self.assertEqual(rows[0]['registry']['python'],sys.executable)
+            from robot_workbench import model_runtime
+            model_runtime.verify_registered(rows[0]['registry'])
+
+    def test_existing_catalog_runtime_lock_migration_is_repeatable(self):
+        release=self.release('wam-mem')
+        install.install_release(release,self.target,self.download)
+        profile=self.root/'target.json';install.write_json(profile,self.target)
+        first=install.lock_runtimes(profile);second=install.lock_runtimes(profile)
+        self.assertEqual(first,second)
+        self.assertEqual(first['models'],[release['model_id']])
+        self.assertTrue(all(r['selectable']for r in RegisteredCatalog(self.target['catalog_root']).rows()))
 
     def test_interrupted_transfer_never_publishes_and_retry_reuses_completed_files(self):
         release=self.release();failed=release['files'][2]['path']
@@ -99,6 +114,23 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.downloads,[])
         release['files'][0]['path']='../escape'
         with self.assertRaises(ValueError):install.install_release(release,self.target,self.download)
+
+    def test_runtime_drift_is_rejected_before_download(self):
+        release=self.release()
+        pin=self.target['runtimes']['wam']['environment_lock']
+        value=install.read_json(pin['path']);value['packages']['synthetic-new-dependency']='1.0'
+        install.write_json(pin['path'],value)
+        pin['sha256']=hashlib.sha256(Path(pin['path']).read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError,'version lock mismatch'):
+            install.install_release(release,self.target,self.download)
+        self.assertEqual(self.downloads,[])
+
+    def test_repeat_install_rejects_changed_interpreter_mapping(self):
+        release=self.release();install.install_release(release,self.target,self.download)
+        path=Path(self.target['catalog_root'])/release['model_id']/'torch/manifest.json'
+        registry=install.read_json(path);registry['python']='/different/declared-python';install.write_json(path,registry)
+        with self.assertRaisesRegex(ValueError,'runtime mapping differs'):
+            install.install_release(release,self.target,self.download)
 
     def test_large_weight_checks_never_read_the_weight_or_its_partial_file(self):
         row=dict(path='weight.pt',bytes=install.WEIGHT_BYTES+1,sha256=None,object='weight.pt')

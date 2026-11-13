@@ -83,12 +83,17 @@ class MixedTest(unittest.TestCase):
     def test_start_enqueues_once_and_waits_for_verified_readiness(self):
         config=dict(units=['robot-workbench-example.service'],url='http://127.0.0.1:18868')
         state=dict(health={'backend_reachable':True},target={'services':{'model':{'pid':5}}},model={'ready':False},operations={'prepare_model':{'allowed':True}},csrf='fixture',deployment={'sha256':'a'*64})
-        completed={'status':'succeeded','verification':{'ok':True}};ready=dict(state,model={'ready':True})
-        with patch('scripts.start_registered_workbench.subprocess.run')as run,patch('scripts.start_registered_workbench.http_json',side_effect=[state,{'workflow':{'manual_queue':{'available':True}}},{'job_id':'warm1'},{'status':'running'},completed,ready])as api,patch('scripts.start_registered_workbench.time.sleep'):
-            result=start(config);self.assertTrue(result['ui_ready']);self.assertEqual(result['model_status'],'ready');self.assertEqual(api.call_count,6);run.assert_called_once()
-        state['workflow']={'manual_queue':{'available':True}};state['active_job']='warm1';state['jobs']={'warm1':dict(job_id='warm1',request={'action':'prepare_model'})}
-        with patch('scripts.start_registered_workbench.subprocess.run'),patch('scripts.start_registered_workbench.http_json',side_effect=[state,state,completed,ready])as api:
-            self.assertTrue(start(config)['reused']);self.assertEqual(api.call_count,4)
+        ready=dict(state,model={'ready':True});calibration={'workflow':{'manual_queue':{'available':True}}}
+        with patch('scripts.start_registered_workbench.subprocess.run')as run,\
+                patch('scripts.start_registered_workbench.http_json',side_effect=[state,calibration,ready])as api,\
+                patch('scripts.start_registered_workbench.startup_operation',return_value={'job_id':'warm1'})as operation:
+            result=start(config);self.assertTrue(result['ui_ready']);self.assertEqual(result['model_status'],'ready')
+            self.assertEqual(api.call_count,3);run.assert_called_once()
+            operation.assert_called_once_with(config,'prepare_model',timeout=360,parameters={})
+        with patch('scripts.start_registered_workbench.subprocess.run'),\
+                patch('scripts.start_registered_workbench.http_json',side_effect=[ready,calibration])as api,\
+                patch('scripts.start_registered_workbench.startup_operation')as operation:
+            self.assertTrue(start(config)['reused']);self.assertEqual(api.call_count,2);operation.assert_not_called()
     def test_warmup_uses_original_size_and_http_service_no_robot(self):
         b=descriptor(REG);requests=[]
         class C:

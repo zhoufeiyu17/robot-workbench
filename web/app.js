@@ -112,7 +112,7 @@ export function actionPermission(state, action, options = {}) {
     if ((state.device?.environment === 'physical' || state.workflow.review.physical_clearance_required) && !options.clearance)
       return {allowed:false, reason:'请先勾选确认本条轨迹与现场净空'};
   }
-  if (['connect','release','recover','inference_select','inference_prepare'].includes(action))
+  if (['connect','release','recover'].includes(action))
     return {allowed:false,reason:'请通过统一服务运维执行此环境操作'};
   if(action==='inference_run'&&state.runtime?.connected!==true)
     return {allowed:false,reason:'设备控制未接入；请先完成接入 / 检查，Run 不会连接设备'};
@@ -1713,7 +1713,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     el('work-pane').dataset.business=context.business;
     el('task-panel').hidden=context.business==='research';el('business-outcomes').hidden=context.business==='research';
     setText('observation-title',context.business==='calibration'?'调姿预览与相机':context.business==='inference'?'推理实际观测与执行画面':context.business==='research'?'控制研究 · 目标姿态与观察相机':'实际观测与规划场景');
-    el('primary-action').hidden=['manual_execute','connect','handoff','release','recover'].includes(w.primary_action?.id)||context.business==='inference'&&['inference_prepare','inference_preview'].includes(w.primary_action?.id)||context.business==='collection'&&(!!w.collection?.actions||!!w.collection?.warmup||!!w.collection?.return_task||['prepare_collection','collection_prepare','return_cup'].includes(w.primary_action?.id));
+    el('primary-action').hidden=['manual_execute','connect','handoff','release','recover'].includes(w.primary_action?.id)||context.business==='inference'&&['prepare_model','inference_preview'].includes(w.primary_action?.id)||context.business==='collection'&&(!!w.collection?.actions||!!w.collection?.warmup||!!w.collection?.return_task||['prepare_collection','collection_prepare','return_cup'].includes(w.primary_action?.id));
     el('results-business').value=context.business;
     setText('device-name',s?.device?.label||s?.device?.id||'机器人工作台');
     setText('holder',BUSINESS[r.holder] || (r.holder ? String(r.holder) : '未分配 / 未知'));
@@ -1738,7 +1738,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     renderDetails('manual-execution-details',manualExecution?.details||[]);
     setText('task-title','当前任务 · '+BUSINESS[context.business]);setText('task-status',idleManualNotice?(manualNotice.status==='running'?'执行前检查':'检查失败'):statusText(w.status));
     setText('run-identity','Run：'+textValue(w.id));setText('stage-title',idleManualNotice?manualNotice.title:STAGE_LABELS[w.stage_id]||operatorText(w.title&&/[\u3400-\u9fff]/.test(w.title)?w.title:'等待任务状态'));setText('stage-id',w.stage_id||'—');
-    const actionName={generate_plan:'生成计划',collection_prepare:'准备数采环境',collection_plan:'观测与规划',return_cup:'检查场景恢复动作',execute:context.business==='inference'?'执行本轮120秒推理':'执行已审阅轨迹',inference_prepare:'加载与预热模型',inference_preview:'准备本轮推理审阅',manual_preview:'检查人工轨迹',fit_batch:'求解当前批次',plan_batch:'规划当前批次',preview_batch:'审阅当前批次'};
+    const actionName={generate_plan:'生成计划',collection_prepare:'准备数采环境',collection_plan:'观测与规划',return_cup:'检查场景恢复动作',execute:context.business==='inference'?'执行本轮120秒推理':'执行已审阅轨迹',prepare_model:'加载与预热模型',inference_preview:'准备本轮推理审阅',manual_preview:'检查人工轨迹',fit_batch:'求解当前批次',plan_batch:'规划当前批次',preview_batch:'审阅当前批次'};
     const workflowMessage=context.business==='collection'&&w.status==='failed'?w.failure?.message||w.message:w.message;
     const resolvedModelRequest=supersedingModelPreparation(s,environmentAccess?.state);
     const taskMessage=w.request?.status==='failed'&&!resolvedModelRequest?[workflowMessage,'本次请求失败：'+textValue(w.request.error)].filter(Boolean).join(' '):w.request?.status==='running'?'正在处理：'+(actionName[w.request.action]||'当前操作')+'。'+(workflowMessage||''):workflowMessage||'尚未取得当前任务回执。';
@@ -2380,7 +2380,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(action==='stop'&&[...pending.values()].some(p=>p.action==='stop'&&p.context===key()))return;
     let requestId;try{requestId=newRequestId(crypto);}catch(error){notice(error.message);return;}
     const body={environment:context.environment,business:context.business,request_id:requestId,...extra};
-    if(context.business==='inference'&&['inference_prepare','inference_preview','execute','inference_run'].includes(action))try{if(body.seed===undefined)body.seed=inferenceSeed();if(body.duration_s===undefined)body.duration_s=inferenceDuration();}catch(error){notice(error.message);return;}
+    if(context.business==='inference'&&['inference_preview','execute','inference_run'].includes(action))try{if(body.seed===undefined)body.seed=inferenceSeed();if(body.duration_s===undefined)body.duration_s=inferenceDuration();}catch(error){notice(error.message);return;}
     if(action==='return_cup'||action==='execute'&&activeReturnTask())try{body.offset_xy_mm=returnOffsets();}catch(error){notice(error.message);return;}
     if(action==='preview_batch'&&body.queue_revision===undefined)body.queue_revision=state?.workflow?.calibration_tools?.queue_revision;
     if(action==='fit_batch'&&body.batch_id===undefined)body.batch_id=state?.workflow?.calibration_tools?.fit_source_id;
@@ -2388,7 +2388,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     if(['execute','manual_execute'].includes(action)){body.review_id=state.workflow.review.id;body.physical_clearance=context.environment==='physical'||state.workflow.review.physical_clearance_required?options().clearance:true;}
     if(context.business==='collection'&&['generate_plan','collection_plan','execute'].includes(action))body.speed_scale=action==='execute'&&activeReturnTask()?(state.workflow.review?.speed_scale??returnTask().parent_speed_scale):Number(el('collection-speed').value)/100;
     const csrf=state.csrf,sequence=++requestSequence,requestContext=key(),requestInstance=serverInstance,controller=new AbortController();
-    if(state.workflow?.review?.id&&!(action==='collection_prepare'&&state.workflow.collection?.warmup?.status==='ready')&&['stop','cancel','handoff','release','execution_settings','control_policy','generate_plan','collection_prepare','collection_plan','inference_select','inference_prepare','inference_preview','inference_run','return_cup','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
+    if(state.workflow?.review?.id&&!(action==='collection_prepare'&&state.workflow.collection?.warmup?.status==='ready')&&['stop','cancel','handoff','release','execution_settings','control_policy','generate_plan','collection_prepare','collection_plan','inference_preview','inference_run','return_cup','manual_preview','manual_queue','manual_queue_preview','manual_execute','execute','recover','install',...CALIBRATION_TOOLS].includes(action))
       invalidatedReviews.add(key()+'/'+state.workflow.review.id);
     barrier();const at=generation;displayedRequest=sequence;pending.set(sequence,{action,context:requestContext,controller});
     if(['manual_preview','manual_queue_preview','return_cup'].includes(action))manualIntent={action,requestId,jobId:null,reviewId:null,context:requestContext,binding:manualBinding(),

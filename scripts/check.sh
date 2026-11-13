@@ -25,6 +25,7 @@ python tests/test_wam_mem.py
 python tests/test_wam_mem_source.py
 python tests/test_model_release.py
 python tests/test_model_install.py
+python tests/test_model_runtime.py
 python tests/test_docker_model_service.py
 python tests/test_environment_exit.py
 python tests/test_reclaim_control.py

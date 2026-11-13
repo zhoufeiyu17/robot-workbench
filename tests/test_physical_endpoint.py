@@ -169,7 +169,7 @@ class EndpointTests(unittest.TestCase):
         endpoint=self.configure();entered,release=threading.Event(),threading.Event()
         self.node['hold_response']=(entered,release);result=[]
         def call():
-            result.append(self.request('/device-physical/'+endpoint['route_id']+'/api/actions/inference_prepare',
+            result.append(self.request('/device-physical/'+endpoint['route_id']+'/api/actions/inference_refresh',
                 dict(environment='physical',business='inference',request_id='in-flight'),{'X-CSRF-Token':'physical-token'}))
         thread=threading.Thread(target=call);thread.start()
         try:

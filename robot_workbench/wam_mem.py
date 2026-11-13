@@ -45,7 +45,7 @@ def is_model_id(value):
 def validate_descriptor(value):
     fields={'schema','model_id','epoch','step','backend','artifacts','model_bundle_sha256','runtime','prompt',
         'inference_options','inference_capabilities','memory_protocol'}
-    if (not isinstance(value,dict)or set(value)!=fields or value['schema']!=SCHEMA
+    if (not isinstance(value,dict)or set(value) not in (fields,fields|{'training_execute_actions'}) or value['schema']!=SCHEMA
             or not is_model_id(value['model_id'])or value['backend']!='torch'or value['epoch']is not None
             or type(value['step'])is not int or value['step']<=0
             or int(value['model_id'].rsplit('-step',1)[1])!=value['step']
@@ -59,6 +59,10 @@ def validate_descriptor(value):
     if value['runtime']!={'adapter':'world_memory_policy.v1','python_abi':'cp312','adapter_sha256':_SOURCE_SHA256}:
         raise ValueError('WAM-MEM requires the registered Torch interface')
     wam.validate_inference_options(value['inference_options'],value['inference_capabilities'])
+    if 'training_execute_actions' in value:
+        steps=value['training_execute_actions']
+        if type(steps) is not int or not 1<=steps<=32:
+            raise ValueError('training execution length must fit the 32-step prediction')
     return deepcopy(value)
 
 
@@ -73,10 +77,18 @@ def descriptor(registry,*,denoise_steps=None):
     canonical=json.dumps(sorted(rows,key=lambda row:row['path']),sort_keys=True,separators=(',',':')).encode()
     if hashlib.sha256(canonical).hexdigest()!=registry.get('bundle_sha256'):
         raise ValueError('WAM-MEM artifact manifest identity differs')
+    training={}
+    config_rows=[row for row in rows if row['path']=='metadata/training-config.json']
+    if config_rows:
+        from .model_install import read_json,verify_file
+        path=Path(registry['root'])/'metadata/training-config.json'
+        if len(config_rows)!=1 or not verify_file(path,config_rows[0]):
+            raise ValueError('training configuration differs from the installed manifest')
+        training['training_execute_actions']=read_json(path)['data']['execute_actions']
     return validate_descriptor(dict(schema=SCHEMA,model_id=registry['model_id'],epoch=None,step=registry['step'],backend='torch',
         artifacts={k:artifact_identity(v)for k,v in pins.items()},model_bundle_sha256=registry['bundle_sha256'],prompt=registry['instruction'],
         runtime=dict(adapter='world_memory_policy.v1',python_abi='cp312',adapter_sha256=_SOURCE_SHA256),
-        memory_protocol=MEMORY_PROTOCOL,inference_options=options,inference_capabilities=deepcopy(capabilities)))
+        memory_protocol=MEMORY_PROTOCOL,inference_options=options,inference_capabilities=deepcopy(capabilities),**training))
 
 
 def variants(registry):
@@ -208,7 +220,8 @@ class PhaseMemory:
             source_time=self.last_time,origin_source_time=self.origin,
             executed_action_context=False,predictions_used_as_actions=0,
             action_context_reason='T01 materialized_next_observation training contract masks historical executed controls',
-            write_policy='shared_effective_samples_0_32_64',prediction_commits_memory=False)
+            write_policy='shared_effective_samples',
+            sampling_stride=getattr(getattr(self.policy.config,'data',None),'execute_actions',32),prediction_commits_memory=False)
 
     def infer(self,request):
         context=validate_phase(request['memory']);operation=request.get('memory_operation','infer')
@@ -285,7 +298,7 @@ class PhaseMemory:
             # and assignments belong to this request-local policy view only.
             query._context=lambda *args,**kwargs:cache
             query.observe(rgb,model_time)
-            prediction=query.act(self.instruction,state)['execute']
+            prediction=query.act(self.instruction,state)['actions']
             if hasattr(prediction,'detach'):prediction=prediction.detach().float().cpu().numpy()
             action=np.asarray(prediction,dtype=np.float32)
             if action.shape!=(32,14)or not np.isfinite(action).all():raise ValueError('WAM-MEM requires finite absolute32x14 output')
@@ -403,7 +416,8 @@ class MemorySession:
         self.lock=threading.RLock();self.io=threading.Lock();self.wake=threading.Event();self.stop=threading.Event()
         self.mode='HOLD';self.epoch=-1;self.generation=0;self.control_sequence=None
         self.control_event_gaps=0;self.last_control_gap=None
-        self.sampler=RealTrajectorySampler();self.pending=deque();self.offered=0;self.mode_events=0
+        self.sampling_stride=client.model_bundle.get('training_execute_actions',32)
+        self.sampler=RealTrajectorySampler(stride=self.sampling_stride);self.pending=deque();self.offered=0;self.mode_events=0
         self.start='continue';self.error=None;self.audit=None;self.last_manual=None
         self.thread=threading.Thread(target=self._work,name='wam-memory-observations',daemon=True);self.thread.start()
 
@@ -495,7 +509,7 @@ class MemorySession:
             with self.lock:
                 if self.error:raise ValueError('memory unavailable: '+self.error)
                 if start=='fresh':
-                    self.pending.clear();self.sampler=RealTrajectorySampler()
+                    self.pending.clear();self.sampler=RealTrajectorySampler(stride=self.sampling_stride)
             if start=='continue':self._drain()
             with self.lock:self.start=start
 
@@ -533,7 +547,7 @@ class MemorySession:
 
     def clear(self,request_id,epoch):
         with self.lock:
-            self.generation+=1;self.pending.clear();self.sampler=RealTrajectorySampler()
+            self.generation+=1;self.pending.clear();self.sampler=RealTrajectorySampler(stride=self.sampling_stride)
         with self.io:
             result=self.client.memory_clear(request_id,epoch=epoch,clock_domain=self.clock_domain)
             with self.lock:
@@ -586,9 +600,12 @@ def _load_policy(registry,paths):
     if payload.get('format')!='world_memory_policy'or payload.get('step')!=registry['step']:
         raise ValueError('final world-memory policy identity differs')
     cfg=from_policy_architecture(payload['architecture']);d=cfg.data
-    if (d.action_dim!=14 or d.state_dim!=14 or d.action_horizon!=32 or d.execute_actions!=32
+    if (d.action_dim!=14 or d.state_dim!=14 or d.action_horizon!=32
+            or type(d.execute_actions) is not int or not 1<=d.execute_actions<=d.action_horizon
             or d.relative_action_dims!=0 or list(d.views)!=['main','left','right']or d.image_size!=256):
         raise ValueError('unsupported temporal native14/camera/action contract')
+    declared=descriptor(registry).get('training_execute_actions',32)
+    if d.execute_actions!=declared:raise ValueError('checkpoint and training execution length differ')
     cfg.inference.denoising_steps=descriptor(registry)['inference_options']['denoise_steps']
     cfg.codec.checkpoint=str(paths['vae']);cfg.codec.phoenix_encoder=str(paths['phoenix_encoder'])
     cfg.codec.csvae_checkpoint=str(paths['csvae_checkpoint']);cfg.data.cache_dir=str(paths['text_index'].parent)

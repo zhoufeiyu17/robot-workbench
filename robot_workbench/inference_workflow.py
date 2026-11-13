@@ -96,7 +96,7 @@ class InferenceWorkflow:
     def __init__(self, device, output, *, camera_service, model_endpoint, model_token_file,
                  profile_provider, support_provider=None, event=None, model_id=MODEL_ID, model_bundle=None,
                  model_catalog_provider=None, catalog_root=None, disabled_grippers=(), recording_enabled=True,
-                 model_prepare_operation=None, reference_trajectory=None,prepared_reference_execution=False,reference_integral_feedback=False,
+                 reference_trajectory=None,prepared_reference_execution=False,reference_integral_feedback=False,
                  control_mapping_pending=None, task=None, rgb_source=None, action_chunks=False, normal_modes=None,
                  normal_initial_mode='MODEL',normal_finish_kind=None,normal_finish_policy=None,reference_planning=None,
                  finite_chunk_count=None,recording_backend=None,ros_plane=None,wam_stall_recovery_available=True):
@@ -180,7 +180,6 @@ class InferenceWorkflow:
         self.model_release_unconfirmed=False
         self.model_client=None
         self.model_identity = None
-        self.model_prepare_operation=model_prepare_operation
         self.model_operation=None
         self.model_status,self.model_error,self.model_observed_wall_ns='not_loaded',None,None
         self.model_service_fact=dict(status='unknown',loaded=None)
@@ -462,26 +461,6 @@ class InferenceWorkflow:
                 raise ValueError('模型目录身份已变化，请重新选择')
             descriptor=deepcopy(self.model_descriptors[row['bundle_digest']])
         return model_id,descriptor,row['bundle_digest']
-
-    def _request_model_prepare(self, parameters):
-        callback=self.model_prepare_operation
-        if callback is None:raise ValueError('模型准备需要运维 Operation；当前部署未接入统一运维入口')
-        result=callback(parameters)
-        with self.lock:self.model_operation=deepcopy(result)
-        return result
-
-    def select_model(self, model_id, expected_bundle_digest=None):
-        model_id,_,bundle_digest=self._model_selection(model_id,expected_bundle_digest)
-        return self._request_model_prepare(dict(model_id=model_id,expected_bundle_digest=bundle_digest))
-
-    def prepare_model(self, *, seed=None, force=False, expected_model_id=None):
-        """Compatibility entry: request the same visible management operation."""
-        if seed is not None:
-            if type(seed) is not int or not 0<=seed<2**32:raise ValueError('本轮需要有效 uint32 随机种子')
-            with self.lock:self.seed=seed
-        if expected_model_id is not None and expected_model_id!=self.selected_model_id:
-            raise ValueError('模型选择已变化，请核验原模型并显式选择')
-        return self._request_model_prepare(dict(model_id=self.selected_model_id,expected_bundle_digest=self.selected_bundle_digest))
 
     def environment_status(self):
         """Memory-only capability facts; never parse an episode/business snapshot."""
@@ -1163,10 +1142,6 @@ class InferenceWorkflow:
     def _support(self, now, feedback):
         with self.lock:return deepcopy(self.support_cache)
 
-    def _prepare(self, seed):
-        with self.lock:self.seed=seed
-        return self.bind_device()
-
     def _preview(self, seed, duration_s=120,reference_feedforward_sha256=None,*,wam_stall_recovery=False,recording_enabled=False):
         duration_s=episode_duration(duration_s)
         if type(recording_enabled)is not bool:raise ValueError('explicit recording selection required')
@@ -1701,25 +1676,21 @@ class InferenceWorkflow:
         if action=='select_result':return dict(allowed=True,reason=None)
         # The page asks every business about every action. Copying the full Run
         # for unrelated actions starves observation publication on this lock.
-        if action not in ('select_model','inference_select_model','cancel','inference_prepare','inference_preview','execute'):
+        if action not in ('cancel','inference_preview','execute'):
             return dict(allowed=False,reason='先准备模型并核对本轮审阅，或等待当前任务结束')
         if current is None:current=self.snapshot()
-        if action in ('select_model','inference_select_model'):
-            return dict(allowed=not current['busy'],reason='当前推理或数据处理尚未结束' if current['busy'] else None)
         if action=='cancel':return dict(allowed=current['busy'],reason=None if current['busy'] else '当前无进行中的推理')
-        allow=not current['busy'] and current['inference']['model_ready'] and (action=='inference_prepare' or action=='inference_preview' and self.prepared is not None and self.cache is not None or action=='execute' and self.status=='awaiting_review')
+        allow=not current['busy'] and current['inference']['model_ready'] and (action=='inference_preview' and self.prepared is not None and self.cache is not None or action=='execute' and self.status=='awaiting_review')
         return dict(allowed=bool(allow),reason=None if allow else self.cache_error if action=='inference_preview' and self.prepared else '先准备模型并核对本轮审阅，或等待当前任务结束')
 
     def action(self, action, body):
         if action in ('refresh_models','inference_refresh_models'):return self.refresh_models()
-        if action in ('select_model','inference_select_model'):
-            return self.select_model(body['model_id'],body.get('expected_bundle_digest'))
-        if action in ('inference_prepare','inference_preview'):
+        if action=='inference_preview':
             seed=body.get('seed',0)
             if type(seed) is not int or not 0<=seed<2**32:raise ValueError('本轮需要有效 uint32 随机种子')
             duration_s=episode_duration(body.get('duration_s',120))
             if self.device.runtime is None or self.device.runtime.holder!='inference':raise ValueError('请先连接设备并交接给推理业务')
-            return self._prepare(seed) if action=='inference_prepare' else self._preview(seed,duration_s,body.get('reference_feedforward_sha256'),
+            return self._preview(seed,duration_s,body.get('reference_feedforward_sha256'),
                 recording_enabled=body.get('recording_enabled',False))
         if action=='execute':
             return self.execute_review(body['token'],physical_clearance=body.get('physical_clearance') is True)
@@ -1862,7 +1833,7 @@ class InferenceWorkflow:
                 data='recording' if saving else (run['receipt']['artifact_status'] if run and run.get('receipt') else 'not_started')
             elif not run_recording:data='not_applicable';message+=' 本轮录制已关闭。'
             if evidence['error']:message+=' 原始推理证据写入失败：'+evidence['error']
-            primary='inference_prepare' if self.prepared is None else 'execute' if self.status=='awaiting_review' else 'inference_preview'
+            primary='prepare_model' if self.prepared is None else 'execute' if self.status=='awaiting_review' else 'inference_preview'
             ingress_closed=bool(run and(not run_recording or getattr(run.get('recorder'),'ingress_closed',False)))
             busy=self.busy or active or saving and not ingress_closed
             if saving and ingress_closed and not active:message='控制已保持，旧录像正在后台封装与导出；可准备下一轮。'
@@ -1876,7 +1847,7 @@ class InferenceWorkflow:
             control_ready=self._control_ready()
             duration_s=run['config'].get('execution_duration_s',run['config']['duration_s']) if run else self.duration_s
             return dict(id=run['id'] if run else 'inference-unstarted',status=status,busy=busy,stage_id=stage,title='推理工作区',message=message,
-                primary_action=dict(id=primary,label={'inference_prepare':'核对已准备模型与设备','inference_preview':'准备本轮推理审阅','execute':f'确认执行本轮 {duration_s:g} 秒推理'}[primary],allowed=primary_reason is None,reason=primary_reason),
+                primary_action=dict(id=primary,label={'prepare_model':'加载与预热模型','inference_preview':'准备本轮推理审阅','execute':f'确认执行本轮 {duration_s:g} 秒推理'}[primary],allowed=primary_reason is None,reason=primary_reason),
                 outcomes=dict(motion='running' if active else 'completed' if value.get('runner_status')=='READY' else status if run else 'not_started',
                     data=data,simulation='not_applicable',task='passed' if outcome.get('success') is True else 'failed' if outcome.get('success') is False else 'unknown'),
                 inference=dict(models=deepcopy(self.models),selected_model_id=self.selected_model_id,catalog_root=self.catalog_root,
