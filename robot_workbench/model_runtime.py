@@ -25,7 +25,7 @@ def snapshot():
 
 def capture(python):
     from rule_based_workbench.launch_environment import clean_environment
-    raw = subprocess.check_output([str(python), '-I', str(Path(__file__).resolve()), '--snapshot'],
+    raw = subprocess.check_output([str(python), '-B', str(Path(__file__).resolve()), '--snapshot'],
                                   env=clean_environment(), timeout=20)
     if len(raw) > 1024 * 1024:
         raise ValueError('runtime environment inventory exceeds limit')
