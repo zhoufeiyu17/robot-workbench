@@ -157,6 +157,11 @@ class CompleteNormalTests(unittest.TestCase):
         def completed():return [data for name,data in self.events if name=='inference_normal_model_segment_completed']
         self.until(lambda:len(completed())>=2)
         rows=completed();self.assertEqual(runner.mode,'MODEL');self.assertIsNone(runner.normal_job)
+        activity=runner.memory_sampling_activity(self.now,self.runtime.owner.epoch)
+        self.assertEqual(activity['schema'],'workbench.memory-activity.v2')
+        self.assertGreaterEqual(activity['model_steps'],30)
+        self.assertEqual(activity['manual_steps'],0)
+        self.assertAlmostEqual(activity['model_time_s'],activity['model_steps']/30.)
         self.assertFalse(getattr(runner,'normal_supply_exhausted',False))
         self.assertGreater(rows[1]['observation_source_s'],rows[0]['completed_source_s'])
         self.assertTrue(all(row['complete_source_steps']==15 for row in rows))
@@ -164,7 +169,14 @@ class CompleteNormalTests(unittest.TestCase):
         epoch=self.runtime.owner.epoch;self.request('MODEL')
         self.assertEqual(self.runtime.owner.epoch,epoch,'already-MODEL intent cannot restart the pipeline')
         request,_=self.request('HOLD',gate=True);self.completed(request)
+        frozen=runner.memory_clock.snapshot()
         count=len(self.requests);self.advance(80);self.assertEqual(len(self.requests),count)
+        self.assertEqual(runner.memory_sampling_activity(self.now,self.runtime.owner.epoch)['model_steps'],frozen['model_steps'])
+        request,_=self.request('TEACH',gate=True);self.completed(request)
+        self.advance(97)
+        activity=runner.memory_sampling_activity(self.now,self.runtime.owner.epoch)
+        self.assertEqual(activity['manual_steps'],32)
+        self.assertAlmostEqual(activity['model_time_s'],frozen['model_steps']/30.+.96)
 
     def test_stall_recovery_consumes_actual_complete_segment_feedback_and_resets_on_hold(self):
         from types import SimpleNamespace

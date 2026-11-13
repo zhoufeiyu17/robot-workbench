@@ -2541,13 +2541,18 @@ for(const change of ['steps','memory-steps','duration','denoise','memory-denoise
   const h=harness({business:'inference'}),value=oneRunSnapshot(),info=value.workflow.inference;
   const id='wam-mem-fixture-step1',digest='c'.repeat(64),caps={denoise_steps:{minimum:2,maximum:2,default:2}};
   info.models=[{id,backend:'torch',selectable:true,status:'ready',label:'WAM-MEM',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps}];
-  Object.assign(info,{selected_model_id:id,backend:'torch',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps,memory:{empty:false,observations:8,manual_observations:3},normal_mode:{mode:'HOLD'}});
+  Object.assign(info,{selected_model_id:id,backend:'torch',bundle_digest:digest,inference_options:{denoise_steps:2},inference_capabilities:caps,memory:{empty:false,observations:8,manual_observations:3},normal_mode:{mode:'HOLD'},
+    memory_policy:{model_submission_stride:16,manual_submission_stride:32,model_step_time_s:1/30,manual_step_time_s:.03}});
   Object.assign(info.model,{id,backend:'torch',bundle_digest:digest});
   value.runtime.allowed_operations.inference_memory_clear={allowed:true};
   h.app.start();h.reply(0,value);await settle();
   assert.equal(h.get('inference-recording-enabled').checked,false,'recording is opt-in even for a ready memory model');
   assert.equal(h.get('inference-run').hidden,true);assert.equal(h.get('inference-memory-'+choice).hidden,false);
   assert.match(h.get('inference-memory-status').textContent,/8.*3/);
+  assert.equal(h.get('inference-memory-policy').hidden,false);
+  assert.match(h.get('inference-memory-model-rule').textContent,/每 16.*1\/30/);
+  assert.match(h.get('inference-memory-manual-rule').textContent,/每 32.*30 ms.*0\.96/);
+  assert.doesNotMatch(html.match(/<section id="inference-memory-policy"[\s\S]*?<\/section>/)[0],/<(?:input|select|button)\b/,'memory rules are read-only');
   if(choice==='continue'){h.get('inference-recording-enabled').checked=true;h.get('inference-recording-enabled').events.change();}
   h.get('inference-memory-'+choice).events.click();await settle();
   assert.equal(h.get('inference-run-dialog').open,true);

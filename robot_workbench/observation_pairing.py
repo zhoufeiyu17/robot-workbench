@@ -36,17 +36,24 @@ class TimestampPairer:
         append(self.feedback,stamp,deepcopy(feedback))
         return self.select(self.frames,self.feedback)
 
-    def select(self, frames, feedback):
+    def select(self, frames, feedback, *, target_ns=None):
         """Use the same nearest-grid policy for already bounded source histories."""
         streams=[*frames.values(),feedback]
         if any(not stream for stream in streams):raise PairingPending('等待新鲜完整观测历史')
         first=max(stream[0][0]for stream in streams);last=min(stream[-1][0]for stream in streams)
         if self.origin_ns is None:self.origin_ns=((first+999_999)//1_000_000)*1_000_000
-        index=(last-self.origin_ns)*30//1_000_000_000+1
-        target=self.origin_ns+round(index*1000/30)*1_000_000
-        while target>last:
-            index-=1;target=self.origin_ns+round(index*1000/30)*1_000_000
-        if index<0 or target<first:raise PairingPending('等待各路共有的30Hz观测时刻')
+        index=None
+        if target_ns is None:
+            index=(last-self.origin_ns)*30//1_000_000_000+1
+            target=self.origin_ns+round(index*1000/30)*1_000_000
+            while target>last:
+                index-=1;target=self.origin_ns+round(index*1000/30)*1_000_000
+            if index<0 or target<first:raise PairingPending('等待各路共有的30Hz观测时刻')
+        else:
+            if type(target_ns)is not int or target_ns<0:raise ValueError('nonnegative explicit node timestamp required')
+            target=target_ns
+            if target<first:raise ValueError('explicit memory observation target expired from source history')
+            if target>last:raise PairingPending('waiting for real samples surrounding the explicit memory node')
         def nearest(stream):return min(stream,key=lambda row:(abs(row[0]-target),row[0]))
         selected={role:nearest(stream)for role,stream in frames.items()}
         robot_stamp,robot=nearest(feedback)
@@ -57,7 +64,7 @@ class TimestampPairer:
                 observed=errors[role]/1e9,source_time=when/1e9,checked_time=checked),'pairing'))
         decisions.append(self.guard.evaluate(dict(rule_id='G06',signal_id='paired_state',observed=(robot_stamp-target)/1e9,
             source_time=robot_stamp/1e9,checked_time=checked),'pairing'))
-        diagnostic=dict(policy='common_30Hz_grid_nearest_ties_earlier',target_wall_ns=target,
+        diagnostic=dict(policy=('common_30Hz_grid_nearest_ties_earlier'if target_ns is None else'explicit_node_nearest_ties_earlier'),target_wall_ns=target,
             origin_wall_ns=self.origin_ns,grid_index=index,camera_error_ns=errors,
             feedback_error_ns=robot_stamp-target,
             camera_span_ns=max(row[0]for row in selected.values())-min(row[0]for row in selected.values()),

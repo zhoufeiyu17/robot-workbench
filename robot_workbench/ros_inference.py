@@ -141,7 +141,8 @@ class RosModelWorker:
                 preprocessing_json=json_text(input_transforms(request['observation']['images'],images)),
                 metadata_json=json_text(dict(binding=self.binding,seed=0,task=self.binding['task'],
                     model_state_dtype=str(np.asarray(state).dtype),applied_history_model14=[],
-                    operation='memory_observe',memory=request['memory'],memory_sample=request.get('memory_sample')))))
+                    operation='memory_observe',memory=request['memory'],memory_context=request['memory_context'],
+                    memory_sample=request.get('memory_sample')))))
             result=call()
             if np.asarray(result.get('action14',[])).size:raise ValueError('manual memory update returned an action')
             return result

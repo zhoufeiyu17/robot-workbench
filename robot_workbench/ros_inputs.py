@@ -49,9 +49,13 @@ def referenced_observation(message, sources, feedback, *, frames=None, state_to_
         identities[role]=dict(serial=source['metadata'].get('serial'),capture_instance_id=ref.source_instance_id,
             frame_number=ref.sequence,source_time_ns=ref.source_time_ns,source_clock_id=ref.source_clock_id)
         if ref.source_clock_id=='host_wall':identities[role]['host_receive_ns']=ref.source_time_ns
-    value=dict(source_time=message.source_time_ns/1e9,
+    value=dict(source_time=message.source_time_ns/1e9,run_id=message.run_id,
+        state_reference=StreamRef.from_message(message.state).__dict__,
         device_state14=state_to_device(feedback) if state_to_device else feedback['qpos'],
         frame_ids=identities,ros_observation=message)
+    if 'memory_sampling'in feedback:
+        value.update(memory_sampling=deepcopy(feedback['memory_sampling']),
+            feedback_sample_time_s=message.state.source_time_ns/1e9)
     if frames is not None:
         import numpy as np
         if set(frames)!=set(identities):raise ValueError('selected frame roles differ')
@@ -376,7 +380,7 @@ class RosInputs:
         if ref.stream_id not in self.caches: raise ValueError('unbound ROS source reference')
         return self.caches[ref.stream_id].get(ref, timeout=timeout)
 
-    def paired(self, frame_streams, pairer, *, state_stream='state'):
+    def paired(self, frame_streams, pairer, *, state_stream='state',target_ns=None):
         """Select directly from the original histories, independent of model family."""
         states=self.caches[state_stream].history()
         if not states:raise LookupError('ROS state has not arrived')
@@ -391,7 +395,7 @@ class RosInputs:
                 else:raise ValueError('camera/state clocks lack a declared mapping')
                 if stamp>=cutoff:samples.append((stamp,value))
             histories[role]=samples
-        selected,state,pairing=pairer.select(histories,[(ref.source_time_ns,value)for ref,value in states if ref.source_time_ns>=cutoff])
+        selected,state,pairing=pairer.select(histories,[(ref.source_time_ns,value)for ref,value in states if ref.source_time_ns>=cutoff],target_ns=target_ns)
         pairing['clock_id']=latest.source_clock_id
         pairing['target_source_ns']=pairing.pop('target_wall_ns')
         pairing['origin_source_ns']=pairing.pop('origin_wall_ns')

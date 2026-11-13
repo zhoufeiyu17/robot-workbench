@@ -57,24 +57,26 @@ class FrozenPolicyParity(unittest.TestCase):
             value=dict(request_id=f'{operation}-{mode}-{index}',seed=17,applied_history=[],
                 memory=dict(protocol=memory.MEMORY_PROTOCOL,session_id='oracle',clock_domain='source',
                             epoch=1,start='continue',revision=0),
-                observation=dict(source_time=stamp,model_state14=np.full(14,index*.001,np.float32),
+                memory_context=dict(revision=candidate.context_revision,
+                    time_s=steps*.03+(index-steps)/30. if index>=steps else index/30.),
+                observation=dict(source_time=stamp,state_reference=dict(stream_id='state',source_instance_id='oracle',
+                    source_clock_id='source',source_time_ns=round(stamp*1e9),sequence=index),model_state14=np.full(14,index*.001,np.float32),
                     images={name:np.full((64,64,3),30+index%180,np.uint8)for name in memory.wam.CAMS}))
             if operation=='observe':
                 value['memory_operation']='observe'
-                value['memory_sample']=dict(states14=[],actions14=[],state_times=[],action_times=[],mode=mode,
-                    effective_index=index,action_semantics='materialized_next_observation',valid_actions=0,
-                    executed_action_condition=False)
+                value['memory_sample']=memory.observation_sample('TEACH'if mode=='TEACH'else'MODEL',index,value['memory_context']['time_s'],stamp)
             return value
 
         with torch.no_grad():
             for index in (0,steps,steps*2):
                 current=request(index)
                 rgb={role:current['observation']['images'][name]for role,name in zip(('main','left','right'),memory.wam.CAMS)}
-                stamp=current['observation']['source_time']-100.
+                stamp=current['memory_context']['time_s']
                 original.observe(rgb,stamp)
                 torch.manual_seed(current['seed']+candidate.calls)
                 expected=original.act('fixture',current['observation']['model_state14'])['actions'].numpy()
-                if index:candidate.infer(request(index,'observe','TEACH'if index==steps else'MODEL_EXECUTING'))
+                candidate.infer(request(index,'observe','TEACH'if index==steps else'MODEL_EXECUTING'))
+                current['memory_context']['revision']=candidate.context_revision
                 result=candidate.infer(current)
                 np.testing.assert_array_equal(result['action14'],expected)
                 torch.testing.assert_close(policy.memory,original.memory,rtol=0,atol=0)
@@ -84,9 +86,21 @@ class FrozenPolicyParity(unittest.TestCase):
                 torch.testing.assert_close(policy.memory,before,rtol=0,atol=0)
                 torch.testing.assert_close(policy.first_frame,anchor,rtol=0,atol=0)
                 self.assertEqual(policy.times,times)
+                fresh=request(index)
+                fresh['request_id']=f'fresh-same-logical-time-{index}'
+                fresh['observation']['source_time']+=.1
+                fresh['observation']['state_reference']['source_time_ns']+=100000000
+                fresh['observation']['model_state14']+=.001
+                for image in fresh['observation']['images'].values():image[:]+=1
+                answer=candidate.infer(fresh)
+                self.assertEqual(answer['action14'].shape,(32,14))
+                self.assertEqual(answer['audit']['model_time_s'],stamp)
+                torch.testing.assert_close(policy.memory,before,rtol=0,atol=0)
+                torch.testing.assert_close(policy.first_frame,anchor,rtol=0,atol=0)
+                self.assertEqual(policy.times,times)
         self.assertEqual(candidate.observations,3)
         self.assertEqual(candidate.manual_observations,1)
-        self.assertEqual(candidate.calls,6)
+        self.assertEqual(candidate.calls,9)
         self.assertFalse(torch.cuda.is_initialized())
 
 

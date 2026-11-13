@@ -28,6 +28,7 @@ class RosModelTests(unittest.TestCase):
         for row in self.sources:
             if row['kind']=='image':row['metadata'].update(width=640,height=480)
         pubs={r['stream_id']:source.publisher(r['topic'],Image if r['kind']=='image'else source.types.RobotState)for r in self.sources}
+        self.pubs=pubs
         self.inputs=RosInputs(infer,self.sources);self.record_inputs=RosInputs(record,self.sources)
         self.used=[];self.results=[];record.subscribe('model/inputs',record.types.ModelInput,self.used.append)
         record.subscribe('model/results',record.types.ModelResult,self.results.append)
@@ -93,6 +94,76 @@ class RosModelTests(unittest.TestCase):
         self.wait(lambda:len(self.used)==1 and len(self.results)==1)
         self.assertEqual(self.results[0].error,'cpu model failure')
         reconstruct_input(self.used[0],self.record_inputs)
+
+    def test_explicit_memory_nodes_keep_original_ros_inputs_and_record_context(self):
+        import json
+        from tempfile import TemporaryDirectory
+        from robot_workbench import wam_mem as mem
+        from robot_workbench.inference_transport import ModelService,RemoteBaseClient,ModelDomainAdapter,serve_model
+        from robot_workbench.ros_inputs import referenced_observation
+        from robot_workbench.observation_pairing import TimestampPairer
+        from test_wam_mem import Worker
+        from sensor_msgs.msg import Image
+        worker=Worker();service=ModelService(worker);flow=pin=None
+        with TemporaryDirectory()as directory:
+            token=Path(directory)/'token';token.write_text('fixture-secret-'+40*'x')
+            server=serve_model(service,token_file=token,port=0)
+            thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+            try:
+                base=RemoteBaseClient('http://127.0.0.1:'+str(server.server_port),token_file=token,
+                    adapter=ModelDomainAdapter(),conversion_identity={'scope':'cpu-only'},
+                    model_id=worker.model_id,model_bundle=worker.bundle)
+                base.prepare();pin=base.pin('ros-memory',auto_renew=False)
+                streams=dict(zip(mem.wam.CAMS,('head','left','right')))
+                self.worker.binding.update(model_binding=pin.model_binding,action_contract=pin.action_contract,
+                    conversion_id=pin.conversion_id,session_id=pin.session_id)
+                origin=self.observation.source_time_ns/1e9
+                pairer=TimestampPairer()
+                def selected(stamp,epoch,run_id=None):
+                    frames,state,source_time,pairing=self.inputs.paired(streams,pairer,target_ns=round(stamp*1e9))
+                    message=self.inputs.observation(frames,state,run_id='run',epoch=epoch,
+                        model_io_digest=pin.conversion_id,source_time_ns=source_time,pairing=pairing)
+                    feedback=self.inputs.resolve(state)
+                    value=referenced_observation(message,self.inputs.sources,feedback)
+                    return dict(value,run_id='run',model_state14=feedback['qpos'])
+                def resolve(value):
+                    _,frames=self.inputs.resolve_observation(value['ros_observation'],timeout=.2)
+                    return dict(value,images={role:np.frombuffer(row['rgb'],np.uint8).reshape(row['height'],row['width'],3)
+                        for role,row in frames.items()})
+                flow=mem.MemorySession(pin,ModelDomainAdapter(),'simulation',select=selected,resolve=resolve,
+                    record=lambda request,prepared,call:self.worker.memory_observation(request,prepared,call))
+                clock=mem.LogicalMemoryClock()
+                first=selected(origin,1)
+                first['memory_sampling']=dict(schema='workbench.memory-activity.v2',run_id='run',phase='WAIT',**clock.snapshot())
+                answer=flow.infer(dict(request_id='initial',seed=1,run_id='run',epoch=1,clock_domain='simulation',
+                    valid_until_source_time=origin+10.,observation=resolve(first),applied_history=np.empty((0,14))))
+                self.assertEqual(answer['audit']['memory']['observations'],1)
+                stamp_ns=round((origin+.96)*1e9)
+                for role in('head','left','right'):
+                    message=Image(height=480,width=640,encoding='rgb8',step=1920,data=bytes([9,6,3])*(640*480))
+                    message.header.stamp.sec=stamp_ns//10**9;message.header.stamp.nanosec=stamp_ns%10**9
+                    self.pubs[role].publish(message)
+                ref=StreamRef('state','cpu_source','simulation',stamp_ns,2)
+                self.pubs['state'].publish(self.nodes[0].types.RobotState(reference=ref.message(),
+                    positions=[.2]*14,velocities=[0.]*14,metadata_json='{}'))
+                self.wait(lambda:all(cache.history()[-1][0].source_time_ns==stamp_ns for cache in self.inputs.caches.values()))
+                clock.set_mode('TEACH',origin);clock.advance(origin+.96)
+                value=selected(origin+.96,2)
+                value['memory_sampling']=dict(schema='workbench.memory-activity.v2',run_id='run',phase='TEACH',**clock.snapshot())
+                flow.offer(value,2)
+                self.wait(lambda:worker.memory.observations==2 or flow.error is not None)
+                self.assertIsNone(flow.error);self.assertEqual(worker.memory.calls,1)
+                self.assertEqual(worker.memory.manual_observations,1)
+                self.wait(lambda:len(self.used)==2 and len(self.results)==2)
+                metadata=json.loads(self.used[-1].metadata_json)
+                self.assertEqual(metadata['memory_sample']['node']['kind'],'TEACH')
+                self.assertEqual(metadata['memory_sample']['node']['step'],32)
+                self.assertEqual(metadata['memory_context'],dict(revision=1,time_s=.96))
+                self.assertEqual(self.results[-1].rows,0);reconstruct_input(self.used[-1],self.record_inputs)
+            finally:
+                if flow:flow.close()
+                if pin:pin.close()
+                server.shutdown();server.server_close();thread.join(2)
 
     def test_cancelled_result_cannot_be_applied(self):
         self.block=threading.Event();errors=[]

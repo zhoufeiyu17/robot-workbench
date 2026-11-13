@@ -909,7 +909,7 @@ class InferenceWorkflow:
             for role,camera in CAMERAS.items():
                 if sources[camera]['metadata'].get('serial')!=binding['camera_serials'][role]:
                     raise ValueError('ROS camera serial differs from the installed binding')
-            if model_family(self.selected_model_id)=='wam-mem' and sources['state']['metadata'].get('memory_sampling_schema')!='workbench.memory-activity.v1':
+            if model_family(self.selected_model_id)=='wam-mem' and sources['state']['metadata'].get('memory_sampling_schema')!='workbench.memory-activity.v2':
                 raise ValueError('WAM-MEM requires current Owner real-memory activity protocol')
             inputs=RosInputs(node,rows)
             state_cache=inputs.caches['state']
@@ -980,7 +980,7 @@ class InferenceWorkflow:
                 images={role:np.frombuffer(frame['rgb'],dtype=np.uint8).reshape(frame['height'],frame['width'],3)
                     for role,frame in frames.items()}
                 return dict(observation,images=images)
-            client.memory_flow=MemorySession(client,adapter,self.ros_inputs.sources['state']['source_clock_id'],resolve=resolve_memory,
+            client.memory_flow=MemorySession(client,adapter,self.ros_inputs.sources['state']['source_clock_id'],resolve=resolve_memory,select=self._memory_observation,
                 record=lambda request,prepared,call:self.ros_worker.memory_observation(request,prepared,call))
         binding=prepared.get('action_chunk_binding')
         if binding is None:raise ValueError('ROS model requests require the pinned action chunk binding')
@@ -1024,6 +1024,28 @@ class InferenceWorkflow:
         pedal=getattr(self,'operator_pedal_source',None)
         if pedal is not None:sources.append(pedal)
         return [capture_source(row,namespace=self.ros_plane['namespace'],domain_id=self.ros_plane['domain_id'])for row in sources]
+
+    def _memory_observation(self,target_source_time,epoch,run_id):
+        from .ros_inputs import referenced_observation
+        from .inference_owner import validate_gripper_feedback
+        prepared=self.prepared;runtime=self.device.runtime
+        frames,state,stamp,pairing=self.ros_inputs.paired(
+            {camera+'_rgb':camera for camera in CAMERAS.values()},self.observation_pairer,
+            target_ns=round(target_source_time*1e9))
+        feedback=self.ros_inputs.resolve(state)
+        with self.lock:run=self.current
+        if (run is None or run['id']!=run_id or runtime is None
+                or feedback.get('runtime_nonce')!=runtime.nonce or feedback['command_epoch']>epoch):
+            raise ValueError('explicit memory observation belongs to a retired Owner or Run')
+        validate_gripper_feedback(tuple(prepared['disabled_grippers']),tuple(self.disabled_grippers),feedback)
+        message=self.ros_inputs.observation(frames,state,run_id=run['id'],epoch=feedback['command_epoch'],
+            model_io_digest=self.client.conversion_id,source_time_ns=stamp,pairing=pairing)
+        value=referenced_observation(message,self.ros_inputs.sources,feedback,state_to_device=lambda raw:device_state(
+            raw['qpos'],disabled_grippers=self.disabled_grippers,
+            right_gripper_device_mm=prepared['profile']['gripper']['max_opening_mm']))
+        captures={name:row['capture_instance_id']for name,row in value['frame_ids'].items()}
+        if captures!=prepared.get('capture_instances'):raise ValueError('memory camera source changed; rebind required')
+        return dict(value,run_id=run['id'])
 
     def _refresh_ros_observation(self,prepared,generation):
         from .ros_inputs import referenced_observation,observation_times
@@ -1845,6 +1867,11 @@ class InferenceWorkflow:
                 model_gate['reason'] if not model_ready else
                 self.cache_error or '等待新鲜三相机观测' if primary=='inference_preview' and self.cache is None else None)
             control_ready=self._control_ready()
+            memory_policy=None
+            if model_family(self.selected_model_id)=='wam-mem':
+                from .wam_mem import sampling_policy,MANUAL_SUBMISSION_STRIDE
+                flow=getattr(self.client,'memory_flow',None)
+                memory_policy=sampling_policy(self.model_bundle or{},getattr(flow,'manual_stride',MANUAL_SUBMISSION_STRIDE))
             duration_s=run['config'].get('execution_duration_s',run['config']['duration_s']) if run else self.duration_s
             return dict(id=run['id'] if run else 'inference-unstarted',status=status,busy=busy,stage_id=stage,title='推理工作区',message=message,
                 primary_action=dict(id=primary,label={'prepare_model':'加载与预热模型','inference_preview':'准备本轮推理审阅','execute':f'确认执行本轮 {duration_s:g} 秒推理'}[primary],allowed=primary_reason is None,reason=primary_reason),
@@ -1861,6 +1888,7 @@ class InferenceWorkflow:
                     catalog_error=self.catalog_error,bundle_digest=self.selected_bundle_digest,generation=self.generation,
                     model_ready=model_ready,control_ready=control_ready,recording_enabled=run_recording,
                     memory=(self.client.memory_flow.snapshot()if getattr(self.client,'memory_flow',None)is not None else None),
+                    memory_policy=memory_policy,
                     recording_backend=self.recording_backend,
                     recording_ingress_closed=ingress_closed,
                     background_recordings=[dict(run_id=identity,ingress_closed=getattr(capture,'ingress_closed',False),

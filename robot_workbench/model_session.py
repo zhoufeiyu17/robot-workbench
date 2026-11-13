@@ -196,7 +196,7 @@ class PinnedModelService:
         finally:
             with self._gate:self._mutating=False
 
-    def infer(self,payload,*,memory_only=False):
+    def infer(self,payload,*,memory_only=False,memory_kind=None):
         from .inference_transport import CAMS,decode_packet,encode_packet
         model_id=self.service.model_id
         metadata,arrays=decode_packet(payload,{'model_state14','model_history',*CAMS},model_id)
@@ -228,7 +228,8 @@ class PinnedModelService:
                     # Reacquiring an expired logical session starts new memory.
                     metadata['memory']=dict(metadata['memory'],session_id=hashlib.sha256(token.encode()).hexdigest())
                 payload=encode_packet(metadata,arrays)
-            result=self.service.infer(payload,memory_only=True)if memory_only else self.service.infer(payload)
+            result=(self.service.infer(payload,memory_only=True,memory_kind=memory_kind)
+                    if memory_only else self.service.infer(payload))
             if token:
                 with self._gate:
                     self._check(token)
@@ -271,6 +272,7 @@ class PinnedModelClient:
         self.token=None;self.auto_renew=auto_renew;self.error=None;self.ttl=0.;self.renewed_at=0.
         self.model_binding=None;self.action_contract=None
         self.memory_revision=0;self.memory_flow=None;self.memory_clears={}
+        self.memory_context_revision=0;self.memory_time_s=0.
         self._stop=threading.Event();self._thread=None
 
     def __getattr__(self,name):return getattr(self.client,name)
@@ -343,7 +345,26 @@ class PinnedModelClient:
         if reply.get('request_id')!=wire_id:raise ValueError('model result identity mismatch')
         result=dict(_redact(reply,token),request_id=original)
         if isinstance(result.get('audit'),dict):result['audit']['session_guard']=_redact(deepcopy(self.lease_decision),token)
+        if memory_only:
+            memory=result['audit']['memory']
+            if memory['context_revision']>self.memory_context_revision:
+                self.memory_context_revision=memory['context_revision'];self.memory_time_s=memory['model_time_s']
         return result
+
+    def observe_model_node(self,request,*,step,model_time_s,target_source_time,epoch,clock_domain,prepared_input=None):
+        return self._observe_node(request,'MODEL',step,model_time_s,target_source_time,epoch,clock_domain,prepared_input)
+
+    def observe_manual_node(self,request,*,step,model_time_s,target_source_time,epoch,clock_domain,prepared_input=None):
+        return self._observe_node(request,'TEACH',step,model_time_s,target_source_time,epoch,clock_domain,prepared_input)
+
+    def _observe_node(self,request,kind,step,model_time_s,target_source_time,epoch,clock_domain,prepared_input):
+        from .wam_mem import MEMORY_PROTOCOL,observation_sample
+        value=deepcopy(request)
+        value['memory_sample']=observation_sample(kind,step,model_time_s,target_source_time)
+        value['memory_context']=dict(revision=self.memory_context_revision,time_s=model_time_s)
+        value['memory']=dict(protocol=MEMORY_PROTOCOL,session_id=self.session_id,epoch=epoch,
+            clock_domain=clock_domain,start='continue',revision=self.memory_revision)
+        return self.infer(value,prepared_input=prepared_input,memory_only=True)
 
     def memory_clear(self,request_id,*,epoch,clock_domain):
         if not self.healthy():raise self._unhealthy_error('model session is not healthy')
@@ -355,6 +376,7 @@ class PinnedModelClient:
             request_id=request_id,epoch=epoch,clock_domain=clock_domain,revision=self.memory_revision),timeout=120)
         if result.get('request_id')!=request_id:raise ValueError('memory clear request differs')
         self.memory_revision=result['audit']['memory']['revision']
+        self.memory_context_revision=0;self.memory_time_s=0.
         self.memory_clears[request_id]=((epoch,clock_domain),deepcopy(result))
         while len(self.memory_clears)>32:self.memory_clears.pop(next(iter(self.memory_clears)))
         return result
@@ -389,8 +411,10 @@ class PinnedModelClient:
         request=deepcopy(request);model_binding=deepcopy(self.model_binding)
         if model_family(self.client.model_id)=='wam-mem':
             from .wam_mem import MEMORY_PROTOCOL
+            if request.get('memory_start','continue')!='continue':raise ValueError('use explicit memory clear before a fresh start')
             request['memory']=dict(protocol=MEMORY_PROTOCOL,session_id=self.session_id,epoch=epoch,
-                clock_domain=clock_domain,start=request.get('memory_start','fresh'),revision=self.memory_revision)
+                clock_domain=clock_domain,start='continue',revision=self.memory_revision)
+            request.setdefault('memory_context',dict(revision=self.memory_context_revision,time_s=self.memory_time_s))
         observed=request['observation']['source_time']
         if (type(observed)not in(int,float)or not math.isfinite(observed)
                 or type(valid_until_source_time)not in(int,float)or not math.isfinite(valid_until_source_time)

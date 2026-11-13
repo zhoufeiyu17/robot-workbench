@@ -21,6 +21,8 @@ class MemoryActivityTests(unittest.TestCase):
         runner.normal_config={'enabled':True}
         runner.status='RUNNING';runner.mode='MODEL';runner.owner=NS(epoch=7)
         runner.execution_instance_id='sample-run';runner.normal_job=None
+        from robot_workbench.wam_mem import LogicalMemoryClock
+        runner.memory_clock=LogicalMemoryClock()
         runner.normal_segment=dict(start_source_s=10.,end_source_s=11.)
         phase=lambda stamp:runner.memory_sampling_activity(stamp,7)['phase']
         self.assertEqual(phase(9.99),'WAIT')

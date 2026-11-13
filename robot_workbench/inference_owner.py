@@ -437,6 +437,9 @@ class InferenceRunner:
         self.normal_single_segment=bool(self.normal_planned and self.normal_config['recording_required']and self.config['duration_s']==.5)
         self.normal_observation_floor=None
         self.normal_segment=None
+        from .wam_mem import LogicalMemoryClock
+        self.memory_clock=getattr(owner,'_inference_memory_clock',None)or LogicalMemoryClock()
+        owner._inference_memory_clock=self.memory_clock
         self.pending_planning_update=None
         self.mode='INITIALIZING'if self.normal_config else'MODEL'
         self.mode_receipts={};self._mode_payloads={};self.normal_job=None
@@ -661,6 +664,7 @@ class InferenceRunner:
         threading.Thread(target=lambda:self.data_queue.put(('_finish', value)), daemon=True).start()
 
     def revoke(self, reason='owner_invalidated', *, finish_data=True):
+        self.memory_clock.set_mode('HOLD',self.owner.control_time())
         if self.finite_chunk_count and self.finite_stage not in('completed','failed'):
             self._finite_freeze_elapsed();self.finite_stage='stopped'
         if self.initialization is not None and self.started is None and self.status!='FAULT':
@@ -944,6 +948,7 @@ class InferenceRunner:
         job=self.normal_job
         if not job or job['request']!=request:raise ValueError('normal mode queued identity changed')
         output=self._normal_output();now=self.owner.control_time()
+        self.memory_clock.set_mode('HOLD',now)
         if self._guard_decision('G24',dict(brake_duration_s=self.normal_config['brake_duration_s'],
                 gain_transition_s=self.normal_config['gain_transition_s']),feedback['sample_time_s'],now,'normal_mode_profile')['verdict']=='reject':
             raise ValueError('G24: normal transition differs from the bound profile')
@@ -1029,6 +1034,7 @@ class InferenceRunner:
 
     def _complete_mode(self, mode, feedback, output):
         job=self.normal_job;request=job['request'];self.mode=mode
+        self.memory_clock.set_mode(mode,feedback['sample_time_s'])
         row=self.mode_receipts[request['request_id']]
         row.update(status='completed',stage='mode_completed',completed=True,mode=mode,
             command_epoch=self.owner.epoch,completed_source_s=feedback['sample_time_s'],
@@ -1068,6 +1074,7 @@ class InferenceRunner:
             observation_source_s=self._accepted_chunk_source_time,status='executing',complete_source_steps=0,
             planning_velocity_limit_rad_s=reference.metadata['planning_policy']['velocity_limit_rad_s'],
             planning_jaw_velocity_limit_mm_s=reference.metadata['planning_policy']['jaw_velocity_limit_mm_s'])
+        self.memory_clock.start_segment(self.normal_segment,self.owner.control_time())
         self._emit('normal_model_segment_started',deepcopy(self.normal_segment))
         return True
 
@@ -1082,7 +1089,9 @@ class InferenceRunner:
                 segment = self.normal_segment
                 if self.normal_job is None and segment and segment['start_source_s'] <= sample_time < segment['end_source_s']:
                     phase = 'MODEL_EXECUTING'
-        return dict(schema='workbench.memory-activity.v1', run_id=self.execution_instance_id, phase=phase)
+        if self.status=='RUNNING'and sample_epoch==self.owner.epoch:self.memory_clock.advance(sample_time)
+        return dict(schema='workbench.memory-activity.v2',run_id=self.execution_instance_id,phase=phase,
+                    **self.memory_clock.snapshot())
 
     def _tick_normal_segment(self,now,feedback):
         """Synchronous complete chunks keep MODEL/Raw open until intent or budget."""
@@ -2100,6 +2109,7 @@ class InferenceRunner:
                 self._submit(command, feedback)
             return self.status
         except Exception as exc:
+            self.memory_clock.set_mode('HOLD',self.owner.control_time())
             if self.owner.cancel_requested_reference(exc):
                 self.revoke('operator stop/release');return self.status
             if self.normal_job:self.reject_mode(self.normal_job['request']['request_id'],str(exc))

@@ -834,7 +834,7 @@ class Runtime:
                 classify = getattr(runner, 'memory_sampling_activity', None)
                 activity = (classify(fields['raw']['sample_time_s'], fields['sample_epoch'])
                             if callable(classify) else
-                            dict(schema='workbench.memory-activity.v1', run_id=None, phase='HOLD'))
+                            dict(schema='workbench.memory-activity.v2', run_id=None, phase='HOLD'))
                 self.ros_publisher.publish_state(dict(fields['raw'],source_call_id=fields.get('call_id'),
                     runtime_nonce=self.nonce,command_epoch=fields['sample_epoch'],memory_sampling=activity))
                 return

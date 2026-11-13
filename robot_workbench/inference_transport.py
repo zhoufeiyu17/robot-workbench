@@ -31,6 +31,10 @@ MAX_METADATA = 256 * 1024
 
 class ModelSelectionChanged(ValueError):
     """The service is reachable, but a different explicitly selected backend is loaded."""
+
+
+class MemoryRequestRejected(ValueError):
+    """A fenced memory request does not retire the healthy loaded model."""
 PROTOCOL = 'workbench.model-http.v2'
 MODEL_ID = BASE379_ID
 
@@ -166,6 +170,8 @@ def request_packet(request, adapter, conversion_id, model_id=MODEL_ID, model_bun
     if model_family(model_id)=='wam-mem':
         metadata['memory']=deepcopy(request.get('memory'))
         metadata['memory_sample']=deepcopy(request.get('memory_sample'))
+        metadata['memory_context']=deepcopy(request.get('memory_context'))
+        metadata['state_reference']=deepcopy(request['observation'].get('state_reference'))
     arrays = dict(model_state14=np.asarray(state), model_history=np.asarray(request['applied_history']), **images)
     _validate_request(metadata, arrays, model_id, model_bundle)
     return encode_packet(metadata, arrays)
@@ -179,8 +185,10 @@ def _validate_request(metadata, arrays, model_id=MODEL_ID, model_bundle=None):
         if metadata.get('task') not in model_spec(model_id,model_bundle)['tasks']:raise ValueError('task is not registered for this checkpoint')
     if model_family(model_id) in ('base566','mixed366','wam','wam-mem'):keys.add('expected_bundle_digest')
     if model_family(model_id)=='wam-mem':
-        from .wam_mem import validate_phase,validate_memory_sample
-        keys.update(('memory','memory_sample'));validate_phase(metadata.get('memory'))
+        from .wam_mem import validate_phase,validate_memory_sample,validate_memory_context,validate_state_reference
+        keys.update(('memory','memory_sample','memory_context','state_reference'));validate_phase(metadata.get('memory'))
+        validate_state_reference(metadata.get('state_reference'))
+        validate_memory_context(metadata.get('memory_context'))
         validate_memory_sample(metadata.get('memory_sample'),metadata.get('source_time'))
     if native_runtime(model_bundle):
         keys.add('backend')
@@ -410,10 +418,17 @@ class ModelService:
         finally:
             self._set(busy=False);self.lock.release()
 
-    def infer(self, payload, *, memory_only=False):
+    def infer(self, payload, *, memory_only=False,memory_kind=None):
         metadata, arrays = decode_packet(payload, {'model_state14', 'model_history', *CAMS}, self.model_id)
         _validate_request(metadata, arrays, self.model_id, self.model_bundle)
         if memory_only and model_family(self.model_id)!='wam-mem':raise ValueError('memory observation requires WAM-MEM')
+        if memory_only:
+            from .wam_mem import validate_memory_sample
+            validate_memory_sample(metadata.get('memory_sample'),metadata['source_time'],required=True)
+        if memory_kind is not None:
+            sample=metadata.get('memory_sample')or{}
+            if not memory_only or sample.get('node',{}).get('kind')!=memory_kind:
+                raise ValueError('memory observation interface and node kind differ')
         if not self.lock.acquire(blocking=False):
             raise ValueError('model worker busy; inference was not queued')
         try:
@@ -436,11 +451,15 @@ class ModelService:
             if model_family(self.model_id)=='wam-mem':
                 request['memory']=deepcopy(metadata['memory'])
                 request['memory_sample']=deepcopy(metadata['memory_sample'])
+                request['memory_context']=deepcopy(metadata['memory_context'])
+                request['observation']['state_reference']=deepcopy(metadata['state_reference'])
             if memory_only:request['memory_operation']='observe'
             started = time.monotonic()
             result = self.client.infer(request)
             if result.get('request_id') != metadata['request_id']:
                 raise ValueError('worker response identity mismatch')
+            if result.get('memory_rejected'):
+                raise MemoryRequestRejected(result['memory_rejected'])
             if memory_only:
                 if 'action14'in result:raise ValueError('observation-only memory must not generate actions')
                 action=np.empty((0,14),np.float32)
@@ -455,6 +474,8 @@ class ModelService:
             encoded = encode_packet(response, dict(action14=action))
             self._set(last_request_id=metadata['request_id'], last_infer_wall_s=time.monotonic()-started)
             return encoded
+        except MemoryRequestRejected:
+            raise
         except Exception as error:
             # A failed/timeout pipe is not reused: no late frame can become the next result.
             self.client.close()
@@ -551,7 +572,8 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
             if len(auth) != 1 or not secrets.compare_digest(auth[0].encode(), ('Bearer '+token).encode()):
                 return self.reply(403, {'error':'model authorization required'})
             tool=self.path in ('/v1/conversions','/v1/infer')and hasattr(service,'tool_start')
-            if not tool and self.path not in ('/prepare', '/infer', '/unload','/memory/observe'):return self.reply(404, {'error':'not found'})
+            memory_routes={'/memory/observe/model':'MODEL','/memory/observe/manual':'TEACH'}
+            if not tool and self.path not in ('/prepare', '/infer', '/unload',*memory_routes):return self.reply(404, {'error':'not found'})
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get_all('Transfer-Encoding', []) or len(lengths) != 1 or not lengths[0].isascii()
                     or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= MAX_PACKET):
@@ -563,7 +585,9 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
                 if self.path in ('/prepare','/unload'):
                     if len(raw) > 4096:raise ValueError('bounded prepare identity required')
                     return self.reply(200, (service.prepare if self.path=='/prepare' else service.unload)(json.loads(raw)))
-                self.reply(200, service.infer(raw,memory_only=True)if self.path=='/memory/observe'else service.infer(raw), 'application/x-npz')
+                result=(service.infer(raw,memory_only=True,memory_kind=memory_routes[self.path])
+                        if self.path in memory_routes else service.infer(raw))
+                self.reply(200,result,'application/x-npz')
             except (ValueError, KeyError, TypeError) as error:self.reply(409, {'error':str(error)})
             except Exception as error:self.reply(503, {'error':str(error)})
     server = ThreadingHTTPServer((host, port), Handler)
@@ -703,7 +727,12 @@ class RemoteBaseClient:
         timing.record('model.packet_encode',began,request_id=timing_request,bytes=len(payload))
         decisions=[]
         began=time.monotonic_ns()
-        reply=self._request('/memory/observe'if memory_only else'/infer', payload, kind='application/x-npz',guard_receipts=decisions)
+        route='/infer'
+        if memory_only:
+            from .wam_mem import validate_memory_sample
+            sample=validate_memory_sample(request.get('memory_sample'),request['observation']['source_time'],required=True)
+            route='/memory/observe/'+('model'if sample['node']['kind']=='MODEL'else'manual')
+        reply=self._request(route, payload, kind='application/x-npz',guard_receipts=decisions)
         timing.record('model.http_roundtrip',began,request_id=timing_request)
         began=time.monotonic_ns();metadata, arrays = decode_packet(reply, {'action14'}, self.model_id)
         timing.record('model.packet_decode',began,request_id=timing_request,bytes=len(reply))

@@ -99,6 +99,8 @@ class VariableStepsTests(unittest.TestCase):
             with self.subTest(steps=n),patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=prepare_reference):
                 runner=InferenceRunner.__new__(InferenceRunner);runner.config=configuration(config(n))
                 runner.owner=NS(control_time=lambda:100.,epoch=2,execution_clock_id='cpu')
+                from robot_workbench.wam_mem import LogicalMemoryClock
+                runner.memory_clock=LogicalMemoryClock()
                 runner._epoch=2;runner.initial_device14=[0.]*14;runner.target_interpreter=None
                 runner.initialization_source_s=100.;runner.previous_native_hold=None
                 runner.sdk_limits=[[-3.,3.]]*6+[[0.,.082]]+[[-3.,3.]]*6+[[0.,.082]]

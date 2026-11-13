@@ -6,6 +6,8 @@ h1,h2,h3,p{margin:0}
 h1{font-size:20px}
 h2{font-size:19px;font-weight:600}
 h3{font-size:15px;font-weight:600}
+.inference-memory-policy{margin:12px 0;padding:12px 14px;border:1px solid var(--line);border-radius:7px;background:#f7f9fc}
+.inference-memory-policy .detail-list{margin:8px 0 0}
 .scene-asset-options,.scene-asset-previews{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:12px 0}
 .scene-asset-options label{display:grid;gap:5px}.scene-asset-options select{width:100%}
 .scene-asset-previews figure{margin:0;border:1px solid var(--line);border-radius:7px;padding:10px;background:#fafcff}

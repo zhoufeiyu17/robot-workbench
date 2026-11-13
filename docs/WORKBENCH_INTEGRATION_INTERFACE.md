@@ -490,35 +490,66 @@ Owner 只规划并执行前 N 步，再使用新观测推理；未执行的预�
 `/api/actions/inference_prepare` 及业务回调包装已移除。模型就绪后，现有控制准备流程调用
 内部 `bind_device`，目录刷新继续使用 `inference_refresh`。
 安装包中的 `metadata/training-config.json` 经清单校验后提供 `training_execute_actions`。
-该字段决定训练时序对应的 MEM 采样间隔，在线执行长度继续由工作台独立设置为 1–32 步。
+该字段决定模型逻辑动作的默认 MEM 提交步距，在线执行长度继续由工作台独立设置为 1–32 步。
 切换 checkpoint 和去噪热更新均保留当前执行长度。预测接口始终返回完整 32 步，
 训练配置的 `execute_actions` 不自动写入在线执行设置。旧安装包缺少该配置时沿用 32 步 MEM 间隔。
 WAM-MEM 去噪能力以已登记制品为准，当前支持 1–10 步、默认 2 步。仅更新步数时保留
 权重、worker、同一独占记忆租约及其时钟／revision；不执行会重置记忆的合成预热。
-`workbench.wam-memory-phase.v4` 的 leased `/prepare memory_sampling` 核对原绑定和新模型描述，
+`workbench.wam-memory-phase.v5` 的 leased `/prepare memory_sampling` 核对原绑定和新模型描述，
 只接受 `inference_options` 变化，拒绝未结束请求、其他活跃任务或过期租约。服务与客户端原子
 更新模型绑定，下一 Run 按新配置准入；旧绑定不能提交迟到推理。人工观测尾部先在原配置下
 串行提交，更新不清空记忆或把未执行预测写成动作。SO 接入暂缓。
 
 ### 统一真实观测记忆与回放配置
 
-v4 统一真实数据写入协议已通过隔离验收。Owner 在真实反馈上附加 `workbench.memory-activity.v1`，按反馈源时间和
-command epoch 标记 MODEL_EXECUTING、TEACH 或等待／保持。业务端仅在前两种阶段推进
-统一有效样本计数，按训练 `execute_actions` 选择真实观测写入记忆；32 步模型使用
-第 0、32、64……个样本，16 步模型使用第 0、16、32……个样本。等待和切换期间保留实际时间差。
-首次启动的真实观测建立初始记忆。相邻实测状态生成 q-next GT 审计，缺帧和等待不补造动作。
+v5 显式观测接口使用 `workbench.wam-memory-phase.v5` 和 Owner 的
+`workbench.memory-activity.v2`。部署时统一更新 Owner、业务和模型服务，绑定时校验精确版本。
+本轮验证覆盖隔离 CPU／原生 ROS 链路及冻结训练 Policy 数值对照，现网加载状态另见发布回执。
 
-已核对的 T01、T02_1 训练快照均将历史 executed-control 条件掩码设为 false。适配器遵循
-各制品原有归一化，将真实 RGB、当前状态和 episode 相对秒送入原 Policy context。
-GT 审计通过 `memory_sample` 随 ModelInput 留存。预测调用复用请求级冻结 context，生成的
-未来动作及重复查询均不提交持久记忆。真实写入按时序串行，显式清空以 revision 和 generation
-隔离旧请求，参数更新沿用同一记忆租约与有效样本计数。
+```mermaid
+flowchart LR
+  A[已执行模型逻辑步] --> C[显式提交节点]
+  B[人工活动每步 30ms] --> C
+  C --> D[按真实目标时间选择原始 RGB 与实测 state]
+  D --> E[observe 串行提交一次 MEM]
+  E --> F[固定 context revision]
+  F --> G[infer 只读预测]
+```
+
+模型阶段每完成一个已采纳动作推进逻辑时间 1/30 秒，通过已接纳轨迹的分段时刻确定该步的
+真实目标时间。重定时改变真实目标时间，逻辑步数保持按执行前缀累计；中断后的未执行后缀不累计。
+默认模型节点步距读取训练 `execute_actions`，在线执行长度继续独立。
+人工阶段每 30 ms 推进一步，默认每 32 步提交一次。`MemorySession(manual_stride=...)`
+可设置其他正整数步距，人工默认值独立于所选模型。两阶段切换沿用连续时间轴，
+模型时间为累计模型步数 / 30 加累计人工步数 × 0.03，等待、保持和控制过渡冻结时间轴。
+显式清空后从下一次真实观测重新建立零点。
+
+| 接口／字段 | 消费者与用途 |
+| --- | --- |
+| `PinnedModelClient.observe_model_node(...)`、`POST /memory/observe/model` | 按累计逻辑 `step` 提交真实观测，支持 32、16 及任意显式已采纳前缀节点 |
+| `PinnedModelClient.observe_manual_node(...)`、`POST /memory/observe/manual` | 按独立人工 `step` 提交真实观测，服务核对节点种类 |
+| `memory_sample.node` | `kind`、`step` 用于去重和单调校验，`model_time_s` 用于模型时间条件，`target_source_time` 用于真实样本配对 |
+| `state_reference`、`frame_ids` | 关联原始状态／相机样本，区分重复数据和静止状态下的新实测样本，并进入回执审计 |
+| `memory_context` | `revision` 指定只读快照，`time_s` 指定本次预测的逻辑时间，RTC 的重复／并行请求明确指定同一快照 |
+| `memory.revision`、`epoch` | 清空和控制阶段栅栏，拒绝旧请求与迟到结果 |
+
+同节点同观测重试返回原提交回执；节点冲突、倒退、过期快照显式拒绝并保留健康 worker。
+保留当前及前一份 context，已淘汰快照明确返回过期。模型计算仍串行，忙时返回未排队。
+公共 `infer` 首次调用前先显式提交初始真实观测。预测及未执行动作始终只读持久 MEM。
+等待或保持期间，真实相机／state 可以更新而逻辑时间保持相同。该请求在独立预测副本中
+读取指定 context，提交计数和持久时间轴保持冻结。
+
+已核对训练快照的历史 executed-control 条件掩码为 false。适配器将真实 RGB、实测状态和
+逻辑时间送入原 Policy context，`memory_sample` 的历史动作数组为空，审计保留原始状态与相机采样引用及节点。
+节点选择复用原始 ROS 短历史，使用显式目标时间及 nearest／同距取早策略；未来样本未到时等待，
+历史过期明确报错。后台观测线程先保留选中 RGB，再等待模型 I/O，队列上限沿用 8 条。
+真实写入串行，清空通过 revision 和 generation 隔离旧请求；去噪更新保留同一租约及逻辑进度。
 
 显式结束控制会话通过 `cancel.end_test=true` 表达测试结束。控制停止确认后清空记忆、关闭
 该测试的记忆租约，下一次准备建立空租约并复用已加载权重。参数热更新内部的普通 cancel
 保持原记忆。清空失败在业务状态中显示，下一次准备等待结束处理完成。
 控制审计 DataEvent 的序号缺口计入 `control_event_gaps` 与 `last_control_gap`，并进入
-现有流水线计时。统一采样与阶段判断使用配对 RobotState 的 `memory_sampling` 及 epoch。
+现有流水线计时。节点调度使用配对 RobotState 的 `memory_sampling`、累计逻辑进度和 epoch。
 原始观测来源变化、时间倒退、写入队列溢出仍使记忆不可用。
 Owner 的状态订阅按 Runtime 实例常驻，推理绑定、测试结束和模型参数更新复用同一已就绪
 输入。每轮模型绑定与请求仍独立。Runtime 身份变更时替换状态订阅，同一实例的描述变更

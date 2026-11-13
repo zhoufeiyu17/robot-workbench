@@ -23,7 +23,7 @@ class RosDriverPublisher:
         self.source_values=[dict(device_id=device_id,stream_id=stream,source_instance_id=instance_id,
             source_clock_id=clock_id,topic=topic,message_type='workbench_interfaces/msg/'+kind,kind=source_kind,
             units=units,coordinate_frame='device',nominal_hz=hz,available=stream!='state',
-            metadata={'memory_sampling_schema':'workbench.memory-activity.v1'}if stream=='state'else{})
+            metadata={'memory_sampling_schema':'workbench.memory-activity.v2'}if stream=='state'else{})
             for stream,topic,kind,source_kind,units,hz in (
                 ('state',state_topic,'RobotState','state',{'positions':'SDK_rad_and_m','velocities':'SDK_rad_s_and_m_s'},100.),
                 ('control',event_topic,'DataEvent','event','original_event_units',0.))]
