@@ -46,11 +46,11 @@ def validate_native_faults(value, *, required=False):
     fields={'library_build_id','controller_instance_id','reason','latched','feedback_valid',
             'damping_committed','joint','observed_value','latched_monotonic_ns'}
     reasons={'joint_state_invalid','interpolated_command_invalid','joint_torque_invalid',
-             'gripper_state_invalid','over_current'}
+             'gripper_state_invalid','over_current','external_guard_fault'}
     if not isinstance(value,dict) or set(value)-{'left','right'} or required and not value:
         raise ValueError('bounded native fault map required')
     for row in value.values():
-        if (not isinstance(row,dict) or set(row)!=fields or row['latched']is not True
+        if (not isinstance(row,dict) or set(row) not in (fields, fields | {'support_mode'}) or row['latched']is not True
                 or not isinstance(row['reason'],str)or row['reason']not in reasons or type(row['feedback_valid'])is not bool
                 or type(row['damping_committed'])is not bool
                 or any(not isinstance(row[k],str)or not 0<len(row[k])<=128 for k in ('library_build_id','controller_instance_id'))
@@ -58,7 +58,14 @@ def validate_native_faults(value, *, required=False):
                 or type(row['observed_value'])not in(int,float)or not math.isfinite(row['observed_value'])
                 or type(row['latched_monotonic_ns'])is not int or row['latched_monotonic_ns']<=0):
             raise ValueError('invalid native fault report')
+        if 'support_mode' in row and row['support_mode'] not in ('cached_position_hold','damping','unavailable'):
+            raise ValueError('invalid native fault support mode')
     return deepcopy(value)
+
+
+def native_support_confirmed(report):
+    return report['damping_committed'] and (
+        report['feedback_valid'] or report.get('support_mode') == 'cached_position_hold')
 
 
 def receive(connection, pending):
@@ -151,7 +158,7 @@ def serve_worker(connection, backend, epoch=None):
                 # stop the other arm before returning a retained-fault response.
                 backend.set_damping_hold(manual=False)
                 faults=validate_native_faults(backend.native_faults(),required=True)
-                if not all(r['feedback_valid'] and r['damping_committed'] for r in faults.values()):
+                if not all(native_support_confirmed(r) for r in faults.values()):
                     raise RuntimeError('native fault has no valid retained damping') from error
                 response.update(code='native_fault',faults=faults,connected=True,
                     release_steps=list(getattr(backend,'release_steps',())))
@@ -319,7 +326,7 @@ class SDKProcess:
                                 or not isinstance(reply['release_steps'],list)or len(reply['release_steps'])>32):
                             raise ValueError('invalid retained native fault response')
                         faults=validate_native_faults(reply['faults'],required=True)
-                        if not all(r['feedback_valid'] and r['damping_committed'] for r in faults.values()):
+                        if not all(native_support_confirmed(r) for r in faults.values()):
                             raise ValueError('native fault output not confirmed')
                         self.connected=True;self.release_steps=reply['release_steps']
                         raise SDKNativeFault(faults)
@@ -360,6 +367,9 @@ class SDKProcess:
                     self._bound_execution_context = None
                 if method=='read_calibration_state':
                     self.heartbeat=(result.get('can_output_guard') or {}).get('heartbeat_monotonic_s')
+                    guard_state = result.get('can_output_guard') or {}
+                    if guard_state.get('native_fault_hold') is not None:
+                        self.native_hold_state = deepcopy(guard_state)
                     worker_pid=(result.get('sdk_worker_read_timing')or{}).get('pid')
                     if type(worker_pid)is int and worker_pid>0:self.worker_pid=worker_pid
                     result['sdk_client_read_timing']=dict(lock_wait_s=acquired-requested,
@@ -393,7 +403,8 @@ class SDKProcess:
                     if not stat.S_ISREG(info.st_mode) or info.st_size>LIMIT:raise ValueError('invalid guard record')
                     record=json.load(stream)
             except (OSError,ValueError):pass
-        latched=record.get('state')=='latched'
+        retained = getattr(self, 'native_hold_state', None) if not exited else None
+        latched=record.get('state')=='latched' or retained is not None
         process_evidence=record.get('process_evidence') or {}
         worker_exited=bool(exited and record.get('supervisor_pid')==self.process.pid
             and type(record.get('child_pid')) is int and record['child_pid']>0 and record['child_pid']!=self.process.pid
@@ -403,7 +414,7 @@ class SDKProcess:
         active=self.is_connected
         age=None if self.heartbeat is None else max(0.,time.monotonic()-self.heartbeat)
         failed=latched or bool(self.failure) or exited and self.connected
-        reason=record.get('reason') or self.failure or ('SDK 控制进程已退出' if failed else None)
+        reason=record.get('reason') or (retained or {}).get('reason') or self.failure or ('SDK 控制进程已退出' if failed else None)
         client_failure=record.get('guard_client_failure')
         if (failed and isinstance(client_failure,dict) and client_failure.get('schema')=='guard_ipc_failure.v1'
                 and client_failure.get('source_pid')==record.get('child_pid')
@@ -426,15 +437,17 @@ class SDKProcess:
             'lost' if heartbeat_lost else
             'unavailable' if failed else 'healthy' if active else 'not_monitored')
         return dict(schema='workbench.control_protection.v1',attempt_id=self.attempt,timeout_ms=NATIVE_WATCHDOG_TIMEOUT_S*1000,
+            transport_connected=active,
             heartbeat=dict(status=heartbeat_status,age_s=age if heartbeat_status in ('healthy','lost') else None,
                            monitored=not worker_exited and (active or failed)),
             active_anomaly=not worker_exited and (failed or heartbeat_lost),
             recovery_required=bool(failed),reason=reason,
             guard_client_failure=client_failure,
             event=(dict(id=self.attempt,wall_ns=record.get('wall_ns'),reason=reason,
-                        stop_action='sdk_worker_terminated' if worker_exited else 'sdk_output_stop_requested',stop_confirmed=worker_exited,
+                        stop_action='sdk_worker_terminated' if worker_exited else 'native_fault_hold' if retained else 'sdk_output_stop_requested',stop_confirmed=worker_exited,
                         sdk_close_confirmed=False,mechanical_state='not_verified',
-                        evidence=str(self.guard_record),diagnostics=record.get('diagnostics'),guard_client_failure=client_failure) if failed else None),
+                        evidence=str(self.guard_record),diagnostics=record.get('diagnostics'),guard_client_failure=client_failure,
+                        native_fault_hold=(retained or {}).get('native_fault_hold')) if failed else None),
             worker_exit_confirmed=worker_exited,supervisor_exit_confirmed=exited,
             supervisor_pid=self.process.pid if self.process else None,worker_pid=record.get('child_pid',self.worker_pid),
             supervisor_exit_code=self.process.returncode if self.process else None)

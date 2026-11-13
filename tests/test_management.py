@@ -748,6 +748,18 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(h['manager'].config['collection_handoff'],pin)
             self.assertEqual(h['manager'].config['device_id'],'cpu-device')
 
+    def test_additional_collection_handoffs_are_validated_before_start(self):
+        primary=dict(unit='collection-main.service',files={'/cpu/main.unit':'a'*64},
+                     status_url='http://127.0.0.1:18001/api/status')
+        extra=dict(unit='collection-other.service',files={'/cpu/other.unit':'b'*64},
+                   status_url='http://127.0.0.1:18002/api/status')
+        h=self.harness('fake',config_overrides={'collection_handoff':primary,'additional_collection_handoffs':[extra]})
+        self.assertEqual(h['manager'].config['additional_collection_handoffs'],[extra])
+        for additions in ([primary], [dict(extra,status_url='http://external.invalid/api/status')], 'not-a-list'):
+            with self.subTest(additions=additions),self.assertRaises(ValueError):
+                WorkbenchManager(dict(h['config'],additional_collection_handoffs=additions),
+                                 services=h['services'],monitor=False)
+
     def attempt_fixture(self,error="No module named 'robot_sim'"):
         root=(Path(self.directory.name)/'backend').resolve();output=root/'attempt-123';output.mkdir(parents=True)
         started=time.time_ns();identity=dict(pid=self.h['services']['workbench'].child.pid,start_ticks='123',

@@ -106,6 +106,20 @@ serve_worker(socket.socket(fileno=int(sys.argv[2])),Backend(),epoch)
 
 
 class SDKProcessTests(unittest.TestCase):
+    def test_retained_native_fault_keeps_transport_and_reports_unconfirmed_support(self):
+        backend=self.fixture();backend.connect()
+        backend.native_hold_state=dict(reason='CAN feedback lost: test:7',
+            native_fault_hold=dict(schema='workbench.native-fault-hold.v1',mechanical_support='unconfirmed',
+                                  committed_monotonic_ns=dict(left=10,right=12)))
+        snapshot=backend.protection_snapshot()
+        self.assertTrue(backend.is_connected)
+        self.assertTrue(snapshot['transport_connected'])
+        self.assertIsNone(backend.terminal_failure)
+        self.assertTrue(snapshot['recovery_required'])
+        self.assertEqual(snapshot['event']['stop_action'],'native_fault_hold')
+        self.assertEqual(snapshot['event']['mechanical_state'],'not_verified')
+        self.assertFalse(snapshot['event']['stop_confirmed'])
+        backend.close()
     def test_mismatched_worker_protocol_refuses_before_native_connect(self):
         with TemporaryDirectory()as folder:
             marker=Path(folder)/'native-connect-was-called'

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.3ccd08168642",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.33f70b9ded8f",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-04T14:48:55.680807+00:00",
   "site_title": "工作台架构与控制策略",
@@ -766,6 +766,22 @@
           "last_submission_receipt"
         ],
         "optional_sdk_clock": "native_output.observations.<side>.command_sdk_time_s retains raw SDK command timestamp; null when unavailable"
+      },
+      "fault_support": {
+        "schema": "workbench.native-fault-hold.v1",
+        "producer": "Guard and native SDK output loop",
+        "consumer": "Owner fault state and diagnostics",
+        "fields": [
+          "EmergencyReport.support_mode",
+          "EmergencyReport.feedback_valid",
+          "EmergencyReport.damping_committed",
+          "can_output_guard.native_fault_hold.committed_monotonic_ns",
+          "control_protection.transport_connected"
+        ],
+        "behavior": "Cache finite in-limit feedback and its existing gravity result. Latched CAN/heartbeat/IPC or invalid-feedback faults cancel future trajectories and retain cached position output. Feedback and physical support remain explicitly unconfirmed.",
+        "native_source_patch": "scripts/patch_sdk_fault_hold.py",
+        "status": "isolated_verified_not_deployed",
+        "recovery": "A retained native fault reports the actual live transport. Supported recovery normally releases/quiesces the existing SDK before acquiring a fresh instance; exited workers follow protected retirement."
       }
     },
     {
@@ -966,7 +982,15 @@
         "operation-verify",
         "operation-timeout",
         "operation-restore"
-      ]
+      ],
+      "control_handoffs": {
+        "fields": [
+          "collection_handoff",
+          "additional_collection_handoffs"
+        ],
+        "behavior": "Each explicitly registered collector exits normally before SDK acquisition; idle Web processes do not imply control ownership. A failed episode needs matching completed emergency recovery and verified stopped hardware.",
+        "status": "isolated_verified_not_deployed"
+      }
     },
     {
       "id": "I11",
@@ -2865,7 +2889,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "931ae65ced375685166b44d7a13253865869397637b18a3399ce46611e4d6a59",
+        "fingerprint": "bee1574e78e745cac8e3fb0f58e557ea1aeaf9005edeaf00eedc45e4f501a2cd",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -2989,7 +3013,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "890bc741ca50dacd1642c151dc63249b79c83311439404e72d4f4aded91317f6",
+        "fingerprint": "0a18f7f94d3f916247b61c6a7a8104950d01bc7fffdc9db95c20e77ff263cb99",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3116,7 +3140,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "52bdd3e74d9dddc8014528cd46509c528e86d6c04c6f3df5a098001d134582be",
+        "fingerprint": "9b625a218c5cb6a1e442cbdbc65ca7fdb8654fe33d03f14e54d87391ab0ee9ec",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3235,7 +3259,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "9a2c6fb58632b08a02197229584d290f613dafbf67f0069848273ca139d104b8",
+        "fingerprint": "03d3fd9735530b531ef5f13b4bc803d0e29ac53d0a2a5f7928fc05f8c2dce242",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3449,7 +3473,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "47546bc68a22500f558f3a45faa54095c01f914e46196d5c7c9c73e92606edae",
+        "fingerprint": "d31cfe0811b35b8698daaa3701390b1dad0a5d806f50c19d42c5f290e3499ce3",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3612,7 +3636,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "cc87eb192f8df3f432f8e522fca4f72b9b748968172cebc9ac0c8f272d44e1c0",
+        "fingerprint": "b58ffdca59ce9f1e1ffb3495d26368260195f475b5937010d548c0ac9c1c9fd8",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3749,7 +3773,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "c1992f56a60189233dfc1bf079d1a1178467f08169fabf081106569d12f9e566",
+        "fingerprint": "c51dde141897fb36323959021af328b17f7a752e0ac4f358796c092460e2c4d8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3891,7 +3915,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "2aa54be5c37499c9335531922d657b66b6f955a2987eb84dd577fea03ba24752",
+        "fingerprint": "b0a145a11366fa93db3e8acf043a8b6d32bf042d4f7438e7a15783d4200a679d",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4017,7 +4041,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "abc4ebe56d2113d1526438b9474b3544e3f440d256f50a7b2988ab7e7e02da23",
+        "fingerprint": "e8327d0ee0b77b1b8c1213f0314f62a441163502f1ca42cdd20c2a50258c9934",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4146,7 +4170,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "ae4bd0fe748e344e1580d20e4ec4e590da4e77edb8c619540332c12074604e53",
+        "fingerprint": "515cfbb7e95569195856e0ba8ee995ae8201baf9ae7160d5d533a143d108a55c",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4272,7 +4296,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "a93a780df4730f2b6981d2b71193f6269aeb987c7dda328772fdbbf1c6069cec",
+        "fingerprint": "855de408ae15da2b2d45b042261bf45b19cd702d9c40534dd5d41f11c068ba0d",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10786,6 +10810,26 @@
       "microsecond PTS and final hold",
       "corrupt derivative rebuilt",
       "long inference/TEACH and recording latency"
+    ]
+  },
+  "image_dds_transport": {
+    "default_profile": "configs/dds-image-transport.xml",
+    "publisher_shm_segment_bytes": 16777216,
+    "producer": "ros_data.image_transport_environment",
+    "consumers": [
+      "camera_owner.run_owner publisher child",
+      "rgbd_service.start_capture_sources ROS publisher children",
+      "machine_profile.Deployment startup identity"
+    ],
+    "explicit_override": "Existing FASTRTPS_DEFAULT_PROFILES_FILE or FASTDDS_DEFAULT_PROFILES_FILE retained; deployment validates configured image capacity.",
+    "external_source": "Existing-source observer does not change a live camera publisher. Deployment must configure the external owning service and schedule normal restart/rebind.",
+    "failure_mode": "512KiB sender SHM buffer recycling invalidates unread fragments; reliable repair waits for HEARTBEAT/NACKFRAG and can add110ms.",
+    "documentation": "docs/WORKBENCH_INTEGRATION_INTERFACE.md#图像-dds-共享内存与跨机器部署默认值",
+    "validation": [
+      "tests/test_ros_data.py",
+      "tests/test_camera_owner.py",
+      "tests/test_camera_sources.py",
+      "tests/test_machine_profile.py"
     ]
   }
 }

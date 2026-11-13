@@ -947,7 +947,7 @@ def controller_conflicts():
         if (('joint_head_real_owner.py' in text and '--connect-hardware' in text)
                 or any(value.endswith('/serve_sdk_control.py') for value in argv_as_strings(argv))
                 or ('real_control.py' in text and '--hardware' in argv_as_strings(argv))
-                or any(value in ('prometheus.web','prometheus.robots.arx5_robot_node','prometheus.system.collection_manager') for value in argv_as_strings(argv))):
+                or any(value in ('prometheus.robots.arx5_robot_node','prometheus.system.collection_manager') for value in argv_as_strings(argv))):
             conflicts.append(int(path.parent.name))
     return conflicts
 

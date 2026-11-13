@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import socket
 import sys
+import signal
+import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'calibration'),str(ROOT/'calibration/infra'),str(ROOT/'rule_based_workbench')]
@@ -67,11 +69,25 @@ def main():
         gravity_calibration=load_gravity_calibration(profile.get('sdk_gravity_calibration')))
     epoch=mmap.mmap(args.epoch_fd,32,access=mmap.ACCESS_READ)
     os.set_inheritable(args.epoch_fd,False)
+    from robot_workbench.arx_output_guard import require_guard
+    hold = getattr(require_guard(), 'fault_hold', None)
+    if hold is not None:
+        def retain_on_signal(signum, frame):
+            if hold.read(1):
+                hold.trip(3)
+            else:
+                raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, retain_on_signal)
+        signal.signal(signal.SIGINT, retain_on_signal)
     try:serve_worker(connection,backend,epoch)
     except BaseException:
         # No native destructor or implicit release on IPC failure. Guard is the
         # sole owner of exceptional termination and retained failure evidence.
-        from robot_workbench.arx_output_guard import require_guard
+        if hold is not None and hold.read(1):
+            hold.trip(3)
+            # Python/Owner IPC may be gone. Native threads still own the only
+            # controller and hold the latched pose until supported retirement.
+            while True:time.sleep(1)
         require_guard().call('trip',detail='SDK worker IPC or request failed')
         raise
     return 0

@@ -44,6 +44,23 @@ class NativeFaultRPCTest(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(ValueError):
                 validate_native_faults({'left':dict(FAULT,**{field:value})})
 
+    def test_invalid_live_feedback_can_only_retain_explicit_cached_support(self):
+        from robot_workbench.sdk_process import native_support_confirmed
+        report = dict(FAULT,feedback_valid=False,support_mode='cached_position_hold')
+        self.assertEqual(validate_native_faults({'left':report}),{'left':report})
+        self.assertTrue(native_support_confirmed(report))
+        self.assertFalse(native_support_confirmed(dict(report,support_mode='unavailable')))
+        self.assertFalse(native_support_confirmed(dict(report,damping_committed=False)))
+
+    def test_invalid_feedback_with_confirmed_cached_hold_keeps_rpc_available(self):
+        worker=WORKER.replace("'feedback_valid': True", "'feedback_valid': False, 'support_mode': 'cached_position_hold'")
+        with patch.object(rpc_fixture,'WORKER',worker):backend=self.fixture()
+        backend.connect()
+        with self.assertRaises(SDKNativeFault):backend.queue_reference({'native_latch':True})
+        self.assertTrue(backend.is_connected)
+        self.assertIsNone(backend.failure)
+        backend.close()
+
 
 class NativeFaultAdapterTest(unittest.TestCase):
     def backend(self):
@@ -113,6 +130,43 @@ class NativeFaultOwnerTest(unittest.TestCase):
         self.assertFalse(owner.recovery_ready());self.assertFalse(runtime._software_stop_recovery_ready())
         owner.recoverable_fault='synthetic software reason'
         self.assertFalse(owner.recovery_ready(),'native latch must win over software eligibility')
+
+    def test_invalid_feedback_is_preserved_as_fault_not_admitted_as_live_state(self):
+        self.create();owner=self.runtime.owner
+        previous_feedback=deepcopy(owner.cache['calibration_feedback'])
+        original=self.raw.read_calibration_state
+        report=dict(FAULT,feedback_valid=False,support_mode='cached_position_hold')
+        def invalid_read():
+            feedback=original()
+            feedback['qpos'][6]=float('nan')
+            feedback['native_faults']={'left':report}
+            return feedback
+        self.raw.read_calibration_state=invalid_read
+        self.advance(3)
+        self.assertEqual(owner.control.state,owner.states.FAULT)
+        self.assertFalse(owner.feedback_healthy)
+        self.assertFalse(owner.stationary)
+        self.assertEqual(owner.cache['calibration_feedback'],previous_feedback)
+        self.assertTrue(owner.last_fault_diagnostic['stop_return_confirmed'])
+        self.assertIsNone(owner.recoverable_fault)
+
+    def test_retained_fault_keeps_transport_connected_for_supported_release(self):
+        from robot_workbench.control_owner import _BackendFacts
+        self.create()
+        protection=dict(reason='native fault-hold requested',transport_connected=True,
+                        event=dict(stop_action='native_fault_hold'))
+        self.raw.protection_snapshot=lambda:deepcopy(protection)
+        state=self.runtime.fact_snapshot()
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['state'],'FAULT_STOP_UNCONFIRMED')
+        self.assertFalse(state['feedback_healthy'])
+        facts=_BackendFacts(NS(state=state))
+        self.assertTrue(facts.is_connected)
+        self.assertIsNone(facts.terminal_failure)
+        protection['transport_connected']=False
+        state=self.runtime.fact_snapshot()
+        self.assertFalse(state['connected'])
+        self.assertEqual(_BackendFacts(NS(state=state)).terminal_failure,protection['reason'])
 
 
 if __name__=='__main__':unittest.main()

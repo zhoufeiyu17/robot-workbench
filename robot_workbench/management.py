@@ -266,7 +266,11 @@ class WorkbenchManager:
                 or not re.fullmatch(r'python(?:\d+(?:\.\d+)*)?',Path(reset['python']).name)):
             raise ValueError('trusted camera_reset requires absolute Python, profile and owner root')
         handoff=config.get('collection_handoff')
-        if handoff is not None:
+        additional = config.get('additional_collection_handoffs', [])
+        if not isinstance(additional, list) or additional and handoff is None:
+            raise ValueError('additional collection handoffs require a primary handoff and a list')
+        units = set()
+        for handoff in ([handoff] if handoff is not None else []) + additional:
             url=urlsplit(handoff.get('status_url','')) if isinstance(handoff,dict) else None
             if (not isinstance(handoff,dict) or set(handoff)not in ({'unit','files','status_url'},{'unit','files','status_url','camera_owner'})
                     or not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(handoff.get('unit')))
@@ -275,6 +279,9 @@ class WorkbenchManager:
                     or url.scheme!='http' or url.hostname!='127.0.0.1' or not url.port or url.path!='/api/status'
                     or url.query or url.fragment or url.username):
                 raise ValueError('pinned collection user unit and loopback status API required')
+            if handoff['unit'] in units:
+                raise ValueError('collection handoff units must be unique')
+            units.add(handoff['unit'])
             if 'camera_owner'in handoff:
                 from scripts.workbench_deploy import validate_collection_camera
                 validate_collection_camera(handoff['camera_owner'])
@@ -1349,6 +1356,10 @@ class WorkbenchManager:
             return result
         except (OSError,HTTPException) as error:
             raise OperationError('operation_state_unknown',str(error),unknown=True) from None
+        except BackendRejection as error:
+            if str(error).startswith('existing hardware controller processes require owner handoff:'):
+                raise OperationError('control_owner_conflict', str(error)) from None
+            raise
 
     def _run(self,action,request,progress):
         observation_backend_start=None
@@ -1366,11 +1377,15 @@ class WorkbenchManager:
         if action=='recover_control' and self.recovery_requires_support(request) and request.get('arms_supported')is not True:
             raise OperationError('support_required','当前需要释放重接；未确认支撑，不执行恢复。')
         handed=None
+        additional_handed=[]
         if action=='connect_control'and self.environment=='physical'and self.config.get('collection_handoff'):
             from scripts.workbench_deploy import handoff_collection
             progress('checking_collection_handoff')
             handed=handoff_collection(self.config['collection_handoff'],self.config['device_id'],
                 stop_active=False,progress=progress,timeout=min(240.,self.timeouts['operation']))
+            for pin in self.config.get('additional_collection_handoffs', []):
+                additional_handed.append(handoff_collection(pin, self.config['device_id'],
+                    stop_active=False, progress=progress, timeout=min(240., self.timeouts['operation'])))
         before=self.target();parameters=request.get('parameters') or {}
         before['dependencies']=self.dependency_evidence(action,self.health_cache,parameters)
         if action!='status_check':progress('checking_service_dependencies',detail=dict(dependencies=before['dependencies']))
@@ -1522,6 +1537,7 @@ class WorkbenchManager:
                     result['backend']=self.state()['server_instance_id']
             result.update(action=action,before=before,requested_capabilities=sorted(wanted),preserved_services=preserved)
             if handed is not None:result['collection_handoff']=handed
+            if additional_handed:result['additional_collection_handoffs']=additional_handed
             if observation_backend_start is not None:result['observation_backend_start']=observation_backend_start
         if action=='restart_workbench':result['model_binding']=self.complete_publication(binding,progress)
         return result
@@ -1913,17 +1929,19 @@ class WorkbenchManager:
     def reclaim_control(self,request,progress):
         """Compose the existing stop, collection shutdown and recovery paths."""
         from scripts.workbench_deploy import handoff_collection,http_json,verify_unit
-        pin=self.config['collection_handoff'];initial=self.target()
+        pins=[self.config['collection_handoff'], *self.config.get('additional_collection_handoffs', [])]
+        initial=self.target()
         runtime=self.health_cache.get('runtime')or{}
-        unit=verify_unit({k:pin[k]for k in ('unit','files')})
-        if unit['ActiveState']=='active' and runtime.get('connected')is True:
-            collection=http_json(pin['status_url'])
-            if collection.get('robot_vin')!=self.config['device_id'] or collection.get('manager_alive')is not False:
-                raise OperationError('control_owner_conflict','数采和工作台控制归属冲突或未知，未接入第二个SDK')
+        for pin in pins:
+            unit=verify_unit({k:pin[k]for k in ('unit','files')})
+            if unit['ActiveState']=='active' and runtime.get('connected')is True:
+                collection=http_json(pin['status_url'])
+                if collection.get('robot_vin')!=self.config['device_id'] or collection.get('manager_alive')is not False:
+                    raise OperationError('control_owner_conflict','数采和工作台控制归属冲突或未知，未接入第二个SDK')
         stopped=self.stop_current_control(request,progress)
         progress('checking_collection_handoff')
-        handed=handoff_collection(pin,self.config['device_id'],stop_active=True,progress=progress,
-                                 timeout=min(240.,self.timeouts['operation']))
+        handoffs = [handoff_collection(pin,self.config['device_id'],stop_active=True,progress=progress,
+                    timeout=min(240.,self.timeouts['operation'])) for pin in pins]
         self.refresh()
         if self.target()['manager_instance']!=initial['manager_instance'] or self.target()['deployment_sha256']!=initial['deployment_sha256']:
             raise OperationError('target_changed','部署身份在交接期间变化，未接入SDK')
@@ -1953,7 +1971,8 @@ class WorkbenchManager:
         progress('recovering_workbench_control')
         result=self._run(action,dict(request,expected_target=self.target()),progress)
         result['requested_action']='reclaim_control'
-        result['reclaim']=dict(before=initial,stop=stopped,collection=handed,old_motion_resumed=False)
+        result['reclaim']=dict(before=initial,stop=stopped,collection=handoffs[0],
+                              additional_collections=handoffs[1:],old_motion_resumed=False)
         return result
 
     def stop(self,body):

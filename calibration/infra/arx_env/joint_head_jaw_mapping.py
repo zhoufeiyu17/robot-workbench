@@ -37,7 +37,7 @@ def configure_mapping(path):
         gaps={side:(0.,row['width_m']*1000.) for side,row in value['sides'].items()}
         identity=dict(version='native-gripper-endpoints-v1',robot_id=value['robot_id'],
             source_sha256=hashlib.sha256(raw).hexdigest(),native_calibration_id=value['identity'],
-            feedback_margin_mm=3.,
+            feedback_margin_mm=3.,feedback_min_mm=-5.,
             command_max_mm={side:row[-1] for side,row in gaps.items()})
         _ACTIVE=(commands,commands,gaps,identity)
         return mapping_identity()
@@ -79,7 +79,7 @@ def feedback_max_mm(side):
 
 def feedback_min_mm(side):
     if side not in ('left','right'):raise ValueError('left or right jaw required')
-    return -_ACTIVE[3].get('feedback_margin_mm',2.)
+    return _ACTIVE[3].get('feedback_min_mm',-_ACTIVE[3].get('feedback_margin_mm',2.))
 
 
 def interpolate(value, xs, ys, *, field='jaw mapping input'):

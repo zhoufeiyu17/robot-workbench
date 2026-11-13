@@ -35,6 +35,19 @@ def observation(state='DISCONNECTED',connected=False):
 
 
 class StartupTest(unittest.TestCase):
+    def test_failed_episode_with_matching_completed_recovery_is_stopped(self):
+        value=dict(manager_alive=False,orphan_alive=False,teleop=None,collect_status='stopped',
+            collection=dict(phase='failed',safe_ok=True,session_id='closed-session'),
+            emergency_recovery=dict(state='completed',session_id='closed-session',error=None))
+        self.assertTrue(d.collection_stopped(value))
+        for key, change in [('manager_alive',True),('orphan_alive',True),('teleop',{'active':True}),
+                            ('collect_status','running')]:
+            with self.subTest(key=key):self.assertFalse(d.collection_stopped(dict(value,**{key:change})))
+        for change in [dict(session_id='other-session'),dict(state='running'),dict(error='release failed')]:
+            candidate=dict(value,emergency_recovery=dict(value['emergency_recovery'],**change))
+            self.assertFalse(d.collection_stopped(candidate))
+        self.assertFalse(d.collection_stopped(dict(value,collection=dict(value['collection'],safe_ok=False))))
+
     def test_camera_rebind_recovers_stale_consumers_once_without_starting_hardware(self):
         stale=dict(media=[dict(id=role,ready=False,error='source unavailable',frame_id='old-frame')for role in ('head','left','right')])
         ready=dict(media=[dict(id=role,ready=True)for role in ('head','left','right')])

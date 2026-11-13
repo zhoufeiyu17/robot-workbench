@@ -27,7 +27,7 @@ from arx_env.joint_head_jaw_mapping import command_sdk, feedback_gaps, hold_comm
 from arx_env.joint_head_real_motion import MotionRunner, make_plan, make_workbench_plans, ARM_SLICES, StationaryWindow, MotionTrackingError, ControlTickGapError, arrival_tolerances, active_indices, feedback_to_command, observe_arm_positions
 from robot_workbench.joint_bounds import position_noise_rad, feedback_position_margin_rad, JointPositionBoundaryError
 from robot_workbench.execution_settings import JointSpeedProtectionError,NativeCommandMismatchError,FEEDBACK_TIMEOUT_S,NATIVE_WATCHDOG_TIMEOUT_S,DEFAULT_JOINT_TOLERANCE_RAD
-from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRejected,SDKNativeFault,validate_native_faults
+from robot_workbench.sdk_process import ReferenceWindowRejected,SDKCommandRejected,SDKNativeFault,validate_native_faults,native_support_confirmed
 from robot_workbench.target_interpreter import ReferenceFeedbackStaleError,ReferenceRevokedError
 
 
@@ -191,6 +191,11 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             sdk=super()._import_arx5()
             from robot_workbench.arx_output_guard import require_guard
             contract=getattr(require_guard(),'sdk_contract',None)
+            fault_hold = getattr(require_guard(), 'fault_hold', None)
+            if fault_hold is not None:
+                from robot_workbench.native_fault_hold import SCHEMA
+                if getattr(sdk, 'fault_hold_schema', None) != SCHEMA:
+                    raise ValueError('native fault-hold SDK capability differs')
             if contract:
                 from robot_workbench.sdk_quiesce import verify_module
                 verify_module(sdk,contract)
@@ -257,7 +262,11 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                         # Native NONE skips clear, enable and every gripper CAN
                         # output; zero Python gains alone would still transmit.
                         robot.gripper_motor_type=sdk.MotorType.NONE
-                    return sdk.Arx5JointController(robot,controller,interface)
+                    native = sdk.Arx5JointController(robot,controller,interface)
+                    if fault_hold is not None:
+                        side = next(s for s in ('left', 'right') if interface == getattr(self_backend.config, s+'_can'))
+                        native.bind_fault_hold(fault_hold.fd, ('left', 'right').index(side))
+                    return native
             self_backend=self
             return ConfiguredControllers()
 
@@ -447,6 +456,8 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                     raise ValueError('native fault SDK identity differs')
                 result[side]={k:getattr(report,k)for k in ('library_build_id','controller_instance_id','reason',
                     'latched','feedback_valid','damping_committed','joint','observed_value','latched_monotonic_ns')}
+                if hasattr(report, 'support_mode'):
+                    result[side]['support_mode'] = report.support_mode
             return validate_native_faults(result)
 
         def set_control_mode(self, mode):
@@ -589,15 +600,27 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
             if faults:
                 result['native_faults']=faults
                 if not all(row['feedback_valid'] for row in faults.values()):
-                    self.set_damping_hold(manual=False)
-                    self.output_guard.call('trip',detail='native emergency: invalid feedback')
-                    raise RuntimeError('native emergency: invalid feedback; retained hold unavailable')
+                    if not all(native_support_confirmed(row) for row in faults.values()):
+                        self.set_damping_hold(manual=False)
+                        faults = self.native_faults()
+                        result['native_faults'] = faults
+                    details = {side:{key:row[key] for key in ('reason','joint','observed_value','latched_monotonic_ns')}
+                               for side,row in faults.items()}
+                    if not getattr(self, '_native_fault_reported', False):
+                        self.output_guard.call('trip',detail=('native emergency: '+json.dumps(details,separators=(',',':')))[:512])
+                        self._native_fault_reported = True
+                    if not all(native_support_confirmed(row) for row in faults.values()):
+                        raise RuntimeError('native emergency: invalid feedback; retained hold unavailable')
+                    heartbeat = self.output_guard.call('heartbeat')
             probe['phase']='jaw_diagnostic'
             result['gripper_feedback_valid']=[side not in disabled for side in ('left','right')]
             result['gripper_feedback_reason']=['operator_disabled_no_feedback' if side in disabled else None for side in ('left','right')]
-            result['can_output_guard']=dict(state='armed',feedback_timeout_ms=100,
+            guard_fault = (heartbeat or {}).get('native_fault_hold')
+            result['can_output_guard']=dict(state='latched' if guard_fault else 'armed',feedback_timeout_ms=100,
                 heartbeat_monotonic_s=(heartbeat or {}).get('heartbeat_monotonic_s'),
-                disabled_grippers=list(disabled),loss_action='latched_native_process_exit')
+                disabled_grippers=list(disabled),loss_action='native_position_hold' if getattr(self.output_guard,'fault_hold',None) else 'latched_native_process_exit')
+            if guard_fault:
+                result['can_output_guard'].update(native_fault_hold=guard_fault, reason=heartbeat.get('reason'))
             if not raw_state_enabled:
                 result['gripper_torque']=[float(self._controllers[side].get_joint_state().gripper_torque) for side in self.sides]
             result['gripper_contact_detection']='unvalidated; torque telemetry only'
@@ -1481,6 +1504,10 @@ class Owner:
         feedback = self.backend.read_calibration_state()
         if feedback.get('native_faults'):
             self.native_faults=validate_native_faults(feedback['native_faults'],required=True)
+            if any(not row['feedback_valid'] for row in self.native_faults.values()):
+                self.feedback_healthy = self.stationary = False
+                self.native_fault(self.native_faults)
+                return None
         self.feedback_read_duration_s = time.monotonic()-read_started
         now = self.control_time()
         q, v, sdk = feedback['qpos'], feedback['qvel'], feedback['sdk_timestamps']
@@ -1507,6 +1534,8 @@ class Owner:
                     self.sdk_progress[i] = now
         self.last_sdk = list(sdk)
         self.feedback_healthy = all(t is not None and now-t <= FEEDBACK_TIMEOUT_S for t in self.sdk_progress)
+        if (feedback.get('can_output_guard') or {}).get('state') == 'latched':
+            self.feedback_healthy = False
         if not self.feedback_healthy:
             self.stationary_window.reset()
             self.stationary = False
@@ -1568,6 +1597,9 @@ class Owner:
                     self.runner.status, self.runner.reason = 'STOPPED', 'operator stop'
                 self.stop('operator stop')
             feedback = self.read_feedback()
+            if feedback is None and getattr(self, 'native_faults', None):
+                self.cache_state(None, self.cache.get('joint_limits'))
+                return True
             self.current_feedback = feedback
             speed_check=getattr(self,'check_speed_protection',None)
             if speed_check is not None:speed_check(feedback)

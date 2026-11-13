@@ -45,7 +45,8 @@ class NativeGripperBindingTest(unittest.TestCase):
                     'robot_workbench.arx_output_guard.bind_child'),patch('scripts.serve_sdk_control.socket.socket'),patch(
                     'scripts.serve_sdk_control.os.set_inheritable'),patch('scripts.serve_sdk_control.mmap.mmap'),patch(
                     'robot_workbench.sdk_process.serve_worker'),patch.object(ref,'legacy_modules'),patch.object(ref,'hardware_backend',side_effect=construct):
-                self.assertEqual(main(),0)
+                with patch('robot_workbench.arx_output_guard.require_guard',return_value=NS(fault_hold=None)):
+                    self.assertEqual(main(),0)
 
     def test_observed_full_open_noise_changes_only_the_hold_command(self):
         with tempfile.TemporaryDirectory()as root:
@@ -75,7 +76,9 @@ class NativeGripperBindingTest(unittest.TestCase):
             self.assertEqual(jaw_gaps([80.,89.]).tolist(),[80.,89.])
             for gaps in ([80.01,89.],[80.,89.01],[-.01,0.]):
                 with self.assertRaises(ValueError):jaw_gaps(gaps)
-            self.assertEqual([[jaw.feedback_min_mm(s),jaw.feedback_max_mm(s)]for s in ('left','right')],[[-3.,83.],[-3.,92.]])
+            self.assertEqual([[jaw.feedback_min_mm(s),jaw.feedback_max_mm(s)]for s in ('left','right')],[[-5.,83.],[-5.,92.]])
+            self.assertEqual(jaw.hold_command_sdk('left',-5.),0.)
+            with self.assertRaises(ValueError):jaw.hold_command_sdk('left',-5.01)
             for side,maximum in [('left',80.),('right',89.)]:
                 self.assertAlmostEqual(jaw.command_sdk(side,maximum),.082)
                 self.assertAlmostEqual(jaw.hold_command_sdk(side,maximum),.082)
@@ -83,7 +86,7 @@ class NativeGripperBindingTest(unittest.TestCase):
                 with self.assertRaises(ValueError):jaw.command_sdk(side,maximum+.01)
                 self.assertEqual(jaw.hold_command_sdk(side,-3.),0.)
                 self.assertAlmostEqual(jaw.hold_command_sdk(side,maximum+3.),.082)
-                for gap in (-3.000001,maximum+3.000001):
+                for gap in (-5.000001,maximum+3.000001):
                     with self.assertRaises(ValueError):jaw.hold_command_sdk(side,gap)
             raw=[0.]*14;raw[6]=raw[13]=.082;limits=[[-3.,3.]]*14;limits[6]=limits[13]=[0.,.082]
             self.assertEqual(list(feedback_to_command(raw,limits)),raw)

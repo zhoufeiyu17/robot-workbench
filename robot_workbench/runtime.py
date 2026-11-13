@@ -1661,7 +1661,7 @@ class Runtime:
                 from .gc_timing import snapshot as gc_snapshot
                 state['control_timing']=dict(gc=gc_snapshot(),last_sdk_return=deepcopy(self.last_return))
                 if protection.get('event'):
-                    state.update(connected=False,state='FAULT_STOP_UNCONFIRMED',automatic_enabled=False,
+                    state.update(connected=protection.get('transport_connected') is True,state='FAULT_STOP_UNCONFIRMED',automatic_enabled=False,
                         feedback_healthy=False,stationary=False,reason=protection['reason'])
             state=owner.cached_snapshot_fields(state)
             native=getattr(owner,'native_task_status',None)

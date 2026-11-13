@@ -3,13 +3,65 @@ from copy import deepcopy
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock,patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import sys
 
-from robot_workbench.management import WorkbenchManager
+from robot_workbench.management import BackendRejection,WorkbenchManager
 from robot_workbench.operations import OperationError
 from scripts import workbench_deploy
 
 
 class ReclaimControlTests(unittest.TestCase):
+    def test_idle_web_is_not_a_controller_but_sdk_and_collection_manager_are(self):
+        with patch.object(sys,'path',[str(Path(__file__).resolve().parents[1]/'rule_based_workbench'),*sys.path]):
+            from rule_based_workbench import real_control
+        with TemporaryDirectory() as directory:
+            root=Path(directory)
+            for pid,argv in [(101,['python','-m','prometheus.web']),
+                             (102,['python','-m','prometheus.system.collection_manager']),
+                             (103,['python','/somewhere/serve_sdk_control.py']),
+                             (104,['python','-m','prometheus.robots.arx5_robot_node'])]:
+                file=root/str(pid)/'cmdline';file.parent.mkdir();file.write_bytes(b'\0'.join(x.encode()for x in argv))
+            with patch.object(real_control,'Path',return_value=root):
+                self.assertEqual(sorted(real_control.controller_conflicts()),[102,103,104])
+
+    def test_reclaim_closes_every_registered_collector_before_sdk_acquire(self):
+        manager=self.manager()
+        extra=dict(unit='collector-secondary.service',files={'/cpu/secondary.unit':'b'*64},
+            status_url='http://127.0.0.1:18981/api/status')
+        manager.config['additional_collection_handoffs']=[extra]
+        events=[]
+        manager._run.side_effect=lambda *args,**kwargs:events.append('acquire')or{}
+        def handoff(pin,*args,**kwargs):
+            events.append(pin['unit'])
+            return dict(unit=pin['unit'],exit_verified=True)
+        with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),\
+                patch.object(workbench_deploy,'handoff_collection',side_effect=handoff):
+            result=manager.reclaim_control(dict(request_id='all',arms_supported=True),Mock())
+        self.assertEqual(events,[manager.config['collection_handoff']['unit'],extra['unit'],'acquire'])
+        self.assertEqual(result['reclaim']['additional_collections'][0]['unit'],extra['unit'])
+
+    def test_extra_collector_exit_failure_keeps_sdk_unacquired(self):
+        manager=self.manager()
+        manager.config['additional_collection_handoffs']=[dict(unit='collector-secondary.service',
+            files={'/cpu/secondary.unit':'b'*64},status_url='http://127.0.0.1:18981/api/status')]
+        with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),\
+                patch.object(workbench_deploy,'handoff_collection',side_effect=[{'exit_verified':True},workbench_deploy.Blocked('exit unconfirmed')]):
+            with self.assertRaises(workbench_deploy.Blocked):
+                manager.reclaim_control(dict(request_id='all',arms_supported=True),Mock())
+        manager._run.assert_not_called()
+
+    def test_explicit_bootstrap_conflict_is_a_known_failure(self):
+        manager=self.manager();manager.stop_generation=0
+        manager._run.side_effect=BackendRejection('existing hardware controller processes require owner handoff: [91]')
+        with self.assertRaises(OperationError)as caught:
+            WorkbenchManager.run(manager,'connect_control',{},Mock())
+        self.assertEqual(caught.exception.code,'control_owner_conflict')
+        self.assertFalse(caught.exception.unknown)
+        manager._run.side_effect=BackendRejection('native SDK result unconfirmed')
+        with self.assertRaises(BackendRejection):WorkbenchManager.run(manager,'connect_control',{},Mock())
+
     def test_cold_camera_source_is_verified_before_business_rebind(self):
         m=self.manager();m.config['camera_descriptor']='/cpu/cameras.json';m.timeouts['camera']=.2
         identity=dict(pid=5,start_ticks='1',boot_id='cpu',script='/cpu/camera.py')

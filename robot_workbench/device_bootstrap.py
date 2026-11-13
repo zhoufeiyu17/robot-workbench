@@ -150,6 +150,10 @@ def read_profile(path,*,require_ros=False):
         raise ValueError('prepared_reference_enabled must be boolean')
     if type(value.get('raw_state_enabled',False))is not bool:
         raise ValueError('raw_state_enabled must be boolean')
+    if 'native_fault_hold' in value:
+        from .native_fault_hold import SCHEMA
+        if value['native_fault_hold'] != SCHEMA or not isinstance(value.get('sdk_quiesce'), dict):
+            raise ValueError('versioned native fault hold requires a pinned SDK')
     if type(value.get('preserve_begin_jaws',False))is not bool:
         raise ValueError('preserve_begin_jaws must be boolean')
     from .motion_reference import NATIVE_REFERENCE_APIS

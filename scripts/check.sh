@@ -94,6 +94,8 @@ python tests/test_control_owner_preview.py
 python tests/test_serve_control_owner.py
 python tests/test_sdk_process.py
 python tests/test_native_emergency_latch.py
+python tests/test_native_fault_hold.py
+python tests/test_fault_hold_supervisor.py
 python tests/test_in_place_software_stop.py
 python tests/test_stop_epoch_race.py
 python tests/test_position_boundary_recovery.py

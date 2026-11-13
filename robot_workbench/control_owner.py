@@ -562,7 +562,9 @@ class _BackendFacts:
     @property
     def passive_jaws(self):return tuple(self.client.state.get('passive_jaws',()))
     @property
-    def terminal_failure(self):return (self.client.state.get('control_protection')or{}).get('reason')
+    def terminal_failure(self):
+        protection = self.client.state.get('control_protection') or {}
+        return None if protection.get('transport_connected') is True else protection.get('reason')
     @property
     def is_connected(self):return self.client.state.get('connected')is True
     def protection_snapshot(self):return deepcopy(self.client.state.get('control_protection')or{})

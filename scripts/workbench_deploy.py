@@ -114,6 +114,14 @@ def collection_stopped(value):
     collection=value.get('collection')
     if not collection:return True
     if collection.get('phase')=='stopped'and collection.get('safe_ok')is True:return True
+    recovery = value.get('emergency_recovery') or {}
+    if (collection.get('phase') == 'failed' and collection.get('safe_ok') is True
+            and value.get('manager_alive') is False and value.get('orphan_alive') is False
+            and value.get('teleop') is None and value.get('collect_status') in ('idle', 'stopped')
+            and recovery.get('state') == 'completed' and not recovery.get('error')
+            and collection.get('session_id')
+            and recovery.get('session_id') == collection['session_id']):
+        return True
     components=collection.get('components')
     if not (collection.get('schema_version')==1 and 'safe_ok'in collection and collection['safe_ok']is None
             and isinstance(components,dict)and set(components)=={'robot','cameras','tactile','event','pedal'}):return False

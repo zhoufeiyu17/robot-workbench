@@ -223,7 +223,7 @@ WAM模型描述升级为 `workbench.wam.v2`，显式携带 `inference_options.de
 | 阶段 | 测量边界与限制 |
 | --- | --- |
 | 相机采集与发布 | 使用源声明的 timing_topic 和同机 boot_id，关联原始 frame clock；分别测量 wait_for_frames、接收后至整组RGB/IR发布返回。不是传感器曝光到主机的硬件延迟。 |
-| 传输与回调 | 发布返回至同帧回调包含DDS传输、排队及线程调度；发布和消费可能重叠，signed_gap_ns保留负值，不能解释为负传输耗时。运行时提供RMW接收时间时另测中间件到回调；未提供时不编造。 |
+| 传输与回调 | 发布返回至同帧回调包含DDS传输、排队及线程调度；发布和消费可能重叠，signed_gap_ns保留负值。Fast DDS 2.6.11 的 RMW 接收时间可在首批分片进入 history 时记录，该时间到回调还包含组帧和可靠交付等待；原生探针分别记录完整组帧、NACKFRAG、消息可读通知、rcl_wait返回和取消息。未提供的边界标为缺测。 |
 | 接收与配对 | 分别记录publisher查询、解码、缓存写入、观测锁等待、配对、引用解析、G02/G03/G04实际裁决及发布；源时间和配对规则不变。 |
 | Owner | 分别记录观测到达、引用解析、G02/G03裁决、tick间隔及执行耗时；与原始Observation ID关联。 |
 | 模型 | 分别测量回调派发、源引用解析、预处理及输入证明、NPZ编码、HTTP往返、解码和结果发布；WAM返回同机worker的准备／GPU同步执行／回传／反归一化时间点。旧duration-only数据明确标记为回包锚定，不能当精确阶段时间点。 |
@@ -233,6 +233,43 @@ WAM模型描述升级为 `workbench.wam.v2`，显式携带 `inference_options.de
 统计只用于诊断，不参与新鲜度裁决、不修改原时间戳或用新帧替换引用帧。事件只含有界标量与身份，
 不含图像、动作数组、命令行或凭据；模型会话能力串在传输测量中还原为原请求ID。诊断文件写入失败
 只计诊断错误，不改变录制完整性裁决。实际原生ROS验证与部署入口见开发Map的告警与测量诊断职责域。
+
+### 图像 DDS 共享内存与跨机器部署默认值
+
+2026-11-12 已定位共享三相机部署中的缺片补发问题。Fast DDS 2.6.11 默认发布端共享内存池为
+512 KiB；一帧 640×480 RGB 为 921600 字节，实测拆为 15 个 RTPS 分片。池空间不足时，
+`SharedMemManager::Segment::recover_buffers` 会回收接收者尚未开始处理的旧缓冲，导致图像缺片。
+真实慢样本约在首次接收后 100 ms 收到相关 HEARTBEAT，105 ms 发出 NACKFRAG，111 ms 补齐。
+该样本的主要等待发生在完整组帧之前。100 ms 随 HEARTBEAT 的实际到达而变化。
+
+默认图像传输配置为仓库内的 `configs/dds-image-transport.xml`，发布端 SHM 池为 **16 MiB**，
+同时保留 UDPv4 通路。`ros_data.image_transport_environment()` 为新发布进程提供该配置；
+`camera_owner.run_owner` 启动的原相机发布器及 `rgbd_service.start_capture_sources` 启动的
+ROS RGB-D 发布器统一使用此默认值。已有 `FASTRTPS_DEFAULT_PROFILES_FILE` 或
+`FASTDDS_DEFAULT_PROFILES_FILE` 显式配置优先，由部署者检查其图像池容量。
+该 XML 纳入启动时的部署身份清单，缺失默认配置时，拥有发布器的启动入口在创建子进程前报错。
+
+后续机器部署和升级按以下步骤处理。
+
+1. 将 XML 配置与代码一起安装，核对实际打开相机并发布图像的进程及其启动入口。
+2. 工作台拥有发布器时，使用上述共同入口。复用外部相机服务时，在**外部发布服务**的环境中
+   显式设置 `FASTRTPS_DEFAULT_PROFILES_FILE` 指向已安装的图像配置，并检查其相机子进程继承。
+3. 对已运行的发布器安排正常维护窗口，加载配置后重新绑定来源。订阅端配置的修改无法扩大
+   现有发布端的内存池。活动数采期间继续按当前会话的维护授权执行。
+4. 验收核对发布子进程环境、实际 SHM 段容量及三路原始帧时间，统计缺片补发和组帧长尾。
+   原始来源身份与时间戳继续参与观测配对，反馈新鲜度仍按共同 ControlPolicy 裁决。
+
+同尺寸三路 30 Hz 合成图像、独立发布和订阅进程的对照结果如下。
+
+| 发布端共享内存池 | 验证量 | 缺片补发请求数 | 组帧结果 |
+| --- | --- | --- | --- |
+| 512 KiB | 单订阅器 540 帧 | 563 | P95 约 10.3–10.4 ms，最大约 20.9 ms |
+| 16 MiB | 单订阅器 540 帧 | 0 | P95 小于 0.2 ms |
+| 16 MiB | 三订阅器共 1620 帧 | 0 | P95 约 0.23 ms，最大小于 0.30 ms |
+
+上述对照验证了默认池容量的影响。更高分辨率、更多流和更长保留队列需要按实际在途数据量
+重新评估容量。原生故障窗口、逐分片记录和具体机器的配置、进程及发布状态保存在任务证据
+`.evidence/dds-native-stages-20261112-v1/progress.json`，部署状态以目标机的新鲜核验为准。
 
 ```mermaid
 sequenceDiagram
@@ -1093,3 +1130,17 @@ SQLite 历史索引 schema 2 从 schema 1 事务迁移，先持久化删除标�
 - I15报告常驻服务实例/PID、writer真实身份、活动会话、队列和缺口。服务自身可用与单Run的CaptureReady分别核验。受管启动先准备记录服务再启动消费者；正常停服务要求会话封存且writer实际退出。活跃会话拒绝SIGTERM及管理停服，不强杀；环境退出前先检查封存状态，再退出来源服务。
 - 用户另行批准I11绑定时接收已有`control_policy/execution_context`。服务核验策略hash、用途、资源预算与Run目录身份，writer封存并确认退出后，由服务生成原格式`workbench.capture-run.v1`的`receipt-rNNNNNN.json`及最新入口。业务端消费封存回执并异步索引；Infer复用既有历史库，保留原调试结果与不可变版本，媒体回读继续核验pin。业务在提交结束后退出，不影响服务生成回执和重启索引。没有final barrier的生产端退出保留未知覆盖，不能补造控制终态。
 - 服务仅在raw封存、writer真实退出、所需Run回执完成后将会话登记为完成；已完成历史的后续清理不等于活动录制故障，已完成request_id不能重新启动writer。用户于2026-11-06批准G34本轮仅做诊断验收：采用非阻塞发布、有界队列、发布耗时及队列年龄统计，不新增运行时硬停止门槛。真机控制周期与Stop性能须在P5发布前实测并冻结预算；CPU微基准不能替代真机性能资格。批准与证据见`g34-performance-stage-proposal.json`和`resident-performance.json`。最终资格与测试证据见`.evidence/architecture-p1-20261105-v1/progress.json`。
+
+
+## 原生故障保持与多来源控制交接
+
+`physical_device.native_fault_hold` 取值为 `workbench.native-fault-hold.v1`，与已固定身份的 SDK 模块一起部署。模块必须提供同版本能力和 `bind_fault_hold`，绑定失败时拒绝启动。`scripts/patch_sdk_fault_hold.py` 仅用于独立 SDK 源码候选，重新构建后更新原有 SDK 制品身份。
+
+- Guard 通过私有共享内存通知原生发送循环。反馈超时、心跳超时和通信异常锁存后，撤销未来轨迹，使用正常执行期间缓存的有限、限位内姿态及其重力项提交位置保持。缓存沿用原计算结果，不在故障时用无效反馈重新计算重力。
+- `EmergencyReport.support_mode` 为 `cached_position_hold`、`damping` 或 `unavailable`。`feedback_valid=false` 与缓存保持输出可同时出现。`damping_committed` 只表示原生输出提交，物理支撑仍须通过设备反馈和现场验收确认。
+- 反馈恢复不清除故障，不恢复旧轨迹。正常释放继续核对各臂 quiesce 及 Guard 退役回执。Owner 或 Guard 通信退出后，已激活的原生保持由本进程继续承担，实例退役需要按故障恢复流程确认现场支撑。 承载服务须采用 `SendSIGKILL=no`、`Restart=no`，由正常释放流程结束控制实例。
+- 隔离验收使用真实控制源码和内存 CAN 替身，覆盖反馈丢失、心跳中断、通信断开及无效反馈，并核对持续发送、未来撤销、拒绝新动作和显式释放。隔离结果不能替代机械承重验收。
+
+管理配置保留 `collection_handoff` 作为默认数采入口，`additional_collection_handoffs` 可登记其他数采来源，每项沿用同一 unit、文件身份、loopback status API 和可选相机归属契约。接管前逐项执行正常停止并核验退出。空闲 Web 进程不作为控制占用证据，数采 manager、机器人节点及 SDK 控制进程继续参与冲突核验。已失败 episode 只有在同 session 的 emergency recovery 完成、硬件安全收尾成立且所有控制者停止后才允许交接。
+
+维护触发为故障输出模式、共享内存版本、SDK 制品契约或数采交接来源变化。

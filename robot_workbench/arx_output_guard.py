@@ -63,6 +63,7 @@ class FeedbackLatch:
         self.release_events=deque(maxlen=16);self.release_events_truncated=0
         self.sdk_contract=sdk_contract
         self.sdk_instances={};self.quiesce_reports={};self.generation=None
+        self.retained_fault = False
         self.rx_evidence={bus:dict(frames=0,valid_feedback_frames=0,stale_frames=0,future_frames=0,
             socket_drops=0,last_rx_age_s=None,maximum_rx_age_s=0.,last_kernel_rx_ns=None,last_read_monotonic_s=None)
             for bus in self.buses}
@@ -110,7 +111,7 @@ class FeedbackLatch:
                     or not int(self.started*1e9)<=report['last_send_attempt_monotonic_ns']<=report['quiesce_returned_monotonic_ns']<=int(self.clock()*1e9)
                     or self.clock()-report['last_send_attempt_monotonic_ns']/1e9>TIMEOUT):
                 raise ValueError('invalid or stale SDK quiesce report')
-        if self.phase!='releasing' or bus in self.retired or self.check():
+        if self.phase!='releasing' or bus in self.retired or self.check() and not self.retained_fault:
             raise ValueError('SDK retirement outside healthy release')
         if self.sdk_contract:self.quiesce_reports[side]=dict(report)
         self.retired.add(bus);self.note_release('retire_'+side+'_received')
@@ -217,6 +218,8 @@ class FeedbackLatch:
         return request
 
     def check(self):
+        if self.reason is not None:
+            return self.reason
         now = self.clock()
         if self.phase in ('starting', 'active', 'releasing'):
             # Startup checks every motor already seen; uninitialized motors have
@@ -358,17 +361,27 @@ class GuardClient:
                     if len(self.pending) > 8192:raise ValueError('oversized guard response')
                 line,self.pending = self.pending.split(b'\n',1);stage='decode';reply = json.loads(line)
             except (OSError, ValueError) as error:
+                hold = getattr(self, 'fault_hold', None)
+                retaining = hold is not None and bool(hold.read(1))
                 if self.failure_trace is not None:
                     try:self.failure_trace.write(dict(schema='guard_ipc_failure.v1',source_pid=os.getpid(),source_tid=threading.get_native_id(),
                         action=action,stage=stage,started_monotonic_ns=started,sent_monotonic_ns=locals().get('sent'),
                         failed_monotonic_ns=time.monotonic_ns(),budget_s=budget,exception=type(error).__name__,errno=getattr(error,'errno',None),
-                        message=str(error)[:160],pending_bytes=len(self.pending),self_sigkill_requested=True))
+                        message=str(error)[:160],pending_bytes=len(self.pending),self_sigkill_requested=not retaining))
                     except Exception:pass  # Diagnostic failure never delays the existing fail-stop.
                 # The supervisor also owns and terminates us on IPC failure. Do
                 # not call SDK close(), whose destructor can resume sending.
-                os.kill(os.getpid(), signal.SIGKILL)
+                if retaining:
+                    hold.trip(3)
+                else:
+                    os.kill(os.getpid(), signal.SIGKILL)
                 raise
             if reply.get('error'):raise ValueError(reply['error'])
+            if action == 'activate' and getattr(self, 'fault_hold', None) is not None:
+                # A dead supervisor must trip the native lease, not kill its
+                # still-running support output together with the process.
+                if ctypes.CDLL(None, use_errno=True).prctl(1, 0, 0, 0, 0):
+                    raise OSError(ctypes.get_errno(), 'cannot retain native hold on supervisor exit')
             returned=time.monotonic_ns()
             self.last_call_timing=dict(action=action,lock_wait_s=(started-requested)/1e9,
                 encode_send_s=(sent-started)/1e9,response_wait_decode_s=(returned-sent)/1e9,
@@ -437,6 +450,11 @@ def bind_child():
     hello=_client.call('hello')
     _client.disabled_grippers = hello['disabled_grippers']
     _client.sdk_contract=hello.get('sdk_contract')
+    hold_fd = os.environ.pop('ROBOT_WORKBENCH_FAULT_HOLD_FD', None)
+    if hold_fd is not None:
+        from .native_fault_hold import NativeFaultHold
+        _client.fault_hold = NativeFaultHold(int(hold_fd))
+        os.set_inheritable(int(hold_fd), False)
 
 
 def require_guard():
@@ -481,6 +499,12 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         from .sdk_quiesce import validate_contract
         validate_contract(sdk_contract)
     latch = FeedbackLatch(buses,disabled_grippers=disabled,sdk_contract=sdk_contract);readers = {};parent = peer = child = None
+    hold = None
+    if profile.get('native_fault_hold'):
+        from .native_fault_hold import NativeFaultHold, SCHEMA
+        if profile['native_fault_hold'] != SCHEMA or sdk_contract is None:
+            raise ValueError('native fault hold requires a pinned compatible SDK')
+        hold = NativeFaultHold.create()
     trace_fd = trace_path = trace_memory = release_trace = failure_trace = None
     stack_capture=dict(storage='bounded_memory',limit_bytes=4*1024**2,archived=False)
     path = Path(record_path or Path(profile['storage_root'])/'can-output-guard.json')
@@ -514,6 +538,7 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         value['process_evidence']=deepcopy(process_evidence)
         value['guard_client_failure']=failure_trace.snapshot() if failure_trace is not None else None
         value['sdk_quiesce_reports']=dict(latch.quiesce_reports)
+        if hold is not None:value['native_fault_hold']=hold.snapshot()
         if latch.reason:value['last_latch']={'reason':latch.reason,'wall_ns':time.time_ns(),**value['diagnostics']}
         if include_release_trace:
             started=next((row['monotonic_s'] for row in reversed(latch.release_events)
@@ -558,6 +583,9 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         try:release_trace=ReleaseTrace.create()
         except (OSError,ValueError,BufferError,MemoryError):pass
         descriptors=(peer.fileno(),trace_fd,*inherited_fds)
+        if hold is not None:
+            descriptors += (hold.fd,)
+            env['ROBOT_WORKBENCH_FAULT_HOLD_FD'] = str(hold.fd)
         if failure_trace is not None:
             descriptors+=(failure_trace.fd,);env['ROBOT_WORKBENCH_GUARD_FAILURE_FD']=str(failure_trace.fd)
         if release_trace is not None:
@@ -567,16 +595,24 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         peer.close();peer=None;persist('disconnected')
         cycle_done_ns=time.monotonic_ns();previous_batch=None;reported_slow_ns=None
         while child.poll() is None:
+            if hold is not None and hold.read(3) and not latch.reason:
+                latch.trip('native fault-hold requested')
             if stop_signal:
                 # Preserve existing supported-release semantics: ordinary service
                 # stop cannot silently drop a powered robot's hold.
                 child.send_signal(stop_signal);stop_signal=None
             if latch.check():
                 observe_failure(latch.reason)
-                terminate()  # Terminate before any log or filesystem IO.
-                try:persist('latched',include_release_trace=True,reason=latch.reason)
-                except OSError:pass
-                break
+                if hold is not None and hold.read(1):
+                    hold.trip()
+                    if not latch.retained_fault:
+                        latch.retained_fault = True
+                        persist('latched', reason=latch.reason)
+                else:
+                    terminate()  # No bound native hold exists during construction.
+                    try:persist('latched',include_release_trace=True,reason=latch.reason)
+                    except OSError:pass
+                    break
             if latch.stack_request() is not None:
                 try:os.kill(child.pid,signal.SIGUSR1)
                 except ProcessLookupError:pass
@@ -607,7 +643,7 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                 process_evidence['last_slow_can_batch']=dict(selected_monotonic_ns=selected_ns,
                     can_batch_s=(can_done_ns-selected_ns)/1e9,can_batch_cpu_s=can_cpu_ns/1e9,
                     can_frames=can_frames,detail=can_detail,loop=loop_timing,gc=recent())
-            if latch.reason:continue
+            if latch.reason and not latch.retained_fault:continue
             if parent in ready:
                 data=parent.recv(4096)
                 if not data:
@@ -639,17 +675,20 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                         from .can_feedback_filter import install
                         for sock,bus in readers.items():
                             install(sock,active=True,include_gripper=(bus,8)in latch.expected)
+                        if hold is not None:hold.arm()
                         reply({'armed':True,'heartbeat_monotonic_s':latch.heartbeat})  # No filesystem IO while outputs are armed.
-                    elif action=='heartbeat' and latch.phase in ('starting','active','releasing'):
+                    elif action=='heartbeat' and latch.phase in ('starting','active','releasing','latched'):
+                        if hold is not None and not latch.reason:hold.heartbeat()
                         slow=process_evidence.get('last_slow_can_batch')
                         new_slow=slow if slow and slow['selected_monotonic_ns']!=reported_slow_ns else None
-                        latch.heartbeat=time.monotonic();reply({'healthy':True,'heartbeat_monotonic_s':latch.heartbeat,
+                        latch.heartbeat=time.monotonic();reply({'healthy':not bool(latch.reason),'heartbeat_monotonic_s':latch.heartbeat,
+                            **(dict(reason=latch.reason,native_fault_hold=hold.snapshot()) if latch.retained_fault else {}),
                             'server_timing':dict(selected_monotonic_ns=selected_ns,can_batch_s=(can_done_ns-selected_ns)/1e9,
                                 can_batch_cpu_s=can_cpu_ns/1e9,can_frames=can_frames,can_detail=can_detail,
                                 loop=loop_timing,new_slow_can_batch=new_slow,gc=recent(),
                                 request_decoded_monotonic_ns=process_evidence['last_ipc']['received_monotonic_ns'])})
                         if new_slow:reported_slow_ns=new_slow['selected_monotonic_ns']
-                    elif action=='releasing' and latch.phase in ('starting','active'):
+                    elif action=='releasing' and (latch.phase in ('starting','active') or latch.retained_fault):
                         latch.phase='releasing';latch.started=time.monotonic();latch.note_release('releasing_received');reply({'protected':True})
                     elif action=='register_sdk':
                         try:latch.register_sdk(request['side'],request['identity'])
@@ -666,7 +705,13 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
                     elif action=='trip':
                         detail=request.get('detail','')
                         if not isinstance(detail,str) or len(detail)>512:raise ValueError('invalid SDK error detail')
+                        first_detail = 'native_fault_detail' not in process_evidence
+                        if first_detail:process_evidence['native_fault_detail'] = detail
                         latch.trip('SDK acquisition or native call failed'+(': '+detail if detail else ''))
+                        if hold is not None and hold.read(1):
+                            hold.trip(3)
+                            reply({'latched':True})
+                            if first_detail:persist('latched', reason=latch.reason)
                     else:raise ValueError('invalid guard transition: '+str(action))
             if probe_request:
                 if not latch.missing(DM):
@@ -687,7 +732,7 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         if latch.phase!='idle' and not latch.reason:
             observe_failure('SDK process exited before protected release completed')
             latch.trip('SDK process exited before protected release completed')
-        if latch.reason:
+        if latch.reason and latch.phase != 'idle':
             try:persist('latched',include_release_trace=True,reason=latch.reason)
             except OSError:pass
         else:persist('disconnected',include_release_trace=True)
@@ -695,7 +740,14 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
     except BaseException as error:
         observe_failure(type(error).__name__+': '+str(error))
         if child is not None:
-            terminate()
+            if hold is not None and hold.read(1) and child.poll() is None:
+                hold.trip(3)
+                latch.trip(str(error))
+                persist('latched', reason=latch.reason)
+                # Keep the native send loops alive until explicit supported-arm
+                # retirement. The shared latch prevents old trajectory revival.
+                while child.poll() is None:time.sleep(.05)
+            else:terminate()
             try:reap()
             except subprocess.TimeoutExpired:pass
         if trace_memory is not None and process_evidence['returncode']is not None:
@@ -706,10 +758,13 @@ def supervise(profile, command, *, record_path=None, inherited_fds=()):
         except OSError:pass
         raise
     finally:
-        if child is not None and child.poll() is None:terminate()
+        if child is not None and child.poll() is None:
+            if hold is not None and hold.read(1):hold.trip(3)
+            else:terminate()
         for sock in [*readers,parent,peer]:
             if sock is not None:sock.close()
         if trace_memory is not None:trace_memory.close()
         if release_trace is not None:release_trace.close()
         if failure_trace is not None:failure_trace.close()
+        if hold is not None:hold.close()
         for sig,handler in old_signals.items():signal.signal(sig,handler)

@@ -113,6 +113,16 @@ python3 scripts/install_model.py install \
 制品与目标配置契约见 [工作台集成接口](docs/WORKBENCH_INTEGRATION_INTERFACE.md) 中的
 “训练制品安装与采集期间回放编码”。新增模型家族或原生完成格式变化时，更新公共解析与相应隔离验收。
 
+## 图像 DDS 部署默认值
+
+- 新部署统一携带 `configs/dds-image-transport.xml`，工作台拥有的相机发布入口默认使用 16 MiB SHM 池并保留 UDPv4。显式 DDS 配置优先，部署时核对发布端池容量。
+- 复用外部相机发布器时，在拥有发布器的服务环境配置该 XML，并核对相机子进程继承。现有进程的配置加载按维护窗口正常重启、重新绑定来源。
+- 故障机制、容量对照和跨机器验收见 [工作台集成接口](docs/WORKBENCH_INTEGRATION_INTERFACE.md#图像-dds-共享内存与跨机器部署默认值)。部署验收覆盖发布端环境、SHM 容量和三路图像缺片补发长尾。
+
+## 协作维护的 WAM 可视化平台
+
+2026-11-13 用户明确 WAM 可视化工作台由协作同事维护。该平台出现问题时，整理复现步骤、根因和必要证据，交由用户安排维护同事处理。后续开发与发布遵循用户的具体委派。
+
 ## 开发 Map 与续接
 
 - 开始、阻塞、实现和验证完成时，同步更新 `web/architecture/development-map.json` 中相应职责域和文件的状态、证据及下一步。每个逻辑变更结束后使用 `python3 scripts/development_map.py refresh --publish` 同步已授权的内网架构站点。
