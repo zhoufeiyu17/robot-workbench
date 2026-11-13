@@ -38,6 +38,7 @@ def native_model_to_device(value):
 def decode_native14(prediction,current_device14,limits):
     vector14(current_device14)
     decoded=native_model_to_device(prediction);final=np.clip(decoded,limits[:,0],limits[:,1])
+    final[[6,13]]=decoded[[6,13]]
     return dict(decoded_device14=decoded.tolist(),mapped_device14=decoded.tolist(),final_device14=final.tolist(),
         conversions=dict(joints='native_encoder_rad_no_zero_offset',jaws='recorded_endpoint_m_to_mm',arms='both'),
         projections=[dict(axis=int(i),requested=float(decoded[i]),final=float(final[i]),delta=float(final[i]-decoded[i]),

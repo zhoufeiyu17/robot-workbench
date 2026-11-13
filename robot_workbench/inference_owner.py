@@ -20,7 +20,7 @@ from .execution_settings import DEFAULT_JOINT_TOLERANCE_RAD,NativeCommandMismatc
 # Native command endpoint comparison: joints rad / rad/s, jaws m / m/s.
 NORMAL_ENDPOINT_ABS_TOLERANCE14=((1e-5,)*6+(1e-6,))*2
 NORMAL_ENDPOINT_RANGE_FRACTION=.05
-MODEL_COMMAND_LIMIT_FRACTION=.98
+MODEL_JOINT_LIMIT_FRACTION=.99
 
 
 def digest(value):
@@ -1819,11 +1819,13 @@ class InferenceRunner:
         decoded=self.adapter.decode(row,held)
         original=vector14(decoded['final_device14'])
         limits=np.asarray(self.limits,dtype=float)
-        inner=np.clip(limits*MODEL_COMMAND_LIMIT_FRACTION,limits[:,0,None],limits[:,1,None])
-        clipped=np.clip(original,inner[:,0],inner[:,1])
+        joints=[*range(6),*range(7,13)]
+        inner=np.clip(limits[joints]*MODEL_JOINT_LIMIT_FRACTION,limits[joints,0,None],limits[joints,1,None])
+        clipped=original.copy()
+        clipped[joints]=np.clip(original[joints],inner[:,0],inner[:,1])
         projections=list(decoded.get('projections',[]))
         projections.extend(dict(axis=int(axis),requested=float(original[axis]),final=float(clipped[axis]),
-            delta=float(clipped[axis]-original[axis]),reason='model_command_limit_98_percent')
+            delta=float(clipped[axis]-original[axis]),reason='model_joint_command_limit_99_percent')
             for axis in np.flatnonzero(original!=clipped))
         return dict(decoded,final_device14=clipped.tolist(),projections=projections)
 

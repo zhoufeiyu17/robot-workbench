@@ -56,6 +56,16 @@ class RegisteredCatalogTests(unittest.TestCase):
         from robot_workbench import wam
         from robot_workbench.inference_transport import RemoteBaseClient, serve_model, PROTOCOL
         manifest, registry = self.register()
+        from robot_workbench import model_runtime
+        lock_name=model_runtime.lock_path('torch')
+        lock_file=Path(registry['root'])/lock_name
+        lock_file.parent.mkdir()
+        lock_bytes=data(model_runtime.capture(sys.executable))
+        lock_file.write_bytes(lock_bytes)
+        registry['python']=sys.executable
+        registry['files'].append(dict(path=lock_name,bytes=len(lock_bytes),sha256=sha(lock_bytes)))
+        registry['bundle_sha256']=sha(data(sorted(registry['files'],key=lambda row:row['path'])))
+        manifest.write_text(json.dumps(registry))
         closed = []
 
         class Worker:

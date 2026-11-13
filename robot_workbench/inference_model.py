@@ -397,6 +397,7 @@ class LegacyBaseAdapter:
         mapped[6] = self.opened if raw[6] >= .044 else self.closed
         mapped[7:] = current[7:]
         final = np.clip(mapped, self.limits[:, 0], self.limits[:, 1]) if self.project else mapped.copy()
+        final[[6,13]]=mapped[[6,13]]
         projections = [dict(axis=int(i), requested=float(mapped[i]), final=float(final[i]),
                             delta=float(final[i]-mapped[i]), reason='device_position_boundary')
                        for i in np.flatnonzero(mapped != final)]
@@ -448,6 +449,7 @@ class ContinuousBaseAdapter(LegacyBaseAdapter):
         if self.disabled_right_gripper_model_m is not None:
             mapped[13] = vector14(self.model_to_device(self.device_to_model(held)))[13]
         final = np.clip(mapped, self.limits[:,0], self.limits[:,1]) if self.project else mapped.copy()
+        final[[6,13]]=mapped[[6,13]]
         return dict(decoded_device14=decoded.tolist(), mapped_device14=mapped.tolist(), final_device14=final.tolist(),
             conversions=dict(left_jaw=dict(predicted_model_m=float(raw[6]), decoder='continuous_sum_two_finger_travel_m'),
                 right_arm='hold_observed_at_episode_start',

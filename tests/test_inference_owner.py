@@ -20,6 +20,22 @@ from test_owner_clock import ClockBackend, Safety, calibration, jaw
 
 
 class InferenceOwnerTests(unittest.TestCase):
+    def test_native_targets_clip_only_joints_and_preserve_raw_jaw_opening(self):
+        from types import SimpleNamespace
+        from robot_workbench.wam import Adapter
+        limits=np.asarray([[-3.5,3.5]]*14,dtype=float)
+        limits[[6,13]]=[0.,83.]
+        runner=SimpleNamespace(adapter=Adapter(limits,83.),limits=limits)
+        for sign in(-1.,1.):
+            prediction=np.full(14,sign*10.)
+            prediction[[6,13]]=[-.002,.090]
+            result=InferenceRunner._decode_model_target(runner,prediction,np.zeros(14))
+            joints=[*range(6),*range(7,13)]
+            np.testing.assert_allclose(np.asarray(result['final_device14'])[joints],sign*3.5*.99)
+            np.testing.assert_allclose(np.asarray(result['final_device14'])[[6,13]],[-2.,90.])
+            self.assertTrue(result['projections'])
+            self.assertTrue(all(row['axis']in joints for row in result['projections']))
+
     def test_optional_clock_mapping_rejects_boot_change_and_clock_step(self):
         from robot_workbench.inference_owner import map_recording_cutoff
         first=dict(host_id='host',boot_id='boot',mapping_id='episode-clock',wall_ns=1000,
@@ -320,7 +336,7 @@ class InferenceOwnerTests(unittest.TestCase):
         self.assertEqual(self.runtime.owner.runner.status,'FAULT')
         self.assertIn('finite',self.runtime.owner.runner.reason)
 
-    def test_position_projection_is_recorded_and_large_speed_does_not_retime_or_stop(self):
+    def test_joint_99_percent_projection_is_recorded_and_large_speed_does_not_stop(self):
         self.configure(lambda request:dict(request_id=request['request_id'],action14=np.full((60,14),99.)))
         self.confirm(self.preview());self.advance(60)
         runner=self.runtime.owner.runner
@@ -331,7 +347,9 @@ class InferenceOwnerTests(unittest.TestCase):
         self.assertTrue(any(row['kind']=='velocity' for row in receipt['final_device_audit']['problems']))
         self.assertEqual(receipt['final_device_audit']['unavailable_acceleration_axes'],[6,13])
         self.assertTrue(receipt['conversions'][0]['projections'])
-        self.assertEqual(runner.last_device_target[0],runner.limits[0][1])
+        self.assertAlmostEqual(runner.last_device_target[0],runner.limits[0][1]*.99)
+        self.assertEqual(runner.last_device_target[6],83.)
+        self.assertFalse(any(row['axis']in(6,13)for row in receipt['conversions'][0]['projections']))
         self.assertEqual(runner.loop.period,1/30)
 
     def test_fake_applied_sequence_mismatch_is_never_fed_to_model_history(self):

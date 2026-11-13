@@ -176,7 +176,7 @@ def _probe_video(path, runner, offsets_us, duration_us, *, decode=True):
             raise ValueError('source replay frame PTS differs by more than 1 microsecond')
     actual_duration = float(streams[0].get('duration', 'nan')) * 1e6
     if not math.isfinite(actual_duration) or abs(actual_duration - duration_us) > 1.000001:
-        raise ValueError('source replay duration/final-frame hold differs')
+        raise ValueError(f'source replay duration/final-frame hold differs: actual_us={actual_duration:g}, expected_us={duration_us}')
     return streams[0]
 
 
@@ -268,6 +268,7 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
             concat.write_text('ffconcat version 1.0\n' + ''.join(f"file '{escaped(path)}'\n" for path in paths))
             filters.write_text(trim+"settb=1/1000000,setpts='" + _setpts(offsets_us) + "'\n")
             destination = output / f'source-{camera}.mp4'
+            encoded = temporary / f'{camera}.mp4'
             before = time.monotonic()
             # The input rate supplies the final packet duration; setpts restores
             # every source timestamp. Output -r conflicts with VFR in FFmpeg 8.
@@ -276,7 +277,11 @@ def export_segments(raw_root, raw_manifest, source, plan, output, *, runner=subp
                     '-c:v', 'libx264', '-threads', '1', '-preset', 'fast', '-crf', '24', '-pix_fmt', 'yuv420p',
                     '-bf', '0',
                     '-vsync', 'vfr', '-enc_time_base', '1:1000000', '-video_track_timescale', '1000000',
-                    '-movflags', '+faststart', str(destination)], check=True, timeout=300)
+                    '-movflags', '+faststart', str(encoded)], check=True, timeout=300)
+            # Set the final packet hold explicitly, including its container
+            # duration, through the same stream-copy path as live recordings.
+            packet_stage=temporary/camera;packet_stage.mkdir()
+            _remux_browser([encoded],destination,offsets_us,tail_us,packet_stage,runner,'ffmpeg')
             detail['encode_wall_s'] = time.monotonic() - before
             before = time.monotonic()
             probe = _probe_video(destination, runner, offsets_us, offsets_us[-1] + tail_us)

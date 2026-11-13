@@ -282,7 +282,6 @@ class Adapter:
         if (self.limits.shape!=(14,2)or not np.isfinite(self.limits).all()or np.any(self.limits[:,0]>self.limits[:,1])
                 or openings.shape!=(2,)or not np.isfinite(openings).all()
                 or np.any(openings<=MODEL_JAW_OPEN_MARGIN_MM)):raise ValueError('valid native14 limits/opening required')
-        self.limits[[6,13],1]=np.minimum(self.limits[[6,13],1],openings-MODEL_JAW_OPEN_MARGIN_MM)
 
     def bind_normalization(self,raw,*,expected_sha256):
         if not isinstance(raw,bytes)or hashlib.sha256(raw).hexdigest()!=expected_sha256:

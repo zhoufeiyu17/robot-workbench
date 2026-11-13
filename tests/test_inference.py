@@ -97,7 +97,7 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(adapter.device_to_model(result['final_device14'])[13],.082992)
         self.assertEqual(held[13],0.,'disabled raw feedback remains unmodified')
         raw[6]=.12
-        self.assertEqual(adapter.decode(raw,held)['final_device14'][6],83.)
+        self.assertAlmostEqual(adapter.decode(raw,held)['final_device14'][6],120.008)
         with self.assertRaisesRegex(ValueError,'disabled right'):
             ContinuousBaseAdapter(model_to_device=to_device,device_to_model=to_model,position_limits=limits,
                 disabled_right_gripper_model_m=float('nan'))
