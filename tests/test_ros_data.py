@@ -32,6 +32,25 @@ def native_subscriber(pipe):
 
 
 class SourceContracts(unittest.TestCase):
+    def test_image_publisher_transport_default_and_explicit_override(self):
+        import xml.etree.ElementTree as ET
+        from unittest.mock import patch
+        from robot_workbench.ros_data import image_transport_environment
+        with patch.dict(os.environ,{'ROS_DOMAIN_ID':'126'},clear=True):
+            environment=image_transport_environment()
+            self.assertNotIn('FASTRTPS_DEFAULT_PROFILES_FILE',os.environ)
+            self.assertEqual(environment['ROS_DOMAIN_ID'],'126')
+            profile=Path(environment['FASTRTPS_DEFAULT_PROFILES_FILE'])
+            tree=ET.parse(profile);ns={'dds':'http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles'}
+            self.assertEqual(tree.find('.//dds:segment_size',ns).text,'16777216')
+            self.assertEqual(tree.find('.//dds:useBuiltinTransports',ns).text,'false')
+            self.assertEqual([node.text for node in tree.findall('.//dds:type',ns)],['SHM','UDPv4'])
+            with patch.object(Path,'is_file',return_value=False):
+                with self.assertRaisesRegex(ValueError,'profile is missing'):image_transport_environment()
+        for key in ('FASTRTPS_DEFAULT_PROFILES_FILE','FASTDDS_DEFAULT_PROFILES_FILE'):
+            with patch.dict(os.environ,{key:'/deployment/custom.xml'},clear=True):
+                self.assertEqual(image_transport_environment(),{key:'/deployment/custom.xml'})
+
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST') == '1', 'native ROS DDS needs isolated Linux')
     def test_timing_keeps_rmw_metadata_and_direct_callbacks(self):
         from robot_workbench.ros_data import RosNode

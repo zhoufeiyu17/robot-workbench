@@ -46,6 +46,7 @@ class CameraOwnerTest(unittest.TestCase):
             ros=Mock();ros.types=SimpleNamespace(SourceDescriptor=SimpleNamespace)
             ros.publisher.return_value.publish.side_effect=messages.append
             def publish(command,**kwargs):
+                self.assertIn('FASTRTPS_DEFAULT_PROFILES_FILE',kwargs['env'])
                 Path(command[command.index('--ready_file')+1]).write_text('{}')
                 return child
             def stop(_):signals[signal.SIGTERM](signal.SIGTERM,None)

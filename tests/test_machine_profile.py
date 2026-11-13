@@ -13,6 +13,16 @@ from robot_workbench.machine_profile import MachineProfile,Deployment
 
 
 class MachineProfileTest(unittest.TestCase):
+    def test_packaged_image_transport_is_in_deployment_identity(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);(root/'configs').mkdir()
+            profile=root/'configs/dds-image-transport.xml'
+            profile.write_text('<segment_size>16777216</segment_size>')
+            first=Deployment(root,{})
+            self.assertIn('manager:configs/dds-image-transport.xml',first.files)
+            profile.write_text('<segment_size>524288</segment_size>')
+            self.assertNotEqual(first.sha256,Deployment(root,{}).sha256)
+
     def test_declared_machine_and_current_index_digest_never_claim_hardware_verification(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);manifest=root/'manifest.json';manifest.write_text('{"head":{"id":"declared-head"}}')

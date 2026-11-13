@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import queue
 import sys
 import re
@@ -27,6 +28,16 @@ _TOPIC = re.compile(r'/[A-Za-z_][A-Za-z0-9_/]*')
 _MESSAGE_NAMES=('StreamRef','SourceDescriptor','RobotState','Observation','ModelRequest','ModelInput','ModelResult','DataEvent')
 # Exact field names, types and bounds of ros/workbench_interfaces/msg/*.msg.
 _MESSAGE_LAYOUT_SHA256='39c50d57a46f51feb1f2e0956015f3e1b80b3240ba8e628d205091c0a613bcd9'
+
+
+def image_transport_environment():
+    """Apply the packaged image transport default to a newly launched publisher."""
+    environment=dict(os.environ)
+    if not any(environment.get(key)for key in ('FASTRTPS_DEFAULT_PROFILES_FILE','FASTDDS_DEFAULT_PROFILES_FILE')):
+        profile=Path(__file__).resolve().parents[1]/'configs/dds-image-transport.xml'
+        if not profile.is_file():raise ValueError('packaged DDS image transport profile is missing')
+        environment['FASTRTPS_DEFAULT_PROFILES_FILE']=str(profile)
+    return environment
 
 
 def require_runtime():

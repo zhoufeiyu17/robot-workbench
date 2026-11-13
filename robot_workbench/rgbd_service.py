@@ -37,8 +37,12 @@ def start_capture_sources(profile, service, output):
         source_argument='--profile'
     else:
         descriptor=Path(service.directories['base_0']).parent/'camera-service.json';source_argument='--service-descriptor'
-    env=dict(os.environ,PYTHONPATH=os.pathsep.join([str(root),str(root/'rule_based_workbench'),
-        str(root/'calibration/infra'),os.environ.get('PYTHONPATH','')]))
+    env=dict(os.environ)
+    if profile.get('data_plane')is not None:
+        from .ros_data import image_transport_environment
+        env=image_transport_environment()
+    env['PYTHONPATH']=os.pathsep.join([str(root),str(root/'rule_based_workbench'),
+        str(root/'calibration/infra'),os.environ.get('PYTHONPATH','')])
     processes=[]
     try:
         for role,row in profile['cameras'].items():

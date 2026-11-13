@@ -82,9 +82,9 @@ class Deployment:
             if source in seen:
                 self.components[component]=dict(self.components[seen[source]],source_component=seen[source]);continue
             entries={}
-            for folder in ('robot_workbench','rule_based_workbench','scripts','web','calibration','detector_adapter'):
+            for folder in ('robot_workbench','rule_based_workbench','scripts','web','calibration','detector_adapter','configs'):
                 for path in (source/folder).rglob('*'):
-                    if path.is_file() and not path.is_symlink() and path.suffix in ('.py','.js','.mjs','.html','.css','.sh'):
+                    if path.is_file() and not path.is_symlink() and path.suffix in ('.py','.js','.mjs','.html','.css','.sh','.xml'):
                         key=component+':'+str(path.relative_to(source));paths[key]=path;entries[key]=str(path)
             self.components[component]=dict(root=str(source),source_files=len(entries))
             seen[source]=component

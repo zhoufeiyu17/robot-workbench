@@ -167,6 +167,8 @@ class CameraSourcesTest(unittest.TestCase):
                 self.assertEqual(len(start_capture_sources(profile,service,root)),3)
             for call in launch.call_args_list:
                 args=call.args[0];self.assertNotIn('--service-descriptor',args)
+                self.assertIn('FASTRTPS_DEFAULT_PROFILES_FILE',call.kwargs['env'])
+                self.assertIn(str(ROOT/'rule_based_workbench'),call.kwargs['env']['PYTHONPATH'])
                 frozen=json.loads(Path(args[args.index('--profile')+1]).read_text())
                 self.assertEqual(frozen,profile)
 

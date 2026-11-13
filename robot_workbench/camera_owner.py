@@ -69,6 +69,8 @@ def reuse_camera_owner(args, path, *, startup_timeout=20):
 
 def run_owner(state, args):
     """Only the original publisher opens SDKs; systemd owns the entire process group."""
+    from robot_workbench.ros_data import image_transport_environment
+    publisher_environment=image_transport_environment()
     state = Path(state)
     import fcntl
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +113,7 @@ def run_owner(state, args):
                     timestamp_basis='publisher_host_after_capture'))))
     try:
         atomic(state, dict(value, heartbeat=time.monotonic()))
-        child = subprocess.Popen(command, env=dict(os.environ, ROBOT_WORKBENCH_CAMERA_OWNER='1'), start_new_session=True)
+        child = subprocess.Popen(command, env=dict(publisher_environment, ROBOT_WORKBENCH_CAMERA_OWNER='1'), start_new_session=True)
         value['publisher_pid'] = child.pid
         while not stopped and child.poll() is None:
             value['state'] = 'running' if ready.is_file() else 'starting'
