@@ -353,6 +353,18 @@ def camera_descriptor(manager, business):
     return str(Path(native['directory'])/'recording-camera-service.json') if native else None
 
 
+def owner_preflight_command(unit_text,profile):
+    from robot_workbench.docker_model_service import option
+    from robot_workbench.managed_services import _script_argument
+    commands=[shlex.split(line.split('=',1)[1])for line in unit_text.splitlines()
+              if line.startswith('ExecStartPre=')]
+    selected=[command for command in commands if Path(_script_argument(command)or'').name=='check_sdk_solver.py']
+    require(len(selected)==1,'Owner needs the shared SDK solver preflight')
+    command=selected[0]
+    require(option(command,'--profile')==[str(profile)],'Owner solver preflight must use the deployed Owner profile')
+    return command
+
+
 def seal(args):
     root = Path(args.root).resolve()
     manager_path = inside(args.manager_profile, root)
@@ -426,7 +438,8 @@ def seal(args):
         starts=[shlex.split(line.split('=',1)[1]) for line in unit_text.splitlines() if line.startswith('ExecStart=')]
         require(len(starts)==1 and spec['expected_script'] in starts[0], 'unit entrypoint does not match registry: '+role)
     owner_text = '\n'.join(Path(p).read_text() for p in services['control_owner']['files'])
-    require('AMENT_PREFIX_PATH=' in owner_text and 'ExecStartPre=' in owner_text, 'Owner needs CPU solver preflight and AMENT environment')
+    require('AMENT_PREFIX_PATH=' in owner_text,'Owner needs the native solver AMENT environment')
+    owner_preflight_command(owner_text,pins['control_owner_profile'])
     from robot_workbench.machine_profile import Deployment
     wrapped = {k: SimpleNamespace(spec=SimpleNamespace(expected_script=v['expected_script'])) for k, v in services.items()}
     deployment = Deployment(source, wrapped); deployment.bind_configuration(manager)

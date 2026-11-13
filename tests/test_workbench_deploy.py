@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import socket
 import sys
@@ -352,6 +353,19 @@ class StartupTest(unittest.TestCase):
         output.write_text('{"instance":2}')
         self.assertEqual(list(d.command_inputs(argv)),[str(script),str(profile)])
         self.assertEqual(list(d.command_inputs(['python',str(script),'--output='+str(output)])),[str(script)])
+
+    def test_owner_solver_preflight_is_bound_to_its_actual_profile(self):
+        profile=self.root/'owner-current.json'
+        command=['python','-B',str(self.root/'check_sdk_solver.py'),'--profile',str(profile)]
+        unit='ExecStartPre='+shlex.join(command)
+        self.assertEqual(d.owner_preflight_command(unit,profile),command)
+        for wrong in (self.root/'owner-old.json',self.root/'other-owner.json'):
+            with self.assertRaisesRegex(d.Blocked,'deployed Owner profile'):
+                d.owner_preflight_command(unit,wrong)
+        with self.assertRaisesRegex(d.Blocked,'deployed Owner profile'):
+            d.owner_preflight_command('ExecStartPre=python /candidate/check_sdk_solver.py',profile)
+        with self.assertRaisesRegex(d.Blocked,'shared SDK solver preflight'):
+            d.owner_preflight_command('ExecStartPre=python /legacy/sdk_solver_check.py',profile)
     @unittest.skipUnless(sys.platform=='linux','real /proc boot identity and Unix socket on Linux')
     def test_old_boot_quarantine_preserves_evidence_and_rejects_same_boot(self):
         root=self.root/'owner'

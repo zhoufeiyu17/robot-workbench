@@ -20,6 +20,42 @@ def _read(pin):
     return raw
 
 
+def validate_sdk_model(config,calibration):
+    """Validate nominal model identity across installation-directory changes."""
+    if (config.robot_model!='X5' or list(config.gravity_vector)!=calibration['gravity_vector']):
+        raise ValueError('SDK gravity model differs from the calibrated source')
+    try:
+        _read(dict(calibration['source_pins']['sdk_model'],path=config.urdf_path))
+    except (OSError,ValueError) as error:
+        raise ValueError('SDK gravity model differs from the calibrated source') from error
+
+
+def check_sdk_solver(profile):
+    """Probe the selected native configuration and solvers without controllers."""
+    import importlib.util
+    import numpy as np
+    from .sdk_quiesce import verify_module
+    pin=profile['sdk_quiesce']
+    spec=importlib.util.spec_from_file_location('arx5_interface',pin['module']['path'])
+    sdk=importlib.util.module_from_spec(spec);spec.loader.exec_module(sdk)
+    verify_module(sdk,pin)
+    config=sdk.RobotConfigFactory.get_instance().get_config('X5')
+    calibration=load_gravity_calibration(profile.get('sdk_gravity_calibration'))
+    models=[config.urdf_path]
+    if calibration is not None:
+        validate_sdk_model(config,calibration)
+        models.extend(calibration['models'][side]['path']for side in('left','right'))
+    q=np.zeros(config.joint_dof)
+    for model in models:
+        solver=sdk.Arx5Solver(model,config.joint_dof,config.joint_pos_min,config.joint_pos_max,
+            config.base_link_name,config.eef_link_name,config.gravity_vector)
+        if (not np.isfinite(solver.forward_kinematics(q)).all()
+                or not np.isfinite(solver.inverse_dynamics(q,q,q)).all()):
+            raise ValueError('SDK solver produced nonfinite FK or gravity')
+    return dict(passed=True,models_checked=len(models),hardware_connected=False,
+        scope='selected native SDK configuration and calibrated solvers; no controllers')
+
+
 def bake_joint_offsets(raw,offsets):
     """T_origin*R_axis(offset)*R_axis(q) equals the original FK at q+offset."""
     import numpy as np

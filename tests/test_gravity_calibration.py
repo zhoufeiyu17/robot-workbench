@@ -7,13 +7,38 @@ from types import ModuleType,SimpleNamespace as NS
 import sys,unittest
 from unittest.mock import patch
 import numpy as np
-from robot_workbench.gravity_calibration import bake_joint_offsets,load_gravity_calibration
+from robot_workbench.gravity_calibration import bake_joint_offsets,load_gravity_calibration,check_sdk_solver
 from robot_workbench.motion_reference import load_feedforward
 from arx_env.joint_head_isaac_fit import Model
 from test_prepared_reference_backend import Base,hardware_backend
 
 
 class GravityCalibrationTests(unittest.TestCase):
+    def test_solver_preflight_uses_the_supplied_profile_and_shared_identity_check(self):
+        from unittest.mock import Mock
+        with TemporaryDirectory()as root:
+            value,pin,_=self.fixture(root)
+            moved=Path(root)/'moved.urdf'
+            moved.write_bytes(Path(value['source_pins']['sdk_model']['path']).read_bytes())
+            config=NS(robot_model='X5',urdf_path=str(moved),gravity_vector=[0.,0.,-9.807],
+                joint_dof=6,joint_pos_min=[-1.]*6,joint_pos_max=[1.]*6,base_link_name='base',eef_link_name='eef')
+            solver=NS(forward_kinematics=lambda q:np.eye(4),inverse_dynamics=lambda q,v,a:np.zeros(6))
+            sdk=NS(RobotConfigFactory=NS(get_instance=lambda:NS(get_config=lambda model:config)),
+                Arx5Solver=Mock(return_value=solver),Arx5JointController=Mock(side_effect=AssertionError('no controllers')))
+            spec=NS(loader=NS(exec_module=lambda module:None))
+            profile=dict(sdk_quiesce={'module':{'path':'fixture-sdk.so'}},sdk_gravity_calibration=pin)
+            with patch('importlib.util.spec_from_file_location',return_value=spec),\
+                    patch('importlib.util.module_from_spec',return_value=sdk),\
+                    patch('robot_workbench.sdk_quiesce.verify_module')as verify:
+                result=check_sdk_solver(profile)
+                self.assertEqual(result['models_checked'],3);self.assertFalse(result['hardware_connected'])
+                verify.assert_called_once_with(sdk,profile['sdk_quiesce'])
+                self.assertEqual([call.args[0]for call in sdk.Arx5Solver.call_args_list],
+                    [str(moved),value['models']['left']['path'],value['models']['right']['path']])
+                sdk.Arx5Solver.reset_mock();moved.write_bytes(b'changed model')
+                with self.assertRaisesRegex(ValueError,'model differs'):check_sdk_solver(profile)
+                sdk.Arx5Solver.assert_not_called();sdk.Arx5JointController.assert_not_called()
+
     def fixture(self,root):
         def put(name,raw):
             path=Path(root)/name;path.write_bytes(raw);return dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())
@@ -62,6 +87,21 @@ class GravityCalibrationTests(unittest.TestCase):
                 sdk.Arx5JointController(robot(),None,b.config.left_can);sdk.Arx5JointController(robot(),None,b.config.right_can)
                 self.assertEqual(calls,[(value['models']['left']['path'],'dm',b.config.left_can),(value['models']['right']['path'],'none',b.config.right_can)])
                 self.assertEqual(b.gravity_calibration_id,pin['sha256'])
+                relocated=Path(root)/'relocated-sdk-model.urdf'
+                relocated.write_bytes(Path(value['source_pins']['sdk_model']['path']).read_bytes())
+                for side in ('left','right'):
+                    moved=robot();moved.urdf_path=str(relocated)
+                    sdk.Arx5JointController(moved,None,getattr(b.config,side+'_can'))
+                    self.assertEqual(calls[-1][0],value['models'][side]['path'])
+                accepted=len(calls)
+                relocated.write_bytes(relocated.read_bytes()+b'\n<!-- changed model -->\n')
+                changed=robot();changed.urdf_path=str(relocated)
+                wrong_gravity=robot();wrong_gravity.gravity_vector=[0.,0.,9.807]
+                wrong_model=robot();wrong_model.robot_model='another-model'
+                for invalid in (changed,wrong_gravity,wrong_model):
+                    with self.assertRaisesRegex(ValueError,'model differs'):
+                        sdk.Arx5JointController(invalid,None,b.config.left_can)
+                self.assertEqual(len(calls),accepted,'rejected models must not construct a native controller')
                 wrong=robot();wrong.urdf_path='unqualified.urdf'
                 with self.assertRaisesRegex(ValueError,'model differs'):sdk.Arx5JointController(wrong,None,b.config.left_can)
             ff=dict(schema='reference_feedforward.v1',source_sha256='a'*64,controller_profile='normal_X5',phase=[0.,1.],torque_bias_sdk6=[[0.]*6]*2,provenance={})

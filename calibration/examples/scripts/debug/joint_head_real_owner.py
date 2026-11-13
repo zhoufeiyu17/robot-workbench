@@ -233,10 +233,10 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                         robot.gripper_width=gripper_calibration['sdk_width_m']
                     if gravity_calibration is not None:
                         side=next((s for s in ('left','right')if interface==getattr(self_backend.config,s+'_can')),None)
-                        if (side is None or robot.robot_model!='X5'
-                                or robot.urdf_path!=gravity_calibration['source_pins']['sdk_model']['path']
-                                or list(robot.gravity_vector)!=gravity_calibration['gravity_vector']):
+                        if side is None:
                             raise ValueError('SDK gravity model differs from the calibrated source')
+                        from robot_workbench.gravity_calibration import validate_sdk_model
+                        validate_sdk_model(robot,gravity_calibration)
                         robot.urdf_path=gravity_calibration['models'][side]['path']
                     if dm_joint_velocity_wire_scale is not None:
                         if (robot.robot_model!='X5'or list(robot.motor_id)!=[1,2,4,5,6,7]
