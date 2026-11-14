@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 597,
-  "updated_at": "2026-11-13T15:42:04.954768+00:00",
+  "revision": 598,
+  "updated_at": "2026-11-14T03:10:46.495995+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -220,7 +220,8 @@
       ],
       "evidence": {
         "path": ".evidence/joint99-export-20261113-v1/qualification.json",
-        "sha256": "a89ab57ca8d22095cb5b0adde3a8e4727bddde11c6af5d62e9506289b33d4e97"
+        "sha256": "a89ab57ca8d22095cb5b0adde3a8e4727bddde11c6af5d62e9506289b33d4e97",
+        "matches_file": true
       },
       "fingerprint": "9d4a03eb77b9f7c13b366c9ad2f227e31266b5cc706034313329dce521e96ca2",
       "verified_fingerprint": null
@@ -459,7 +460,7 @@
         "sha256": "c97c70de12a61b547c63cc5d2ea038ee27556a61603e9215a666147b0dbab1e5",
         "matches_file": false
       },
-      "fingerprint": "2e9ab86fc4349f21bd85c1064e73e4c0b7b548866fe767342c49bf7ca195e439",
+      "fingerprint": "0a1b59dfde6ef4c2c00946452067cb66399cccd13b640e21d069d82ab17fa64f",
       "verified_fingerprint": null
     },
     {
@@ -483,7 +484,7 @@
         "sha256": "84e3aa157bb819eecc541f4326980c819070d0ea90bad8108e3011833c944bd5",
         "matches_file": false
       },
-      "fingerprint": "42b9a16bafc240c39002d69e11f88981f0e3ec07f8ce7d21877da32524c58530",
+      "fingerprint": "c41a2843ae6d4a9ba5657476ffbc468ed8dc4fd98c7fd9541211820fb1795e16",
       "verified_fingerprint": null
     },
     {
@@ -491,11 +492,11 @@
       "module": "lifecycle",
       "name": "服务启动、归属与部署",
       "phase": "P2",
-      "state": "verified",
-      "note": "ARX6 final seven-service cold launch: page0.317s, allready70.929s, repeat0.349s without SDK/model replacement. Normal home/record/release/collection Web restored.",
-      "next": "User online trial; physical double-pedal gesture test remains separately deferred",
+      "state": "implemented",
+      "note": "Explicit control reclaim gracefully drains remaining children of the registered stopped collection unit. Normal shutdown, passive-start boundaries, concurrent restart and timeout paths have isolated coverage.",
+      "next": "Observe normal operator takeover through the updated entrypoint.",
       "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
-      "updated_at": "2026-11-09T04:19:21.613903+00:00",
+      "updated_at": "2026-11-14T03:10:46.494773+00:00",
       "files": [
         "robot_workbench/managed_services.py",
         "robot_workbench/device_bootstrap.py",
@@ -514,12 +515,11 @@
         "scripts/check_sdk_solver.py"
       ],
       "evidence": {
-        "path": ".evidence/arx6-startup-rebind-20261109-v1/delivery-acceptance.json",
-        "sha256": "de2ae7c9071749c0d6d0c4d5d89c059dc3ccbe015e26469ee4eaee60ed5dc594",
-        "matches_file": true
+        "path": ".evidence/arx6-reclaim-children-20261114-v1/qualification.json",
+        "sha256": "c60586f3403470236760cc82ed7da4b1c3ad8dc57b6f1a1c2ce815696c1ef04f"
       },
-      "fingerprint": "9fef25fd9c3e0a9d773b8895b79b67c7ed8cb0fd4b310b5a61b60c01682c3e3b",
-      "verified_fingerprint": "a24bb870da27141cfe698dbdc7e6d1f72acd69274d3dc854f0d2d637ab657542"
+      "fingerprint": "73b52be392310aaa97a290f853d36d0631f452f3ee842e7e5b807ecd12d79a71",
+      "verified_fingerprint": null
     },
     {
       "id": "sdk-adapter",
@@ -2381,7 +2381,7 @@
           }
         ]
       },
-      "fingerprint": "42b9a16bafc240c39002d69e11f88981f0e3ec07f8ce7d21877da32524c58530"
+      "fingerprint": "c41a2843ae6d4a9ba5657476ffbc468ed8dc4fd98c7fd9541211820fb1795e16"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2608,7 +2608,7 @@
           }
         ]
       },
-      "fingerprint": "42b9a16bafc240c39002d69e11f88981f0e3ec07f8ce7d21877da32524c58530",
+      "fingerprint": "c41a2843ae6d4a9ba5657476ffbc468ed8dc4fd98c7fd9541211820fb1795e16",
       "verified_fingerprint": "719525d16c57f56483fe3943802c5d0c07eec59f4fbadd8f2015cdbc16bffe26"
     },
     "robot_workbench/maintenance.py": {
@@ -3099,7 +3099,7 @@
           }
         ]
       },
-      "fingerprint": "fed362ea5444f0408d7077a0f6c8783d49957820cf62f844be1f4fc667e4e5c8",
+      "fingerprint": "592519d9d28e90546a30c1d6aef0d480c371589bc4fb71ac4bea0307b4bf7db6",
       "verified_fingerprint": "c90531aaec6d73c5b1afc2dfeb9f5e4ca0375aaa11538b9373eee36b1c3b26da"
     },
     "scripts/workbench_deploy.py": {
@@ -3115,7 +3115,7 @@
       },
       "source": {
         "exists": true,
-        "sha256": "f8a4dfeea4ada2ce3c13d8acfc07ae3f3af5d063139e2995f4550292c4bf88c0",
+        "sha256": "1155f613ce51046586d0584a3e6c8b5acabea9ed0fdb319f1a1cf231a7ad9149",
         "imports": [
           "robot_workbench/camera_owner.py",
           "robot_workbench/control_owner.py",
@@ -3136,7 +3136,7 @@
           }
         ]
       },
-      "fingerprint": "42b9a16bafc240c39002d69e11f88981f0e3ec07f8ce7d21877da32524c58530",
+      "fingerprint": "c41a2843ae6d4a9ba5657476ffbc468ed8dc4fd98c7fd9541211820fb1795e16",
       "verified_fingerprint": "b38c75f5364779bf0e09a355f4636a9526d22b22c7932fc5427f03f63ed3f81c"
     },
     "scripts/serve_inference_model.py": {
@@ -3932,7 +3932,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "14e31ce63576675733d8826ff05596208f02f3931ad6a85b89b50cffd87f5715"
+      "fingerprint": "8a8a496e0dfc48abb588f2dfae66cecfae7c93e93b1897a75509566c5dfa20be"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -4181,15 +4181,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-09T05:22:12.946141+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/inference_workflow.py"
-      ],
-      "state": "verified",
-      "note": "Atomic policy admission and user-approved2.5 measured-speed default; CPU/ROS plus actual ARX6 prepare-only HOLD/full recording passed."
-    },
     {
       "at": "2026-11-09T05:22:13.727075+00:00",
       "kind": "file",
@@ -5153,9 +5144,18 @@
       ],
       "state": "implemented",
       "note": "Joint commands use99% native position bounds while decoded jaw openings remain raw. Isolated inference/owner/catalog/workflow and replay tests pass. One-second export writes explicit final packet duration and restores history."
+    },
+    {
+      "at": "2026-11-14T03:10:46.495016+00:00",
+      "kind": "domain",
+      "ids": [
+        "lifecycle-services"
+      ],
+      "state": "implemented",
+      "note": "Explicit control reclaim gracefully drains remaining children of the registered stopped collection unit. Normal shutdown, passive-start boundaries, concurrent restart and timeout paths have isolated coverage."
     }
   ],
   "unmapped_files": [],
-  "source_head": "b2f56284059678598307eb4c3613178373aa8f5d",
-  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.5b986a754e7a"
+  "source_head": "d4d5999ec19aab52ef260bca35476e4188a3546d",
+  "architecture_revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.a9035a147801"
 }

@@ -36,6 +36,62 @@ def observation(state='DISCONNECTED',connected=False):
 
 
 class StartupTest(unittest.TestCase):
+    def test_explicit_cleanup_drains_inactive_collection_children(self):
+        pin=dict(unit='collector.service',files={'/cpu/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
+        state=dict(ActiveState='inactive',MainPID='0',ControlPID='0',ControlGroup='/cpu/collector')
+        children=['123']
+        def stopped(*args,**kwargs):
+            children.clear()
+            return SimpleNamespace(returncode=0)
+        with patch.object(d,'verify_unit',return_value=state),patch.object(d,'unit_state',return_value=state),\
+                patch.object(Path,'exists',return_value=True),patch.object(Path,'read_text',side_effect=lambda:'\n'.join(children)),\
+                patch.object(d.subprocess,'run',side_effect=stopped)as command:
+            result=d.handoff_collection(pin,'cpu',stop_active=True)
+            again=d.handoff_collection(pin,'cpu',stop_active=True)
+        self.assertTrue(result['exit_verified'])
+        self.assertFalse(again['children_exit']['stop_requested'])
+        self.assertEqual(result['children_exit'],dict(exit_verified=True,stop_requested=True,pids=['123']))
+        command.assert_called_once_with(['systemctl','--user','kill','--kill-who=all','--signal=SIGTERM','collector.service'],
+                                       capture_output=True,text=True,timeout=10)
+
+    def test_normal_collection_shutdown_also_drains_remaining_children(self):
+        pin=dict(unit='collector.service',files={'/cpu/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
+        active=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/cpu/collector')
+        inactive=dict(active,ActiveState='inactive',MainPID='0')
+        running=dict(robot_vin='cpu',manager_alive=True,orphan_alive=False,teleop=None,collect_status='running',collection=dict(session_id='one'))
+        stopped=dict(running,manager_alive=False,collect_status='stopped',collection=dict(session_id='one',phase='stopped',safe_ok=True))
+        children=['123'];commands=[]
+        def command(args,**kwargs):
+            commands.append(args[2])
+            if args[2]=='kill':children.clear()
+            return SimpleNamespace(returncode=0)
+        with patch.object(d,'verify_unit',return_value=active),patch.object(d,'unit_state',return_value=inactive),\
+                patch.object(d,'http_json',side_effect=[running,{},stopped]),\
+                patch.object(Path,'exists',return_value=True),patch.object(Path,'read_text',side_effect=lambda:'\n'.join(children)),\
+                patch.object(d.subprocess,'run',side_effect=command):
+            result=d.handoff_collection(pin,'cpu',stop_active=True)
+        self.assertEqual(commands,['stop','kill'])
+        self.assertTrue(result['children_exit']['exit_verified'])
+
+    def test_passive_start_does_not_stop_leftover_collection_children(self):
+        state=dict(ActiveState='inactive',MainPID='0',ControlGroup='/cpu/collector')
+        with patch.object(Path,'exists',return_value=True),patch.object(Path,'read_text',return_value='123\n'),\
+                patch.object(d.subprocess,'run')as command:
+            with self.assertRaisesRegex(d.Blocked,'显式清理'):
+                d.finish_collection_children({'unit':'collector.service'},state,stop_active=False,progress=lambda *a,**k:None,timeout=.1)
+        command.assert_not_called()
+
+    def test_remaining_or_restarted_collection_still_blocks_acquisition(self):
+        old=dict(ActiveState='inactive',MainPID='0',ControlGroup='/cpu/collector')
+        for current in(old,dict(old,ActiveState='active',MainPID='456')):
+            with self.subTest(current=current),patch.object(d,'unit_state',return_value=current),\
+                    patch.object(Path,'exists',return_value=True),patch.object(Path,'read_text',return_value='123\n'),\
+                    patch.object(d.subprocess,'run',return_value=SimpleNamespace(returncode=0))as command,\
+                    patch.object(d.time,'sleep'):
+                with self.assertRaises(d.Blocked):
+                    d.finish_collection_children({'unit':'collector.service'},old,stop_active=True,progress=lambda *a,**k:None,timeout=.001)
+                if current['MainPID']!='0':command.assert_not_called()
+
     def test_failed_episode_with_matching_completed_recovery_is_stopped(self):
         value=dict(manager_alive=False,orphan_alive=False,teleop=None,collect_status='stopped',
             collection=dict(phase='failed',safe_ok=True,session_id='closed-session'),

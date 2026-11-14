@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const source=await readFile(new URL('../web/operations.js',import.meta.url),'utf8');
-const {createOperations,operationsGuidance,environmentSwitchReason,mountControlAlerts}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {createOperations,operationsGuidance,environmentSwitchReason,mountControlAlerts,phaseText}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+assert.equal(phaseText('checking_collection_handoff'),'清理已登记数采控制');
+assert.equal(phaseText('stopping_collection_children'),'停止数采残留进程');
+assert.equal(phaseText('waiting_collection_children_exit'),'等待数采残留进程退出');
 
 class Element{
   constructor(tag){this.tag=tag;this.children=[];this.events={};this.dataset={};this.value='';this._text='';this.hidden=false;this.disabled=false;this.checked=false;this.open=false;this.classList={add:name=>{this.className=name;}};}

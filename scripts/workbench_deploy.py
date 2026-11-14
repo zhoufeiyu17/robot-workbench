@@ -175,6 +175,33 @@ def stop_collection_camera(pin, *, progress, timeout):
     raise Blocked('collection camera exit unconfirmed; no force kill or new camera owner')
 
 
+def finish_collection_children(pin, before, *, stop_active, progress, timeout):
+    group=before.get('ControlGroup')
+    if not group:return dict(exit_verified=True,stop_requested=False,pids=[])
+    require(isinstance(group,str)and group.startswith('/')and '..'not in Path(group).parts,'collection cgroup identity missing')
+    processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'
+    def remaining():return processes.read_text().split()if processes.exists()else[]
+    pids=remaining()
+    if not pids:return dict(exit_verified=True,stop_requested=False,pids=[])
+    require(stop_active,'数采残留进程仍在运行，需要显式清理后接入')
+    current=unit_state(pin['unit'])
+    require(current['MainPID']=='0'and current['ActiveState']=='inactive'
+            and current.get('ControlGroup')in(None,'',group),'清理期间数采已重新启动，控制尚未接入')
+    progress('stopping_collection_children',detail=dict(unit=pin['unit'],pids=pids))
+    result=subprocess.run(['systemctl','--user','kill','--kill-who=all','--signal=SIGTERM',pin['unit']],
+                          capture_output=True,text=True,timeout=10)
+    require(result.returncode==0 or not remaining(),'数采残留进程退出请求失败，控制尚未接入')
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        current=unit_state(pin['unit'])
+        require(current['MainPID']=='0'and current['ActiveState']=='inactive',
+                '清理期间数采已重新启动，控制尚未接入')
+        if not remaining():return dict(exit_verified=True,stop_requested=True,pids=pids)
+        progress('waiting_collection_children_exit',detail=dict(unit=pin['unit']))
+        time.sleep(.1)
+    raise Blocked('已发送数采退出请求，残留进程尚未退出，控制尚未接入')
+
+
 def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,**k:None, timeout=240):
     """Use the registered collection shutdown; never kill a PID or edit its environment."""
     require(isinstance(pin,dict) and set(pin)in ({'unit','files','status_url'},{'unit','files','status_url','camera_owner'}),'registered collection unit/files/status URL required')
@@ -184,13 +211,10 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
             and not url.query and not url.fragment and not url.username,'collection status must be the registered loopback API')
     before=verify_unit({k:pin[k]for k in ('unit','files')})
     if before['ActiveState']=='inactive' and before['MainPID']=='0':
-        group=before.get('ControlGroup')
-        if group:
-            require(group.startswith('/')and '..'not in Path(group).parts,'collection cgroup identity missing')
-            processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'
-            require(not processes.exists()or not processes.read_text().strip(),'collection children remain; no camera handoff')
+        children=finish_collection_children(pin,before,stop_active=stop_active,progress=progress,timeout=timeout)
         camera=stop_collection_camera(pin['camera_owner'],progress=progress,timeout=timeout)if 'camera_owner'in pin else None
-        return dict(unit=pin['unit'],status='already_stopped',exit_verified=True,stop_requested=False,camera_owner=camera)
+        return dict(unit=pin['unit'],status='already_stopped',exit_verified=True,stop_requested=False,
+                    camera_owner=camera,children_exit=children)
     require(before['ActiveState']=='active' and before['ControlPID']=='0','collection service state is uncertain')
     require(before.get('SendSIGKILL')=='no','collection Web stop must not force-kill surviving hardware children')
     def observe():
@@ -227,12 +251,10 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
         if stopped['MainPID']=='0' and stopped['ActiveState']=='inactive':break
         time.sleep(.25)
     else:raise Blocked('collection Web exit unconfirmed; no force kill or SDK acquire')
-    group=before.get('ControlGroup')
-    require(isinstance(group,str)and group.startswith('/')and'..'not in Path(group).parts,'collection cgroup identity missing')
-    processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'
-    require(not processes.exists()or not processes.read_text().strip(),'collection children remain; no SDK acquire')
+    children=finish_collection_children(pin,before,stop_active=True,progress=progress,timeout=timeout)
     camera=stop_collection_camera(pin['camera_owner'],progress=progress,timeout=timeout)if 'camera_owner'in pin else None
     return dict(unit=pin['unit'],status='stopped',exit_verified=True,stop_requested=requested,camera_owner=camera,
+                children_exit=children,
                 collection_session_id=session,normal_hardware_stop=(value.get('collection')or{}).get('safe_ok'),
                 previous_collection_phase=(value.get('collection')or{}).get('phase'),
                 previous_collection_error=(value.get('collection')or{}).get('error'),
