@@ -72,8 +72,12 @@ def registered_desktop(pid,registry,proc=Path('/proc')):
         if re.search(rb'(?:^|[ \x00])--type=gpu-process(?:[ \x00]|$)',raw)is None:return False
         try:
             executable=str((p/'exe').resolve(strict=True))
+            groups=[line.split(':',2)[-1]for line in (p/'cgroup').read_text().splitlines()]
+            desktop=any('/session.slice/'in group or re.fullmatch(
+                r'/user.slice/user-\d+\.slice/user@\d+\.service/app.slice/app-[^/]+\.scope',group)
+                for group in groups)
             if (executable in {r.get('exe')for r in rows.values()}
-                    and p.stat().st_uid==os.getuid() and '/session.slice/'in(p/'cgroup').read_text()
+                    and p.stat().st_uid==os.getuid() and desktop
                     and (p/'stat').read_text().split(') ',1)[1].split()[19]==stat[19]):return True
         except (OSError,RuntimeError):pass
         row=rows.get(str(pid))or{}
