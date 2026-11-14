@@ -9,6 +9,41 @@ from robot_workbench.motion_reference import prepare_reference,ReferenceIntegral
 
 
 class MotionReferenceTests(unittest.TestCase):
+    def test_measured_hold_clamps_joint_anchor_and_resumes_legal_reference(self):
+        from copy import deepcopy
+        from types import SimpleNamespace as NS
+        from robot_workbench.motion_reference import JOINTS
+        from robot_workbench.target_interpreter import prepare_measured_hold,TargetInterpreter
+        from arx_env.joint_head_real_motion import StationaryWindow
+        _,_,limits=self.fixture()
+        raw=np.zeros(14)
+        for axis in JOINTS:raw[axis]=limits[axis,axis%2]+(-.001 if axis%2==0 else .001)
+        stationary=StationaryWindow()
+        for stamp in np.arange(10.,10.41,.01):stationary.update(float(stamp),raw.tolist(),[0.]*14)
+        feedback=dict(qpos=raw.tolist(),qvel=[0.]*14,sample_time_s=float(stamp))
+        before=deepcopy(feedback)
+        hold=prepare_measured_hold(feedback,limits,now=float(stamp),brake_end_s=10.,
+            stationary_window=stationary,held_jaws_sdk=[0.,0.],source_sha256='a'*64)
+        expected=np.clip(raw,limits[:,0],limits[:,1])
+        np.testing.assert_array_equal(hold.initial,expected)
+        self.assertEqual(feedback,before)
+        self.assertEqual(hold.metadata['anchor_measured_sdk14'],raw.tolist())
+        packets=[]
+        interpreter=TargetInterpreter(NS(queue_reference=lambda p:packets.append(p)),hold,active_arm='both',
+            start_s=float(stamp),epoch=1,current_epoch=lambda:1,gate=lambda:None,clock=lambda:float(stamp))
+        interpreter.tick(float(stamp),feedback)
+        np.testing.assert_array_equal(packets[0]['q_sdk14'][0],expected)
+        source=dict(kind='online_prediction_chunk',device_targets14=[[0.]*14,[0.]*14],
+            active_arms=['left','right'],duration_s=1.)
+        resumed=prepare_reference(source,hold.initial,limits,source_sha256='b'*64)
+        np.testing.assert_array_equal(resumed.sample([0.])[0][0],expected)
+        for invalid in (float('nan'),float('inf'),-float('inf')):
+            bad=deepcopy(feedback);bad['qpos'][0]=invalid
+            stationary.last_diagnostic['raw_qpos']=bad['qpos']
+            with self.assertRaises(ValueError):
+                prepare_measured_hold(bad,limits,now=float(stamp),brake_end_s=10.,
+                    stationary_window=stationary,held_jaws_sdk=[0.,0.],source_sha256='c'*64)
+
     def test_ipc_roundtrip_accepts_declared_cubic_quartic_and_quintic(self):
         from copy import deepcopy
         from robot_workbench.motion_reference import prepare_brake,prepare_brake_after

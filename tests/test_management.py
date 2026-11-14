@@ -1315,6 +1315,18 @@ class ManagementTests(unittest.TestCase):
             self.assertTrue(manager.stop(dict(expected_device_id='cpu-device',request_id='unknown-stop'))['receipt']['stopped'])
         self.assertEqual(backend.stops,0)
 
+    def test_cold_bootstrap_tracks_started_recording_and_pedal_services(self):
+        manager=self.h['manager']
+        manager.services.update(recording=Mock(),pedal=Mock())
+        for action in ('prepare_environment','connect_control','recover_control',
+                       'restart_workbench','start_cameras','restart_cameras'):
+            with self.subTest(action=action):
+                cold=manager.service_dependencies(action,dict(backend_reachable=False))
+                self.assertTrue({'recording','pedal'} <= cold)
+                warm=manager.service_dependencies(action,dict(backend_reachable=True))
+                self.assertNotIn('pedal',warm)
+        self.assertEqual(manager.service_dependencies('stop_cameras',dict(backend_reachable=False)),{'workbench'})
+
     def test_recovery_uses_ticket_scope_and_actual_reconnect_branch(self):
         h,cameras,_=self.camera_reset_fixture();manager=h['manager'];model=h['services']['model']
         with manager.maintenance('start_cameras'):

@@ -134,13 +134,17 @@ def prepare_measured_hold(feedback, limits, *, now, brake_end_s, stationary_wind
             or jaws.shape!=(2,)or not np.isfinite(jaws).all()):
         raise ValueError('fresh post-brake stationary evidence and explicit held jaw commands required')
     target=np.asarray(feedback['qpos'],dtype=float).copy()
-    if target.shape!=(14,):raise ValueError('14 measured axes required')
+    limits=np.asarray(limits,dtype=float)
+    if target.shape!=(14,) or not np.isfinite(target).all() or limits.shape!=(14,2):
+        raise ValueError('14 finite measured axes and SDK limits required')
+    target[list(JOINTS)]=np.clip(target[list(JOINTS)],limits[list(JOINTS),0],limits[list(JOINTS),1])
     target[[6,13]]=jaws
     q,_=_vectors([target],limits)
     meta=dict(schema=REFERENCE_SCHEMA,kind='normal_hold',source_sha256=source_sha256,
         clock='host_monotonic_relative_seconds',joint_units='rad',jaw_units='SDK_m',duration_s=1.,
         brake_end_source_s=brake_end_s,anchor_sample_source_s=sample,anchor_sdk14=q[0].tolist(),
-        anchor_policy='fixed_measured_joints_once; retained_command_jaws',
+        anchor_measured_sdk14=list(feedback['qpos']),
+        anchor_policy='fixed_measured_joints_clamped_to_sdk_limits; retained_command_jaws',
         stationary_scope='existing_0.3s_position_span_not_motor_ACK',max_velocity_rad_s=0.,max_acceleration_rad_s2=0.)
     meta['reference_id']=_identity(meta)
     return PointReference(_frozen(q[0]),_frozen(q[0]),1.,meta)

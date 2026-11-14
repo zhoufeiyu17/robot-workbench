@@ -498,6 +498,9 @@ class WorkbenchManager:
         required={'workbench'};parameters=parameters or {}
         if self.control_external:return required
         if action in ('exit_workbench','exit_environment'):return self.managed_service_names()
+        if not health.get('backend_reachable') and action in ('prepare_environment','connect_control',
+                'recover_control','restart_workbench','start_cameras','restart_cameras'):
+            required.update(name for name in ('recording','pedal') if name in self.services)
         if 'recording' in self.services and action in ('prepare_environment','connect_control','recover_control','restart_workbench'):
             required.add('recording')
         wanted=set(parameters.get('capabilities',['observe'])) if action=='prepare_environment' else set()
