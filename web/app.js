@@ -1446,7 +1446,7 @@ export function createWorkbench({document:doc, fetch:fetchRequest, location, per
     const memory=value.memory;setText('inference-memory-status',memory?memory.error?'记忆更新失败：'+memory.error:`${memory.empty?'当前记忆为空':`记忆已接纳 ${memory.observations??0} 次观测，其中人工接管 ${memory.manual_observations??0} 次`}；清空仅在 HOLD 下可用。`:'准备控制会话后建立记忆；人工接管只写入真实观测，不生成模型动作。');
     const memoryPolicy=value.memory_policy;
     setText('inference-memory-model-rule',memoryPolicy?`每 ${memoryPolicy.model_submission_stride} 个已执行逻辑步写入一次；模型时间每步 1/${Math.round(1/memoryPolicy.model_step_time_s)} 秒。`:'加载模型后显示当前更新步距。');
-    setText('inference-memory-manual-rule',memoryPolicy?`每 ${memoryPolicy.manual_submission_stride} 步写入一次；每步 ${Math.round(memoryPolicy.manual_step_time_s*1000)} ms，累计活动 ${(memoryPolicy.manual_submission_stride*memoryPolicy.manual_step_time_s).toFixed(2)} 秒。`:'等待当前模型的记忆规则。');
+    setText('inference-memory-manual-rule',memoryPolicy?`每 ${memoryPolicy.manual_submission_stride} 个真实人工步写入一次；每步 ${Math.round(memoryPolicy.manual_step_time_s*1000)} ms，累计活动 ${(memoryPolicy.manual_submission_stride*memoryPolicy.manual_step_time_s).toFixed(2)} 秒。`:'等待当前模型的记忆规则。');
     const background=value.background_recordings||[];
     const activity=value.recording_enabled&&value.operator_session?state?.runtime?.recording?.recording_activity:null;
     const activityText=value.recording_enabled===false?'本轮录制已关闭，不保存结果和视频。':activity?`${activity.active_mode?'正在录制 '+activity.active_mode:'等待中，不录制'} · 有效录制 ${Number(activity.effective_duration_s).toFixed(1)} 秒`:'';

@@ -275,13 +275,12 @@ def prepare_images(images):
 class Adapter:
     """WAM input preparation over the existing recorded-native14 unit mapper."""
     def __init__(self,position_limits,maximum_opening_mm):
-        from .execution_settings import MODEL_JAW_OPEN_MARGIN_MM
         self.limits=np.asarray(position_limits,dtype=float).copy();self.stats=None
         openings=np.asarray([maximum_opening_mm[s]for s in ('left','right')]if isinstance(maximum_opening_mm,dict)
                             else [maximum_opening_mm]*2,dtype=float)
         if (self.limits.shape!=(14,2)or not np.isfinite(self.limits).all()or np.any(self.limits[:,0]>self.limits[:,1])
                 or openings.shape!=(2,)or not np.isfinite(openings).all()
-                or np.any(openings<=MODEL_JAW_OPEN_MARGIN_MM)):raise ValueError('valid native14 limits/opening required')
+                or np.any(openings<=0)):raise ValueError('valid native14 limits/opening required')
 
     def bind_normalization(self,raw,*,expected_sha256):
         if not isinstance(raw,bytes)or hashlib.sha256(raw).hexdigest()!=expected_sha256:

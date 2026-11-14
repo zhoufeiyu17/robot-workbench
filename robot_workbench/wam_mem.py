@@ -19,7 +19,6 @@ MEMORY_PROTOCOL='workbench.wam-memory-phase.v5'
 MODEL_CONTROL_HZ=30
 MODEL_STEP_TIME_S=1/MODEL_CONTROL_HZ
 MANUAL_STEP_TIME_S=.03
-MANUAL_SUBMISSION_STRIDE=32
 ROLES=('checkpoint','vae','phoenix_encoder','csvae_checkpoint','text_index','text_features','source_manifest')
 _SHA=re.compile('[0-9a-f]{64}')
 _SOURCE_SHA256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -231,9 +230,10 @@ def observation_sample(kind,step,model_time_s,target_source_time):
                 executed_action_condition=False,node=node)
 
 
-def sampling_policy(bundle,manual_stride=MANUAL_SUBMISSION_STRIDE):
-    return dict(protocol=MEMORY_PROTOCOL,model_submission_stride=bundle.get('training_execute_actions',32),
-        manual_submission_stride=manual_stride,model_step_time_s=MODEL_STEP_TIME_S,
+def sampling_policy(bundle,manual_stride=None):
+    stride=bundle.get('training_execute_actions',32)
+    return dict(protocol=MEMORY_PROTOCOL,model_submission_stride=stride,
+        manual_submission_stride=stride if manual_stride is None else manual_stride,model_step_time_s=MODEL_STEP_TIME_S,
         manual_step_time_s=MANUAL_STEP_TIME_S)
 
 
@@ -490,7 +490,8 @@ class LogicalMemoryClock:
 
 class LogicalNodeSampler:
     """Default node scheduling, separate from the public arbitrary-node APIs."""
-    def __init__(self,*,model_stride=32,manual_stride=MANUAL_SUBMISSION_STRIDE):
+    def __init__(self,*,model_stride=32,manual_stride=None):
+        if manual_stride is None:manual_stride=model_stride
         if any(type(n)is not int or n<1 for n in(model_stride,manual_stride)):
             raise ValueError('positive logical memory submission strides required')
         self.strides={'MODEL':model_stride,'TEACH':manual_stride}
@@ -540,15 +541,16 @@ class LogicalNodeSampler:
 
 class MemorySession:
     """Real observations selected at explicit nodes and one serialized writer."""
-    def __init__(self,client,adapter,clock_domain,*,resolve=None,select=None,record=None,manual_stride=MANUAL_SUBMISSION_STRIDE):
+    def __init__(self,client,adapter,clock_domain,*,resolve=None,select=None,record=None,manual_stride=None):
         self.client,self.adapter,self.clock_domain=client,adapter,clock_domain
         self.resolve,self.select,self.record=resolve,select,record
         self.lock=threading.RLock();self.io=threading.Lock();self.wake=threading.Event();self.stop=threading.Event()
         self.prepare_io=threading.Lock()
         self.mode='HOLD';self.epoch=-1;self.generation=0;self.control_sequence=None
         self.control_event_gaps=0;self.last_control_gap=None
-        self.sampling_stride=client.model_bundle.get('training_execute_actions',32);self.manual_stride=manual_stride
-        self.sampler=LogicalNodeSampler(model_stride=self.sampling_stride,manual_stride=manual_stride)
+        policy=sampling_policy(client.model_bundle,manual_stride)
+        self.sampling_stride=policy['model_submission_stride'];self.manual_stride=policy['manual_submission_stride']
+        self.sampler=LogicalNodeSampler(model_stride=self.sampling_stride,manual_stride=self.manual_stride)
         self.pending=deque();self.offered=0;self.mode_events=0
         self.start='continue';self.error=None;self.audit=None;self.last_manual=None
         self.thread=threading.Thread(target=self._work,name='wam-memory-observations',daemon=True);self.thread.start()

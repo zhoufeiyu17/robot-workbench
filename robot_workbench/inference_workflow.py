@@ -1869,9 +1869,9 @@ class InferenceWorkflow:
             control_ready=self._control_ready()
             memory_policy=None
             if model_family(self.selected_model_id)=='wam-mem':
-                from .wam_mem import sampling_policy,MANUAL_SUBMISSION_STRIDE
+                from .wam_mem import sampling_policy
                 flow=getattr(self.client,'memory_flow',None)
-                memory_policy=sampling_policy(self.model_bundle or{},getattr(flow,'manual_stride',MANUAL_SUBMISSION_STRIDE))
+                memory_policy=sampling_policy(self.model_bundle or{},getattr(flow,'manual_stride',None))
             duration_s=run['config'].get('execution_duration_s',run['config']['duration_s']) if run else self.duration_s
             return dict(id=run['id'] if run else 'inference-unstarted',status=status,busy=busy,stage_id=stage,title='推理工作区',message=message,
                 primary_action=dict(id=primary,label={'prepare_model':'加载与预热模型','inference_preview':'准备本轮推理审阅','execute':f'确认执行本轮 {duration_s:g} 秒推理'}[primary],allowed=primary_reason is None,reason=primary_reason),

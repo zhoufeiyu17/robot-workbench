@@ -231,12 +231,12 @@ while c.recv() is not None:pass
             self.assertEqual(flow._binding(),(profile,binding));self.assertFalse(binding['extrinsics_consumed'])
             limits=[[-3.,3.]for _ in range(14)];limits[6]=limits[13]=[0.,.082]
             adapter,identity=calibrated_adapter(profile,limits,model_id=MODEL_ID)
-            np.testing.assert_allclose(adapter.limits[[6,13],1],[78.,87.])
+            np.testing.assert_allclose(adapter.limits[[6,13],1],[80.,89.])
             observed=np.zeros(14);observed[[6,13]]=[80.,89.]
             np.testing.assert_allclose(adapter.device_to_model(observed)[[6,13]],[.080,.089])
             action=np.zeros(14);action[[6,13]]=.1
             projected=adapter.decode(action,observed)
-            np.testing.assert_allclose(np.asarray(projected['final_device14'])[[6,13]],[78.,87.])
+            np.testing.assert_allclose(np.asarray(projected['final_device14'])[[6,13]],[100.,100.])
             self.assertEqual(identity['native_calibration_id'],native['sha256'])
             np.testing.assert_allclose([device_limits(limits)[i][1]for i in (6,13)],[80.,83.])
             changed=deepcopy(binding);changed['robot_id']='arx6';flow.profile_provider=lambda:(profile,changed)

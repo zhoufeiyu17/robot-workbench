@@ -1853,7 +1853,9 @@ class InferenceRunner:
         jaws=np.asarray(converted)[:,[6,13]]
         decision=self._guard_decision('G17',dict(minimum=jaws.min(axis=0).tolist(),maximum=jaws.max(axis=0).tolist()),
             request['observation']['source_time'],self.owner.control_time(),request['request_id'],phase='model_command')
-        if decision['verdict']=='reject':raise ValueError('G17: converted model jaw command exceeds the bound calibrated range')
+        if decision['verdict']=='reject':
+            raise ValueError('G17: converted model jaw command exceeds the bound calibrated range; '
+                +json.dumps(dict(observed=decision['observed'],limit=decision['limit'],unit=decision['unit']),separators=(',',':')))
         initial=(self.target_interpreter.reference.sample([self.owner.control_time()-self.native_start])[0][0].tolist()
                  if self.target_interpreter is not None else sdk_target(held))
         device=initial[:]

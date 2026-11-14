@@ -24,7 +24,7 @@ def native_mapping_fixture(root,robot_id='arx6',widths=(.083,.083)):
 class NativeTest(unittest.TestCase):
     def tearDown(self):jaw.configure_mapping(None)
 
-    def test_recorded_native_roundtrip_both_arms_and_explicit_endpoint_margins(self):
+    def test_recorded_native_roundtrip_both_arms_and_full_command_range(self):
         with tempfile.TemporaryDirectory()as directory:
             root=Path(directory)
             def put(name,v):
@@ -39,8 +39,10 @@ class NativeTest(unittest.TestCase):
             raw=np.linspace(-.5,.5,14);raw[[6,13]]=[23.,76.]
             model=a.device_to_model(raw);np.testing.assert_allclose(model[[6,13]],[.023,.076]);np.testing.assert_allclose(a.model_to_device(model),raw)
             prediction=model.copy();prediction[7]=1.2;prediction[13]=.1
-            decoded=a.decode(prediction,raw);self.assertEqual(decoded['final_device14'][7],1.2);self.assertEqual(decoded['final_device14'][13],81.)
-            self.assertEqual(decoded['projections'][0]['axis'],13);self.assertEqual(identity['history_steps'],0)
+            decoded=a.decode(prediction,raw);self.assertEqual(decoded['final_device14'][7],1.2);self.assertEqual(decoded['final_device14'][13],100.)
+            self.assertEqual(decoded['projections'],[]);self.assertEqual(identity['history_steps'],0)
+            self.assertEqual(identity['command_jaw_limits_mm'],[0.,83.])
+            np.testing.assert_allclose(a.limits[[6,13],1],[83.,83.])
             from robot_workbench.inference_model import CAMS
             images={c:np.zeros((480,640,3),np.uint8)for c in CAMS}
             state,result=a.model_input(dict(device_state14=raw,images=images));self.assertIs(result,images)

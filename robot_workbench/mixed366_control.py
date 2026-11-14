@@ -58,8 +58,7 @@ class NativeAdapter:
         if disabled_grippers or mapping_identity().get('native_calibration_id')!=native['identity']:
             raise ValueError('mixed366 needs measured feedback and output for both calibrated jaws')
         self.limits=np.asarray(device_limits(sdk_limits),float)
-        from .execution_settings import MODEL_JAW_OPEN_MARGIN_MM
-        self.limits[[6,13],1]=np.minimum(self.limits[[6,13],1],profile['gripper']['max_opening_mm']-MODEL_JAW_OPEN_MARGIN_MM)
+        self.limits[[6,13],1]=np.minimum(self.limits[[6,13],1],profile['gripper']['max_opening_mm'])
 
     @staticmethod
     def device_to_model(value):
@@ -80,9 +79,8 @@ class NativeAdapter:
 
 
 def adapter(profile,sdk_limits,disabled_grippers):
-    from .execution_settings import MODEL_JAW_OPEN_MARGIN_MM
     value=NativeAdapter(profile,sdk_limits,disabled_grippers)
     return value,dict(schema=SCHEMA,profile_digest=digest(profile),joint_offsets_rad=[0.]*12,
         model_jaw_unit='recorder_endpoint_m',device_jaw_unit='recorder_endpoint_mm',
-        input_jaw_clipping_m=[0.,.083],command_jaw_limits_mm=[0.,profile['gripper']['max_opening_mm']-MODEL_JAW_OPEN_MARGIN_MM],arms='both',history_steps=0,
+        input_jaw_clipping_m=[0.,.083],command_jaw_limits_mm=[0.,profile['gripper']['max_opening_mm']],arms='both',history_steps=0,
         first_action_offset_s=1/30.,position_projection=True)

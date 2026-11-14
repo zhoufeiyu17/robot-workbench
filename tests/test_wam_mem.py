@@ -88,7 +88,7 @@ class Worker:
 
 
 class MemoryTests(unittest.TestCase):
-    def test_readonly_policy_matches_the_bound_sampler_and_manual_default(self):
+    def test_readonly_policy_and_sampler_share_model_and_manual_stride(self):
         for stride in(16,32):
             client=SimpleNamespace(model_bundle={'training_execute_actions':stride},memory_revision=0)
             flow=mem.MemorySession(client,None,'source')
@@ -97,7 +97,8 @@ class MemoryTests(unittest.TestCase):
                 snapshot=flow.snapshot()
                 self.assertEqual({key:snapshot[key]for key in policy},policy)
                 self.assertEqual(policy['model_submission_stride'],stride)
-                self.assertEqual(policy['manual_submission_stride'],32)
+                self.assertEqual(policy['manual_submission_stride'],stride)
+                self.assertEqual(flow.sampler.strides,{'MODEL':stride,'TEACH':stride})
                 self.assertEqual(policy['model_step_time_s'],1/30.)
                 self.assertEqual(policy['manual_step_time_s'],.03)
             finally:flow.close()
@@ -221,7 +222,23 @@ class MemoryTests(unittest.TestCase):
                     self.assertEqual(signature,expected)
                     self.assertEqual([x[0]for x in signature],list(range(stride,161,stride)))
 
-    def test_manual_30ms_separate_stride_wait_and_interrupted_prefix(self):
+    def test_manual_default_commits_after_sixteen_real_steps_across_hold(self):
+        clock=mem.LogicalMemoryClock();sampler=mem.LogicalNodeSampler(model_stride=16)
+        sampler.bootstrap(request()['observation'])
+        def offer():
+            return sampler.offer(dict(schema='workbench.memory-activity.v2',phase='TEACH',**clock.snapshot()))
+        clock.set_mode('TEACH',100.);clock.advance(100.45)
+        self.assertEqual(clock.steps['TEACH'],15);self.assertEqual(offer(),[])
+        clock.set_mode('HOLD',100.45);clock.advance(200.)
+        self.assertEqual(clock.steps['TEACH'],15);self.assertEqual(offer(),[])
+        clock.set_mode('TEACH',200.);clock.advance(200.03)
+        nodes=offer();self.assertEqual([n['node']['step']for n in nodes],[16])
+        self.assertAlmostEqual(nodes[0]['node']['model_time_s'],.48)
+        self.assertAlmostEqual(nodes[0]['node']['target_source_time'],200.03)
+        clock.advance(200.51)
+        self.assertEqual([n['node']['step']for n in offer()],[32])
+
+    def test_manual_30ms_explicit_stride_wait_and_interrupted_prefix(self):
         for manual_stride in (16,32):
             clock=mem.LogicalMemoryClock();sampler=mem.LogicalNodeSampler(model_stride=16,manual_stride=manual_stride)
             value=request()['observation'];sampler.bootstrap(value)

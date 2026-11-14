@@ -131,6 +131,21 @@ class SharedTargetRoutesTest(unittest.TestCase):
         self.assertEqual(self.runtime.owner.epoch,epoch+1);self.assertEqual(len(self.raw.packets),count)
         self.assertEqual(recording.controller_result['status'],'failed')
 
+    def test_native_model_jaw_guard_uses_full_calibrated_opening(self):
+        self.create();self.runtime.handoff(self.creds['calibration'],'inference')
+        config=dict(model_id='cpu-fixture',duration_s=40.,execute_steps=30,
+            binding={'schema':'workbench.wam-native-coordinates.v1'},
+            conversion_identity={'mapping':{'profile_max_opening_mm':{'left':83.,'right':83.}}})
+        self.runtime.configure_inference(config,lambda *args:None)
+        self.runtime.submit(self.creds['inference'],dict(action='preview_inference'))
+        guard=self.runtime._control_guards['inference']
+        for gap,expected in [(81.,'pass'),(82.5,'pass'),(83.,'pass'),(83.001,'reject'),(-.001,'reject')]:
+            decision=guard.evaluate(dict(rule_id='G17',signal_id='model-jaw-boundary',
+                observed=dict(minimum=[gap,gap],maximum=[gap,gap]),
+                source_time=self.now,checked_time=self.now,epoch=self.runtime.owner.epoch),'model_command')
+            self.assertEqual(decision['verdict'],expected,decision)
+            self.assertEqual(decision['limit']['bounds'],[[0.,83.],[0.,83.]])
+
     def test_preview_and_native_window_share_bound_position_decisions(self):
         self.create()
         review=self.runtime.submit(self.creds['calibration'],dict(action='preview_workbench',

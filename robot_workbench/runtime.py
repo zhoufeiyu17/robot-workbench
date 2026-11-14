@@ -1440,14 +1440,15 @@ class Runtime:
             context['run_duration_s']=episode_duration(command.get('duration_s',config['duration_s']))
             mapping=config.get('conversion_identity',{}).get('mapping',{})
             model_bounds=mapping.get('command_jaw_limits_mm')
-            if model_bounds is not None:context['model_jaw_limits_mm']=[list(model_bounds),list(model_bounds)]
+            if model_bounds is not None:
+                context['model_jaw_limits_mm']=[[max(low,model_bounds[0]),min(high,model_bounds[1])]
+                    for low,high in context['jaw_limits_mm']]
             else:
                 maximum=mapping.get('profile_max_opening_mm')
                 if config.get('binding',{}).get('schema')=='workbench.wam-native-coordinates.v1':
-                    from .execution_settings import MODEL_JAW_OPEN_MARGIN_MM
                     if not isinstance(maximum,dict)or set(maximum)!={'left','right'}:
                         raise ValueError('WAM per-side calibrated jaw ranges required')
-                    context['model_jaw_limits_mm']=[[low,min(high,maximum[side]-MODEL_JAW_OPEN_MARGIN_MM)]
+                    context['model_jaw_limits_mm']=[[low,min(high,maximum[side])]
                         for side,(low,high)in zip(('left','right'),context['jaw_limits_mm'])]
                 else:
                     context['model_jaw_limits_mm']=[[low,high if maximum is None else min(high,maximum)]for low,high in context['jaw_limits_mm']]
