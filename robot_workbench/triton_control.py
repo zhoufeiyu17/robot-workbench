@@ -1,7 +1,6 @@
 """Task-owned CPU control plane for fixed ARX13 conversion / preview CLIs."""
 from datetime import datetime, timezone
 import hashlib
-import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -178,12 +177,8 @@ class ControlPlane:
         folder=self.jobs_root/job['job_id'];output=folder/'output';name='pi05-arx13-'+job['job_id'];process=None;cleanup_ok=True;gpu_lock=None
         try:
             self.allocation()
-            gpu_lock=(self.state/'gpu-use.lock').open('a+b')
-            try:fcntl.flock(gpu_lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:raise Rejected('GPU_BUSY','已有常驻模型或转换任务占用GPU；请先显式卸载，未停止任何进程')from None
-            # The owner's receipt is necessary, but not evidence that another process is absent.
-            check=subprocess.run(['nvidia-smi','--id='+self.config['gpu_uuid'],'--query-compute-apps=pid','--format=csv,noheader,nounits'],capture_output=True,text=True,timeout=5,check=True)
-            if check.stdout.strip():raise Rejected('GPU_BUSY','GPU仍有计算进程，未启动本任务')
+            from .gpu_admission import acquire
+            gpu_lock=acquire(dict(self.config,model_id=job['source_id'],min_free_memory_mib=self.config.get('min_free_memory_mib',0)))
             if job['type']=='infer':self.live_input()
             script=self.source/'scripts'/('deploy_pi05_triton.sh' if job['type']=='conversions' else 'infer_pi05_triton.sh')
             args=['bash',str(script),str(self.root),self.config['gpu_uuid'],self.config['image']]

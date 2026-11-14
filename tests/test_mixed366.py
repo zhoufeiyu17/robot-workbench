@@ -42,7 +42,7 @@ class MixedTest(unittest.TestCase):
             self.assertTrue(registered_desktop('123',r,p));self.assertFalse(registered_desktop('124',r,p))
             (p/'123/cmdline').write_bytes(raw+b'changed');self.assertFalse(registered_desktop('123',r,p))
     def test_restarted_browser_is_verified_from_executable_user_and_desktop_session(self):
-        with TemporaryDirectory()as tmp:
+        with TemporaryDirectory()as tmp, patch.dict('os.environ',WORKBENCH_GPU_POLICY=str(Path(tmp)/'unconfigured')):
             root=Path(tmp);p=root/'456';p.mkdir();exe=root/'chrome';exe.touch()
             (p/'exe').symlink_to(exe);(p/'cmdline').write_bytes(b'chrome\0--type=gpu-process\0')
             (p/'stat').write_text('456 (chrome) '+' '.join(['S']+['0']*18+['100']))

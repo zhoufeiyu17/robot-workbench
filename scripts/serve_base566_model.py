@@ -39,6 +39,11 @@ def create_service(registry, machine_id):
     spec=importlib.util.spec_from_file_location('native_base566_endpoint',source/'scripts/serve_base566_model.py')
     native=importlib.util.module_from_spec(spec);spec.loader.exec_module(native)
     class HostResident(ResidentBase566Client):
+        def _acquire_gpu(self):
+            from robot_workbench.gpu_admission import acquire
+            self._gpu_lock=acquire(dict(registry,model_id=self.model_id,
+                min_free_memory_mib=self.min_free_memory_mib))
+
         def _lease_check(self,remaining=0):
             if Path('/etc/machine-id').read_text().strip()!=machine_id:
                 raise ValueError('registered model host changed')

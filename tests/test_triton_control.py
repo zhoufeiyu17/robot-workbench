@@ -10,6 +10,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from robot_workbench.triton_control import ControlPlane, Rejected, save, sha
+from robot_workbench.gpu_admission import lock_path
 
 
 class ControlTests(unittest.TestCase):
@@ -74,7 +75,7 @@ class ControlTests(unittest.TestCase):
         child=SimpleNamespace(pid=12345,poll=lambda:0,returncode=0)
         def command(args,**kwargs):
             return SimpleNamespace(returncode=1 if args[:2]==['docker','inspect'] else 0,stdout='',stderr='')
-        with patch.object(self.plane,'live_input',return_value={}),patch('robot_workbench.triton_control.subprocess.run',side_effect=command),patch('robot_workbench.triton_control.subprocess.Popen',return_value=child)as spawn:
+        with patch('robot_workbench.gpu_admission.acquire',return_value=SimpleNamespace(close=lambda:None)),patch.object(self.plane,'live_input',return_value={}),patch('robot_workbench.triton_control.subprocess.run',side_effect=command),patch('robot_workbench.triton_control.subprocess.Popen',return_value=child)as spawn:
             self.plane._run(job,deployment)
         self.assertEqual(job['status'],'SUCCEEDED',job);self.assertTrue(job['cleanup_confirmed'])
         args=spawn.call_args.args[0];env=spawn.call_args.kwargs['env']
@@ -85,7 +86,8 @@ class ControlTests(unittest.TestCase):
     def test_resident_flock_blocks_conversion_without_inspecting_or_stopping_gpu(self):
         self.allocation(jobs_enabled=True);folder=self.plane.jobs_root/'blocked';folder.mkdir()
         job=dict(job_id='blocked',type='conversions',source_id='base566-e008')
-        with (self.plane.state/'gpu-use.lock').open('a+b')as lock:
+        with patch.dict('os.environ',WORKBENCH_GPU_LOCK_DIR=str(self.root/'gpu-locks')), lock_path('GPU-fixture').open('a+b')as lock:
+            lock_path('GPU-fixture').chmod(0o600)
             fcntl.flock(lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
             with patch('robot_workbench.triton_control.subprocess.run')as run,patch('robot_workbench.triton_control.subprocess.Popen')as spawn:
                 self.plane._run(job,None)

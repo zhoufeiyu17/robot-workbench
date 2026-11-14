@@ -53,6 +53,25 @@ def request(identity='request-1', seed=7):
 
 
 class InferenceTransportTests(unittest.TestCase):
+    def test_candidate_preflight_failure_preserves_current_loaded_model(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from robot_workbench.inference_model import model_bundle_digest
+        self.client.prepare()
+        spec=model_spec(BASE566_ID)
+        bundle=dict(model_id=BASE566_ID,schema=spec['schema'],epoch=spec['epoch'],step=spec['step'],prompt=spec['prompt'],
+            action_horizon=60,execution_steps=10,action_hz=30,rtc=False,python='/model/python',model_source='/model/code',
+            artifacts={key:dict(path='/model/'+key,sha256=sha)for key,sha in spec['pins'].items()})
+        candidate=SimpleNamespace(model_id=BASE566_ID,close=Mock(),preflight=Mock(side_effect=ValueError('candidate metadata invalid')))
+        self.service.catalog={BASE566_ID:bundle};self.service.client_factory=lambda _:candidate
+        with self.assertRaisesRegex(ValueError,'candidate metadata invalid'):
+            self.service.prepare(dict(protocol=PROTOCOL,model_id=BASE566_ID,conversion_id='0'*64,
+                expected_bundle_digest=model_bundle_digest(BASE566_ID,bundle)))
+        self.assertIs(self.service.client,self.model)
+        self.assertTrue(self.service.status()['loaded'])
+        self.assertEqual(self.model.closes,0)
+        candidate.close.assert_called_once()
+
     def test_old_http_protocol_is_refused_before_prepare_or_worker_use(self):
         with patch.object(self.client,'_request',return_value=json.dumps({'protocol':'workbench.model-http.v1'}).encode())as call:
             with self.assertRaisesRegex(ValueError,'protocol version mismatch'):self.client.prepare()

@@ -1,6 +1,5 @@
 """Model-only mixed366 lifecycle and conversion. No robot or camera API."""
 from copy import deepcopy
-import fcntl
 import hashlib
 import json
 import multiprocessing
@@ -15,6 +14,7 @@ import time
 import numpy as np
 from .inference_model import MIXED366_ID,MIXED366_SCHEMA,MIXED366_PINS,NOHISTORY_MODELS,CAMS,worker_identity,model_bundle_digest
 from .inference_transport import ModelService,PROTOCOL
+from .gpu_admission import acquire as gpu_lock, registered_desktop
 
 
 def sha(path):
@@ -42,49 +42,13 @@ def verify_registry(registry):
         raise ValueError('registered host/GPU required')
     for item in registry['files']:
         path=(root/item['path']).resolve(strict=True)
-        if not path.is_relative_to(root)or path.stat().st_size!=item['bytes']or sha(path)!=item['sha256']:
+        large_weight=path.suffix.lower()in('.pt','.pth','.ckpt','.safetensors','.bin')and item['bytes']>64*1024**2
+        if not path.is_relative_to(root)or path.stat().st_size!=item['bytes']or not large_weight and sha(path)!=item['sha256']:
             raise ValueError('model bundle artifact changed: '+item['path'])
     expected=NOHISTORY_MODELS[registry.get('model_id',MIXED366_ID)]['pins']['checkpoint']
-    if sha(root/'bundle/model/model.pt')!=expected:raise ValueError('registered checkpoint mismatch')
+    checkpoints=[row for row in registry['files']if row['path']=='bundle/model/model.pt']
+    if len(checkpoints)!=1 or checkpoints[0]['sha256']!=expected:raise ValueError('registered checkpoint mismatch')
     return root
-
-
-def gpu_lock(registry):
-    root=Path(registry['root']);lock=(root/'gpu-use.lock').open('a+b')
-    try:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        gpu=subprocess.check_output(['nvidia-smi','--id='+registry['gpu_uuid'],'--query-gpu=uuid,memory.free','--format=csv,noheader,nounits'],text=True,timeout=8).strip().split(',')
-        if gpu[0].strip()!=registry['gpu_uuid']or int(gpu[1])<registry.get('min_free_memory_mib',16000):raise ValueError('GPU identity or free memory changed')
-        output=subprocess.check_output(['nvidia-smi','--id='+registry['gpu_uuid'],'--query-compute-apps=pid','--format=csv,noheader,nounits'],text=True,timeout=8)
-        for pid in output.split():
-            if not registered_desktop(pid,registry):raise ValueError('GPU busy with an unrelated worker')
-        return lock
-    except BaseException:lock.close();raise
-
-
-def registered_desktop(pid,registry,proc=Path('/proc')):
-    """Verify live desktop processes after browser restarts; retain pinned container evidence."""
-    rows=registry.get('desktop_gpu_processes')or{}
-    if not str(pid).isdigit()or not rows:return False
-    p=proc/str(pid)
-    try:
-        raw=(p/'cmdline').read_bytes();stat=(p/'stat').read_text().split(') ',1)[1].split()
-        if re.search(rb'(?:^|[ \x00])--type=gpu-process(?:[ \x00]|$)',raw)is None:return False
-        try:
-            executable=str((p/'exe').resolve(strict=True))
-            groups=[line.split(':',2)[-1]for line in (p/'cgroup').read_text().splitlines()]
-            desktop=any('/session.slice/'in group or re.fullmatch(
-                r'/user.slice/user-\d+\.slice/user@\d+\.service/app.slice/app-[^/]+\.scope',group)
-                for group in groups)
-            if (executable in {r.get('exe')for r in rows.values()}
-                    and p.stat().st_uid==os.getuid() and desktop
-                    and (p/'stat').read_text().split(') ',1)[1].split()[19]==stat[19]):return True
-        except (OSError,RuntimeError):pass
-        row=rows.get(str(pid))or{}
-        return (row.get('exe')=='/opt/google/chrome/chrome'and row.get('start_ticks')==stat[19]
-        and row.get('cmdline_sha256')==hashlib.sha256(raw).hexdigest()
-        and row.get('boot_id')==(proc/'sys/kernel/random/boot_id').read_text().strip())
-    except (OSError,IndexError):return False
 
 
 def _worker(connection,root,backend,packed,gpu,log):
@@ -115,6 +79,9 @@ class Client:
     def worker_status(self):
         p=self.process
         return dict(worker_pid=None if p is None else p.pid,worker_exit_code=None if p is None else p.exitcode,worker_alive=p is not None and p.is_alive())
+    def preflight(self):
+        verify_registry(self.registry)
+
     def prepare(self):
         if sys.platform!='linux':raise ValueError('Linux model host required')
         if self.process is None:

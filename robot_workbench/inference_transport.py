@@ -311,6 +311,9 @@ class ModelService:
                 dependencies=dict(model_id=result['model_id'],worker_pid=result['worker_pid']),
                 valid=result['status']=='ready'and result['loaded']is True,reason=result.get('error'))
         path = getattr(self.client, 'log_path', None)
+        lease = getattr(self.client, 'lock', None)
+        if lease is not None and not getattr(lease,'closed',True):
+            result['gpu_admission'] = deepcopy(getattr(lease, 'admission', None))
         result['stderr_path'], result['stderr_tail'] = path, ''
         if path:
             try:
@@ -349,12 +352,15 @@ class ModelService:
         runtime_preflight=False
         try:
             candidate = self.client
+            runtime_preflight=True
+            self._set(last_prepare_error=None,last_prepare_admission=None)
             identity = None
             reused=self.status()['loaded']
             changed=requested!=self.model_id or selected!=self.model_bundle
             if (changed and self.status()['loaded']
                     and getattr(self.client,'can_reconfigure',lambda _:False)(selected)):
                 self._set(busy=True)
+                runtime_preflight=False
                 identity=self.client.reconfigure(selected)
                 validate_worker_identity(identity,requested,bundle=selected)
                 self.model_bundle=selected
@@ -370,9 +376,17 @@ class ModelService:
             if ((candidate is not self.client or not self.status()['loaded'])
                     and model_family(requested) in ('wam','wam-mem') and hasattr(candidate,'registry')):
                 from .model_runtime import verify_registered
-                runtime_preflight=True
                 verify_registered(candidate.registry)
-                runtime_preflight=False
+            if candidate is not self.client or not self.status()['loaded']:
+                preflight=getattr(candidate,'preflight',None)
+                if preflight is not None:preflight()
+                if hasattr(candidate,'registry') and candidate.registry.get('gpu_uuid'):
+                    from .gpu_admission import inspect
+                    current=self.client.worker_status() if hasattr(self.client,'worker_status') else {}
+                    lease=getattr(self.client,'lock',None)
+                    replacing=(current['worker_pid'],) if lease is not None and not getattr(lease,'closed',True) and current.get('worker_alive') else ()
+                    self._set(gpu_admission=inspect(candidate.registry,replacing_pids=replacing))
+            runtime_preflight=False
             if candidate is not self.client:
                 reused=False
                 if getattr(candidate, 'model_id', None) != requested:
@@ -380,7 +394,7 @@ class ModelService:
                 self.client.close()
                 self.client, self.model_id, self.model_bundle = candidate, requested, selected
                 self.base_log_path = getattr(candidate, 'log_path', None)
-                self._set(status='not_loaded', loaded=False, worker_identity=None, error=None, warmup=None)
+                self._set(status='not_loaded', loaded=False, worker_identity=None, error=None, warmup=None, memory=None)
             if not self.status()['loaded']:
                 if getattr(self.client, 'client', None) is not None:
                     self.client.close()  # Explicit prepare after an independently exited owned worker.
@@ -411,6 +425,9 @@ class ModelService:
                         timing=deepcopy(warm.get('audit',{}).get('timing'))))
             return dict(**metadata, worker_identity=self.status()['worker_identity'],reused=bool(reused))
         except Exception as error:
+            self._set(last_prepare_error=str(error))
+            if getattr(error,'details',None) is not None:self._set(last_prepare_admission=deepcopy(error.details))
+            if runtime_preflight and candidate is not self.client:candidate.close()
             if not runtime_preflight:
                 self.client.close()
                 self._set(status='error', loaded=False, error=str(error))
@@ -588,7 +605,8 @@ def serve_model(service, *, token_file, host='127.0.0.1', port=0, forwarded_port
                 result=(service.infer(raw,memory_only=True,memory_kind=memory_routes[self.path])
                         if self.path in memory_routes else service.infer(raw))
                 self.reply(200,result,'application/x-npz')
-            except (ValueError, KeyError, TypeError) as error:self.reply(409, {'error':str(error)})
+            except (ValueError, KeyError, TypeError) as error:
+                self.reply(409, dict(error=str(error), **({'gpu_admission':error.details} if hasattr(error,'details') else {})))
             except Exception as error:self.reply(503, {'error':str(error)})
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True

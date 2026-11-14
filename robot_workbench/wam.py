@@ -503,6 +503,9 @@ class Client:
         self.bundle=bundle;self.registry['selected_inference_options']=deepcopy(bundle['inference_options'])
         return result['worker_identity']
 
+    def preflight(self):
+        self.implementation.verify_registry(self.registry)
+
     def prepare(self):
         import multiprocessing,os,subprocess,sys,threading
         from .mixed366 import gpu_lock,save

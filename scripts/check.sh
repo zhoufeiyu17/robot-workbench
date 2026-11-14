@@ -21,6 +21,7 @@ python tests/test_arx13_manual_limits.py
 python tests/test_workbench_deploy.py
 python tests/test_registered_model_startup.py
 python tests/test_mixed366.py
+python tests/test_gpu_admission.py
 python tests/test_model_session.py
 python tests/test_wam_mem.py
 python tests/test_wam_mem_source.py
