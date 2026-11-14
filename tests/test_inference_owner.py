@@ -20,7 +20,7 @@ from test_owner_clock import ClockBackend, Safety, calibration, jaw
 
 
 class InferenceOwnerTests(unittest.TestCase):
-    def test_native_targets_clip_only_joints_and_preserve_raw_jaw_opening(self):
+    def test_native_targets_use_sdk_jaw_bounds_and_preserve_decoded_values(self):
         from types import SimpleNamespace
         from robot_workbench.wam import Adapter
         limits=np.asarray([[-3.5,3.5]]*14,dtype=float)
@@ -32,9 +32,47 @@ class InferenceOwnerTests(unittest.TestCase):
             result=InferenceRunner._decode_model_target(runner,prediction,np.zeros(14))
             joints=[*range(6),*range(7,13)]
             np.testing.assert_allclose(np.asarray(result['final_device14'])[joints],sign*3.5*.99)
-            np.testing.assert_allclose(np.asarray(result['final_device14'])[[6,13]],[-2.,90.])
+            np.testing.assert_allclose(np.asarray(result['decoded_device14'])[[6,13]],[-2.,90.])
+            np.testing.assert_allclose(np.asarray(result['final_device14'])[[6,13]],[0.,83.])
             self.assertTrue(result['projections'])
-            self.assertTrue(all(row['axis']in joints for row in result['projections']))
+            self.assertEqual({row['axis']for row in result['projections']},set(range(14)))
+        prediction=np.zeros(14);prediction[[6,13]]=[.0825,.083]
+        result=InferenceRunner._decode_model_target(runner,prediction,np.zeros(14))
+        np.testing.assert_allclose(np.asarray(result['final_device14'])[[6,13]],[82.5,83.])
+        self.assertEqual(result['projections'],[])
+
+    def test_prediction_jaw_over_sdk_bound_warns_and_prepares_full_trajectory(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from robot_workbench.wam import Adapter
+        from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash
+        from robot_workbench.motion_reference import prepare_reference
+        runner=object.__new__(InferenceRunner);runner.owner=SimpleNamespace(control_time=lambda:1.)
+        runner.config={'execute_steps':2,'task':'coffee'};runner.initial_device14=[0.]*14
+        runner.limits=np.asarray([[-3.,3.]]*14);runner.limits[[6,13]]=[0.,83.]
+        runner.sdk_limits=np.asarray([[-3.,3.]]*14);runner.sdk_limits[[6,13]]=[0.,.082]
+        runner.adapter=Adapter(runner.limits,83.);runner.target_interpreter=None
+        runner.reference_executor=None;runner.normal_config=None;runner.execution_instance_id='cpu-jaw-bound'
+        runner._record=lambda *args:None;events=[];runner._emit=lambda name,value:events.append((name,value))
+        parameters=control_parameters(defaults('inference'),business='inference')
+        guard=Guard.bind(dict(revision=0,parameters=parameters,policy_hash=policy_hash(parameters)),
+            dict(model_jaw_limits_mm=[[0.,83.],[0.,83.]]))
+        runner._guard_decision=lambda rule,value,source,checked,signal,**kwargs:guard.evaluate(
+            dict(rule_id=rule,signal_id=signal,observed=value,source_time=source,checked_time=checked),'model_command')
+        raw=np.zeros((60,14));raw[:,6]=.0825;raw[:,13]=.08324528485536575
+        with patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=prepare_reference),\
+                self.assertLogs('robot_workbench.inference_owner',level='WARNING')as logs:
+            result=runner._prepare_native_response(dict(request_id='jaw-bound',action14=raw),
+                dict(request_id='jaw-bound',observation={'source_time':0.}))
+        np.testing.assert_array_equal(result['action14'],raw)
+        warning=events[0][1];self.assertEqual(warning['action'],'CONTINUE')
+        self.assertEqual(len(warning['projections']),2)
+        self.assertAlmostEqual(warning['projections'][0]['requested'],83.24528485536575)
+        self.assertEqual(warning['projections'][0]['final'],83.)
+        self.assertIn('83.24528485536575',logs.output[0])
+        reference=result['_prepared_reference'];target=reference.sample([reference.duration_s])[0][0]
+        from arx_env.joint_head_jaw_mapping import command_sdk
+        self.assertAlmostEqual(target[13],command_sdk('right',83.))
 
     def test_optional_clock_mapping_rejects_boot_change_and_clock_step(self):
         from robot_workbench.inference_owner import map_recording_cutoff

@@ -1821,11 +1821,12 @@ class InferenceRunner:
         limits=np.asarray(self.limits,dtype=float)
         joints=[*range(6),*range(7,13)]
         inner=np.clip(limits[joints]*MODEL_JOINT_LIMIT_FRACTION,limits[joints,0,None],limits[joints,1,None])
-        clipped=original.copy()
+        clipped=np.clip(original,limits[:,0],limits[:,1])
         clipped[joints]=np.clip(original[joints],inner[:,0],inner[:,1])
         projections=list(decoded.get('projections',[]))
         projections.extend(dict(axis=int(axis),requested=float(original[axis]),final=float(clipped[axis]),
-            delta=float(clipped[axis]-original[axis]),reason='model_joint_command_limit_99_percent')
+            delta=float(clipped[axis]-original[axis]),reason=(
+                'model_jaw_sdk_command_limit'if axis in(6,13)else'model_joint_command_limit_99_percent'))
             for axis in np.flatnonzero(original!=clipped))
         return dict(decoded,final_device14=clipped.tolist(),projections=projections)
 
@@ -1849,7 +1850,16 @@ class InferenceRunner:
         if raw.shape!=(model_capabilities(self.config)[0],14)or raw.dtype.kind not in 'fiu'or not np.isfinite(raw).all():
             raise ValueError('model response requires finite action14 matching the bound horizon')
         held=list(self.initial_device14)
-        converted=[self._decode_model_target(row,held)['final_device14']for row in raw[:self.config['execute_steps']]]
+        decoded=[self._decode_model_target(row,held)for row in raw[:self.config['execute_steps']]]
+        converted=[row['final_device14']for row in decoded]
+        jaw_projections=[dict(step=index+1,**projection)for index,row in enumerate(decoded)
+            for projection in row['projections']if projection.get('reason')=='model_jaw_sdk_command_limit']
+        if jaw_projections:
+            warning=dict(request_id=request['request_id'],severity='warning',action='CONTINUE',
+                bounds_mm=np.asarray(self.limits)[[6,13]].tolist(),projections=jaw_projections)
+            self._emit('model_jaw_boundary_warning',warning)
+            logging.getLogger(__name__).warning('model jaw command projected to SDK boundary: %s',
+                json.dumps(dict(execution_instance_id=self.execution_instance_id,**warning),allow_nan=False,separators=(',',':')))
         jaws=np.asarray(converted)[:,[6,13]]
         decision=self._guard_decision('G17',dict(minimum=jaws.min(axis=0).tolist(),maximum=jaws.max(axis=0).tolist()),
             request['observation']['source_time'],self.owner.control_time(),request['request_id'],phase='model_command')
