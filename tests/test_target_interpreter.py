@@ -18,6 +18,28 @@ from examples.scripts.debug.joint_head_real_owner import hardware_backend
 
 
 class TargetInterpreterTests(unittest.TestCase):
+    def test_numeric_margin_projects_final_window_to_exact_command_bounds(self):
+        from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash
+        from arx_env.joint_head_jaw_mapping import command_sdk
+        reference,_=self.point();sample=reference.sample
+        jaw_upper=command_sdk('right',83.)
+        def rounded(times):
+            q,v,a=sample(times);q[:,0]=1.0000005
+            q[:,13]=float(np.nextafter(np.float32(jaw_upper),np.float32(np.inf)))
+            return q,v,a
+        rounded_reference=NS(metadata=reference.metadata,duration_s=reference.duration_s,sample=rounded)
+        parameters=control_parameters(defaults('inference'),business='inference')
+        guard=Guard.bind(dict(revision=1,parameters=parameters,policy_hash=policy_hash(parameters)),
+            dict(joint_limits=[[-1.,1.]]*12,jaw_limits_mm=[[0.,83.],[0.,83.]],
+                feedback_timeout_s=.1,starvation_margin_s=.015))
+        packets=[];backend=NS(queue_reference=lambda p:packets.append(p)or{'firmware_ack':False})
+        runner=TargetInterpreter(backend,rounded_reference,active_arm='both',start_s=100.,epoch=1,
+            current_epoch=lambda:1,gate=lambda:None,clock=lambda:100.,guard=guard)
+        runner.tick(100.,dict(sample_time_s=100.,qpos=[0.]*14))
+        q=np.asarray(packets[0]['q_sdk14'])
+        np.testing.assert_array_equal(q[:,0],np.ones(len(q)))
+        np.testing.assert_array_equal(q[:,13],np.full(len(q),jaw_upper))
+
     def test_bound_position_guard_rejects_corrupt_reference_before_sdk(self):
         from robot_workbench.execution_settings import Guard,control_parameters,defaults,policy_hash
         reference,_=self.point();original=reference.sample

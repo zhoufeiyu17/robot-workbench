@@ -86,7 +86,9 @@ class NativeGripperBindingTest(unittest.TestCase):
                 with self.assertRaises(ValueError):jaw.command_sdk(side,maximum+.01)
                 self.assertEqual(jaw.hold_command_sdk(side,-3.),0.)
                 self.assertAlmostEqual(jaw.hold_command_sdk(side,maximum+3.),.082)
-                for gap in (-5.000001,maximum+3.000001):
+                self.assertEqual(jaw.hold_command_sdk(side,-5.000001),0.)
+                self.assertAlmostEqual(jaw.hold_command_sdk(side,maximum+3.000001),.082)
+                for gap in (-5.001,maximum+3.001):
                     with self.assertRaises(ValueError):jaw.hold_command_sdk(side,gap)
             raw=[0.]*14;raw[6]=raw[13]=.082;limits=[[-3.,3.]]*14;limits[6]=limits[13]=[0.,.082]
             self.assertEqual(list(feedback_to_command(raw,limits)),raw)

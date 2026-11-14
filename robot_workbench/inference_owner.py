@@ -386,10 +386,11 @@ def sdk_target(value):
 
 
 def device_limits(sdk_limits,*,native_coordinates=False):
-    from arx_env.joint_head_jaw_mapping import command_gap_mm
+    from arx_env.joint_head_jaw_mapping import command_gap_mm,command_max_mm
     result = [list(pair) for pair in sdk_limits]
     for side, slot in (('left', 6), ('right', 13)):
         lo, hi = (command_gap_mm(side, value) for value in result[slot])
+        hi=min(hi,command_max_mm(side))
         result[slot] = [max(0., lo), hi if native_coordinates else min(83., hi)]
     return result
 

@@ -258,7 +258,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(parameters['arrival']['jaw_mm'],2.)
 
     def test_common_guard_uses_policy_and_preserves_boundaries_and_times(self):
-        from robot_workbench.execution_settings import Guard,control_parameters,policy_hash
+        from robot_workbench.execution_settings import Guard,control_parameters,policy_hash,numeric_tolerance
         parameters=control_parameters(defaults('inference'),configuration=dict(maximum_observation_age_s=.5),business='inference')
         policy=dict(revision=7,policy_hash=policy_hash(parameters),parameters=parameters)
         for rule,limit in [('G02',.5),('G03',.1),('G04',.1),('G11',math.radians(2.)),('G12',2.),('G14',2.5)]:
@@ -267,11 +267,14 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(passed['verdict'],'pass')
             self.assertEqual((passed['revision'],passed['policy_hash']),(7,policy['policy_hash']))
             self.assertEqual((passed['source_time'],passed['checked_time']),(10.,10.5))
-            rejected=Guard.evaluate(dict(signal,observed=limit+1e-9),'submission',policy)
+            unit=Guard._rules[rule][2];epsilon=numeric_tolerance(limit,unit)
+            self.assertEqual(Guard.evaluate(dict(signal,observed=limit+epsilon*.5),'submission',policy)['verdict'],'pass')
+            rejected=Guard.evaluate(dict(signal,observed=limit+epsilon*2),'submission',policy)
             self.assertEqual(rejected['verdict'],'reject')
             if rule not in ('G02','G03','G04'):self.assertEqual(Guard.evaluate(dict(signal,observed=-limit),'submission',policy)['verdict'],'pass')
-        future=dict(signal,rule_id='G02',observed=-1e-9)
+        future=dict(signal,rule_id='G02',observed=-2*numeric_tolerance(0.,'s'))
         self.assertEqual(Guard.evaluate(future,'submission',policy)['verdict'],'reject')
+        self.assertEqual(Guard.evaluate(dict(future,observed=-1e-9),'submission',policy)['verdict'],'pass')
         disabled=deepcopy(parameters);disabled['measured']['enabled']=False
         disabled_policy=dict(revision=8,policy_hash=policy_hash(disabled),parameters=disabled)
         self.assertEqual(Guard.evaluate(dict(signal,observed=9.),'execution',disabled_policy)['verdict'],'observe')
@@ -280,7 +283,7 @@ class SettingsTest(unittest.TestCase):
 
     def test_trajectory_guards_use_frozen_limits_steps_and_derived_duration(self):
         from test_variable_inference_steps import config
-        from robot_workbench.execution_settings import Guard,control_parameters,policy_hash
+        from robot_workbench.execution_settings import Guard,control_parameters,policy_hash,numeric_tolerance
         for steps in (1,15,60):
             parameters=control_parameters(defaults('inference'),configuration=config(steps),business='inference')
             policy=dict(revision=4,policy_hash=policy_hash(parameters),parameters=parameters)
@@ -290,13 +293,28 @@ class SettingsTest(unittest.TestCase):
                 self.assertEqual(result['verdict'],'pass')
                 self.assertEqual(result['limit'],limit)
                 self.assertEqual(result['policy_hash'],policy['policy_hash'])
-                exceeded=Guard.evaluate(dict(signal,observed=limit+1e-8),'submission',policy)
+                epsilon=1e-8 if rule=='G21'else numeric_tolerance(limit,Guard._rules[rule][2])*2
+                exceeded=Guard.evaluate(dict(signal,observed=limit+epsilon),'submission',policy)
                 self.assertEqual(exceeded['action'],'REJECT_PLAN'if rule=='G21'else'CONTINUE')
                 self.assertEqual(exceeded['verdict'],'reject'if rule=='G21'else'observe')
                 self.assertEqual(Guard.evaluate(dict(signal,observed=-1),'submission',policy)['action'],'REJECT_PLAN')
                 if rule=='G21':
                     self.assertEqual(Guard.evaluate(dict(signal,observed=steps-.5),'submission',policy)['verdict'],'reject')
             self.assertEqual(policy['parameters']['execution']['execute_steps'],steps)
+
+    def test_jaw_float32_roundoff_has_tolerance_but_real_excess_is_rejected(self):
+        from robot_workbench.execution_settings import Guard,control_parameters,policy_hash
+        parameters=control_parameters(defaults('inference'),business='inference')
+        guard=Guard.bind(dict(revision=1,parameters=parameters,policy_hash=policy_hash(parameters)),
+            dict(model_jaw_limits_mm=[[0.,83.],[0.,83.]]))
+        def decision(value):
+            return guard.evaluate(dict(rule_id='G17',signal_id='rounded-jaw',
+                observed=dict(minimum=[0.,0.],maximum=[value,value]),source_time=1.,checked_time=1.),'model_command')
+        accepted=decision(83.00000229259817)
+        self.assertEqual(accepted['verdict'],'pass')
+        self.assertEqual(accepted['limit']['numeric_tolerance_mm'],[.0001,.0001])
+        self.assertEqual(decision(83.0002)['verdict'],'reject')
+        self.assertEqual(decision(83.24528485536575)['verdict'],'reject')
 
     def test_bound_guard_freezes_capabilities_and_handles_vectors_with_one_identity(self):
         from robot_workbench.execution_settings import Guard,control_parameters,policy_hash
@@ -350,9 +368,12 @@ class SettingsTest(unittest.TestCase):
         span=[STATIONARY_PROFILE['joint_span_rad']]*14;span[6]=span[13]=2.
         self.assertEqual(check('G27',span,'stationary_span')['verdict'],'pass')
         span[13]+=1e-8
+        self.assertEqual(check('G27',span,'stationary_span')['verdict'],'pass')
+        span[13]+=.001
         self.assertEqual(check('G27',span,'stationary_span')['action'],'WAIT')
         self.assertEqual(check('G31',LEGACY_REFERENCE_LIMITS,'legacy_reference')['verdict'],'pass')
-        self.assertEqual(check('G31',dict(LEGACY_REFERENCE_LIMITS,velocity_limit_rad_s=.25000001),'legacy_reference')['action'],'REJECT_PLAN')
+        self.assertEqual(check('G31',dict(LEGACY_REFERENCE_LIMITS,velocity_limit_rad_s=.25000001),'legacy_reference')['verdict'],'pass')
+        self.assertEqual(check('G31',dict(LEGACY_REFERENCE_LIMITS,velocity_limit_rad_s=.2501),'legacy_reference')['action'],'REJECT_PLAN')
         facts=dict(monitored=True,age_s=.1,fault_latched=False)
         self.assertEqual(check('G30',facts,'native_watchdog')['verdict'],'pass')
         for changed in (dict(age_s=None),dict(age_s=.10001),dict(fault_latched=True),dict(age_s=-.001)):

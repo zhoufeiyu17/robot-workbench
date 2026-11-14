@@ -96,7 +96,7 @@ class RealMotionTest(unittest.TestCase):
 
     def test_measured_endpoint_tolerance_keeps_commands_bounded(self):
         from arx_env.joint_head_jaw_mapping import FEEDBACK, GAP_MM, command_sdk, interpolate
-        for gap in (-2., -.5, 83.74, 85.019,87.,89.):
+        for gap in (-2.000001,-2., -.5, 83.74, 85.019,87.,89.,89.000001):
             start = [0.] * 14
             for side, i in [('left', 6), ('right', 13)]:
                 start[i] = interpolate(gap, GAP_MM[side], FEEDBACK[side])
@@ -106,13 +106,15 @@ class RealMotionTest(unittest.TestCase):
             held = feedback_to_command(start)
             for side, i in [('left', 6), ('right', 13)]:
                 self.assertEqual(held[i], command_sdk(side, min(83., max(0., gap))))
-        for gap in (-2.000001, 89.000001):
+        for gap in (-2.001, 89.001):
             start[6] = interpolate(gap, GAP_MM['left'], FEEDBACK['left'])
             with self.assertRaisesRegex(ValueError, 'feedback tolerance'):
                 feedback_to_command(start)
         for gap in (-2.,83.1,87.,89.):
             with self.assertRaises(ValueError):
                 command_sdk('left', gap)
+        self.assertEqual(command_sdk('left',83.00000229259817),command_sdk('left',83.))
+        self.assertEqual(command_sdk('left',-.000001),command_sdk('left',0.))
 
     def test_numeric_arm_boundary_preserves_raw_and_seals_projected_request(self):
         bounds = limits();bounds[8] = [0., 2.]
@@ -140,7 +142,7 @@ class RealMotionTest(unittest.TestCase):
         inside = raw[:];inside[8] = -math.radians(1.5)
         self.assertEqual(feedback_to_command(inside,bounds)[8],0.)
         self.assertLess(inside[8],0.,'raw feedback must not be clipped')
-        too_far = raw[:];too_far[8] = -math.radians(5.)-.000001
+        too_far = raw[:];too_far[8] = -math.radians(5.)-.00001
         with self.assertRaisesRegex(ValueError, 'position-boundary'):
             make_workbench_plans(too_far, [dict(q12=[0.]*12, speeds12=[.2]*12)], bounds)
         with self.assertRaisesRegex(ValueError, 'outside SDK limit'):
@@ -165,8 +167,8 @@ class RealMotionTest(unittest.TestCase):
             altered=list(plan.requested_q_target);altered[0]=-tolerance/3
             with self.assertRaisesRegex(ValueError,'canonical contents'):
                 MotionRunner(replace(plan,requested_q_target=tuple(altered)),begin=lambda q:q,send=lambda q:None,stop=lambda reason:None)
-            beyond=raw[:];beyond[0]=-tolerance-.000001
-            beyond_feedback=raw[:];beyond_feedback[0]=-(math.radians(5.)if environment=='physical'else tolerance)-.000001
+            beyond=raw[:];beyond[0]=-tolerance-.00001
+            beyond_feedback=raw[:];beyond_feedback[0]=-(math.radians(5.)if environment=='physical'else tolerance)-.00001
             with self.assertRaisesRegex(ValueError,'position-boundary'):
                 make_plan('both',beyond_feedback,requested,bounds,kind='workbench',environment=environment)
             with self.assertRaisesRegex(ValueError,'position-boundary'):

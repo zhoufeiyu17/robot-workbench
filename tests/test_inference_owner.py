@@ -49,8 +49,14 @@ class InferenceOwnerTests(unittest.TestCase):
         from robot_workbench.motion_reference import prepare_reference
         runner=object.__new__(InferenceRunner);runner.owner=SimpleNamespace(control_time=lambda:1.)
         runner.config={'execute_steps':2,'task':'coffee'};runner.initial_device14=[0.]*14
-        runner.limits=np.asarray([[-3.,3.]]*14);runner.limits[[6,13]]=[0.,83.]
-        runner.sdk_limits=np.asarray([[-3.,3.]]*14);runner.sdk_limits[[6,13]]=[0.,.082]
+        jaw.configure_mapping(None)
+        runner.sdk_limits=np.asarray([[-3.,3.]]*14)
+        for side,slot in [('left',6),('right',13)]:
+            rounded=np.nextafter(np.float32(jaw.command_sdk(side,83.)),np.float32(np.inf))
+            runner.sdk_limits[slot]=[0.,float(rounded)]
+        runner.limits=np.asarray(device_limits(runner.sdk_limits.tolist(),native_coordinates=True))
+        context=Runtime._guard_context(SimpleNamespace(environment='fake',owner=SimpleNamespace(backend=SimpleNamespace())),runner.sdk_limits)
+        self.assertEqual(context['jaw_limits_mm'],runner.limits[[6,13]].tolist())
         runner.adapter=Adapter(runner.limits,83.);runner.target_interpreter=None
         runner.reference_executor=None;runner.normal_config=None;runner.execution_instance_id='cpu-jaw-bound'
         runner._record=lambda *args:None;events=[];runner._emit=lambda name,value:events.append((name,value))

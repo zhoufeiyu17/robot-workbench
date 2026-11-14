@@ -232,6 +232,10 @@ while c.recv() is not None:pass
             limits=[[-3.,3.]for _ in range(14)];limits[6]=limits[13]=[0.,.082]
             adapter,identity=calibrated_adapter(profile,limits,model_id=MODEL_ID)
             np.testing.assert_allclose(adapter.limits[[6,13],1],[80.,89.])
+            rounded=deepcopy(limits)
+            rounded[6][1]=rounded[13][1]=float(np.float32(.082))
+            native_limits=np.asarray(device_limits(rounded,native_coordinates=True))
+            np.testing.assert_array_equal(native_limits[[6,13],1],[80.,89.])
             observed=np.zeros(14);observed[[6,13]]=[80.,89.]
             np.testing.assert_allclose(adapter.device_to_model(observed)[[6,13]],[.080,.089])
             action=np.zeros(14);action[[6,13]]=.1

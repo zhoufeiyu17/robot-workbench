@@ -23,7 +23,8 @@ class PositionBoundsTests(unittest.TestCase):
         raw=[-margin,1+margin]
         bounded,changes=inspect_joint_feedback(raw,[(0,1)]*2,environment='physical')
         self.assertEqual(bounded,[0,1]);self.assertEqual(len(changes),2);self.assertEqual(raw,[-margin,1+margin])
-        with self.assertRaises(ValueError):inspect_joint_feedback([-margin-.000001],[(0,1)],environment='physical')
+        self.assertEqual(inspect_joint_feedback([-margin-.0000005],[(0,1)],environment='physical')[0],[0])
+        with self.assertRaises(ValueError):inspect_joint_feedback([-margin-.00001],[(0,1)],environment='physical')
         with self.assertRaises(ValueError):project_joint_positions(raw,[(0,1)]*2,environment='physical')
         with self.assertRaises(ValueError):inspect_joint_feedback(raw,[(0,1)]*2,environment='fake')
 
@@ -33,7 +34,7 @@ class PositionBoundsTests(unittest.TestCase):
             bounded,changes=project_joint_positions(raw,[(0,1)]*2,environment=environment)
             self.assertEqual(bounded,[0,1]);self.assertEqual(raw,[-allowance,1+allowance])
             self.assertEqual([row['original_rad'] for row in changes],raw)
-            for excess in (-allowance-.000001,1+allowance+.000001,float('nan'),float('inf'),True):
+            for excess in (-allowance-.00001,1+allowance+.00001,float('nan'),float('inf'),True):
                 with self.assertRaises(ValueError):project_joint_positions([excess],[(0,1)],environment=environment)
         with self.assertRaises(ValueError):project_joint_positions([0],[(0,1)],environment='unknown')
 

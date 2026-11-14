@@ -47,11 +47,12 @@ class A1MappingTest(unittest.TestCase):
                     self.assertAlmostEqual(command_gap_mm(side,endpoint),83)
                     self.assertEqual(command_sdk(side,0),0)
                     self.assertEqual(hold_command_sdk(side,-2),0)
-                    for measured in (85.019,87.,89.):self.assertAlmostEqual(hold_command_sdk(side,measured),endpoint)
+                    for measured in (85.019,87.,89.,89.000001):self.assertAlmostEqual(hold_command_sdk(side,measured),endpoint)
                     self.assertGreater(command_gap_slope(side),0)
                     for bad in (-.1, 83.1, 84, True, float('nan')):
                         with self.assertRaises(ValueError): command_sdk(side,bad)
-                    for measured in (-2.000001,89.000001):
+                    self.assertEqual(hold_command_sdk(side,-2.000001),0.)
+                    for measured in (-2.001,89.001):
                         with self.assertRaises(ValueError):hold_command_sdk(side,measured)
                 raw = [0.]*14
                 raw[6],raw[13] = feedback_sdk('left',84),feedback_sdk('right',84)
@@ -61,7 +62,8 @@ class A1MappingTest(unittest.TestCase):
                 self.assertEqual(feedback_state(raw)['control_range_mm'],[[0.,83.],[0.,83.]])
                 from arx_env.joint_head_jaw_mapping import measured_jaw_gaps
                 self.assertEqual(measured_jaw_gaps([85.019,89.]).tolist(),[85.019,89.])
-                for bad in (-2.000001,89.000001,float('nan'),float('inf')):
+                self.assertEqual(measured_jaw_gaps([-2.000001,89.000001]).tolist(),[-2.000001,89.000001])
+                for bad in (-2.001,89.001,float('nan'),float('inf')):
                     with self.assertRaises(ValueError):measured_jaw_gaps([bad,0.])
                 for bad in ([0,24,24,64,84], [3,24,44,64,84], [0,24,44,64,82],
                             [0,24,float('nan'),64,84], [0,24,44,84], [0,True,44,64,84]):

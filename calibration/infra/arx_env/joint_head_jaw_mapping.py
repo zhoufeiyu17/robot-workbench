@@ -93,11 +93,13 @@ def interpolate(value, xs, ys, *, field='jaw mapping input'):
 
 
 def command_sdk(side, gap_mm):
+    from robot_workbench.execution_settings import within_numeric_bounds
     commands, _, gaps, _ = _ACTIVE
     if side not in gaps or type(gap_mm) not in (float, int) or not math.isfinite(gap_mm):
         raise ValueError('finite left/right actual jaw gap required')
-    if not 0 <= gap_mm <= command_max_mm(side):
+    if not within_numeric_bounds(gap_mm,0.,command_max_mm(side),'mm'):
         raise ValueError(f'{side} jaw command range is 0–{command_max_mm(side):g} mm')
+    gap_mm=min(command_max_mm(side),max(0.,gap_mm))
     return interpolate(gap_mm, gaps[side], commands[side])
 
 
@@ -124,7 +126,8 @@ def command_gap_slope(side):
 
 def hold_command_sdk(side, gap_mm):
     """Accept measured endpoint error, without commanding beyond the calibrated range."""
-    if type(gap_mm) not in (float, int) or not math.isfinite(gap_mm) or not feedback_min_mm(side)-1e-9 <= gap_mm <= feedback_max_mm(side)+1e-9:
+    from robot_workbench.execution_settings import within_numeric_bounds
+    if type(gap_mm) not in (float, int) or not math.isfinite(gap_mm) or not within_numeric_bounds(gap_mm,feedback_min_mm(side),feedback_max_mm(side),'mm'):
         raise ValueError(f'{side} measured jaw gap {gap_mm} mm outside feedback tolerance {feedback_min_mm(side):g}–{feedback_max_mm(side):g} mm')
     return command_sdk(side, min(command_max_mm(side), max(0., gap_mm)))
 
@@ -143,9 +146,10 @@ def feedback_state(raw):
 def measured_jaw_gaps(value):
     """Measured metal gaps: retain endpoint error; never use for commands."""
     import numpy as np
+    from robot_workbench.execution_settings import within_numeric_bounds
     gaps = np.asarray(value, float)
     if (gaps.shape != (2,) or not np.isfinite(gaps).all()
-            or np.any(gaps < np.asarray([feedback_min_mm(s)for s in ('left','right')])-1e-9)
-            or np.any(gaps > np.asarray([feedback_max_mm(s)for s in ('left','right')])+1e-9)):
+            or any(not within_numeric_bounds(float(gap),feedback_min_mm(side),feedback_max_mm(side),'mm')
+                   for side,gap in zip(('left','right'),gaps))):
         raise ValueError('left/right measured metal gaps exceed calibrated feedback tolerance')
     return gaps

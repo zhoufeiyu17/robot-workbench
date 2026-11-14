@@ -1,6 +1,6 @@
 """Position-boundary noise only; never a tracking, settling or collision policy."""
 import math
-from .execution_settings import PHYSICAL_FEEDBACK_MARGIN_RAD
+from .execution_settings import PHYSICAL_FEEDBACK_MARGIN_RAD,numeric_tolerance
 
 
 class JointPositionBoundaryError(ValueError):
@@ -47,7 +47,7 @@ def _project(values,limits,tolerance,context='command'):
                for v in (value, lower, upper)) or lower > upper:
             raise ValueError('finite ordered joint position limits required')
         bounded = min(upper, max(lower, value))
-        if abs(bounded - value) > tolerance + 1e-12:
+        if abs(bounded - value) > tolerance + numeric_tolerance(max(abs(lower),abs(upper)),'rad'):
             raise JointPositionBoundaryError(index,value,lower,upper,tolerance,len(values),context)
         projected.append(bounded)
         if bounded != value:

@@ -633,11 +633,11 @@ class Runtime:
             integral_feedback_timeout_s=INTEGRAL_FEEDBACK_TIMEOUT_S,starvation_margin_s=REFERENCE_STARVATION_MARGIN_S)
         if limits is not None:
             from .motion_reference import JOINTS
-            from arx_env.joint_head_jaw_mapping import command_gap_mm
+            from .inference_owner import device_limits
             if len(limits)!=14:raise ValueError('bound SDK capability requires14 limits')
             context['joint_limits']=[list(limits[i])for i in JOINTS]
-            context['jaw_limits_mm']=[sorted(command_gap_mm(side,float(value))for value in limits[slot])
-                for side,slot in (('left',6),('right',13))]
+            command_limits=device_limits([[float(value)for value in pair]for pair in limits],native_coordinates=True)
+            context['jaw_limits_mm']=[command_limits[slot]for slot in (6,13)]
             context['disabled_grippers']=list(getattr(self.owner.backend,'passive_jaws',()))
         return context
 

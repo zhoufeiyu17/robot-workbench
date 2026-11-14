@@ -428,13 +428,18 @@ class TargetInterpreter:
                 source_time=sample,checked_time=now,epoch=self.epoch),'submission')
             decisions.append(bounds);mark('position_guard')
             if bounds['verdict']=='reject':raise ValueError('G18: native command exceeds the bound joint capability')
-            from arx_env.joint_head_jaw_mapping import command_gap_mm
+            joint_bounds=np.asarray(bounds['limit']['bounds'])
+            q[:,JOINTS]=np.clip(q[:,JOINTS],joint_bounds[:,0],joint_bounds[:,1])
+            from arx_env.joint_head_jaw_mapping import command_gap_mm,command_sdk
             jaws=self.position_guard.evaluate(dict(rule_id='G17',signal_id=self.reference.metadata['reference_id'],
                 observed=dict(minimum=[command_gap_mm(side,float(q[:,slot].min()))for side,slot in (('left',6),('right',13))],
                     maximum=[command_gap_mm(side,float(q[:,slot].max()))for side,slot in (('left',6),('right',13))],active_arm=self.active_arm),
                 source_time=sample,checked_time=now,epoch=self.epoch),'submission')
             decisions.append(jaws)
             if jaws['verdict']=='reject':raise ValueError('G17: native jaw command exceeds the bound SDK capability')
+            for index,(side,slot)in enumerate((('left',6),('right',13))):
+                lower,upper=jaws['limit']['bounds'][index]
+                q[:,slot]=np.clip(q[:,slot],command_sdk(side,lower),command_sdk(side,upper))
         mark('feedback_target_sample')
         # Only residual integrators consume the feedback-time target. Ordinary
         # windows must not spend their admission lead evaluating an unused row.

@@ -22,6 +22,16 @@ DEFAULT_MEASURED_SPEED_LIMIT_RAD_S=2.5
 PHYSICAL_FEEDBACK_MARGIN_RAD=math.radians(5.)
 STATIONARY_PROFILE=dict(window_s=.3,max_sample_gap_s=.1,joint_span_rad=DEFAULT_JOINT_TOLERANCE_RAD,jaw_span_mm=2.)
 LEGACY_REFERENCE_LIMITS=dict(velocity_limit_rad_s=.25,acceleration_limit_rad_s2=1.)
+NUMERIC_RELATIVE_TOLERANCE=1e-6
+NUMERIC_ABSOLUTE_TOLERANCE={'rad':1e-6,'mm':1e-4,'s':1e-6,'rad/s':1e-5,'rad/s²':1e-4,'mm/s':1e-3}
+
+
+def numeric_tolerance(limit,unit):
+    return max(NUMERIC_ABSOLUTE_TOLERANCE[unit],abs(limit)*NUMERIC_RELATIVE_TOLERANCE)
+
+
+def within_numeric_bounds(value,lower,upper,unit):
+    return lower-numeric_tolerance(lower,unit)<=value<=upper+numeric_tolerance(upper,unit)
 
 
 def recording_parameters(business=None, value=None):
@@ -222,10 +232,10 @@ class Guard:
         'G04': ('observation', 'max_camera_span_s', 's', '0<=observed<=limit', 'REJECT_INPUT'),
         'G11': ('execution', 'prepare_drift_joint_rad', 'rad', 'abs(observed)<=limit', 'REJECT_PLAN'),
         'G12': ('execution', 'prepare_drift_jaw_mm', 'mm', 'abs(observed)<=limit', 'REJECT_PLAN'),
-        'G13': ('planning', 'velocity_limit_rad_s', 'rad/s', '0<=observed<=limit+1e-10', 'REJECT_PLAN'),
+        'G13': ('planning', 'velocity_limit_rad_s', 'rad/s', '0<=observed<=limit', 'REJECT_PLAN'),
         'G14': ('measured', 'limit_rad_s', 'rad/s', 'abs(observed)<=limit', 'FAULT_STOP'),
-        'G15': ('planning', 'acceleration_limit_rad_s2', 'rad/s²', '0<=observed<=limit+1e-10', 'REJECT_PLAN'),
-        'G16': ('planning', 'jaw_velocity_limit_mm_s', 'mm/s', '0<=observed<=limit+1e-10', 'REJECT_PLAN'),
+        'G15': ('planning', 'acceleration_limit_rad_s2', 'rad/s²', '0<=observed<=limit', 'REJECT_PLAN'),
+        'G16': ('planning', 'jaw_velocity_limit_mm_s', 'mm/s', '0<=observed<=limit', 'REJECT_PLAN'),
         'G21': ('execution', 'execute_steps', 'steps', 'observed==limit', 'REJECT_PLAN'),
         'G22': ('execution', 'execute_steps', 's', 'finite observed>0', 'REJECT_PLAN'),
         'G35': ('recording', 'purpose_profile', 'failed_conditions', 'observed==0', 'REJECT_INPUT'),
@@ -285,8 +295,10 @@ class Guard:
             enabled = settings.get('enabled', True)
             if signal['rule_id']=='G21':
                 passed=type(observed) is int and observed==limit
-            elif signal['rule_id'] in ('G13','G15','G16'):passed=0<=observed<=limit+1e-10
-            else:passed = 0 <= observed <= limit if signal['rule_id'] in ('G02','G03','G04') else abs(observed) <= limit
+            else:
+                value=observed if signal['rule_id'] in ('G02','G03','G04','G13','G15','G16') else abs(observed)
+                passed=within_numeric_bounds(value,0.,limit,unit)
+                comparison+=' with numeric tolerance'
         if type(enabled) is not bool:raise ValueError('boolean guard enabled required')
         planning_audit=signal['rule_id']in ('G13','G15','G16')
         if planning_audit and observed>=0 and not passed:override='observe'
@@ -299,7 +311,9 @@ class Guard:
                     observed=observed, limit=limit, unit=unit, comparison=comparison,
                     revision=policy['revision'], policy_hash=policy['policy_hash'],
                     source_time=signal['source_time'], checked_time=signal['checked_time'],
-                    **{key: signal[key] for key in identity_fields if key in signal})
+                    **{key: signal[key] for key in identity_fields if key in signal},
+                    **({'numeric_tolerance':numeric_tolerance(limit,unit)}
+                       if signal['rule_id']not in('G10','G23')and isinstance(limit,Real)and unit in NUMERIC_ABSOLUTE_TOLERANCE else {}))
 
 
 class _BoundGuard:
@@ -409,14 +423,14 @@ def _bound_values(rule,value,parameters,context,phase):
     if rule=='G27':
         if phase=='stationary_gap':
             observed=_guard_number(value,'stationary sample gap');limit=STATIONARY_PROFILE['max_sample_gap_s']
-            passed=0<observed<=limit;comparison='0<gap<=limit';unit='s'
+            passed=observed>0 and within_numeric_bounds(observed,0.,limit,'s');comparison='0<gap<=limit with numeric tolerance';unit='s'
         elif phase=='stationary_span':
             observed=_guard_vector(value,14,'stationary position span')
             limit=[STATIONARY_PROFILE['jaw_span_mm']if i in (6,13)else STATIONARY_PROFILE['joint_span_rad']for i in range(14)]
-            passed=all(0<=v<=bound for v,bound in zip(observed,limit));comparison='0<=span<=axis_limit';unit='rad / mm'
+            passed=all(within_numeric_bounds(v,0.,bound,'mm'if i in(6,13)else'rad')for i,(v,bound)in enumerate(zip(observed,limit)));comparison='0<=span<=axis_limit with numeric tolerance';unit='rad / mm'
         elif phase=='stationary_window':
             observed=_guard_number(value,'stationary window duration');limit=STATIONARY_PROFILE['window_s']
-            passed=observed>=limit-1e-9;comparison='duration>=window-1e-9';unit='s'
+            passed=observed>=limit-numeric_tolerance(limit,'s');comparison='duration>=window with numeric tolerance';unit='s'
         else:raise ValueError('declared stationary phase required')
         return observed,limit,unit,comparison,'WAIT',True,passed,None
     if rule=='G30':
@@ -424,20 +438,20 @@ def _bound_values(rule,value,parameters,context,phase):
             raise ValueError('declared native watchdog facts required')
         observed=dict(value)
         if value['age_s']is not None:observed['age_s']=_guard_number(value['age_s'],'watchdog age')
-        passed=not value['monitored']or not value['fault_latched']and observed['age_s']is not None and 0<=observed['age_s']<=NATIVE_WATCHDOG_TIMEOUT_S
+        passed=not value['monitored']or not value['fault_latched']and observed['age_s']is not None and within_numeric_bounds(observed['age_s'],0.,NATIVE_WATCHDOG_TIMEOUT_S,'s')
         return observed,NATIVE_WATCHDOG_TIMEOUT_S,'s','unmonitored or healthy heartbeat within native timeout','FAULT_STOP',True,passed,None
     if rule=='G31':
         if not isinstance(value,dict)or set(value)!=set(LEGACY_REFERENCE_LIMITS):raise ValueError('declared legacy reference peaks required')
         observed={key:_guard_number(v,'legacy reference peak')for key,v in value.items()}
-        passed=all(0<=observed[key]<=bound+1e-9 for key,bound in LEGACY_REFERENCE_LIMITS.items())
-        return observed,dict(LEGACY_REFERENCE_LIMITS),'rad/s / rad/s²','legacy peaks<=profile+1e-9','REJECT_PLAN',True,passed,None
+        passed=all(within_numeric_bounds(observed[key],0.,bound,'rad/s²'if key=='acceleration_limit_rad_s2'else'rad/s')for key,bound in LEGACY_REFERENCE_LIMITS.items())
+        return observed,dict(LEGACY_REFERENCE_LIMITS),'rad/s / rad/s²','legacy peaks<=profile with numeric tolerance','REJECT_PLAN',True,passed,None
     if rule=='G01':
         observed=_guard_identity(value);expected=context['expected_identity']
         return observed,deepcopy(expected),'identity','typed identities equal','INVALIDATE_RUN',True,_same_identity(observed,expected),None
     if rule in ('G05','G06'):
         observed=_guard_number(value,'pairing error')
         limit=context['training_rgb_pair_error_s'if rule=='G05'else'training_state_pair_error_s']
-        passed=abs(observed)<=limit
+        passed=within_numeric_bounds(abs(observed),0.,limit,'s')
         return observed,limit,'s','abs(error)<=limit','CONTINUE',True,passed,None if passed else'observe'
     if rule in ('G07','G08'):
         limit=parameters['model']['reference_supply_timeout_s']if rule=='G07'else parameters['observation']['maximum_age_s']
@@ -446,9 +460,9 @@ def _bound_values(rule,value,parameters,context,phase):
             if set(value)!={'current_time','basis_time'}:raise ValueError('declared supply timestamps required')
             observed={key:_guard_number(stamp,'supply timestamp')for key,stamp in value.items()}
             observed['elapsed_s']=observed['current_time']-observed['basis_time']
-            passed=observed['basis_time']<=observed['current_time']<=observed['basis_time']+limit
+            passed=within_numeric_bounds(observed['elapsed_s'],0.,limit,'s')
         else:
-            observed=_guard_number(value,'supply age');passed=0<=observed<=limit
+            observed=_guard_number(value,'supply age');passed=within_numeric_bounds(observed,0.,limit,'s')
         return observed,limit,'s','basis<=now<=basis+limit','BRAKE_TO_HOLD'if rule=='G07'else'REJECT_INPUT',True,passed,None
     if rule in ('G09','G10'):
         limit=context['infer_timeout_s'if rule=='G09'else'pin_ttl_s']
@@ -462,8 +476,8 @@ def _bound_values(rule,value,parameters,context,phase):
             if isinstance(value,dict):
                 if set(value)!={'elapsed_s','timed_out'}or type(value['timed_out'])is not bool:raise ValueError('declared HTTP timeout fact required')
                 observed=dict(elapsed_s=_guard_number(value['elapsed_s'],'HTTP elapsed'),timed_out=value['timed_out'])
-                passed=not observed['timed_out']and 0<=observed['elapsed_s']<=limit
-            else:observed=_guard_number(value,'HTTP elapsed');passed=0<=observed<=limit
+                passed=not observed['timed_out']and within_numeric_bounds(observed['elapsed_s'],0.,limit,'s')
+            else:observed=_guard_number(value,'HTTP elapsed');passed=within_numeric_bounds(observed,0.,limit,'s')
         return observed,limit,'s','elapsed<=timeout'if rule=='G09'else'now<renewed+ttl','REJECT_INPUT'if rule=='G09'else'INVALIDATE_RUN',True,passed,None
     if rule=='G23':
         if not isinstance(value,dict)or set(value)!={'start_time','end_time'}:raise ValueError('declared Run budget timestamps required')
@@ -475,8 +489,8 @@ def _bound_values(rule,value,parameters,context,phase):
         if not isinstance(value,dict)or set(value)!={'brake_duration_s','gain_transition_s'}:raise ValueError('declared normal transition durations required')
         observed={key:_guard_number(v,'normal transition duration',positive=True)for key,v in value.items()}
         limit=dict(brake_duration_s=context['normal_brake_s'],gain_transition_s=context['gain_transition_s'])
-        passed=all(abs(observed[key]-expected)<=1e-10 for key,expected in limit.items())
-        return observed,limit,'s','durations match bound normal profile (1e-10 arithmetic allowance)','REJECT_PLAN',True,passed,None
+        passed=all(abs(observed[key]-expected)<=numeric_tolerance(expected,'s')for key,expected in limit.items())
+        return observed,limit,'s','durations match bound normal profile with numeric tolerance','REJECT_PLAN',True,passed,None
     if rule=='G17':
         if not isinstance(value,dict)or not {'minimum','maximum'}<=value.keys()or value.keys()-{'minimum','maximum','active_arm'}:
             raise ValueError('declared jaw command extrema required')
@@ -486,8 +500,10 @@ def _bound_values(rule,value,parameters,context,phase):
         if 'active_arm'in value:observed['active_arm']=arm
         limits=context['model_jaw_limits_mm'if phase=='model_command'else'jaw_limits_mm']
         enabled=[i for i,side in enumerate(('left','right'))if (arm=='both'or side==arm)and side not in context.get('disabled_grippers',())]
-        passed=all(limits[i][0]<=observed['minimum'][i]<=observed['maximum'][i]<=limits[i][1]for i in enabled)
-        return observed,dict(bounds=deepcopy(limits),enabled_indices=enabled),'mm','lower<=command<=upper','REJECT_PLAN',True,passed,None
+        passed=all(within_numeric_bounds(observed['minimum'][i],limits[i][0],limits[i][1],'mm')
+            and within_numeric_bounds(observed['maximum'][i],observed['minimum'][i],limits[i][1],'mm')for i in enabled)
+        return observed,dict(bounds=deepcopy(limits),enabled_indices=enabled,
+            numeric_tolerance_mm=[numeric_tolerance(max(abs(lo),abs(hi)),'mm')for lo,hi in limits]),'mm','lower<=command<=upper with numeric tolerance','REJECT_PLAN',True,passed,None
     if rule in ('G18','G19','G20'):
         limits=context['joint_limits']
         if rule=='G18'and isinstance(value,dict):
@@ -498,36 +514,38 @@ def _bound_values(rule,value,parameters,context,phase):
             observed={key:_guard_vector(value[key],len(limits),'command extrema')for key in ('minimum','maximum')}
             if 'active_arm' in value:observed['active_arm']=arm
             indices=range(6)if arm=='left'else range(6,12)if arm=='right'else range(len(limits))
-            passed=all(limits[i][0]<=observed['minimum'][i]<=observed['maximum'][i]<=limits[i][1] for i in indices)
-            return observed,dict(bounds=deepcopy(limits),allowance_rad=0.),'rad','lower<=minimum<=maximum<=upper','REJECT_PLAN',True,passed,None
+            passed=all(within_numeric_bounds(observed['minimum'][i],limits[i][0],limits[i][1],'rad')
+                and within_numeric_bounds(observed['maximum'][i],observed['minimum'][i],limits[i][1],'rad')for i in indices)
+            return observed,dict(bounds=deepcopy(limits),allowance_rad=0.,
+                numeric_tolerance_rad=[numeric_tolerance(max(abs(lo),abs(hi)),'rad')for lo,hi in limits]),'rad','lower<=minimum<=maximum<=upper with numeric tolerance','REJECT_PLAN',True,passed,None
         observed=_guard_vector(value,len(limits),'joint positions')
         margin=0.
         if rule!='G18':
             from .joint_bounds import position_noise_rad,feedback_position_margin_rad
             margin=(position_noise_rad if rule=='G19'else feedback_position_margin_rad)(context['environment'])
-        epsilon=0. if rule=='G18'else 1e-12
-        passed=all(low-margin-epsilon<=v<=high+margin+epsilon for v,(low,high)in zip(observed,limits))
-        limit=dict(bounds=deepcopy(limits),allowance_rad=margin)
-        return observed,limit,'rad','lower-margin<=q<=upper+margin','FAULT_STOP'if rule=='G20'else'REJECT_PLAN',True,passed,None
+        passed=all(within_numeric_bounds(v,low-margin,high+margin,'rad')for v,(low,high)in zip(observed,limits))
+        limit=dict(bounds=deepcopy(limits),allowance_rad=margin,
+            numeric_tolerance_rad=[numeric_tolerance(max(abs(lo-margin),abs(hi+margin)),'rad')for lo,hi in limits])
+        return observed,limit,'rad','lower-margin<=q<=upper+margin with numeric tolerance','FAULT_STOP'if rule=='G20'else'REJECT_PLAN',True,passed,None
     if rule in ('G28','G29'):
         limit=context[('integral_feedback_timeout_s'if phase=='feedback_integral'else'feedback_timeout_s')if rule=='G28'else'starvation_margin_s']
         if rule=='G29'and isinstance(value,dict):
             if set(value)!={'current_time','queued_until'}:raise ValueError('declared queue timestamps required')
             observed={key:_guard_number(stamp,'queue timestamp')for key,stamp in value.items()}
             observed['remaining_s']=observed['queued_until']-observed['current_time']
-            passed=observed['current_time']<=observed['queued_until']-limit
+            passed=observed['remaining_s']>=limit-numeric_tolerance(limit,'s')
         else:
             observed=_guard_number(value,'feedback age'if rule=='G28'else'queue lead')
-            passed=0<=observed<=limit if rule=='G28'else observed>=limit
-        return observed,limit,'s','0<=age<=limit'if rule=='G28'else'lead>=limit','FAULT_STOP',True,passed,None
+            passed=within_numeric_bounds(observed,0.,limit,'s')if rule=='G28'else observed>=limit-numeric_tolerance(limit,'s')
+        return observed,limit,'s','0<=age<=limit with numeric tolerance'if rule=='G28'else'lead>=limit with numeric tolerance','FAULT_STOP',True,passed,None
     fields={'joint_errors_rad','jaw_errors_mm'}|({'exceeded_for_s'}if rule=='G25'else set())
     if not isinstance(value,dict) or set(value)!=fields:raise ValueError('declared tracking/arrival observation required')
     observed=dict(joint_errors_rad=_guard_vector(value['joint_errors_rad'],12,'joint errors'),
                   jaw_errors_mm=_guard_vector(value['jaw_errors_mm'],2,'jaw errors'))
     settings=parameters['tracking'if rule=='G25'else'arrival']
     joint_limits=[settings['joint_rad']]*12 if rule=='G25'else settings['tolerances_rad']
-    joints=[i for i,(v,limit)in enumerate(zip(observed['joint_errors_rad'],joint_limits))if abs(v)>limit]
-    jaws=[i for i,v in enumerate(observed['jaw_errors_mm'])if abs(v)>settings['jaw_mm']]
+    joints=[i for i,(v,limit)in enumerate(zip(observed['joint_errors_rad'],joint_limits))if not within_numeric_bounds(abs(v),0.,limit,'rad')]
+    jaws=[i for i,v in enumerate(observed['jaw_errors_mm'])if not within_numeric_bounds(abs(v),0.,settings['jaw_mm'],'mm')]
     exceeded=bool(joints or jaws)
     observed.update(exceeded=exceeded,exceeded_joint_indices=joints,exceeded_jaw_indices=jaws)
     limit=dict(joint_rad=list(joint_limits),jaw_mm=settings['jaw_mm'])
@@ -536,8 +554,7 @@ def _bound_values(rule,value,parameters,context,phase):
         if elapsed<0:raise ValueError('nonnegative tracking elapsed required')
         observed['exceeded_for_s']=elapsed;limit['duration_s']=settings['duration_s']
         passed=not exceeded
-        epsilon=1e-12 if phase=='tracking_frozen'else 0.
-        if exceeded and elapsed+epsilon<settings['duration_s']:override='observe'
+        if exceeded and elapsed<settings['duration_s']-numeric_tolerance(settings['duration_s'],'s'):override='observe'
     else:passed=not exceeded
     return observed,limit,'rad / mm','per-axis absolute errors within policy','FAULT_STOP'if rule=='G25'else'WAIT',settings['enabled'],passed,override
 
