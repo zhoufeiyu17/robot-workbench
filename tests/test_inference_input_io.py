@@ -13,6 +13,33 @@ from robot_workbench.observation_pairing import TimestampPairer,PairingPending
 
 
 class InputIOTests(unittest.TestCase):
+    def test_newer_grid_uses_existing_samples_within_training_alignment(self):
+        pairer=TimestampPairer();pairer.origin_ns=0
+        frames={role:[(ms*1_000_000,dict(stamp=ms))for ms in stamps]
+                for role,stamps in {'head':[83,116],'left':[90,123],'right':[97,130]}.items()}
+        feedback=[(ms*1_000_000,dict(stamp=ms))for ms in (100,110,120,130,140)]
+        selected,state,diagnostic=pairer.select(frames,feedback)
+        self.assertEqual(diagnostic['target_wall_ns'],133_000_000)
+        self.assertEqual(diagnostic['grid_advance_ns'],33_000_000)
+        self.assertEqual(state['stamp'],130)
+        self.assertEqual([selected[k]['stamp']for k in ('head','left','right')],[116,123,130])
+        self.assertTrue(diagnostic['training_alignment_within_bounds'])
+        _,state,explicit=pairer.select(frames,feedback,target_ns=100_000_000)
+        self.assertEqual(state['stamp'],100)
+        self.assertEqual(explicit['grid_advance_ns'],0)
+        _,state,limited=pairer.select(frames,feedback[:3])
+        self.assertEqual(limited['target_wall_ns'],100_000_000)
+        self.assertEqual(state['stamp'],100)
+
+    def test_newer_grid_falls_back_when_a_camera_exceeds_training_error(self):
+        pairer=TimestampPairer();pairer.origin_ns=0
+        frames={role:[(t*1_000_000,dict(stamp=t))for t in (0,ms)]for role,ms in
+                {'head':100,'left':125,'right':125}.items()}
+        feedback=[(ms*1_000_000,dict(stamp=ms))for ms in (100,110,120,130,140)]
+        _,_,diagnostic=pairer.select(frames,feedback)
+        self.assertEqual(diagnostic['target_wall_ns'],100_000_000)
+        self.assertEqual(diagnostic['grid_advance_ns'],0)
+
     def frames(self, stamps):
         return {name:dict(metadata=dict(host_receive_ns=10_000_000_000+ms*1_000_000,
                     capture_instance_id='camera',serial=name,frame_number=ms),rgb=b'pixels')

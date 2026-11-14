@@ -54,18 +54,31 @@ class TimestampPairer:
             target=target_ns
             if target<first:raise ValueError('explicit memory observation target expired from source history')
             if target>last:raise PairingPending('waiting for real samples surrounding the explicit memory node')
-        def nearest(stream):return min(stream,key=lambda row:(abs(row[0]-target),row[0]))
-        selected={role:nearest(stream)for role,stream in frames.items()}
-        robot_stamp,robot=nearest(feedback)
-        errors={role:when-target for role,(when,_)in selected.items()}
-        checked=time.time();decisions=[]
-        for role,(when,_)in selected.items():
-            decisions.append(self.guard.evaluate(dict(rule_id='G05',signal_id=role,
-                observed=errors[role]/1e9,source_time=when/1e9,checked_time=checked),'pairing'))
-        decisions.append(self.guard.evaluate(dict(rule_id='G06',signal_id='paired_state',observed=(robot_stamp-target)/1e9,
-            source_time=robot_stamp/1e9,checked_time=checked),'pairing'))
-        diagnostic=dict(policy=('common_30Hz_grid_nearest_ties_earlier'if target_ns is None else'explicit_node_nearest_ties_earlier'),target_wall_ns=target,
+        def sample(at):
+            def nearest(stream):return min(stream,key=lambda row:(abs(row[0]-at),row[0]))
+            selected={role:nearest(stream)for role,stream in frames.items()}
+            robot_stamp,robot=nearest(feedback)
+            errors={role:when-at for role,(when,_)in selected.items()}
+            checked=time.time();decisions=[]
+            for role,(when,_)in selected.items():
+                decisions.append(self.guard.evaluate(dict(rule_id='G05',signal_id=role,
+                    observed=errors[role]/1e9,source_time=when/1e9,checked_time=checked),'pairing'))
+            decisions.append(self.guard.evaluate(dict(rule_id='G06',signal_id='paired_state',observed=(robot_stamp-at)/1e9,
+                source_time=robot_stamp/1e9,checked_time=checked),'pairing'))
+            return selected,robot_stamp,robot,errors,decisions
+        grid_advance=0
+        chosen=None
+        if target_ns is None:
+            newer=self.origin_ns+round((index+1)*1000/30)*1_000_000
+            if newer<=feedback[-1][0]:
+                candidate=sample(newer)
+                if all(row['verdict']=='pass'for row in candidate[-1]):
+                    grid_advance=newer-target;target=newer;index+=1;chosen=candidate
+        if chosen is None:chosen=sample(target)
+        selected,robot_stamp,robot,errors,decisions=chosen
+        diagnostic=dict(policy=('common_30Hz_grid_latest_aligned'if target_ns is None else'explicit_node_nearest_ties_earlier'),target_wall_ns=target,
             origin_wall_ns=self.origin_ns,grid_index=index,camera_error_ns=errors,
+            grid_advance_ns=grid_advance,
             feedback_error_ns=robot_stamp-target,
             camera_span_ns=max(row[0]for row in selected.values())-min(row[0]for row in selected.values()),
             training_alignment_within_bounds=all(row['verdict']=='pass'for row in decisions),

@@ -23,6 +23,16 @@ from .wam import HORIZON as WAM_HORIZON
 from .pipeline_timing import timing
 
 CAMERAS = {'head':'base_0', 'left':'left_wrist_0', 'right':'right_wrist_0'}
+
+
+def offer_memory_progress(memory,activity,epoch,run_id):
+    """Offer state-carried nodes independently of the live observation gate."""
+    with memory.lock:
+        # Bootstrap requires a full real observation. Subsequent offers only
+        # schedule explicit nodes, whose original inputs are resolved separately.
+        if memory.sampler.base is not None:
+            memory.offer(dict(memory_sampling=activity,run_id=run_id),epoch)
+
 METRIC_EVENTS=frozenset(('prediction_received','prediction_discarded','prediction_requested',
     'bounded_prediction_result','finite_chunk_prepared','bounded_prediction_prepared',
     'finite_chunk_started','normal_model_segment_started','episode_started','episode_completed','episode_stopped'))
@@ -118,6 +128,7 @@ class InferenceWorkflow:
         from .ros_data import plane_config
         self.ros_plane=plane_config(ros_plane) if ros_plane is not None else None
         self.ros_node=self.ros_inputs=self.ros_worker=None
+        self.ros_state_node=self.ros_event_node=None
         self.reference_planning=None
         if reference_planning is not None:
             if not action_chunks or model_family(model_id)not in('mixed366','wam','wam-mem') or reference_trajectory is not None:
@@ -294,6 +305,8 @@ class InferenceWorkflow:
         if callable(healthy) and not healthy():return False
         runtime=self.device.runtime
         if runtime is None:return False
+        shared=getattr(getattr(self,'ros_inputs',None),'shared_images',None)
+        if shared is not None and shared is not getattr(self.cameras,'inputs',None):return False
         expected=prepared.get('dependencies')
         return expected is None or expected==self._device_dependencies()
 
@@ -890,17 +903,25 @@ class InferenceWorkflow:
         from .ros_inputs import RosInputs
         from .observation_pairing import TimestampPairer
         runtime=self.device.runtime
+        shared_images=getattr(self.cameras,'inputs',None)
+        if hasattr(self.cameras,'inputs')and shared_images is None:
+            raise ValueError('common camera inputs are not ready for inference binding')
         memory=getattr(self.client,'memory_flow',None)
         if memory is not None:memory.rebind_hold()
         if self.ros_worker is not None:
             self.ros_worker.close()
             self._memory_model_sequences=(dict(self.ros_worker.sequences)if model_family(self.selected_model_id)=='wam-mem'else None)
             self.ros_worker=None
-        if self.ros_node is not None:self.ros_node.close();self.ros_node=None
+        self._close_ros_input_nodes()
         plane=self.ros_plane
         node=RosNode('infer_input_'+self.instance_id[:12],namespace=plane['namespace'],
             domain_id=plane['domain_id'],localhost_only=False)
+        state_node=event_node=None
         try:
+            state_node=RosNode('infer_state_'+self.instance_id[:12],namespace=plane['namespace'],
+                domain_id=plane['domain_id'],localhost_only=False)
+            event_node=RosNode('infer_events_'+self.instance_id[:12],namespace=plane['namespace'],
+                domain_id=plane['domain_id'],localhost_only=False)
             directory=SourceDirectory(node,self.device.id)
             expected={'state':dict(source_instance_id=runtime.nonce,kind='state')}
             expected.update({camera:dict(kind='image')for camera in CAMERAS.values()})
@@ -911,7 +932,8 @@ class InferenceWorkflow:
                     raise ValueError('ROS camera serial differs from the installed binding')
             if model_family(self.selected_model_id)=='wam-mem' and sources['state']['metadata'].get('memory_sampling_schema')!='workbench.memory-activity.v2':
                 raise ValueError('WAM-MEM requires current Owner real-memory activity protocol')
-            inputs=RosInputs(node,rows)
+            inputs=RosInputs(node,rows,state_ros=state_node,state_max_samples=256,on_sample=self._memory_state_sample,
+                shared_images=shared_images)
             state_cache=inputs.caches['state']
             with state_cache.changed:
                 if not state_cache.changed.wait_for(lambda:bool(state_cache.samples)or state_cache.error or node.errors,timeout=5.):
@@ -939,10 +961,26 @@ class InferenceWorkflow:
                     if run is not None and run.get('stall_recovery')is not None:
                         run['stall_recovery'].reset('control_source_error')
                     node.errors.append(str(error))
-            node.subscribe(control['topic'],node.types.DataEvent,control_event,depth=128)
-        except BaseException:node.close();raise
+            event_node.subscribe(control['topic'],node.types.DataEvent,control_event,depth=128)
+        except BaseException:
+            for reader in (event_node,state_node,node):
+                if reader is not None:reader.close()
+            raise
         self.ros_node,self.ros_directory,self.ros_inputs=node,directory,inputs
+        self.ros_state_node,self.ros_event_node=state_node,event_node
         self.ros_observations=publisher;self.observation_pairer=TimestampPairer()
+
+    def _close_ros_input_nodes(self):
+        for name in ('ros_event_node','ros_state_node','ros_node'):
+            node=getattr(self,name,None)
+            if node is not None:node.close();setattr(self,name,None)
+
+    def _memory_state_sample(self,reference,value):
+        if reference.stream_id!='state':return
+        run=self.current;memory=getattr(self.client,'memory_flow',None)
+        if run is None or memory is None or run.get('ended_wall')is not None:return
+        if value.get('runtime_nonce')!=run['owner'].runtime_nonce:return
+        offer_memory_progress(memory,value.get('memory_sampling'),value['command_epoch'],run['id'])
 
     def _ros_control_event(self,message):
         from .ros_data import json_value
@@ -972,7 +1010,7 @@ class InferenceWorkflow:
         from .ros_inference import RosModelWorker
         prepared,client,adapter=self.prepared,self.client,self.adapter
         if model_family(self.selected_model_id)=='wam-mem'and client.memory_flow is None:
-            from .wam_mem import MemorySession
+            from .monitored_memory import MonitoredMemorySession
             def resolve_memory(observation):
                 # The observation cache holds references, not camera payloads.
                 # Resolve exactly those samples off the ROS selection thread.
@@ -980,7 +1018,7 @@ class InferenceWorkflow:
                 images={role:np.frombuffer(frame['rgb'],dtype=np.uint8).reshape(frame['height'],frame['width'],3)
                     for role,frame in frames.items()}
                 return dict(observation,images=images)
-            client.memory_flow=MemorySession(client,adapter,self.ros_inputs.sources['state']['source_clock_id'],resolve=resolve_memory,select=self._memory_observation,
+            client.memory_flow=MonitoredMemorySession(client,adapter,self.ros_inputs.sources['state']['source_clock_id'],resolve=resolve_memory,select=self._memory_observation,
                 record=lambda request,prepared,call:self.ros_worker.memory_observation(request,prepared,call))
         binding=prepared.get('action_chunk_binding')
         if binding is None:raise ValueError('ROS model requests require the pinned action chunk binding')
@@ -1085,6 +1123,15 @@ class InferenceWorkflow:
             timing.record('observation.guard.'+rule,time.monotonic_ns(),outcome='ok'if decision['verdict']=='pass'else'rejected',
                 observation_id=message.observation_id,age_s=age,limit_s=decision['limit'],state_source_ns=state.source_time_ns)
             if decision['verdict']=='reject':
+                from .runtime_monitor import probes
+                probes.fault('input_'+rule, run_id=(self.current or {}).get('id'), epoch=owner['command_epoch'],
+                             observed_age_s=age, limit_s=decision['limit'],
+                             selected_state_ns=state.source_time_ns, latest_state_ns=latest.source_time_ns,
+                             target_ns=pairing['target_source_ns'],
+                             latest_camera_source_ns=pairing['latest_camera_source_ns'],
+                             grid_advance_ns=pairing['grid_advance_ns'],
+                             pair_duration_ns=paired-began,
+                             post_pair_duration_ns=round(now*1e9)-paired)
                 raise PairingPending(f"{rule}: waiting for a fresh ROS selection (observed={decision['observed']}, limit={decision['limit']})")
         value=referenced_observation(message,self.ros_inputs.sources,feedback,state_to_device=lambda raw:device_state(
             raw['qpos'],disabled_grippers=self.disabled_grippers,right_gripper_device_mm=prepared['profile']['gripper']['max_opening_mm']))
@@ -1106,7 +1153,12 @@ class InferenceWorkflow:
                     # the worker binding; a request cannot authorize its own epoch.
                     self.ros_worker.bind(run['id'],owner['command_epoch'])
                     memory=getattr(self.client,'memory_flow',None)
-                    if memory is not None:memory.offer(dict(value,run_id=run['id']),owner['command_epoch'])
+                    if memory is not None:
+                        # Once initialized, only the canonical state subscriber
+                        # advances progress. A paired image observation may lag it.
+                        with memory.lock:
+                            if memory.sampler.base is None:
+                                memory.offer(dict(value,run_id=run['id']),owner['command_epoch'])
                 published=time.monotonic_ns();self.ros_observations.publish(message)
                 timing.record('observation.publish',published,observation_id=message.observation_id,
                     epoch=owner['command_epoch'],state_source_ns=state.source_time_ns)
@@ -1918,15 +1970,19 @@ class InferenceWorkflow:
     def results(self):
         return self.results_page()['results']
 
-    def pipeline_diagnostics(self, *, after=0, owner_after=0, limit=128):
+    def pipeline_diagnostics(self, *, after=0, owner_after=0, limit=128, monitor_history=0, monitor_only=0):
         """Independent bounded read; do not construct all business/UI snapshots."""
-        local=timing.snapshot(after=after,limit=limit)
+        if monitor_history not in (0,1)or monitor_only not in(0,1):raise ValueError('monitor flags must be zero or one')
+        from .runtime_monitor import probes
+        local=(dict(monitor=probes.snapshot(history=bool(monitor_history))) if monitor_only else
+               timing.snapshot(after=after,limit=limit,monitor_history=bool(monitor_history)))
         if type(owner_after)is not int or owner_after<0:raise ValueError('nonnegative Owner timing cursor required')
         runtime=self.device.runtime
         owner=dict(status='unavailable',reason='no connected Owner')
         if runtime is not None and getattr(runtime,'remote_control_owner',False):
             try:owner=dict(status='observed',data=runtime.channel.call('pipeline_timing',
-                expected_nonce=runtime.nonce,after=owner_after,limit=limit,timeout=1.))
+                expected_nonce=runtime.nonce,after=owner_after,limit=limit,monitor_history=bool(monitor_history),
+                monitor_only=bool(monitor_only),timeout=1.))
             except (OSError,ValueError,ConnectionError)as error:owner=dict(status='unavailable',reason=str(error)[:256])
         with self.lock:
             run=self.current;recorders=dict(self.pending_captures)
@@ -1935,6 +1991,8 @@ class InferenceWorkflow:
                 backend=self.selected_spec.get('backend'),observation_error=self.cache_error,
                 memory=(self.client.memory_flow.snapshot()if getattr(self.client,'memory_flow',None)is not None else None))
         recordings=[]
+        if monitor_only:
+            return dict(schema='workbench.inference-diagnostics.v1',context=context,business=local,owner=owner)
         for run_id,recorder in list(recorders.items())[-8:]:
             session=getattr(getattr(recorder,'capture',None),'session',None)or getattr(recorder,'session',None)
             directory=getattr(session,'directory',None)
@@ -1996,6 +2054,6 @@ class InferenceWorkflow:
         run=self.current
         if run and run['config'].get('recording_backend')=='capture_session_v1' and run.get('recorder'):
             run['recorder'].close()
-        if self.ros_node is not None:self.ros_node.close()
+        self._close_ros_input_nodes()
         if self.artifacts is not None:self.artifacts.close()
         if self.capture_results is not None:self.capture_results.close()

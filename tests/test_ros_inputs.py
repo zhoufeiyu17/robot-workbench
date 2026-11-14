@@ -29,6 +29,83 @@ def sources():
 
 class SourceDecoding(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
+    def test_borrowed_original_images_keep_one_subscription_and_owner_lifetime(self):
+        from robot_workbench.ros_data import RosNode
+        from sensor_msgs.msg import Image
+        producer=RosNode('shared_image_source',namespace='/wb_cpu_inputs',domain_id=126)
+        owner=RosNode('shared_image_owner',namespace='/wb_cpu_inputs',domain_id=126)
+        reader=RosNode('shared_image_reader',namespace='/wb_cpu_inputs',domain_id=126)
+        try:
+            rows=sources()[:3]
+            publishers=[producer.publisher(row['topic'],Image)for row in rows]
+            shared=RosInputs(owner,rows,max_samples=4)
+            borrowed=RosInputs(reader,rows,shared_images=shared)
+            self.assertEqual(len(reader.subscriptions),0)
+            for row in rows:
+                self.assertIs(borrowed.caches[row['stream_id']],shared.caches[row['stream_id']])
+                self.assertEqual(shared.caches[row['stream_id']].max_samples,64)
+            bad=dict(rows[0],source_instance_id='another_source')
+            with self.assertRaisesRegex(ValueError,'shared original image source differs'):
+                RosInputs(reader,[bad],shared_images=shared)
+            reader.close()
+            end=time.monotonic()+3
+            while not all(p.get_subscription_count()==1 for p in publishers):
+                self.assertLess(time.monotonic(),end);time.sleep(.01)
+            stamp=time.monotonic_ns();msg=Image(height=2,width=2,encoding='rgb8',step=6,data=bytes(12))
+            msg.header.stamp.sec=stamp//10**9;msg.header.stamp.nanosec=stamp%10**9;publishers[0].publish(msg)
+            while not shared.caches['head'].history():
+                self.assertLess(time.monotonic(),end);time.sleep(.01)
+        finally:
+            reader.close();owner.close();producer.close()
+
+    def test_explicit_memory_target_uses_retained_history_beyond_live_window(self):
+        from robot_workbench.ros_data import SampleCache
+        from robot_workbench.observation_pairing import TimestampPairer
+        inputs=RosInputs.__new__(RosInputs);inputs.caches={};inputs.sources={}
+        for source in sources():
+            name=source['stream_id'];inputs.sources[name]=source
+            cache=inputs.caches[name]=SampleCache(source,max_samples=256)
+            count,step=(201,10_000_000)if name=='state'else(61,33_000_000)
+            for index in range(1,count+1):
+                ref=StreamRef(name,'cpu_source','simulation',index*step,index)
+                value=({'ros_reference':ref.__dict__,'sample_wall_ns':index*step}if name=='state'else
+                       {'metadata':{'ros_reference':ref.__dict__}})
+                cache.put(ref,value,100)
+        _,state,_,_=inputs.paired({x:x for x in('head','left','right')},TimestampPairer(),target_ns=1_000_000_000)
+        self.assertEqual(state.source_time_ns,1_000_000_000)
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
+    def test_separate_state_executor_survives_blocked_image_callback(self):
+        from robot_workbench.ros_data import RosNode
+        from sensor_msgs.msg import Image
+        for separate in (False,True):
+            producer=RosNode('isolation_source',namespace='/wb_cpu_inputs',domain_id=126)
+            images=RosNode('isolation_images',namespace='/wb_cpu_inputs',domain_id=126)
+            state_node=RosNode('isolation_state',namespace='/wb_cpu_inputs',domain_id=126)if separate else None
+            entered=threading.Event();release=threading.Event()
+            try:
+                rows=sources();pubs={r['stream_id']:producer.publisher(r['topic'],Image if r['kind']=='image'else producer.types.RobotState)for r in rows}
+                def sample(ref,value):
+                    if ref.stream_id=='head':entered.set();release.wait(2)
+                inputs=RosInputs(images,rows,on_sample=sample,state_ros=state_node,state_max_samples=256)
+                end=time.monotonic()+5
+                while not all(p.get_subscription_count()for p in pubs.values()):
+                    self.assertLess(time.monotonic(),end);time.sleep(.01)
+                now=time.monotonic_ns();frame=Image(height=2,width=2,encoding='rgb8',step=6,data=bytes(12))
+                frame.header.stamp.sec=now//10**9;frame.header.stamp.nanosec=now%10**9;pubs['head'].publish(frame)
+                self.assertTrue(entered.wait(2))
+                for i in range(1,11):
+                    stamp=now+i*10_000_000;ref=StreamRef('state','cpu_source','simulation',stamp,i)
+                    pubs['state'].publish(producer.types.RobotState(reference=ref.message(),positions=[0.]*14,velocities=[0.]*14,metadata_json='{}'))
+                    time.sleep(.01)
+                time.sleep(.1)
+                self.assertEqual(bool(inputs.caches['state'].history()),separate)
+            finally:
+                release.set()
+                if state_node is not None:state_node.close()
+                images.close();producer.close()
+
+    @unittest.skipUnless(os.environ.get('WORKBENCH_NATIVE_ROS_TEST')=='1','native ROS DDS needs isolated Linux')
     def test_state_delivery_survives_a_short_consumer_pause_with_small_image_history(self):
         from robot_workbench.ros_data import RosNode
         producer=RosNode('paused_state_source',namespace='/wb_cpu_inputs',domain_id=126)

@@ -219,6 +219,7 @@ def publish(root, data):
             item = tarfile.TarInfo(name)
             item.size = len(content)
             item.mode = 0o644
+            item.mtime = int(datetime.now(timezone.utc).timestamp())
             tar.addfile(item, io.BytesIO(content))
     command = 'mkdir ' + shlex.quote(release) + ' && tar -xf - -C ' + shlex.quote(release)
     subprocess.run(['ssh', '-o', 'BatchMode=yes', 'lan-services-3090', command], input=archive.getvalue(), check=True)

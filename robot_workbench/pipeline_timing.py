@@ -6,6 +6,7 @@ from pathlib import Path
 import secrets
 import threading
 import time
+from .runtime_monitor import probes
 
 SCHEMA = 'workbench.pipeline-timing.v1'
 
@@ -52,11 +53,12 @@ class PipelineTiming:
 
     def fault(self, reason, **identity):
         """Preserve the preceding window only on an actual pipeline fault."""
+        probes.fault(reason, **identity)
         with self.lock:
             self.faults.append(dict(reason=str(reason)[:256], sampled_ns=time.monotonic_ns(),
                 identity=identity, events=list(self.events)[-2048:]))
 
-    def snapshot(self, *, after=0, limit=128):
+    def snapshot(self, *, after=0, limit=128, monitor_history=False):
         if type(after)is not int or after<0 or type(limit)is not int or not 0<=limit<=512:
             raise ValueError('nonnegative timing cursor and limit in 0..512 required')
         with self.lock:
@@ -80,7 +82,7 @@ class PipelineTiming:
             next_after=selected[-1]['sequence'] if selected else after,
             invalid_measurements=self.invalid, dropped_stages=self.dropped,
             percentile_scope='last bounded samples per stage; counts/mean/max since process start',
-            stages=stats, events=selected, faults=faults)
+            stages=stats, events=selected, faults=faults, monitor=probes.snapshot(history=monitor_history))
 
 
 timing = PipelineTiming()

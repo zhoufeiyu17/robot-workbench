@@ -691,7 +691,10 @@ class MemorySession:
                 generation=self.generation
                 initial=self.sampler.bootstrap(request['observation'])
                 if initial is not None:self._enqueue(initial,request['observation'],request['epoch'])
-            self._drain(until=request['observation'].get('feedback_sample_time_s',request['observation']['source_time']))
+            # The paired state can precede the earliest RGB by a few ms. Both
+            # belong to this observation; its initial MEM node must be committed.
+            self._drain(until=max(request['observation']['source_time'],
+                request['observation'].get('feedback_sample_time_s',request['observation']['source_time'])))
             activity=request['observation']['memory_sampling']
             logical_time=activity['model_time_s']-self.sampler.time_origin
             result=self.client.infer_chunk(dict(request,memory_context=dict(

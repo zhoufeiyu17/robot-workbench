@@ -336,6 +336,7 @@ class RosNode:
 
     def subscribe(self, topic, message_type, callback, *, retained=False, depth=32,reliable=True):
         from .pipeline_timing import timing
+        from .runtime_monitor import probes
         consumer=self.node.get_name()
         def receive(message, info=None):
             began=time.monotonic_ns();wall=time.time_ns();outcome='ok'
@@ -348,6 +349,10 @@ class RosNode:
                 source_sequence=getattr(ref,'sequence',None),
                 source_instance_id=getattr(ref,'source_instance_id',None))
             received=info.get('received_timestamp',0)if isinstance(info,dict)else getattr(info,'received_timestamp',0)
+            probe_channel = 'callback/' + consumer
+            probes.mark(probe_channel, now_ns=began, active=True, stage=message_type.__name__,
+                        topic=topic, source_ns=source_stamp, source_sequence=identity['source_sequence'],
+                        rmw_received_wall_ns=received or None, callback_wall_ns=wall)
             if type(received)is int and received>0 and 0<=wall-received<=60_000_000_000:
                 timing.record('ros.middleware_to_callback.'+message_type.__name__,began-(wall-received),
                     ended_ns=began,**identity)
@@ -355,6 +360,14 @@ class RosNode:
             except Exception as error:
                 outcome='error';self.errors.append(str(error))
             finally:
+                ended = time.monotonic_ns()
+                probes.mark(probe_channel, now_ns=ended, force=ended-began>=25_000_000,
+                            active=False, stage=message_type.__name__, topic=topic,
+                            duration_ns=ended-began, source_ns=source_stamp,
+                            source_sequence=identity['source_sequence'], outcome=outcome)
+                if ended-began >= 100_000_000:
+                    probes.fault('callback_slow', consumer=consumer, topic=topic,
+                                 callback_type=message_type.__name__, duration_ns=ended-began)
                 timing.record('ros.callback.'+message_type.__name__,began,outcome=outcome,
                     rmw_received_wall_ns=received or None,**identity)
         receive._workbench_timing=True

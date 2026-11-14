@@ -9,7 +9,7 @@ import {buildDraft, validateDraft, escapeHtml, componentSvg, flowSvg, modelExten
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const catalog=JSON.parse(fs.readFileSync(path.join(root,'web/architecture/catalog.json'),'utf8'));
 assert.equal(catalog.schema_version,2);
-assert.equal(catalog.components.length,5);
+assert.equal(catalog.components.length,6);
 assert.equal(catalog.components.filter(row=>row.id==='evidence').length,1);
 assert(!catalog.supporting.some(row=>row.id==='evidence'));
 const componentIds=new Set([...catalog.components,...catalog.supporting].map(c=>c.id));
@@ -99,7 +99,7 @@ const interfaceIds=new Set(catalog.interfaces.map(row=>row.id));
 const sharedIds=new Set(catalog.shared_steps.map(row=>row.id));
 const actorIds=new Set(catalog.actors.map(row=>row.id));
 assert.equal(caseIds.size,catalog.use_cases.length);
-assert.equal(catalog.use_cases.length,21);
+assert.equal(catalog.use_cases.length,22);
 for(const row of catalog.use_cases) {
   assert(goalIds.has(row.goal)&&actorIds.has(row.actor));
   assert(row.preconditions.length&&row.main_flow.length&&row.success_postconditions.length&&row.effects.length);

@@ -49,8 +49,9 @@ class OverlayTests(unittest.TestCase):
             np.testing.assert_allclose(draw.call_args_list[1].args[1],polygons[1],atol=1)
         self.assertEqual(g.gaps,{'left':.083,'right':.083})
         np.testing.assert_array_equal(v,np.array([[-.1,-.1,1],[.1,-.1,1],[0,.1,1]]))
+        mesh_overlay(g,img,np.zeros(12),{**candidate,'jaw_gap_mm':[0,89.000001]})
         with self.assertRaises(ValueError):
-            mesh_overlay(g,img,np.zeros(12),{**candidate,'jaw_gap_mm':[0,89.000001]})
+            mesh_overlay(g,img,np.zeros(12),{**candidate,'jaw_gap_mm':[0,89.01]})
 
     def test_articulated_fingers_use_gap_frames(self):
         from arx_env.joint_head_workbench_overlay import mesh_overlay

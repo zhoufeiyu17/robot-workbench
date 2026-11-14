@@ -14,6 +14,7 @@ import time
 
 from .ros_data import MAX_CACHE_SAMPLES, MAX_METADATA_BYTES, SampleCache, StreamRef, descriptor_value, json_text, json_value, source_descriptor
 from .pipeline_timing import timing
+from .runtime_monitor import probes
 
 
 def observation_times(message, feedback):
@@ -109,14 +110,20 @@ def state_sample(message, source):
 
 
 class RosInputs:
-    def __init__(self, ros, descriptors, *, on_sample=None, max_samples=64, max_bytes=64*1024*1024,subscription_depth=4,include_depth=False):
+    def __init__(self, ros, descriptors, *, on_sample=None, max_samples=64, max_bytes=64*1024*1024,subscription_depth=4,include_depth=False,
+                 state_ros=None,state_max_samples=None,shared_images=None):
         from sensor_msgs.msg import Image
         from rclpy.qos import ReliabilityPolicy
         self.ros = ros; self.sources = {}; self.caches = {}; self.writers = {}; self.on_sample = on_sample
         self.consumer=ros.node.get_name()
+        self.shared_images=shared_images
+        self.consumers={}
         self.clock_samples={};self.image_arrivals={}
         self.reliability={};self.depth_for={};self.rgb_for={};self.pending_rgbd=set();self.last_pairs={}
         self.raw_caches={};self.metadata_caches={};self.metadata_writers={};self.pending_metadata=set();self.gaps={}
+        limits=(max_samples,max_bytes)if state_max_samples is None else(max_samples,max_bytes,state_max_samples)
+        if any(type(value)is not int or value<1 for value in limits):
+            raise ValueError('positive bounded input cache sizes required')
         descriptors=list(descriptors)
         if type(include_depth)is not bool:raise ValueError('explicit RGB-D subscription mode required')
         if include_depth:
@@ -136,11 +143,26 @@ class RosInputs:
         if type(subscription_depth)is not int or not 1<=subscription_depth<=256:raise ValueError('bounded ROS subscription depth required')
         for row in descriptors:
             source = source_descriptor(row); stream = source['stream_id']
+            reader=state_ros if source['kind']=='state'and state_ros is not None else ros
+            self.consumers[stream]=reader.node.get_name()
             if stream in self.sources or source['kind'] not in ('image','state'):
                 raise ValueError('unique raw image/state source bindings required')
             expected = 'sensor_msgs/msg/Image' if source['kind']=='image' else 'workbench_interfaces/msg/RobotState'
             if source['message_type'] != expected or not source['available']:
                 raise ValueError('source type or readiness differs from its binding')
+            if source['kind']=='image' and shared_images is not None:
+                if include_depth or shared_images.sources.get(stream)!=source:
+                    raise ValueError('shared original image source differs from the requested binding')
+                cache=shared_images.caches[stream]
+                with cache.lock:cache.max_samples=max(cache.max_samples,max_samples)
+                self.sources[stream]=source
+                self.caches[stream]=cache
+                self.writers[stream]=shared_images.writers[stream]
+                self.reliability[stream]=shared_images.reliability[stream]
+                self.consumers[stream]=shared_images.consumers.get(stream,shared_images.consumer)
+                probes.mark(self.consumer+'/shared/'+stream,kind='shared_image',
+                            source_consumer=self.consumers[stream],source_instance=source['source_instance_id'])
+                continue
             deadline=time.monotonic()+2.
             publishers=ros.node.get_publishers_info_by_topic(source['topic'])
             while not publishers and time.monotonic()<deadline:
@@ -157,7 +179,8 @@ class RosInputs:
             if declared is not None and self.writers[stream].hex()!=declared:
                 raise ValueError('raw ROS publisher differs from registered source')
             self.sources[stream] = source
-            self.caches[stream] = SampleCache(source, max_samples=max_samples, max_bytes=max_bytes)
+            retained=state_max_samples if source['kind']=='state'and state_max_samples is not None else max_samples
+            self.caches[stream] = SampleCache(source, max_samples=retained, max_bytes=max_bytes)
             clock_topic=source['metadata'].get('timing_topic')
             if source['metadata'].get('timing_boot_id')!=timing.boot_id:clock_topic=None
             if clock_topic is not None:
@@ -184,10 +207,10 @@ class RosInputs:
             # Image retention is not a state delivery budget: sixteen samples
             # cover only160ms at100Hz. Keep the existing bounded state history
             # through short executor pauses without enlarging image caches.
-            state_depth=max(max_samples,min(MAX_CACHE_SAMPLES,max(1,max_bytes//MAX_METADATA_BYTES)))
-            ros.subscribe(source['topic'], Image if source['kind']=='image' else ros.types.RobotState,
+            state_depth=max(retained,min(MAX_CACHE_SAMPLES,max(1,max_bytes//MAX_METADATA_BYTES)))
+            reader.subscribe(source['topic'], Image if source['kind']=='image' else ros.types.RobotState,
                           callback, depth=state_depth if source['kind']=='state'else subscription_depth,reliable=reliable)
-            ros.subscribe('sources/'+stream,ros.types.SourceDescriptor,self._source_changed,retained=True,depth=1)
+            reader.subscribe('sources/'+stream,ros.types.SourceDescriptor,self._source_changed,retained=True,depth=1)
 
     def _source_changed(self,message):
         value=descriptor_value(message);source=self.sources.get(value['stream_id'])
@@ -215,6 +238,12 @@ class RosInputs:
             cache.error = 'raw ROS publisher restarted; explicit source rebind required'; raise ValueError(cache.error)
         decoded=time.monotonic_ns()
         reference, value, size = (image_sample if source['kind']=='image' else state_sample)(message, source)
+        wall_stamp=(reference.source_time_ns if reference.source_clock_id=='host_wall' else value.get('sample_wall_ns'))
+        probes.mark(getattr(self,'consumers',{}).get(stream,self.consumer)+'/'+stream+'/raw', kind='raw', source_ns=reference.source_time_ns,
+                    source_sequence=reference.sequence, source_clock=reference.source_clock_id, payload_bytes=size,
+                    source_instance=reference.source_instance_id,
+                    receive_age_ns=time.time_ns()-wall_stamp if type(wall_stamp)is int else None,
+                    requires_metadata=stream in self.raw_caches)
         identity=dict(consumer=self.consumer,stream_id=stream,source_instance_id=reference.source_instance_id,
             source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
         timing.record('input.decode.'+stream,decoded,**identity)
@@ -282,6 +311,8 @@ class RosInputs:
             if len(writers)!=1 or bytes(writers[0].endpoint_gid)!=self.metadata_writers[stream]:
                 raise ValueError('original frame metadata publisher changed')
             ref=StreamRef.from_message(message.reference)
+            probes.mark(self.consumer+'/'+stream+'/metadata', kind='metadata', source_ns=ref.source_time_ns,
+                        source_sequence=ref.sequence, source_clock=ref.source_clock_id, source_instance=ref.source_instance_id)
             if message.event!='frame_metadata' or ref.sequence!=ref.source_time_ns:
                 raise ValueError('frame metadata must reference the original image sample')
             value=json_value(message.payload_json)
@@ -329,6 +360,9 @@ class RosInputs:
         began=time.monotonic_ns()
         cache=self.caches[stream]
         if not cache.put(reference,value,size):return
+        probes.mark(getattr(self,'consumers',{}).get(stream,self.consumer)+'/'+stream+'/ready', kind='ready', source_ns=reference.source_time_ns,
+                    source_sequence=reference.sequence, source_clock=reference.source_clock_id,
+                    source_instance=reference.source_instance_id)
         timing.record('input.cache_put.'+stream,began,consumer=self.consumer,source_time_ns=reference.source_time_ns,source_sequence=reference.sequence)
         if stream in self.depth_for:
             self.pending_rgbd.add(reference)
@@ -385,7 +419,9 @@ class RosInputs:
         states=self.caches[state_stream].history()
         if not states:raise LookupError('ROS state has not arrived')
         latest,feedback=states[-1];histories={}
-        cutoff=latest.source_time_ns-500_000_000
+        # Explicit MEM nodes use the retained source history. Live selection has
+        # its independent freshness gate and keeps the existing half-second view.
+        cutoff=latest.source_time_ns-500_000_000 if target_ns is None else 0
         for role,stream in frame_streams.items():
             samples=[]
             for ref,value in self.caches[stream].history():
@@ -396,6 +432,20 @@ class RosInputs:
                 if stamp>=cutoff:samples.append((stamp,value))
             histories[role]=samples
         selected,state,pairing=pairer.select(histories,[(ref.source_time_ns,value)for ref,value in states if ref.source_time_ns>=cutoff],target_ns=target_ns)
+        pairing['latest_camera_source_ns']=min(rows[-1][0]for rows in histories.values())
+        if target_ns is None:
+            facts = dict(kind='selection', target_ns=pairing['target_wall_ns'],
+                         state_latest_ns=latest.source_time_ns,
+                         state_selected_ns=state['ros_reference']['source_time_ns'],
+                         grid_advance_ns=pairing['grid_advance_ns'])
+            for role, stream in frame_streams.items():
+                name = {'base_0':'head','left_wrist_0':'left','right_wrist_0':'right'}.get(stream)
+                if name is None:continue
+                facts[name+'_latest_ns'] = histories[role][-1][0]
+                sample = selected[role]['metadata']['ros_reference']
+                facts[name+'_selected_ns'] = (sample['source_time_ns'] if sample['source_clock_id']==latest.source_clock_id
+                    else latest.source_time_ns+sample['source_time_ns']-feedback['sample_wall_ns'])
+            probes.mark(self.consumer+'/selection', **facts)
         pairing['clock_id']=latest.source_clock_id
         pairing['target_source_ns']=pairing.pop('target_wall_ns')
         pairing['origin_source_ns']=pairing.pop('origin_wall_ns')

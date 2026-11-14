@@ -2044,12 +2044,12 @@ def handler(app):
             path=urlsplit(self.path);query=parse_qs(path.query)
             try:
                 if path.path=='/api/inference-diagnostics':
-                    if (set(query)-{'environment','after','owner_after','limit'}or 'environment'not in query
+                    if (set(query)-{'environment','after','owner_after','limit','monitor_history','monitor_only'}or 'environment'not in query
                             or any(len(v)!=1 for v in query.values())):
                         raise ValueError('one explicit environment and bounded diagnostic cursors required')
                     flow=app.device(query['environment'][0]).workflows.get('inference')
                     if flow is None:raise ValueError('推理业务未配置')
-                    options={k:int(query[k][0])for k in ('after','owner_after','limit')if k in query}
+                    options={k:int(query[k][0])for k in ('after','owner_after','limit','monitor_history','monitor_only')if k in query}
                     return self.send(200,flow.pipeline_diagnostics(**options))
                 if path.path=='/api/inference-replay-metadata':
                     if set(query)!={'environment','run_id'}or any(len(v)!=1 for v in query.values()):

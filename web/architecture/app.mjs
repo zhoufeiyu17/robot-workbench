@@ -75,10 +75,10 @@ function svgStart(label,height=385) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 ${height}" role="img" aria-label="${label}" font-family="system-ui, PingFang SC, Microsoft Yahei, sans-serif"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#8194ae"/></marker></defs>`;
 }
 export function componentSvg(catalog,target=true) {
-  const status = id => target ? '设计待确认' : catalog.statuses[catalog.components.find(row=>row.id===id).status].label;
+  const status = id => target ? (catalog.components.find(row=>row.id===id).targetStatus==='confirmed'?'设计已确认':'设计待确认') : catalog.statuses[catalog.components.find(row=>row.id===id).status].label;
   const color = id => target ? '#3565c9' : colors[id];
-  let svg=svgStart('五个公共模块及并行记录数据流',565);
-  svg+='<rect x="10" y="8" width="1080" height="545" rx="14" fill="#f7f9fc"/>';
+  let svg=svgStart('公共运行模块与独立监控',680);
+  svg+='<rect x="10" y="8" width="1080" height="660" rx="14" fill="#f7f9fc"/>';
   svg+=node('guard',228,24,665,85,target?'公用控制门槛 · Control Guard':'门槛分散在多个执行点',target?'唯一策略版本 · 统一裁决 · 录制用途策略':'Workflow / Runner / Runtime / 解释器 / SDK 各自校验',status('guard'),color('guard'));
   svg+='<text x="32" y="53" fill="#677d99" font-size="13">应用层用例编排</text><text x="32" y="75" fill="#8b9bb0" font-size="11">参数与录制会话</text><path d="M146 65 H220" stroke="#8194ae" fill="none" marker-end="url(#arrow)"/>';
   for(const x of [145,445,755])svg+=`<path d="M${x<228?265:x} 109 L${x} 154" stroke="#9cb2d9" stroke-dasharray="4 4" fill="none"/>`;
@@ -95,17 +95,20 @@ export function componentSvg(catalog,target=true) {
   svg+='<path d="M893 65 H1080 V370 H900 V389" stroke="#a1afc3" fill="none" stroke-dasharray="4 4" marker-end="url(#arrow)"/>';
   svg+='<path d="M945 449 H1092 V125 H900 V100" stroke="#6c94be" fill="none" stroke-dasharray="4 4" marker-end="url(#arrow)"/><text x="952" y="426" font-size="10" fill="#6b819c">健康 → Guard</text>';
   svg+='<text x="198" y="532" font-size="12" fill="#617b9b">数据面有界发布 / 共享帧引用；控制面管理CaptureSession与用途策略；资源和性能独立核验。</text>';
+  svg+=node('monitor',160,565,785,78,'独立运行监控 · Runtime Monitoring','接收 / 元数据 / 配对 / MEM数字探针 → 故障前后时间线',status('monitor'),'#607d8b');
+  svg+='<path d="M1050 270 V601 H952" stroke="#607d8b" stroke-dasharray="4 4" fill="none" marker-end="url(#arrow)"/><text x="955" y="545" font-size="11" fill="#607d8b">只读诊断</text>';
   return svg+'</svg>';
 }
 export function flowSvg() {
-  const labels=[['绑定上下文','设备 · 模型 · policy_hash'],['取得观测','三相机 + 实测 state'],['模型预测','原始60点 + 有效期限'],['翻译准备','前N点 + 动态/刹车证明'],['下发短窗口','唯一Owner + SDK回执'],['监测实际执行','速度 · 跟踪 · 反馈年龄'],['核验段末','输出完成 + 实际到位'],['进入下一段 / 结束','新观测或HOLD / Stop']];
-  let s=svgStart('控制与独立记录的全生命周期信息流',440);
+  const labels=[['绑定上下文','设备 · 模型 · policy_hash'],['取得观测','三相机 + 实测 state'],['模型预测','绑定模型完整输出 + 有效期限'],['翻译准备','前N点 + 动态/刹车证明'],['下发短窗口','唯一Owner + SDK回执'],['监测实际执行','速度 · 跟踪 · 反馈年龄'],['核验段末','输出完成 + 实际到位'],['进入下一段 / 结束','新观测或HOLD / Stop']];
+  let s=svgStart('控制、独立记录与运行监控信息流',545);
   labels.forEach(([title,sub],i)=>{const col=i<4?i:7-i,x=24+col*270,y=i<4?30:202;s+=`<rect x="${x}" y="${y}" width="240" height="88" rx="10" fill="#f3f6fb" stroke="#d4deeb"/><text x="${x+15}" y="${y+26}" font-size="11" fill="#6e8cba">0${i+1}</text><text x="${x+15}" y="${y+49}" font-size="15" fill="#294461">${title}</text><text x="${x+15}" y="${y+71}" font-size="10" fill="#71849c">${sub}</text>`;});
   for(const x of[264,534,804])s+=`<path d="M${x} 74 H${x+24}" stroke="#8194ae" marker-end="url(#arrow)"/>`;
   s+='<path d="M954 120 V195" stroke="#8194ae" marker-end="url(#arrow)"/>';
   for(const x of[834,564,294])s+=`<path d="M${x} 246 H${x-24}" stroke="#8194ae" marker-end="url(#arrow)"/>`;
   s+='<rect x="235" y="144" width="620" height="32" rx="7" fill="#e9effc"/><text x="285" y="165" font-size="12" fill="#3863a5">各阶段统一返回 GuardDecision · 阶段 / 原因 / 实际值 / 门槛 / 处理动作</text>';
   s+='<path d="M144 290 V337 H954 V290 M414 290 V337 M684 290 V337" stroke="#9daec5" stroke-dasharray="4 4" fill="none"/><path d="M550 337 V352" stroke="#8194ae" marker-end="url(#arrow)"/><rect x="160" y="358" width="780" height="64" rx="10" fill="#eaf2ff" stroke="#9cb9e6"/><text x="195" y="385" font-size="14" fill="#305b96">独立记录进程 · 全流视频 / 状态 / 指令 / 模型 / 业务事件</text><text x="195" y="406" font-size="11" fill="#6c85a8">执行前准备会话，各阶段并行采集，finish提交序列屏障后异步封存</text>';
+  s+='<path d="M1060 118 V482 H945" stroke="#607d8b" stroke-dasharray="4 4" fill="none" marker-end="url(#arrow)"/><rect x="160" y="447" width="780" height="70" rx="10" fill="#edf5f3" stroke="#8caaa2"/><text x="195" y="474" font-size="14" fill="#345b51">独立运行监控 · 接收 / 元数据合并 / 观测配对 / MEM节点</text><text x="195" y="498" font-size="11" fill="#607d74">有界数字探针 → 首次异常与前后窗口 → 自动留档 / 离线分析 · UC22 / I18</text>';
   return s+'</svg>';
 }
 
@@ -190,7 +193,7 @@ async function boot() {
   get('export-draft').onclick=()=>{if(validateDraft(values(),catalog.parameters).length)return;const blob=new Blob([JSON.stringify(latestDraft,null,2)+'\n'],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='control-policy-review-draft.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};updateDraft();
   get('progress').innerHTML=catalog.phases.map(p=>`<article class="phase" style="border-top-color:${catalog.statuses[p.status].color}"><span class="rule-id">${p.id}</span> ${badge(p.status)}<h3>${esc(p.name)}</h3><p class="owner">负责 · ${esc(p.owner)}</p><ul>${p.items.map(i=>`<li>${esc(i)}</li>`).join('')}</ul></article>`).join('');
   get('maintenance').innerHTML=catalog.maintenance.workflow.map(v=>`<li>${esc(v)}</li>`).join('');
-  get('baseline').innerHTML=`<p>分支 <code>${esc(catalog.baseline.branch)}</code> · HEAD <code>${catalog.baseline.head.slice(0,12)}</code></p><p>实际部署源码 <code>${esc(catalog.baseline.deployed_root)}</code></p><p class="rule-note">部署源码与本地工作树仍待归并。门槛快照引用本次读取的部署源码和真实Run回执。</p><p>最后封存 Run <code>${catalog.baseline.latest_run.execution_id.slice(0,12)}</code>，执行 ${catalog.baseline.latest_run.execute_steps} 步，执行设置 revision ${catalog.baseline.latest_run.execution_settings.revision}。</p>`;
+  get('baseline').innerHTML=`<p>分支 <code>${esc(catalog.baseline.branch)}</code> · 已提交基线 <code>${catalog.baseline.head.slice(0,12)}</code></p><p>部署定位 <code>${esc(catalog.baseline.deployed_root)}</code></p><p class="rule-note">当前候选与验收范围见开发图；以下Run保留为历史门槛来源。</p><p>历史参考 Run <code>${catalog.baseline.latest_run.execution_id.slice(0,12)}</code>，执行 ${catalog.baseline.latest_run.execute_steps} 步，执行设置 revision ${catalog.baseline.latest_run.execution_settings.revision}。</p>`;
   get('runtime-json').textContent=JSON.stringify(catalog.runtime_snapshot.units,null,2);
   function view(route) {
     let [id,query='']=route.split('?');

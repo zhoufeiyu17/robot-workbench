@@ -1,48 +1,22 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.6697087d89ee",
+  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.0fcaa8422073",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
-  "checked_at": "2026-11-04T14:48:55.680807+00:00",
+  "checked_at": "2026-11-14T09:17:16.122013+00:00",
   "site_title": "工作台架构与控制策略",
   "owner": "本聊天统一负责工作台、共享模型与控制执行",
   "scope": "用户用例驱动的五模块设计审阅，统一记录服务覆盖各类控制执行并以独立进程并行采集、保存和封存。",
   "runtime_snapshot": {
-    "at": "2026-11-08T05:46:25.620040+00:00",
-    "summary": "ARX13 v34已发布ROS退役引用环修复；SDK健康静止、E04_2/Torch热模型保留。组合回归一次MODEL前观测超时保留为待查，非全天内存资格。",
-    "units": {
-      "wam-arx13-workbench-ros-retirement-v34.service": {
-        "MainPID": "1895374",
-        "ActiveState": "active",
-        "SubState": "running"
-      },
-      "wam-arx13-manager-ros-retirement-v34.service": {
-        "MainPID": "1895379",
-        "ActiveState": "active",
-        "SubState": "running"
-      },
-      "wam-arx13-owner-ros-retirement-v15.service": {
-        "MainPID": "1895369",
-        "ActiveState": "active",
-        "SubState": "running"
-      },
-      "wam-arx13-recording-ros-retirement-v12.service": {
-        "MainPID": "1895364",
-        "ActiveState": "active",
-        "SubState": "running"
-      },
-      "wam-catalog-model-v4.service": {
-        "MainPID": "1514380",
-        "ActiveState": "active",
-        "SubState": "running"
-      }
-    },
+    "at": "2026-11-14T09:17:16.122013+00:00",
+    "summary": "图像、状态和控制事件已使用独立执行线程，MEM节点提前保留。610.6秒真实输入录制与模型验收通过，240.1秒混合线程对照也通过。原始自然延迟触发原因继续留档定位。",
+    "units": {},
     "live": false,
-    "evidence": ".evidence/infer-pedal2-start-20261107-v1/current-runtime.json"
+    "evidence": ".evidence/arx6-ten-minute-recording-20261114-v1/qualification.json"
   },
   "baseline": {
-    "branch": "feature/workbench-shared-lifecycle",
-    "head": "e470eff4613e5fe681881d27bf17d0d70052393c",
-    "deployed_root": "/home/wujie/work/feiyu.zhou/workbench-collection-switch-20261104-v1/provider",
+    "branch": "feature/explicit-memory-observation",
+    "head": "f173affadd088df4a7ee7e3d4121c0a9aa916b29",
+    "deployed_root": "按目标环境配置与版本化回执定位",
     "source_reconciled": false,
     "latest_run": {
       "execution_id": "bc4d30c27246f9d11940f075626e361b",
@@ -103,7 +77,8 @@
       "code_default": 0.8,
       "planning": 1,
       "last_run": 1.5
-    }
+    },
+    "historical": true
   },
   "statuses": {
     "implemented": {
@@ -139,7 +114,7 @@
       "status": "implemented",
       "targetStatus": "confirmed",
       "summary": "统一规则定义、参数版本和裁决格式，覆盖接入到释放。",
-      "current": "本轮职责已接通并完成匹配源码的CPU验收；现有接口与单位保持。实机部署和物理性能资格在P5单独验证。",
+      "current": "数值容差已统一；关节命令99%范围、夹爪按真实SDK边界投影，原始预测保留。见最近发布回执。",
       "responsibilities": [
         "管理唯一 ControlPolicy 及规则目录",
         "在各阶段检查信号、身份、时序、动力学与误差",
@@ -181,7 +156,7 @@
       "status": "implemented",
       "targetStatus": "confirmed",
       "summary": "提供绑定设备与时钟的模型输入快照。",
-      "current": "本轮职责已接通并完成匹配源码的CPU验收；现有接口与单位保持。实机部署和物理性能资格在P5单独验证。",
+      "current": "状态、图像和控制事件分别调度。显式MEM使用有界保留历史；已完成610.6秒开启录制的真实输入模型验证。",
       "responsibilities": [
         "订阅三相机及唯一 Owner 反馈",
         "维护帧与 state 时间历史，按指定策略配对",
@@ -220,7 +195,7 @@
       "status": "implemented",
       "targetStatus": "confirmed",
       "summary": "将 ObservationBundle 交给绑定的模型，返回原始 ActionChunk。",
-      "current": "本轮职责已接通并完成匹配源码的CPU验收；现有接口与单位保持。实机部署和物理性能资格在P5单独验证。",
+      "current": "统一模型运行时与依赖锁定已部署；显式MEM v5按模型训练步距写入，执行前缀长度独立。",
       "responsibilities": [
         "管理模型身份、backend、权重与统计量绑定",
         "执行训练一致的预处理与模型调用",
@@ -262,7 +237,7 @@
       "status": "implemented",
       "targetStatus": "confirmed",
       "summary": "把前 N 个模型动作翻译成 SDK 窗口，并持续回传实际执行状态。",
-      "current": "本轮职责已接通并完成匹配源码的CPU验收；现有接口与单位保持。实机部署和物理性能资格在P5单独验证。",
+      "current": "支持故障后支撑保持、显式恢复接管与完整片段执行；最近观测供应失败在零速段末转入HOLD。",
       "responsibilities": [
         "完成单位、夹爪端点和坐标转换",
         "在共同约束下构造完整 N 点参考与刹车证明",
@@ -306,7 +281,7 @@
       "status": "implemented",
       "targetStatus": "confirmed",
       "summary": "独立进程统一订阅各类控制轨迹、全部声明状态/指令、连续视频和业务事件。",
-      "current": "本轮职责已接通并完成匹配源码的CPU验收；现有接口与单位保持。实机部署和物理性能资格在P5单独验证。",
+      "current": "独立录制、短录制导出与重载修正已实现；标定结束后的三相机回放按用户要求暂缓。",
       "responsibilities": [
         "以统一CaptureSession服务标定、规则数采、infer与控制研究",
         "采集关节反馈、控制指令/窗口、策略裁决、模型输入输出及全程视频流",
@@ -342,6 +317,41 @@
         "录制开启/关闭与压力场景的控制循环、Stop响应增量满足冻结预算",
         "满盘、慢盘、服务崩溃和队列溢出均可定位缺口并执行用途策略",
         "停止采集后按各源final_seq异步封存，重试与重启不会混入其他Run"
+      ]
+    },
+    {
+      "id": "monitor",
+      "name": "独立运行监控",
+      "en": "Runtime Monitoring",
+      "status": "implemented",
+      "targetStatus": "confirmed",
+      "summary": "关联数字探针、MEM节点和故障时间线，自动留档。",
+      "current": "独立进程已随工作台启动；真实相机/状态、24次模型预测、3份完整故障记录和短时开销对照通过。自然发生的观测故障继续留档。",
+      "responsibilities": [
+        "采集有界数字探针和活动回调状态",
+        "关联原图、元数据、状态、配对与MEM时间线",
+        "独立读取诊断、合并故障并持久化",
+        "复用MEM节点核验和离线故障重放分析"
+      ],
+      "boundaries": [
+        "生产端只提供非阻塞数字探针",
+        "监控进程仅GET与写自身诊断目录",
+        "监控降级独立报告；运行决策归原Guard与Owner"
+      ],
+      "files": [
+        "pipeline_timing.py",
+        "runtime_monitor.py",
+        "monitor_inference.py",
+        "monitored_memory.py"
+      ],
+      "sources": [
+        "monitor-design"
+      ],
+      "acceptance": [
+        "故障前5秒与后1秒数字证据可回读",
+        "元数据、状态、回调和MEM隔离注入可区分",
+        "无录像时自动留存故障",
+        "热路径与同负载开销对照满足预算"
       ]
     }
   ],
@@ -450,7 +460,7 @@
       "status": "implemented",
       "transport": "内部 RGBClient.latest_rgb → TimestampPairer.pair → observation；目标 ObservationManager.snapshot(policy, floor) 为显式接口。",
       "compatibility": "新输入时限通过既有Owner protocol_features协商observation_policy_v1；缺能力时配置前拒绝。旧持久化策略补原0.1s默认，旧产物读取不变。",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。"
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。"
     },
     {
       "id": "I03",
@@ -477,7 +487,7 @@
       "status": "implemented",
       "transport": "配置的loopback模型HTTP端点；GET /status、/models；POST /prepare、/infer、/unload；infer载荷application/x-npz。",
       "compatibility": "在线模型HTTP统一workbench.model-http.v2；POST准备前核验版本，准备必需bundle摘要，Base379也核验完整worker身份。不同在线协议直接拒绝，不再回退旧握手。历史制品按文件schema读取。",
-      "ros_migration": "ROS数据面已接入ARX13；实际控机资格按具体Run及源码回执读取。本轮目录发布覆盖软件、模型准备及目录动态变化。",
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。",
       "backend_selection": "π torch/triton；WAM torch/anyinfer（UI显示SO算子加速）。同一checkpoint由backend/runtime/bundle_digest标识所选运行时。",
       "generic_wam": "workbench.wam.v2复用已有权重摘要；workbench.wam.v3允许权重SHA缺省，以真实来源回执、模型/step、路径和大小绑定，统计量/文本/配置仍校验摘要。",
       "inference_configuration": {
@@ -734,7 +744,7 @@
       "status": "implemented",
       "transport": "Owner 的只读反馈快照及事件通道；相机/state模块订阅这些事实。",
       "compatibility": "现有字段集合与能力检查保持可核验。目标字段按显式 schema / feature 协商发布，并覆盖旧调用方与旧产物回放。 用户已批准按部署版本恢复raw_state_enabled可选接线；getter时间区间和各臂独立SDK时钟分别保留。",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。",
       "normal_native_endpoint_comparison": {
         "scope": "model segment native output command versus planned endpoint",
         "joint_position_atol_rad": 1e-05,
@@ -1028,7 +1038,7 @@
       ],
       "transport": "已批准：登记的本地Unix IPC，常驻记录服务持有writer；生产端内存有界入队，后台发送；业务断连不结束会话。既有Run/请求/策略字段及final_seq屏障保持。",
       "compatibility": "Owner workbench.control_owner.v10 / recording workbench.recording-service.v8，连接时精确核验；历史文件按原schema读取",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。",
       "recording_protocol": "workbench.recording-service.v8；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
       "lifecycle_update": "仅MODEL/TEACH有效录制；HOLD/HOME无有效时间；ingress_closed与完整封存分离。",
       "model_input_verification": "Live ingress stores original references and transform metadata. Routine sealing verifies native state, transform metadata, original sample coverage and input/result correspondence; pixel reconstruction is an explicit deep audit and is reported as not_requested by default. Missing original samples keep outcome incomplete. Writer codec proofs are retained for the Run and reused only after current content digest verification. Replay exports use three parallel single-thread codec workers."
@@ -1062,7 +1072,7 @@
         "guard",
         "lifecycle"
       ],
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。"
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。"
     },
     {
       "id": "I13",
@@ -1091,7 +1101,7 @@
       ],
       "transport": "来源可带source_ref指向已登记的相机服务；记录子进程直接读原通道并复用无损分段编码。帧元数据和段引用保存原时钟，像素不经过控制事件队列。",
       "compatibility": "设计协议，迁移时由适配层连接既有记录格式；已封存旧产物保持原schema与读取能力。",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。"
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。"
     },
     {
       "id": "I14",
@@ -1116,7 +1126,7 @@
       ],
       "transport": "轻量索引事件与不可变载荷通道，实际数据由记录进程持有或复制并释放引用。",
       "compatibility": "设计协议，迁移时由适配层连接既有记录格式；已封存旧产物保持原schema与读取能力。",
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。"
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。"
     },
     {
       "id": "I15",
@@ -1156,7 +1166,7 @@
         "lifecycle",
         "ui"
       ],
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。",
       "recording_protocol": "workbench.recording-service.v8；尾部落盘/取流关闭、封存、真实退出分开回报；旧在线组合绑定时拒绝",
       "lifecycle_update": "运行中反馈取流健康，关闭后独立验证原始样本和导出；长时验收状态由开发Map证据维护。",
       "model_input_verification": "Live ingress stores original references and transform metadata. Routine sealing verifies native state, transform metadata, original sample coverage and input/result correspondence; pixel reconstruction is an explicit deep audit and is reported as not_requested by default. Missing original samples keep outcome incomplete. Writer codec proofs are retained for the Run and reused only after current content digest verification. Replay exports use three parallel single-thread codec workers."
@@ -1226,7 +1236,7 @@
         "lifecycle",
         "ui"
       ],
-      "ros_migration": "已实现并通过原生ROS与完整CPU用例；以final-nonhardware-receipt.json为准。ARX候选尚未发布，真机仍暂停。",
+      "ros_migration": "ROS链路已发布；当前资格见版本化部署回执。近期观测供应超时按独立诊断任务继续核验。",
       "pedal_source": {
         "status": "implemented",
         "message": "existing DataEvent",
@@ -1254,6 +1264,38 @@
           "33": "HOME"
         }
       }
+    },
+    {
+      "id": "I18",
+      "name": "RuntimeProbe / Incident",
+      "producer": "input",
+      "consumer": "monitor",
+      "producers": [
+        "input",
+        "infer",
+        "translation",
+        "guard"
+      ],
+      "consumers": [
+        "monitor",
+        "ui"
+      ],
+      "status": "implemented",
+      "current": "I18探针与轻量只读接口已实现；后台自动留存故障前后窗口，支持离线重放分析。",
+      "target": "稳定的进程内数字探针与只读跨进程诊断接口。",
+      "fields": [
+        "schema / boot_id / pid / sampled_ns / sequence",
+        "channel / stage / source_ns / source_sequence / active callback",
+        "run_id / epoch / observation_id / request_id",
+        "memory node / phase / model_time_s / pending",
+        "fault markers / drop counters / optional bounded history"
+      ],
+      "clock": "进程内host monotonic_ns；原始source clock与RMW wall时钟分别保留。",
+      "units": "ns、秒、计数与显式标量单位。",
+      "failure": "读取、容量和写入异常形成监控降级证据。",
+      "sources": [
+        "monitor-design"
+      ]
     }
   ],
   "gates": [
@@ -2674,6 +2716,13 @@
       "sha256": "630cd50f7ad9c92858e13144b3ee270aab38a34a2f0250243ae52a15e00de15b",
       "excerpt": " 725 \n 726 class CollectionWorkflow:\n 727     def __init__(self, playground, device, service):\n 728         self.playground,self.device,self.service=playground,device,service\n 729         self.playground.managed_lifecycle=True\n 730         self.lock=threading.Lock();self.closed=threading.Event()\n 731         self.value=dict(status='connecting',busy=False,stage_id='connecting',title='数采',primary_action=None,outcomes={})\n 732         self.catalog=[];self.review_key=None;self.speed_scale=None",
       "scope": "2026-11-04已部署源码快照"
+    },
+    "monitor-design": {
+      "path": "docs/INFERENCE_MONITORING.md",
+      "line": 1,
+      "sha256": "a76d9a921277840bd073b29152d0501b2256908387222b95d3511a71320ed4f0",
+      "excerpt": "1 # 推理链路独立监控",
+      "scope": "2026-11-14 用户确认设计"
     }
   },
   "maintenance": {
@@ -2724,7 +2773,7 @@
     "max_duration_factor": 4,
     "max_steps": 60
   },
-  "design_updated_at": "2026-11-08T03:53:58.451713+00:00",
+  "design_updated_at": "2026-11-14T09:17:16.122013+00:00",
   "goals": [
     {
       "id": "GO1",
@@ -2776,7 +2825,8 @@
         "UC18",
         "UC19",
         "UC20",
-        "UC21"
+        "UC21",
+        "UC22"
       ]
     }
   ],
@@ -2891,7 +2941,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "d7a98bc9c889e15652a2e7bff1d61ab3d67499e9e67715b0db2e22a238b0c941",
+        "fingerprint": "c8a21bb0a43e61b826eda62961badfe70d010c3647d42564fc476acd3824f25e",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -3015,7 +3065,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "bbaa6d3353efd2ff085dc79f292f4430d62ed6397a3f97fd7de8e213573be019",
+        "fingerprint": "2bc13afeb6b417d6826996acb23d2e5f5c3ee5b7b26d7c3efe043b89297df227",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3142,7 +3192,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "95293f33e227a4c24388a9ddc9dee8e2add350e32750307a553a89a43eab0b81",
+        "fingerprint": "6199299b990356d66830ba1d12f10b4fabb151b7c79ae1b3fd4f82ecb7705ff3",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3261,7 +3311,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "5d74672ad31c4b8ec201f3a608adc9119c068806984d7a211a72e28c47519e31",
+        "fingerprint": "63bbf3dad41e2796604fbfd8da265ec3d85827756df95d9e57b3fc98abc304a8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3475,7 +3525,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "d7dd9ab229109f1a705a80e9be1665227f52d982c56ca1959f68cec4a3ee3ae6",
+        "fingerprint": "f9f8c380b07246ac81f03db3e5e93f05a6b26db724e55423eeb9bb3dabfdae6c",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3638,7 +3688,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "78d740cabe03c211f39cb43d20986656c19a5afc7551e8acd5ec8669fea38ea6",
+        "fingerprint": "bac6121745859d0110e6afbbcc8d43ec8dc0cc54b006f7fc189e4827688a665b",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3775,7 +3825,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "3485240872f604ac31429801f3a41d6d8901e3fbb2391de4f8f6a35c0e7c4012",
+        "fingerprint": "0f5dec06e20f744ff10abb8aae3fa397417c67d2b72ee364940b9d0803b6b4f8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3917,7 +3967,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "d16e483e9e6fdc3064fb3d61c6c698ef86b8c06e0d9ca4791deec68f42272eed",
+        "fingerprint": "9cc2ddf1d5dd115ef6de082ce52d110026b694577328637750752f8357fa1319",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4043,7 +4093,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "33b4d7c51289a3047cdf0010f38e98c785d2eee62d2af1d5ebb4da3ad8746d99",
+        "fingerprint": "234281d4088316d89b18346326c73ff17f2c610ea2d858579858d2c225f653cf",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4172,7 +4222,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "aef6abda336b65ce645c52261aecc3328654e4d0e034179c38b788bce7bd55f4",
+        "fingerprint": "5dc140a729d216a8c7a713e6b52da8f69d9084eb6eaeb550dc8a66ecd3c9366d",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4298,7 +4348,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "6a5afee3dfac21c87cae47a0efd8cade12d94fbd35d0a11a48e64da9591b7dba",
+        "fingerprint": "ebd8d5419cbecbbc805556affc5753dc581757b46864ca75e41993e7e760811f",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -8078,6 +8128,119 @@
         "执行规则控制任务",
         "持续记录并派生数据集产物"
       ]
+    },
+    {
+      "id": "UC22",
+      "title": "持续监控并留存推理故障",
+      "group": "推理",
+      "goal": "GO4",
+      "actor": "operator",
+      "status": "review",
+      "preconditions": [
+        "工作台数字探针已启动",
+        "诊断输出目录与容量已声明"
+      ],
+      "main_flow": [
+        {
+          "id": "UC22-S01",
+          "title": "持续提供有界数字探针",
+          "inputs": "当前数字探针和既有身份",
+          "completion": "来源、活动回调和节点时间可读",
+          "sc_refs": [],
+          "bindings": [
+            "monitor-probes"
+          ],
+          "next": "UC22-S02"
+        },
+        {
+          "id": "UC22-S02",
+          "title": "独立读取与关联故障",
+          "inputs": "当前数字探针和既有身份",
+          "completion": "异常与唯一运行身份关联",
+          "sc_refs": [],
+          "bindings": [
+            "monitor-incidents"
+          ],
+          "next": "UC22-S03"
+        },
+        {
+          "id": "UC22-S03",
+          "title": "留存前后窗口并核验MEM",
+          "inputs": "当前数字探针和既有身份",
+          "completion": "故障记录自动保存并可重放分析",
+          "sc_refs": [],
+          "bindings": [
+            "monitor-incidents"
+          ],
+          "next": "complete"
+        }
+      ],
+      "success_postconditions": [
+        "故障前后时间线可回读",
+        "各阶段延迟与MEM节点可关联",
+        "监控自身降级可识别"
+      ],
+      "alternatives": [
+        {
+          "id": "UC22-E01",
+          "trigger": "诊断读取或写入失败",
+          "resulting_state": "监控降级，保留失败和缺口计数",
+          "next_action": "恢复诊断后继续独立采集",
+          "inputs": "监控异常",
+          "completion": "业务继续按原决策运行",
+          "from_steps": [
+            "UC22-S02",
+            "UC22-S03"
+          ],
+          "sc_refs": [],
+          "bindings": [
+            "monitor-incidents"
+          ]
+        }
+      ],
+      "modules": [
+        "monitor",
+        "input",
+        "infer",
+        "translation",
+        "guard",
+        "ui"
+      ],
+      "interfaces": [
+        "I18"
+      ],
+      "rules": [
+        "G03",
+        "G07",
+        "G08"
+      ],
+      "shared_steps": [],
+      "evidence": [
+        "monitor-design"
+      ],
+      "effects": [
+        "生成有界数字诊断文件和摘要"
+      ],
+      "acceptance": [
+        {
+          "kind": "success",
+          "given": "实际观测与MEM节点",
+          "when": "输入过期或阶段延迟",
+          "then": "自动保存可定位的前后时间线"
+        },
+        {
+          "kind": "failure",
+          "given": "诊断写入受阻",
+          "when": "容量或IO异常",
+          "then": "诊断降级，动作与输入路径不等待监控"
+        },
+        {
+          "kind": "success",
+          "given": "真实相机、实时反馈、模型与CaptureSession开启，SDK动作输出隔离",
+          "when": "连续运行至少600秒",
+          "then": "录制完整且模型/MEM持续推进，原始延迟和丢弃计数可核验"
+        }
+      ]
     }
   ],
   "journeys": [
@@ -8235,14 +8398,15 @@
     },
     {
       "id": "L3",
-      "name": "五个公共模块",
-      "responsibility": "通过稳定契约完成规则判断、输入管理、推理、翻译执行及独立记录",
+      "name": "公共运行模块",
+      "responsibility": "规则、输入、模型、执行、录制与独立监控通过明确契约协作",
       "contains": [
         "ControlGuard",
         "ObservationManager",
         "InferenceService",
         "TrajectoryExecutor",
-        "RecordingService（独立进程）"
+        "RecordingService（独立进程）",
+        "RuntimeMonitoring（独立进程）"
       ]
     },
     {
@@ -9819,6 +9983,36 @@
         "gap": "",
         "verification_scope": "本轮CPU协议/替身执行；不授予实机资格",
         "evidence": ".evidence/architecture-p1-20261105-v1/resident-candidate-qualification.json"
+      },
+      "monitor-probes": {
+        "id": "monitor-probes",
+        "interface": "I18",
+        "component": "input",
+        "role": "提供接收、元数据合并、配对和MEM数字探针",
+        "files": [
+          "robot_workbench/pipeline_timing.py",
+          "robot_workbench/ros_inputs.py",
+          "robot_workbench/monitored_memory.py"
+        ],
+        "status": "implemented",
+        "gap": "",
+        "verification_scope": "隔离与真实观测无动作输出验收",
+        "evidence": ".evidence/inference-monitor-20261114-v1/progress.json"
+      },
+      "monitor-incidents": {
+        "id": "monitor-incidents",
+        "interface": "I18",
+        "component": "monitor",
+        "role": "独立读取、关联、留档与离线重放分析",
+        "files": [
+          "robot_workbench/runtime_monitor.py",
+          "robot_workbench/monitored_memory.py",
+          "scripts/monitor_inference.py"
+        ],
+        "status": "implemented",
+        "gap": "",
+        "verification_scope": "隔离与真实观测无动作输出验收",
+        "evidence": ".evidence/inference-monitor-20261114-v1/progress.json"
       }
     },
     "source_scope": "本地工作树中的复用实现与目标接口映射，真实发布资格按独立回执核验。",
@@ -9836,7 +10030,7 @@
       "robot_workbench/ros_inference.py",
       "robot_workbench/ros_recording.py"
     ],
-    "sharing": "One source topic; Observation and ModelInput reference the same source samples, no image payload republishing",
+    "sharing": "One source topic. Inference borrows the common camera view original RGB cache after exact source validation; source replacement invalidates the binding. State and control events use independent executors. Observation and ModelInput reference original samples.",
     "physical_acceptance": "paused; this migration is CPU/ROS-only until separately resumed",
     "assembly_files": [
       "robot_workbench/runtime.py",
@@ -9925,7 +10119,12 @@
       "status": "native full-use-case verified; direct Owner/UI health and non-infer result index"
     },
     "final_cpu_receipt": ".evidence/ros-migration-20261106-v1/final-nonhardware-receipt.json",
-    "next_physical_target": "ARX13；用户2026-11-06指定，尚未占用/接入，实体控制仍暂停。本轮为合成图像/state的隔离ROS CPU验收。"
+    "next_physical_target": "ARX13；用户2026-11-06指定，尚未占用/接入，实体控制仍暂停。本轮为合成图像/state的隔离ROS CPU验收。",
+    "live_pairing": {
+      "selection": "Prefer one newer30Hz grid when original RGB/state samples meet declared training error bounds and state covers target; retain original samples and explicit MEM target semantics.",
+      "diagnostics": "Record grid advance and exact failure-time target, newest camera and pairing/build durations.",
+      "status": "physical_recording_verified"
+    }
   },
   "model_extensions": [
     {
@@ -10530,19 +10729,14 @@
     "scope": "shared named defaults plus explicit current Owner policy revision"
   },
   "current_development_plan": {
-    "source": ".evidence/infer-pedal2-start-20261107-v1/progress.json",
+    "source": ".evidence/arx6-ten-minute-recording-20261114-v1/progress.json",
     "ordered_ids": [
-      "infer_observation_timeout",
-      "capture_finish_blocking",
-      "prepared_parameters",
-      "pedal_gestures",
-      "checkpoint_catalog_discovery",
-      "wam_stall_trick",
-      "backend_parity_benchmark",
-      "formal_acceptance_followups"
+      "executor_isolation",
+      "early_memory_retention",
+      "recorded_600s_acceptance"
     ],
     "implementation_paused_for_inventory": false,
-    "confirmed_at": "2026-11-07T14:21:55.765948+00:00"
+    "confirmed_at": "2026-11-14T07:44:19.111488+00:00"
   },
   "checkpoint_catalog_target": {
     "status": "published_and_verified",

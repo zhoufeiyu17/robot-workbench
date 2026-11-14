@@ -88,6 +88,23 @@ class Worker:
 
 
 class MemoryTests(unittest.TestCase):
+    def test_progress_queues_node_before_a_fresh_live_observation(self):
+        from robot_workbench.monitored_memory import MonitoredMemorySession
+        from robot_workbench.inference_workflow import offer_memory_progress
+        client=SimpleNamespace(model_bundle=mem.descriptor(registry()))
+        flow=MonitoredMemorySession(client,ModelDomainAdapter(),'source')
+        flow.prepare_io.acquire();flow.io.acquire()
+        try:
+            flow.sampler.bootstrap(request()['observation'])
+            activity=dict(schema='workbench.memory-activity.v2',run_id='run',phase='WAIT',model_steps=32,manual_steps=0,
+                          model_time_s=32/30.,nodes=[dict(kind='MODEL',step=32,model_time_s=32/30.,target_source_time=101.)])
+            offer_memory_progress(flow,activity,1,'run')
+            self.assertEqual(len(flow.pending),1)
+            self.assertEqual(flow.pending[0]['metadata']['node']['target_source_time'],101.)
+            self.assertIsNone(flow.pending[0]['observation'])
+        finally:
+            flow.pending.clear();flow.prepare_io.release();flow.io.release();flow.close()
+
     def test_readonly_policy_and_sampler_share_model_and_manual_stride(self):
         for stride in(16,32):
             client=SimpleNamespace(model_bundle={'training_execute_actions':stride},memory_revision=0)
@@ -294,6 +311,7 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):mem.validate_descriptor(bad)
 
     def test_http_explicit_interfaces_hot_parameters_and_isolated_lifecycle(self):
+        from robot_workbench.monitored_memory import MonitoredMemorySession
         worker=Worker();variants=mem.variants(registry())
         service=ModelService(worker,catalog=lambda:{str(n):b for n,b in enumerate(variants)},
             client_factory=lambda _:self.fail('sampling must retain the worker'))
@@ -308,8 +326,9 @@ class MemoryTests(unittest.TestCase):
             try:
                 base=client();base.prepare();pin=base.pin('explicit',auto_renew=False)
                 with self.assertRaisesRegex(RuntimeError,'exclusive'):base.pin('other',auto_renew=False)
-                flow=mem.MemorySession(pin,ModelDomainAdapter(),'source');pin.memory_flow=flow
+                flow=MonitoredMemorySession(pin,ModelDomainAdapter(),'source');pin.memory_flow=flow
                 first=request('first',100.);first.update(epoch=1,clock_domain='source',valid_until_source_time=200.)
+                first['observation']['feedback_sample_time_s']=99.995
                 answer=flow.infer(first)
                 self.assertEqual(answer['audit']['memory']['observations'],1)
                 self.assertNotIn(pin.token,json.dumps(answer['audit']))

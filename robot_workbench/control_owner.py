@@ -378,8 +378,13 @@ class ControlOwnerService:
         runtime=self.device.runtime
         if operation=='pipeline_timing':
             from .pipeline_timing import timing
-            if set(args)-{'after','limit'}:raise ValueError('unknown timing query')
-            result=timing.snapshot(**args)
+            if set(args)-{'after','limit','monitor_history','monitor_only'}:raise ValueError('unknown timing query')
+            monitor_only=args.pop('monitor_only',False)
+            if type(monitor_only)is not bool:raise ValueError('boolean monitor_only required')
+            if monitor_only:
+                from .runtime_monitor import probes
+                result=dict(monitor=probes.snapshot(history=args.get('monitor_history',False)))
+            else:result=timing.snapshot(**args)
             publisher=getattr(runtime,'ros_publisher',None)
             if publisher is not None:
                 with publisher.lock:

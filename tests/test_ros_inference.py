@@ -96,6 +96,7 @@ class RosModelTests(unittest.TestCase):
         reconstruct_input(self.used[0],self.record_inputs)
 
     def test_explicit_memory_nodes_keep_original_ros_inputs_and_record_context(self):
+        from robot_workbench.monitored_memory import MonitoredMemorySession
         import json
         from tempfile import TemporaryDirectory
         from robot_workbench import wam_mem as mem
@@ -130,7 +131,7 @@ class RosModelTests(unittest.TestCase):
                     _,frames=self.inputs.resolve_observation(value['ros_observation'],timeout=.2)
                     return dict(value,images={role:np.frombuffer(row['rgb'],np.uint8).reshape(row['height'],row['width'],3)
                         for role,row in frames.items()})
-                flow=mem.MemorySession(pin,ModelDomainAdapter(),'simulation',select=selected,resolve=resolve,
+                flow=MonitoredMemorySession(pin,ModelDomainAdapter(),'simulation',select=selected,resolve=resolve,
                     record=lambda request,prepared,call:self.worker.memory_observation(request,prepared,call))
                 clock=mem.LogicalMemoryClock()
                 first=selected(origin,1)

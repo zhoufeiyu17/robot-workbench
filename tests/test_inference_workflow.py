@@ -239,7 +239,9 @@ class InferenceWorkflowTests(unittest.TestCase):
             return SimpleNamespace(observation_id='cpu-observation',state=state,frames=list(frames.values()),camera_roles=list(frames),**fields)
         flow.ros_plane={'namespace':'/cpu','domain_id':126};flow.observation_pairer=None
         flow.ros_inputs=SimpleNamespace(sources=sources,latest=lambda stream:newest,
-            paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),{'target_source_ns':state.source_time_ns}),
+            paired=lambda *a:(frames,state,min(x.source_time_ns for x in frames.values()),
+                dict(target_source_ns=state.source_time_ns,
+                     latest_camera_source_ns=min(x.source_time_ns for x in frames.values()),grid_advance_ns=0)),
             resolve=lambda ref:feedback,observation=observation)
         flow.ros_observations=SimpleNamespace(publish=published.append)
         with patch.object(self.device.runtime,'control_inputs',side_effect=AssertionError('status RPC is stalled')):

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -43,6 +44,7 @@ def main():
     parser.add_argument('--browser-port',type=int,action='append',default=[])
     parser.add_argument('--start-cameras',action='store_true')
     parser.add_argument('--supervised-child',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--no-monitor',action='store_true',help='Disable the independent diagnostic reader for an overhead comparison')
     args=parser.parse_args()
     if not 1024<=args.port<=65535:parser.error('an explicit unprivileged loopback port is required')
     from ipaddress import IPv4Address
@@ -109,8 +111,21 @@ def main():
             model_service_started_by_workbench=False) if deployment.inference is not None else None))
     (output/'service.json').write_text(json.dumps(receipt,ensure_ascii=False,allow_nan=False,indent=2)+'\n')
     print(json.dumps(receipt,ensure_ascii=False,allow_nan=False),flush=True)
+    monitor = None
+    if not args.no_monitor:
+        try:
+            monitor = subprocess.Popen([sys.executable, str(ROOT/'scripts/monitor_inference.py'),
+                '--endpoint', f'http://{listen}:{server.server_port}', '--output', str(output/'diagnostics'),
+                '--parent-pid', str(os.getpid())], stdin=subprocess.DEVNULL)
+        except OSError as error:
+            event('monitor_start_failed', error=str(error))
     try:server.serve_forever()
     finally:
+        if monitor is not None:
+            monitor.terminate()
+            try:monitor.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                monitor.kill();monitor.wait()
         server.server_close();close_deployment(deployment);done.set();writer.join(timeout=2)
     return 0
 
