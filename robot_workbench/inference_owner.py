@@ -447,7 +447,7 @@ class InferenceRunner:
         self.normal_ended=False
         self.finish_completed=False
         self._accepted_chunk_source_time=None
-        if self.normal_config and prepared_reference is not None:
+        if self.normal_config and prepared_reference is not None and not self.normal_planned:
             from .motion_reference import check_brake_reserve
             check_brake_reserve(prepared_reference,proxy.joint_limits,duration_s=self.normal_config['brake_duration_s'],
                 velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])
@@ -1908,15 +1908,12 @@ class InferenceRunner:
                 timing.record('planning.cpu.'+phase,end-round(cpu_timing[phase+'_s']*1e9),ended_ns=end,
                     aggregated_duration=True,worker_pid=cpu_timing['worker_pid'],request_id=request['request_id'])
         brake_start=time.monotonic_ns()
-        if self.normal_config:
-            from .motion_reference import check_brake_reserve,retime_for_brake_reserve
-            if self.normal_planned:
-                reference=retime_for_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
-                    velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'],
-                    maximum_duration_s=self.config['duration_s'])
-            else:
-                check_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
-                    velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])
+        # Planned model paths use their bounded trajectory directly. A Stop
+        # validates the actual committed boundary and its brake when requested.
+        if self.normal_config and not self.normal_planned:
+            from .motion_reference import check_brake_reserve
+            check_brake_reserve(reference,self.sdk_limits,duration_s=self.normal_config['brake_duration_s'],
+                velocity_limit=self.normal_config['velocity_limit'],acceleration_limit=self.normal_config['acceleration_limit'])
         timing.record('planning.brake_reserve',brake_start,request_id=request['request_id'])
         record_start=time.monotonic_ns()
         from .owner_inference import reference_wire

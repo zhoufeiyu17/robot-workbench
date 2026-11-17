@@ -13,6 +13,8 @@ import numpy as np
 JOINTS=tuple([*range(6),*range(7,13)])
 SCHEMA='prepared_motion_reference.v1'
 MAX_PACKET_ROWS=32
+CERTIFICATE_GRID_INTERVALS = 32
+BOUNDED_PLANNER_VERSION = 'bounded_c2_grid.v1'
 NATIVE_REFERENCE_APIS=('legacy_recompute','preserve_reference_v1')
 TORQUE_BIAS_LIMITS=(.4,1.2,1.5,.3,.15,.15)
 TORQUE_BIAS_SLEW_LIMITS=(.2,.2,.3,.08,.04,.04)
@@ -216,14 +218,20 @@ def _extrema(coefficients,breaks):
 
 def _check_c2(coefficients,breaks):
     """Numerical polynomial identity check, not a physical tracking tolerance."""
-    for index,(c,width)in enumerate(zip(coefficients,np.diff(breaks))):
-        q=c[0].copy();v=np.zeros(12);a=np.zeros(12)
-        for term in c[1:]:
-            a=a*width+2*v;v=v*width+q;q=q*width+term
-        expected=([coefficients[index+1,-1],coefficients[index+1,-2],2*coefficients[index+1,-3]]
-                  if index+1<len(coefficients)else[q,np.zeros(12),np.zeros(12)])
-        if any(not np.allclose(x,y,rtol=1e-9,atol=1e-9)for x,y in zip((q,v,a),expected)):
-            raise ValueError('normal reference requires joint C2 joins and a zero-v/a terminal hold')
+    widths = np.diff(breaks)[:, None]
+    q = coefficients[:, 0].copy()
+    v = np.zeros_like(q)
+    a = np.zeros_like(q)
+    for term in np.moveaxis(coefficients[:, 1:], 1, 0):
+        a = a * widths + 2 * v
+        v = v * widths + q
+        q = q * widths + term
+    expected = (np.concatenate((coefficients[1:, -1], q[-1:])),
+                np.concatenate((coefficients[1:, -2], np.zeros((1, 12)))),
+                np.concatenate((2 * coefficients[1:, -3], np.zeros((1, 12)))))
+    if any(not np.allclose(actual, wanted, rtol=1e-9, atol=1e-9)
+           for actual, wanted in zip((q, v, a), expected)):
+        raise ValueError('normal reference requires joint C2 joins and a zero-v/a terminal hold')
 
 
 def infer_reference_policy(value):
@@ -318,6 +326,252 @@ def _extrema_batched(coefficients,breaks,*,per_interval=False):
     return bounds[0][0],bounds[0][1],np.maximum(abs(bounds[1][0]),abs(bounds[1][1])),np.maximum(abs(bounds[2][0]),abs(bounds[2][1]))
 
 
+def _interval_add(left, right):
+    lower = left[0] + right[0]
+    upper = left[1] + right[1]
+    # Addition of two stored floats can round to zero only when it is exact.
+    return (np.where(lower == 0, 0., np.nextafter(lower, -np.inf)),
+            np.where(upper == 0, 0., np.nextafter(upper, np.inf)))
+
+
+def _interval_multiply(left, right):
+    """Multiply by a nonnegative interval (width, integer or basis weight)."""
+    lower = np.where(left[0] >= 0, left[0] * right[0], left[0] * right[1])
+    upper = np.where(left[1] >= 0, left[1] * right[1], left[1] * right[0])
+    zero = (left[0] == 0) & (left[1] == 0)
+    return (np.where(zero, 0., np.nextafter(lower, -np.inf)),
+            np.where(zero, 0., np.nextafter(upper, np.inf)))
+
+
+def _normalized_derivative_bounds(coefficients, breaks, order):
+    """Enclose q^(order)(h*u) for the exact stored polynomial, ascending powers.
+
+    Each primitive interval operation rounds outwards, including subnormals.
+    Grid evaluation below uses ordinary Horner with a separate error bound.
+    """
+    ascending = coefficients[:, ::-1]
+    degree = ascending.shape[1] - 1 - order
+    widths = np.diff(breaks)[:, None]
+    h = (np.nextafter(widths, -np.inf), np.nextafter(widths, np.inf))
+    if np.any(h[0] <= 0):
+        raise ValueError('numeric_unsupported: interval width is not representable')
+    power = (np.ones_like(widths), np.ones_like(widths))
+    lower, upper = [], []
+    for k in range(degree + 1):
+        integer = math.factorial(k + order) // math.factorial(k)
+        value = ascending[:, k + order]
+        value = _interval_multiply((value, value), (integer, integer))
+        value = _interval_multiply(value, power)
+        lower.append(value[0])
+        upper.append(value[1])
+        if k < degree:
+            power = _interval_multiply(power, h)
+            power = (np.maximum(0., power[0]), power[1])
+    return np.stack(lower, axis=1), np.stack(upper, axis=1)
+
+
+def _bernstein_bounds(power_bounds):
+    """Degree <=5 power-to-Bernstein conversion, including rational rounding."""
+    lower, upper = power_bounds
+    degree = lower.shape[1] - 1
+    if degree in (1, 2):
+        first = (lower[:, 0], upper[:, 0])
+        last = _interval_add(first, (lower[:, 1], upper[:, 1]))
+        if degree == 1:
+            return np.stack((first[0], last[0]), axis=1), np.stack((first[1], last[1]), axis=1)
+        middle = _interval_add(first, _interval_multiply((lower[:, 1], upper[:, 1]), (.5, .5)))
+        last = _interval_add(last, (lower[:, 2], upper[:, 2]))
+        return (np.stack((first[0], middle[0], last[0]), axis=1),
+                np.stack((first[1], middle[1], last[1]), axis=1))
+    result = []
+    for j in range(degree + 1):
+        value = (lower[:, 0].copy(), upper[:, 0].copy())
+        for k in range(1, j + 1):
+            weight = math.comb(j, k) / math.comb(degree, k)
+            weight = (np.nextafter(weight, -np.inf), np.nextafter(weight, np.inf))
+            term = _interval_multiply((lower[:, k], upper[:, k]), weight)
+            value = _interval_add(value, term)
+        result.append(value)
+    return np.stack([v[0] for v in result], axis=1), np.stack([v[1] for v in result], axis=1)
+
+
+def _upper_sum(values):
+    total = np.zeros_like(values[:, 0])
+    for value in np.moveaxis(values, 1, 0):
+        summed = total + value
+        total = np.where(summed == 0, 0., np.nextafter(summed, np.inf))
+    return total
+
+
+def _certified_dynamics(coefficients, breaks):
+    """Root-free physical V/A bounds from a fixed grid and interpolation error.
+
+    For f on each grid cell, |f-linear(f)| <= sup|f''|/(8*N^2).
+    Coefficient radii enclose normalization/differentiation. gamma_(2*d)
+    bounds Horner rounding for dyadic u; 2*d smallest subnormals bound gradual
+    underflow. All remaining upper-bound arithmetic is rounded upwards.
+    """
+    grid = np.arange(CERTIFICATE_GRID_INTERVALS + 1) / CERTIFICATE_GRID_INTERVALS
+    unit_roundoff = np.finfo(np.float64).eps / 2
+    tiny = np.nextafter(0., 1.)
+    bounds = []
+    with np.errstate(over='raise', invalid='raise', divide='raise'):
+        velocity = _normalized_derivative_bounds(coefficients, breaks, 1)
+        widths = np.diff(breaks)[:, None, None]
+        reciprocal = (np.nextafter(1 / np.nextafter(widths, np.inf), -np.inf),
+                      np.nextafter(1 / np.nextafter(widths, -np.inf), np.inf))
+        multiplier = np.arange(1, velocity[0].shape[1])[None, :, None]
+        acceleration = _interval_multiply((velocity[0][:, 1:], velocity[1][:, 1:]),
+                                          (multiplier, multiplier))
+        acceleration = _interval_multiply(acceleration, reciprocal)
+        for lower, upper in (velocity, acceleration):
+            degree = lower.shape[1] - 1
+            center = lower / 2 + upper / 2
+            distance = np.maximum(center - lower, upper - center)
+            radius = np.where(distance == 0, 0., np.nextafter(distance, np.inf))
+            zero = np.all((lower == 0) & (upper == 0), axis=1)
+            values = np.zeros((len(center), center.shape[2], len(grid)))
+            for coefficient in np.moveaxis(center[:, ::-1], 1, 0):
+                values = values * grid + coefficient[:, :, None]
+            gamma = np.nextafter(2 * degree * unit_roundoff / (1 - 2 * degree * unit_roundoff), np.inf)
+            error = np.nextafter(gamma * _upper_sum(abs(center)), np.inf)
+            error = np.nextafter(error + _upper_sum(radius), np.inf)
+            error = np.nextafter(error + 2 * degree * tiny, np.inf)
+            error = np.where(zero, 0., error)
+            multiplier = np.arange(2, degree + 1) * np.arange(1, degree)
+            curvature = _interval_multiply((lower[:, 2:], upper[:, 2:]),
+                                            (multiplier[None, :, None], multiplier[None, :, None]))
+            curvature = _bernstein_bounds(curvature)
+            m2 = np.maximum(abs(curvature[0]), abs(curvature[1])).max(axis=1)
+            remainder = np.nextafter(m2 / (8 * CERTIFICATE_GRID_INTERVALS ** 2), np.inf)
+            remainder = np.where(m2 == 0, 0., remainder)
+            sampled = abs(values).max(axis=2)
+            high = np.nextafter(np.nextafter(sampled + error, np.inf) + remainder, np.inf)
+            high = np.where(zero, 0., high)
+            low = np.maximum(0., np.nextafter(sampled - error, -np.inf))
+            if not np.isfinite(high).all():
+                raise ValueError('numeric_unsupported: nonfinite dynamic certificate')
+            bounds.append((low, high))
+    return bounds
+
+
+def _quintic_segments(q, velocity, acceleration, widths):
+    """Batch Hermite reconstruction, preserving shared q/v/a at joins."""
+    h = widths[:, None]
+    d = q[1:] - q[:-1] - velocity[:-1] * h - acceleration[:-1] * h ** 2 / 2
+    v = (velocity[1:] - velocity[:-1]) * h - acceleration[:-1] * h ** 2
+    a = (acceleration[1:] - acceleration[:-1]) * h ** 2
+    scaled = np.stack((6*d-3*v+a/2, -15*d+7*v-a, 10*d-4*v+a/2,
+                       acceleration[:-1]*h**2/2, velocity[:-1]*h, q[:-1]), axis=1)
+    return scaled / widths[:, None, None] ** np.arange(5, -1, -1)[None, :, None]
+
+
+def _bounded_model_curve(breaks, sdk, limits, coefficients, policy, jaw_scales, timing):
+    """Zero-boundary MODEL compiler; existing nonzero-start callers stay separate."""
+    import time
+    started = time.perf_counter()
+    original_widths = np.diff(breaks)
+    q = sdk[:, JOINTS]
+    bounds = limits[list(JOINTS)]
+    velocity = np.vstack((coefficients[:, -2], np.zeros(12)))
+    acceleration = np.vstack((2 * coefficients[:, -3], np.zeros(12)))
+    factors = np.ones_like(q)
+    h = original_widths[:, None]
+    offsets = ((0, velocity[:-1]*h/5),
+               (0, 2*velocity[:-1]*h/5+acceleration[:-1]*h**2/20),
+               (1, -velocity[1:]*h/5),
+               (1, -2*velocity[1:]*h/5+acceleration[1:]*h**2/20))
+    for start, delta in offsets:
+        nodes = q[start:start + len(h)]
+        available = np.ones_like(delta)
+        np.divide(bounds[:, 1] - nodes, delta, out=available, where=delta > 0)
+        np.divide(nodes - bounds[:, 0], -delta, out=available, where=delta < 0)
+        factors[start:start + len(h)] = np.minimum(factors[start:start + len(h)], np.clip(available, 0., 1.))
+    velocity *= factors
+    acceleration *= factors
+    rebuilt = _quintic_segments(q, velocity, acceleration, original_widths)
+    changed = (factors[:-1] < 1) | (factors[1:] < 1)
+    base = np.where(changed[:, None, :], rebuilt, coefficients)
+    velocity_limit = policy['velocity_limit_rad_s']
+    acceleration_limit = policy['acceleration_limit_rad_s2']
+    jaw_limit = policy['jaw_velocity_limit_mm_s']
+    evaluations = []
+
+    def evaluate(c, b):
+        mark = time.perf_counter()
+        certificate = _certified_dynamics(c, b)
+        jaw = np.nextafter(abs(np.diff(sdk[:, [6, 13]], axis=0)), np.inf)
+        jaw = np.nextafter(jaw * np.asarray(jaw_scales), np.inf)
+        jaw /= np.nextafter(np.diff(b), -np.inf)[:, None]
+        jaw = np.nextafter(jaw, np.inf)
+        ratios = np.ones((len(c), 14))
+        ratios[:, JOINTS] = np.maximum(np.nextafter(certificate[0][1] / velocity_limit, np.inf),
+                                       np.nextafter(np.sqrt(np.nextafter(certificate[1][1] / acceleration_limit, np.inf)), np.inf))
+        ratios[:, [6, 13]] = np.nextafter(jaw / jaw_limit, np.inf)
+        evaluations.append(time.perf_counter() - mark)
+        return certificate, jaw, ratios
+
+    certificate, jaw, ratios = evaluate(base, breaks)
+    local_ratios = ratios.copy()
+    local = np.maximum(1., ratios.max(axis=1))
+    local = np.where(local > 1., local * 1.02, 1.)
+    widths = original_widths * local
+    knot_scale = np.ones(len(q))
+    knot_scale[1:-1] = np.maximum(local[:-1], local[1:])
+    c = _quintic_segments(q, velocity / knot_scale[:, None],
+                          acceleration / knot_scale[:, None] ** 2, widths)
+    affected = (local != 1) | (knot_scale[:-1] != 1) | (knot_scale[1:] != 1)
+    c = np.where(affected[:, None, None], c, base)
+    b = np.r_[0., np.cumsum(widths)]
+    certificate, jaw, ratios = evaluate(c, b)
+    dilation = max(1., float(ratios.max()))
+    dilation = dilation * 1.02 if dilation > 1 else 1.
+    corrections = 0
+    uniform_scale = 1.
+    for attempt in range(2):
+        uniform_scale *= dilation
+        b = b * dilation
+        c = c / dilation ** np.arange(5, -1, -1)[None, :, None]
+        certificate, jaw, ratios = evaluate(c, b)
+        if ratios.max() <= 1.:
+            break
+        if attempt == 1:
+            raise ValueError('internal_fault: final dynamic certificate failed')
+        dilation = float(ratios.max()) * 1.02
+        corrections = 1
+    from .execution_settings import numeric_tolerance
+    position = _bernstein_bounds(_normalized_derivative_bounds(c, b, 0))
+    tolerance = np.asarray([numeric_tolerance(max(abs(lo), abs(hi)), 'rad') for lo, hi in bounds])
+    if (np.any(position[0] < bounds[:, 0] - tolerance) or
+            np.any(position[1] > bounds[:, 1] + tolerance)):
+        raise ValueError('internal_fault: final Bernstein position certificate failed')
+    _check_c2(c, b)
+    maximum = policy['max_execution_duration_s']
+    if not np.isfinite(c).all() or not np.isfinite(b).all():
+        raise ValueError('numeric_unsupported: final reference is not finite')
+    if maximum is not None and b[-1] > maximum:
+        axis = int(np.argmax(local_ratios) % 14)
+        label = ('left' if axis < 7 else 'right') + ('_jaw' if axis % 7 == 6 else '_J' + str(axis % 7 + 1))
+        raise ValueError(f'prepared path exceeds {maximum:g}s bound; required_s={b[-1]:.6g}; limiting_axis={label}')
+    changes = [dict(interval=int(i), input_start_s=float(breaks[i]),
+                    original_duration_s=float(original_widths[i]), duration_s=float(np.diff(b)[i]),
+                    scale=float(np.diff(b)[i] / original_widths[i]), constraints=[('left' if axis < 7 else 'right') +
+                    ('_jaw' if axis % 7 == 6 else '_J' + str(axis % 7 + 1))])
+               for i in np.flatnonzero(local > 1.) for axis in [int(np.argmax(local_ratios[i]))]]
+    details = dict(planner_version=BOUNDED_PLANNER_VERSION, peak_semantics='certified_upper_bound',
+                   certificate_grid_intervals=CERTIFICATE_GRID_INTERVALS,
+                   certificate_evaluations=len(evaluations),
+                   limited_node_axes=int(np.count_nonzero(factors < 1)),
+                   final_uniform_corrections=corrections,
+                   uniform_time_scale=uniform_scale, local_retiming_passes=1,
+                   velocity_peak_lower_rad_s=float(certificate[0][0].max()),
+                   acceleration_peak_lower_rad_s2=float(certificate[1][0].max()))
+    if timing is not None:
+        timing['bounded_compile_s'] = time.perf_counter() - started
+        timing['certificate_wall_s'] = evaluations
+    return b, c, certificate[0][1].max(axis=0), certificate[1][1].max(axis=0), float(jaw.max()), int(affected.any()), changes, details
+
+
 @dataclass(frozen=True)
 class PreparedReference:
     breaks:np.ndarray
@@ -367,7 +621,7 @@ class PreparedReference:
 
 def _retime_local(breaks,sdk,limits,initial_velocity,initial_acceleration,*,velocity_limit,
                   acceleration_limit,jaw_scales,jaw_velocity_limit,maximum_duration,
-                  brake_duration=None,coefficients=None):
+                  coefficients=None):
     """Extend violating intervals with shared Hermite joins and fixed outer q/v/a."""
     original=np.diff(breaks).copy();widths=original.copy();bounds=np.asarray(limits)[list(JOINTS)]
     if maximum_duration is not None and breaks[-1]>maximum_duration:
@@ -403,25 +657,6 @@ def _retime_local(breaks,sdk,limits,initial_velocity,initial_acceleration,*,velo
         for index in np.flatnonzero(factors>1.+1e-9):
             axis=int(np.argmax(ratios[index]));side='left'if axis<7 else'right'
             reasons[index].add(side+('_jaw'if axis%7==6 else '_J'+str(axis%7+1)))
-        if brake_duration is not None:
-            low,high,pv,pa=_brake_envelope_bounds(coefficients,breaks,brake_duration,per_interval=True)
-            failed=(np.any(low<bounds[:,0]-1e-10,axis=1)|np.any(high>bounds[:,1]+1e-10,axis=1)
-                    |np.any(pv>velocity_limit+1e-10,axis=1)|np.any(pa>acceleration_limit+1e-10,axis=1))
-            margin=np.maximum(0.,np.minimum(lo-bounds[:,0],bounds[:,1]-hi))
-            def stretch(quadratic,linear,limit):
-                limit=np.broadcast_to(limit,v.shape)
-                positive=limit>0
-                result=np.ones_like(v)
-                result[~positive&((quadratic!=0)|(linear!=0))]=np.inf
-                result[positive]=(linear[positive]+np.sqrt(linear[positive]**2+
-                    4*limit[positive]*quadratic[positive]))/(2*limit[positive])
-                return result.max(axis=1)
-            reserve=np.maximum.reduce([np.ones(len(widths)),
-                stretch(a*brake_duration**2/12,v*brake_duration/2,margin),
-                stretch((4/27)*a*brake_duration,v,velocity_limit),
-                stretch(a,1.5*v/brake_duration,acceleration_limit)])
-            factors[failed]=np.maximum(factors[failed],reserve[failed])
-            for index in np.flatnonzero(failed):reasons[index].add('normal_brake_reserve')
         changed=factors>1.+1e-9
         if not changed.any():
             _check_c2(coefficients,breaks)
@@ -431,7 +666,7 @@ def _retime_local(breaks,sdk,limits,initial_velocity,initial_acceleration,*,velo
                 for i in np.flatnonzero(widths>original)]
             return breaks,coefficients,v.max(axis=0),a.max(axis=0),float(jaw.max()),iteration,changes
         proposed=widths.copy();proposed[changed]*=factors[changed]*1.02
-        if not np.isfinite(proposed).all():raise ValueError('local interval has no finite brake reserve')
+        if not np.isfinite(proposed).all():raise ValueError('local interval duration is not finite')
         if maximum_duration is not None and proposed.sum()>maximum_duration:
             interval,axis=np.unravel_index(int(np.argmax(ratios)),ratios.shape)
             label=('left'if axis<7 else'right')+('_jaw'if axis%7==6 else '_J'+str(axis%7+1))
@@ -507,12 +742,17 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
     if policy is None:
         coefficients=np.moveaxis(spline.c,1,0)
         fit_wall=time.perf_counter()-fit_started
-    extrema_started=time.perf_counter()
-    extrema=_extrema_batched if policy is not None else _extrema
-    low,high,v,a=extrema(coefficients,breaks)
-    extrema_wall+=time.perf_counter()-extrema_started
-    if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
-        raise ValueError('continuous spline exceeds joint command limits; no silent clipping')
+    bounded_model = policy is not None and not np.any(v0) and not np.any(a0)
+    planning_details = {}
+    if bounded_model:
+        v = a = np.zeros(12)
+    else:
+        extrema_started=time.perf_counter()
+        extrema=_extrema_batched if policy is not None else _extrema
+        low,high,v,a=extrema(coefficients,breaks)
+        extrema_wall+=time.perf_counter()-extrema_started
+        if np.any(low<limits[list(JOINTS),0]-1e-9)or np.any(high>limits[list(JOINTS),1]+1e-9):
+            raise ValueError('continuous spline exceeds joint command limits; no silent clipping')
     scale=max(1.,float(np.max(v))/velocity_limit,math.sqrt(float(np.max(a))/acceleration_limit))
     from arx_env.joint_head_real_motion import jaw_peak_scale
     jaw_scales=jaw_scales or {side:jaw_peak_scale(side)for side in ('left','right')}
@@ -538,10 +778,19 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
     refits=0;local_changes=[];local_retiming_wall=0.
     if policy is not None:
         local_started=time.perf_counter()
-        breaks,coefficients,v,a,jaw_velocity,refits,local_changes=_retime_local(
-            breaks,sdk,limits,v0[list(JOINTS)],a0[list(JOINTS)],velocity_limit=velocity_limit,
-            acceleration_limit=acceleration_limit,jaw_scales=[jaw_scales[side]for side in('left','right')],
-            jaw_velocity_limit=jaw_velocity_limit,maximum_duration=maximum_duration,coefficients=coefficients)
+        if bounded_model:
+            try:
+                with np.errstate(over='raise', invalid='raise', divide='raise'):
+                    breaks,coefficients,v,a,jaw_velocity,refits,local_changes,planning_details = _bounded_model_curve(
+                        breaks,sdk,limits,coefficients,policy,
+                        [jaw_scales[side] for side in ('left','right')],timing)
+            except FloatingPointError as error:
+                raise ValueError('numeric_unsupported: bounded curve arithmetic failed') from error
+        else:
+            breaks,coefficients,v,a,jaw_velocity,refits,local_changes=_retime_local(
+                breaks,sdk,limits,v0[list(JOINTS)],a0[list(JOINTS)],velocity_limit=velocity_limit,
+                acceleration_limit=acceleration_limit,jaw_scales=[jaw_scales[side]for side in('left','right')],
+                jaw_velocity_limit=jaw_velocity_limit,maximum_duration=maximum_duration,coefficients=coefficients)
         local_retiming_wall=time.perf_counter()-local_started;scale=1.
     else:
         breaks=breaks*scale
@@ -564,12 +813,14 @@ def prepare_reference(source,initial_sdk_command14,sdk_limits,*,source_sha256,
             interpolation='CPU_C2_quintic_to_SDK_linear_samples',continuity='joint_C2',
             derivative_scope='analytic_joint_q_v_a; jaws_position_only',jerk_limit='not_configured_not_qualified')
     if policy is not None:
-        _check_c2(coefficients,breaks)
+        if not bounded_model:
+            _check_c2(coefficients,breaks)
         metadata.update(planning_policy=policy,interpolation='CPU_C2_cubic_with_quintic_ends_to_SDK_linear_samples',
             initial_velocity_sdk14=v0.tolist(),initial_acceleration_sdk14=a0.tolist(),retiming_refits=refits,
             internal_derivatives='shared_C2_boundaries; physical_initial_and_zero_terminal_preserved',
             retiming_scope='local_intervals',local_retiming=local_changes)
         if local_changes:metadata['interpolation']='CPU_C2_local_Hermite_retiming_to_SDK_linear_samples'
+        metadata.update(planning_details)
     metadata.update(max_jaw_velocity_mm_s=jaw_velocity/scale,jaw_velocity_limit_mm_s=jaw_velocity_limit,
         jaw_unit_scales_mm_per_sdk_m=dict(jaw_scales))
     digest=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode())
@@ -689,47 +940,6 @@ def _brake_envelope_bounds(coefficients,breaks,duration_s,*,per_interval=False):
     return low,high,np.maximum(abs(vl),abs(vh)),np.maximum(abs(al),abs(ah))
 
 
-def retime_for_brake_reserve(reference,limits,*,duration_s,velocity_limit,acceleration_limit,maximum_duration_s):
-    """Extend only intervals that fail the all-times normal brake proof."""
-    if not isinstance(reference,PreparedReference):raise ValueError('analytic reference required for brake reserve')
-    _check_c2(reference.coefficients,reference.breaks)
-    _,start_v,start_a=reference.sample([0.])
-    if np.any(start_v!=0.)or np.any(start_a!=0.):raise ValueError('reserve retiming requires a confirmed zero-v/a start')
-    if any(type(x)not in(int,float)or not math.isfinite(x)or x<=0
-           for x in(duration_s,velocity_limit,acceleration_limit,maximum_duration_s)):
-        raise ValueError('explicit positive normal brake budgets required')
-    bounds=np.asarray(limits,dtype=float)
-    if bounds.shape!=(14,2)or not np.isfinite(bounds).all():raise ValueError('finite SDK position limits required')
-    sdk=np.zeros((len(reference.breaks),14))
-    sdk[:-1,JOINTS]=reference.coefficients[:,-1]
-    sdk[-1]=reference.sample([reference.duration_s])[0][0]
-    sdk[:,[6,13]]=reference.jaws
-    policy=reference.metadata.get('planning_policy')
-    if policy is None:raise ValueError('local brake retiming requires the bound infer planning policy')
-    from arx_env.joint_head_real_motion import jaw_peak_scale
-    jaw_scales=reference.metadata.get('jaw_unit_scales_mm_per_sdk_m') or {side:jaw_peak_scale(side)for side in('left','right')}
-    breaks,c,v,a,jaw_velocity,refits,changes=_retime_local(reference.breaks,sdk,bounds,
-        start_v[0,list(JOINTS)],start_a[0,list(JOINTS)],velocity_limit=velocity_limit,
-        acceleration_limit=acceleration_limit,jaw_scales=[jaw_scales[side]for side in('left','right')],
-        jaw_velocity_limit=policy['jaw_velocity_limit_mm_s'],maximum_duration=maximum_duration_s,
-        brake_duration=duration_s,coefficients=reference.coefficients)
-    if not changes:
-        check_brake_reserve(reference,limits,duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit)
-        return reference
-    meta=dict(reference.metadata);parent=meta.pop('reference_id')
-    meta.update(parent_reference_id=parent,duration_s=float(breaks[-1]),
-        normal_brake_time_scale=float(breaks[-1]/reference.duration_s),
-        normal_brake_retiming_scope='local_intervals',normal_brake_local_retiming=changes,
-        interpolation='CPU_C2_local_Hermite_retiming_to_SDK_linear_samples',
-        max_velocity_rad_s=float(max(v)),max_acceleration_rad_s2=float(max(a)),
-        max_jaw_velocity_mm_s=jaw_velocity,
-        normal_brake_reserve_policy=dict(duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit))
-    identity=hashlib.sha256(json.dumps(meta,sort_keys=True).encode())
-    for array in(breaks,c,reference.jaws):identity.update(array.tobytes())
-    meta['reference_id']=identity.hexdigest()
-    result=PreparedReference(_frozen(breaks),_frozen(c),reference.jaws,meta)
-    check_brake_reserve(result,limits,duration_s=duration_s,velocity_limit=velocity_limit,acceleration_limit=acceleration_limit)
-    return result
 
 
 def check_brake_reserve(reference, limits, *, duration_s, velocity_limit, acceleration_limit):
@@ -794,6 +1004,26 @@ def _reference_worker_start(parent_pid):
         from .arx_output_guard import parent_death
         parent_death(parent_pid)
     from scipy.interpolate import CubicSpline, PchipInterpolator, BPoly, PPoly
+    _prepare_encoded(json.dumps(_reference_warmup_request()).encode(), True)
+
+
+def _reference_warmup_request():
+    targets = np.zeros((61, 14))
+    targets[:, 0] = .02 * np.sin(np.arange(61) / 3)
+    targets[:, [6, 13]] = .03
+    limits = np.tile([-3., 3.], (14, 1))
+    limits[[6, 13]] = [0., .085]
+    return dict(source=dict(kind='online_prediction_chunk', device_targets14=targets.tolist(),
+                            duration_s=2., active_arms=['left', 'right']),
+                initial=targets[0].tolist(), limits=limits.tolist(),
+                options=dict(source_sha256='cpu-warmup', sdk_targets14=targets.tolist(),
+                             jaw_scales={'left': 1000., 'right': 1000.},
+                             initial_velocity_sdk14=[0.] * 14, initial_acceleration_sdk14=[0.] * 14,
+                             planning_policy=dict(schema='workbench.infer-reference-policy.v1',
+                                 curve='cubic_c2_quintic_ends', velocity_limit_rad_s=1.,
+                                 acceleration_limit_rad_s2=40., jaw_velocity_limit_mm_s=40.,
+                                 boundary_scope='complete_prepared_segment', timing_policy='retime_allowed',
+                                 max_execution_duration_s=None)))
 
 
 def create_reference_executor():
@@ -803,7 +1033,14 @@ def create_reference_executor():
     from concurrent.futures import ProcessPoolExecutor
     executor=ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn'),
         initializer=_reference_worker_start,initargs=(os.getpid(),))
-    try:executor.submit(os.getpid).result(timeout=10.)
+    try:
+        executor.submit(os.getpid).result(timeout=10.)
+        request = _reference_warmup_request()
+        reference = prepare_reference_process(request['source'], request['initial'], request['limits'],
+                                              executor=executor, **request['options'])
+        from .owner_inference import reference_wire
+        from copy import deepcopy
+        deepcopy(reference_wire(reference))
     except BaseException:
         executor.shutdown(wait=True,cancel_futures=True);raise
     return executor
@@ -836,10 +1073,13 @@ def prepare_reference_process(source,initial_sdk_command14,sdk_limits,*,executor
             encoded,details=encoded.split(b'\n',1);stages=json.loads(details)
     else:encoded,stages=executor.submit(_prepare_encoded,body,True).result(timeout=20)
     returned=time.perf_counter();value=json.loads(encoded);decoded=time.perf_counter()
+    reference = PreparedReference(_frozen(value['breaks']),_frozen(value['coefficients']),_frozen(value['jaws']),value['metadata'])
+    rebuilt = time.perf_counter()
     if timing is not None:timing.update(stages,request_json_encode_s=encoded_at-encoding,
         parent_json_decode_s=decoded-returned,roundtrip_s=returned-encoded_at,
+        parent_rebuild_s=rebuilt-decoded,parent_encoded_to_ready_s=rebuilt-encoding,
         transport_and_wait_s=max(0.,returned-encoded_at-stages.get('worker_total_s',0.)))
-    return PreparedReference(_frozen(value['breaks']),_frozen(value['coefficients']),_frozen(value['jaws']),value['metadata'])
+    return reference
 
 
 if __name__=='__main__':

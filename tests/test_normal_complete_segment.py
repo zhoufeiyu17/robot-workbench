@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import test_normal_modes as normal
 from test_infer_curve_policy import POLICY
-from robot_workbench.motion_reference import prepare_reference,retime_for_brake_reserve,check_brake_reserve
+from robot_workbench.motion_reference import prepare_reference
 
 
 class CompleteNormalTests(unittest.TestCase):
@@ -326,16 +326,6 @@ class CompleteNormalTests(unittest.TestCase):
         self.assertTrue(rejected)
         self.assertTrue(backend._controllers['left'].future)
 
-    def test_brake_reserve_retime_preserves_every_target_or_rejects_full_segment(self):
-        q=np.zeros((16,14));q[:,0]=np.linspace(0,.12,16)
-        limits=np.tile([-3.,3.],(14,1));limits[[6,13]]=[0,.082]
-        r=prepare_reference(dict(kind='online_prediction_chunk',device_targets14=q.tolist(),duration_s=.5,active_arms=['left','right']),
-            q[0],limits,source_sha256='a'*64,sdk_targets14=q,jaw_scales={'left':1000.,'right':1000.},
-            planning_policy=POLICY,initial_velocity_sdk14=[0.]*14,initial_acceleration_sdk14=[0.]*14)
-        result=retime_for_brake_reserve(r,limits,duration_s=.2,velocity_limit=1.,acceleration_limit=40.,maximum_duration_s=2.)
-        check_brake_reserve(result,limits,duration_s=.2,velocity_limit=1.,acceleration_limit=40.)
-        np.testing.assert_allclose(result.sample(result.breaks)[0],q,atol=1e-10)
-        with self.assertRaises(ValueError):retime_for_brake_reserve(r,limits,duration_s=.2,velocity_limit=1.,acceleration_limit=40.,maximum_duration_s=.01)
 
 
 if __name__=='__main__':unittest.main()

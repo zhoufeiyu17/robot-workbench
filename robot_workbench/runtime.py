@@ -1127,7 +1127,8 @@ class Runtime:
             if reason and getattr(self.owner.backend,'terminal_failure',None):
                 evidence=self.owner.backend.protection_snapshot()
                 recording=self.owner.recording
-                if (evidence.get('worker_exit_confirmed') is True and not self.tick_lock.locked() and not self.calls
+                can_retire=getattr(self.owner.backend,'supported_retirement_ready',lambda:False)
+                if ((evidence.get('worker_exit_confirmed') is True or can_retire()) and not self.tick_lock.locked() and not self.calls
                         and (recording is None or recording.done.is_set()
                              and getattr(recording,'thread',None) is not None and not recording.thread.is_alive())):
                     reason=None;output_exited=True  # Inspect/retire only; old SDK output cannot resume.
@@ -1742,13 +1743,20 @@ class Runtime:
         if self.ros_publisher is not None:self.ros_publisher.close()
         if self.ros_node is not None:self.ros_node.close()
 
-    def retire_protected(self):
+    def retire_protected(self, *, arms_supported=False):
         """Explicit supported reconnect only; worker exit is never SDK close success."""
         with self.lock:
             backend=self.owner.backend
             reader=getattr(backend,'protection_snapshot',None)
             evidence=reader() if callable(reader) else {}
             recording=self.owner.recording
+            if self.tick_lock.locked() or self.calls or recording is not None and not recording.done.is_set():
+                raise ValueError('控制调用或录制尚未收尾，不能退役旧实例')
+            if evidence.get('event') and evidence.get('worker_exit_confirmed') is not True:
+                retire=getattr(backend,'retire_supported',None)
+                if not callable(retire):raise ValueError('保护后的控制进程退出或录制收尾尚未确认，缺少受控退役入口')
+                retire(arms_supported=arms_supported)
+                evidence=reader()
             if (not evidence.get('event') or evidence.get('worker_exit_confirmed') is not True
                     or self.tick_lock.locked() or self.calls or backend.is_connected
                     or recording is not None and not recording.done.is_set()):
@@ -1762,6 +1770,10 @@ class Runtime:
                 retired_wall_ns=time.time_ns(),worker_exit_confirmed=True,sdk_close_confirmed=False,
                 mechanical_state='not_verified',motion_resumed=False)
             result=deepcopy(self.protected_retirement)
+            supported=getattr(backend,'supported_retirement',None)
+            if isinstance(supported,dict):
+                self.protected_retirement['supported_retirement']=deepcopy(supported)
+                result=deepcopy(self.protected_retirement)
         if self.ros_publisher is not None:self.ros_publisher.close()
         if self.ros_node is not None:self.ros_node.close()
         return result

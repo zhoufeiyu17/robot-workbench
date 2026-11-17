@@ -41,7 +41,7 @@ class InferCurvePolicyTests(unittest.TestCase):
                 for row in (cold,measured):
                     times=[row['worker_'+name+'_ns']for name in ('started','decoded','prepared','finished')]
                     self.assertEqual(times,sorted(times));self.assertGreater(row['worker_total_s'],0)
-                    self.assertGreater(row['fit_s'],0);self.assertGreater(row['extrema_s'],0)
+                    self.assertGreater(row['fit_s'],0);self.assertGreater(row['bounded_compile_s'],0)
             invalid=deepcopy(options);invalid['sdk_targets14']=deepcopy(source['device_targets14'])
             invalid['sdk_targets14'][1][0]=2.
             for pool in (None,executor):
@@ -63,44 +63,21 @@ class InferCurvePolicyTests(unittest.TestCase):
         self.assertLessEqual(reference.metadata['max_jaw_velocity_mm_s'],40.)
         _check_c2(reference.coefficients,reference.breaks)
 
-    def test_local_joint_velocity_change_preserves_remote_safe_intervals(self):
+    def test_bounded_joint_retiming_preserves_nodes_and_limits(self):
         source,limits=self.fixture(32/30)
         q=np.zeros((33,14));q[:,0]=np.r_[np.zeros(12),np.linspace(0,.1,9),np.full(12,.1)]
         source['device_targets14']=q.tolist()
         reference=self.prepare(source,limits,planning_policy=dict(POLICY,
             velocity_limit_rad_s=.1,max_execution_duration_s=None))
         widths=np.diff(reference.breaks)
-        np.testing.assert_allclose(widths[:5],1/30,atol=1e-14,rtol=0)
-        np.testing.assert_allclose(widths[-5:],1/30,atol=1e-14,rtol=0)
+        self.assertTrue(np.all(widths >= 1/30 - 1e-14))
+        actual = np.concatenate([reference.sample(times)[0] for times in np.array_split(reference.breaks, 2)])
+        np.testing.assert_allclose(actual,q,atol=1e-12)
         self.assertTrue(np.any(widths[12:20]>1/30))
         self.assertLessEqual(reference.metadata['max_velocity_rad_s'],.1+1e-9)
         self.assertLessEqual(reference.metadata['max_acceleration_rad_s2'],40.+1e-9)
         _check_c2(reference.coefficients,reference.breaks)
 
-    def test_local_brake_reserve_keeps_safe_prefix_timing_and_all_knots(self):
-        from robot_workbench.motion_reference import retime_for_brake_reserve,check_brake_reserve
-        source,limits=self.fixture(32/30)
-        q=np.zeros((33,14));q[:,1]=np.linspace(.23,-.049,33);q[:,[6,13]]=.04
-        source['device_targets14']=q.tolist();limits[1]=[-.05,3.5]
-        policy=dict(POLICY,velocity_limit_rad_s=4.,jaw_velocity_limit_mm_s=60.,max_execution_duration_s=None)
-        reference=self.prepare(source,limits,planning_policy=policy)
-        result=retime_for_brake_reserve(reference,limits,duration_s=.2,velocity_limit=4.,
-            acceleration_limit=40.,maximum_duration_s=4120.)
-        np.testing.assert_array_equal(result.breaks[:28],reference.breaks[:28])
-        np.testing.assert_array_equal(result.coefficients[:26],reference.coefficients[:26])
-        self.assertLess(result.duration_s,3.)
-        self.assertEqual([row['interval']for row in result.metadata['normal_brake_local_retiming']],[27,28,29,30,31])
-        for chunk in np.array_split(result.breaks,2):
-            positions,_,_=result.sample(chunk)
-            for stamp,position in zip(chunk,positions):
-                index=int(np.flatnonzero(result.breaks==stamp)[0]);np.testing.assert_allclose(position,q[index],atol=1e-12)
-        _check_c2(result.coefficients,result.breaks)
-        check_brake_reserve(result,limits,duration_s=.2,velocity_limit=4.,acceleration_limit=40.)
-        # The run budget may admit or reject a curve; it cannot set its speed.
-        other=retime_for_brake_reserve(reference,limits,duration_s=.2,velocity_limit=4.,
-            acceleration_limit=40.,maximum_duration_s=10.)
-        np.testing.assert_array_equal(result.breaks,other.breaks)
-        np.testing.assert_array_equal(result.coefficients,other.coefficients)
 
     def test_per_interval_extrema_reduce_to_existing_complete_curve_proof(self):
         source,limits=self.fixture();r=self.prepare(source,limits)
@@ -161,18 +138,75 @@ class InferCurvePolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_brake_after(reference,boundary,narrow,duration_s=.2,velocity_limit=1.,acceleration_limit=40.)
 
-    def test_overshoot_and_unknown_boundary_reject_instead_of_clipping_or_zeroing(self):
+    def test_overshoot_is_bounded_and_unknown_boundary_still_rejects(self):
         source,limits=self.fixture();source['device_targets14'][1][0]=-.01936916448175907
         source['device_targets14'][0][0]=.00171661376953125
         for row in source['device_targets14'][2:]:row[0]=-.007
         limits[0]=[-.0195,1.]
-        with self.assertRaisesRegex(ValueError,'joint command limits'):self.prepare(source,limits)
+        reference = self.prepare(source,limits)
+        lower,upper,_,_ = _extrema_batched(reference.coefficients,reference.breaks)
+        self.assertGreaterEqual(lower[0],limits[0,0]-1e-9)
+        self.assertLessEqual(upper[0],limits[0,1]+1e-9)
+        np.testing.assert_allclose(reference.sample(reference.breaks)[0],source['device_targets14'],atol=1e-12)
         source,limits=self.fixture()
         with self.assertRaisesRegex(ValueError,'start q/v/a'):self.prepare(source,limits,initial_velocity_sdk14=None)
         invalid=deepcopy(POLICY);invalid['jaw_velocity_limit_mm_s']=80.
         self.assertEqual(self.prepare(source,limits,planning_policy=invalid).metadata['planning_policy']['jaw_velocity_limit_mm_s'],80.)
         invalid['jaw_velocity_limit_mm_s']=-1.
         with self.assertRaises(ValueError):self.prepare(source,limits,planning_policy=invalid)
+
+    def test_grid_certificates_enclose_independent_stationary_point_extrema(self):
+        from robot_workbench.motion_reference import _certified_dynamics
+        rng = np.random.default_rng(20261116)
+        for _ in range(24):
+            widths = rng.uniform(.03, 3., 8)
+            breaks = np.r_[0., np.cumsum(widths)]
+            coefficients = rng.normal(size=(8, 6, 12)) / widths[:, None, None] ** np.arange(5, -1, -1)[None, :, None]
+            coefficients[:, :, 0] = 0.
+            bounds = _certified_dynamics(coefficients, breaks)
+            exact = _extrema_batched(coefficients, breaks, per_interval=True)
+            for (lower, upper), wanted in zip(bounds, exact[2:]):
+                self.assertTrue(np.all(lower <= wanted + 1e-9))
+                self.assertTrue(np.all(upper >= wanted - 1e-9))
+
+    def test_zero_certificate_stays_exact_and_real_subnormals_are_enclosed(self):
+        from robot_workbench.motion_reference import _certified_dynamics
+        coefficients = np.zeros((1, 6, 12))
+        for lower, upper in _certified_dynamics(coefficients, np.array([0., 1.])):
+            np.testing.assert_array_equal(lower, 0.)
+            np.testing.assert_array_equal(upper, 0.)
+        smallest = np.nextafter(0., 1.)
+        coefficients[0, -2, 0] = smallest
+        velocity, _ = _certified_dynamics(coefficients, np.array([0., 1.]))
+        self.assertLessEqual(velocity[0][0, 0], smallest)
+        self.assertGreaterEqual(velocity[1][0, 0], smallest)
+
+    def test_bounded_construction_keeps_edge_nodes_and_zero_width_axes(self):
+        rng = np.random.default_rng(73)
+        for count in (2, 3, 17, 33, 61):
+            for kind in range(4):
+                q = np.zeros((count, 14))
+                q[:, :6] = rng.uniform(-1., 1., (count, 6))
+                if kind == 0:
+                    q[::2, :6] = 1.
+                    q[1::2, :6] = -1.
+                if kind == 1:
+                    q[:] = q[0]
+                q[:, 0] = 0.
+                source = dict(kind='online_prediction_chunk', device_targets14=q.tolist(),
+                              duration_s=(count-1)/30., active_arms=['left', 'right'])
+                limits = np.tile([-1., 1.], (14, 1))
+                limits[0] = [0., 0.]
+                limits[[6, 13]] = [0., .085]
+                reference = self.prepare(source, limits, planning_policy=dict(POLICY,max_execution_duration_s=None))
+                actual = np.concatenate([reference.sample(t)[0] for t in np.array_split(reference.breaks, 3) if len(t)])
+                np.testing.assert_allclose(actual, q, atol=1e-10)
+                low, high, velocity, acceleration = _extrema_batched(reference.coefficients, reference.breaks)
+                self.assertTrue(np.all(low >= limits[list(range(6))+list(range(7,13)), 0]-1e-9))
+                self.assertTrue(np.all(high <= limits[list(range(6))+list(range(7,13)), 1]+1e-9))
+                self.assertLessEqual(velocity.max(),1.+1e-9)
+                self.assertLessEqual(acceleration.max(),40.+1e-9)
+                self.assertLessEqual(reference.metadata['certificate_evaluations'],4)
 
     def test_legacy_default_is_unchanged_and_profile_is_scoped_and_frozen(self):
         from robot_workbench.inference_owner import configuration

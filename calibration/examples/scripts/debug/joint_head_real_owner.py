@@ -611,7 +611,7 @@ def hardware_backend(*, passive_left_jaw=False, disabled_grippers=(), right_j4_d
                         self._native_fault_reported = True
                     if not all(native_support_confirmed(row) for row in faults.values()):
                         raise RuntimeError('native emergency: invalid feedback; retained hold unavailable')
-                    heartbeat = self.output_guard.call('heartbeat')
+                    raise SDKNativeFault(faults)
             probe['phase']='jaw_diagnostic'
             result['gripper_feedback_valid']=[side not in disabled for side in ('left','right')]
             result['gripper_feedback_reason']=['operator_disabled_no_feedback' if side in disabled else None for side in ('left','right')]

@@ -5,7 +5,7 @@ import queue
 import threading
 import time
 
-from .ros_data import BoundedQueue, StreamRef, bounded_value, descriptor_message, json_text, MAX_METADATA_BYTES
+from .ros_data import BoundedQueue, SampleCache, StreamRef, bounded_value, descriptor_message, json_text, MAX_METADATA_BYTES
 
 
 class RosDriverPublisher:
@@ -27,6 +27,8 @@ class RosDriverPublisher:
             for stream,topic,kind,source_kind,units,hz in (
                 ('state',state_topic,'RobotState','state',{'positions':'SDK_rad_and_m','velocities':'SDK_rad_s_and_m_s'},100.),
                 ('control',event_topic,'DataEvent','event','original_event_units',0.))]
+        self.state_cache=SampleCache(dict(self.source_values[0],available=True),max_samples=256)
+        self.state_listeners=set()
         self.thread=threading.Thread(target=self._run,name='ros-driver-publisher',daemon=True);self.thread.start()
         for value in self.source_values:
             publisher=ros.publisher('sources/'+value['stream_id'],ros.types.SourceDescriptor,retained=True,depth=1)
@@ -82,7 +84,17 @@ class RosDriverPublisher:
                 if stream=='state':
                     message=self.ros.types.RobotState(reference=ref.message(),positions=list(value['positions']),
                         velocities=list(value['velocities']),efforts=list(value['efforts']),metadata_json=json_text(value['metadata']))
+                    from .ros_inputs import state_sample
+                    reference,sample,size=state_sample(message,self.state_cache.descriptor)
+                    self.state_cache.put(reference,sample,size)
                     self.state.publish(message)
+                    with self.lock:listeners=tuple(self.state_listeners)
+                    for listener in listeners:
+                        callback=listener()
+                        if callback is not None:callback()
+                        else:
+                            with self.lock:self.state_listeners.discard(listener)
+                        del callback
                     if not self.source_values[0]['available']:
                         self.source_values[0]['available']=True
                         self.sources['state'].publish(descriptor_message(self.ros,self.source_values[0]))
@@ -91,6 +103,9 @@ class RosDriverPublisher:
                         epoch=value['epoch'],event=value['event'],payload_json=json_text(value['payload'])))
             except Exception as error:
                 with self.lock:self.error=str(error);self.dropped+=1
+                if stream=='state':
+                    with self.state_cache.changed:
+                        self.state_cache.error=str(error);self.state_cache.changed.notify_all()
             finally:self.queue.task_done()
 
     def flush(self, timeout=5.):
@@ -113,4 +128,8 @@ class RosDriverPublisher:
             self.closed=True
         self.queue.put((1,None),timeout=5.);self.thread.join(5.)
         if self.thread.is_alive():raise TimeoutError('ROS publisher worker has not exited')
+        with self.state_cache.changed:
+            self.state_cache.error='Owner state source closed; explicit rebind required'
+            self.state_cache.changed.notify_all()
+        with self.lock:self.state_listeners.clear()
         for value in self.source_values:self.sources[value['stream_id']].publish(descriptor_message(self.ros,dict(value,available=False)))

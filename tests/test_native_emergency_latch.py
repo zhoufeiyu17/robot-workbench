@@ -21,6 +21,21 @@ class Backend:
 
 class NativeFaultRPCTest(unittest.TestCase):
     fixture=rpc_fixture.SDKProcessTests.fixture
+    def test_reported_read_fault_keeps_the_release_channel_open(self):
+        worker=WORKER.replace(' def read_execution_output(self):',
+            ' def read_calibration_state(self):\n'
+            '  from robot_workbench.sdk_process import SDKNativeFault\n'
+            '  self.faults={"left":'+repr(dict(FAULT,feedback_valid=False,support_mode='cached_position_hold'))+'}\n'
+            '  raise SDKNativeFault(self.faults)\n'
+            ' def read_execution_output(self):')
+        with patch.object(rpc_fixture,'WORKER',worker):b=self.fixture()
+        b.connect()
+        with self.assertRaises(SDKNativeFault):b.read_calibration_state()
+        self.assertIsNone(b.failure)
+        self.assertTrue(b.is_connected)
+        self.assertTrue(b.protection_snapshot()['recovery_required'])
+        b.close()
+
     def test_native_error_retains_ipc_for_reads_stop_release_not_software_recovery(self):
         with patch.object(rpc_fixture,'WORKER',WORKER):b=self.fixture()
         b.connect();pid=b.process.pid
@@ -63,6 +78,16 @@ class NativeFaultRPCTest(unittest.TestCase):
 
 
 class NativeFaultAdapterTest(unittest.TestCase):
+    def test_invalid_native_feedback_returns_fault_before_raw_finite_validation(self):
+        b,c=self.backend()
+        report=dict(FAULT,feedback_valid=False,support_mode='cached_position_hold')
+        b.native_faults=lambda:{'left':report}
+        b.output_guard.call=lambda *args,**kwargs:{'healthy':False}
+        b._arx5=NS(background_home_supported=False)
+        with self.assertRaises(SDKNativeFault) as caught:
+            b._read_calibration_state({})
+        self.assertEqual(caught.exception.faults,{'left':report})
+
     def backend(self):
         class ScopedBase(adapter_fixture.Base):
             def set_damping_hold(self,**kwargs):

@@ -14,6 +14,7 @@ python tests/test_ros_inputs.py
 python tests/test_ros_inference.py
 python tests/test_ros_recording.py
 python tests/test_ros_driver.py
+python tests/test_owner_state_binding.py
 python tests/test_ros_run.py
 python tests/test_joint_bounds.py
 python tests/test_manual_self_collision.py
@@ -79,6 +80,7 @@ python tests/test_normal_complete_segment.py
 python tests/test_user_duration_infer.py
 python tests/test_variable_inference_steps.py
 python tests/test_infer_curve_policy.py
+python tests/test_infer_operator_controls.py
 python tests/test_strict_initial_hold.py
 python tests/test_inference_timing.py
 python tests/test_inference_reference.py
@@ -97,6 +99,7 @@ python tests/test_control_owner_preview.py
 python tests/test_serve_control_owner.py
 python tests/test_sdk_process.py
 python tests/test_native_emergency_latch.py
+python tests/test_sdk_retirement.py
 python tests/test_native_fault_hold.py
 python tests/test_fault_hold_supervisor.py
 python tests/test_in_place_software_stop.py

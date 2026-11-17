@@ -96,12 +96,14 @@ class VariableStepsTests(unittest.TestCase):
 
     def test_actual_prepare_admit_complete_for_selected_steps(self):
         for n in (1,2,15,30,60):
-            with self.subTest(steps=n),patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=prepare_reference):
+            with self.subTest(steps=n),patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=prepare_reference),\
+                    patch('robot_workbench.motion_reference.check_brake_reserve',side_effect=AssertionError('model path must not require all-times fixed-duration reserve')):
                 runner=InferenceRunner.__new__(InferenceRunner);runner.config=configuration(config(n))
                 runner.owner=NS(control_time=lambda:100.,epoch=2,execution_clock_id='cpu')
                 from robot_workbench.wam_mem import LogicalMemoryClock
                 runner.memory_clock=LogicalMemoryClock()
                 runner._epoch=2;runner.initial_device14=[0.]*14;runner.target_interpreter=None
+                runner.initial_device14[3]=-3.
                 runner.initialization_source_s=100.;runner.previous_native_hold=None
                 runner.sdk_limits=[[-3.,3.]]*6+[[0.,.082]]+[[-3.,3.]]*6+[[0.,.082]]
                 from robot_workbench.inference_owner import device_limits
@@ -110,6 +112,7 @@ class VariableStepsTests(unittest.TestCase):
                 runner.adapter=NS(decode=lambda row,held:dict(final_device14=row.tolist()))
                 runner._record=Mock();runner._emit=Mock();runner._queue_native=Mock()
                 rows=np.zeros((60,14));rows[:,0]=np.linspace(.00001,.006,60)
+                rows[:,3]=np.linspace(-2.99,-2.9,60)
                 request=dict(request_id='cpu-'+str(n),observation=dict(source_time=100.))
                 response=runner._prepare_native_response(dict(request_id=request['request_id'],action14=rows),request)
                 ref=response['_prepared_reference'];_check_c2(ref.coefficients,ref.breaks)

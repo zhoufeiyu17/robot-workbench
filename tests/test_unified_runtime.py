@@ -19,6 +19,30 @@ from test_frozen_executor import fixture
 
 
 class UnifiedRuntimeTest(unittest.TestCase):
+    def test_lost_channel_with_live_retained_worker_can_enter_supported_retirement(self):
+        runtime,_=self.create()
+        backend=runtime.owner.backend._backend
+        backend.terminal_failure='synthetic lost SDK channel'
+        backend.is_connected=False
+        exited=[False]
+        backend.protection_snapshot=lambda:dict(event=dict(id='retained'),worker_exit_confirmed=exited[0])
+        backend.supported_retirement_ready=lambda:True
+        backend.dispose=Mock()
+        def retire(*,arms_supported):
+            if not arms_supported:raise ValueError('supported arms required')
+            exited[0]=True
+            backend.supported_retirement=dict(worker_exit_confirmed=True,sdk_close_confirmed=False)
+        backend.retire_supported=Mock(side_effect=retire)
+        self.assertFalse(runtime.tick())
+        runtime.begin_maintenance()
+        with self.assertRaisesRegex(ValueError,'supported arms'):runtime.retire_protected()
+        self.assertIsNotNone(runtime.fd)
+        result=runtime.retire_protected(arms_supported=True)
+        self.assertTrue(result['worker_exit_confirmed'])
+        self.assertFalse(result['sdk_close_confirmed'])
+        self.assertIsNone(runtime.fd)
+        backend.dispose.assert_called_once()
+
     def test_pre_backend_lock_wait_is_reported_separately_from_fast_backend(self):
         runtime,_=self.create();events=[];started=threading.Event();results=[]
         def invoke():

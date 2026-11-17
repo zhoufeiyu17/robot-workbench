@@ -140,7 +140,8 @@ class OwnerInference:
         self.service=service;self.session_id=secrets.token_hex(16);self.runner=None
         self.lock=threading.Lock();self.observation=None;self.support=None;self.pending={}
         self.recording_ready=False;self.recording_error=None
-        self.ros_node=self.ros_client=self.ros_state_node=None;self.ros_error=None;self.ros_pending_observation=None
+        self.ros_node=self.ros_client=self.state_cache=None;self.state_publisher=self.state_listener=None
+        self.ros_error=None;self.ros_pending_observation=None
         self.ros_configuration=deepcopy(configuration);self.ros_profile=deepcopy(specification['profile'])
         if getattr(service.device.runtime,'data_plane',None) is not None:
             try:self._open_ros(configuration)
@@ -150,7 +151,6 @@ class OwnerInference:
     def _open_ros(self,configuration):
         from .pipeline_timing import timing
         from .ros_data import RosNode,SourceDirectory,plane_config
-        from .ros_inputs import RosInputs
         from .ros_inference import RosModelClient
         runtime=self.service.device.runtime;plane=plane_config(runtime.data_plane)
         if configuration.get('data_plane')!=plane:
@@ -169,40 +169,26 @@ class OwnerInference:
         for role,camera in CAMERAS.items():
             if self.ros_sources[camera]['metadata'].get('serial')!=self.camera_bindings[role][1]:
                 raise ValueError('ROS camera serial differs from the reviewed binding')
-        with self.service.inference_state_lock:
-            source=self.ros_sources['state'];shared=self.service.inference_state
-            if shared is not None and shared[0]['source_instance_id']!=runtime.nonce:
-                shared[1].close();self.service.inference_state=shared=None
-            if shared is not None and shared[0]!=source:
-                raise ValueError('Owner state descriptor changed within the same runtime')
-            reused=shared is not None
-            if shared is None:
-                state_node=RosNode('owner_state_'+runtime.nonce[:12],namespace=plane['namespace'],
-                    domain_id=plane['domain_id'],localhost_only=False)
-                service=self.service
-                def received(*_):
-                    current=service.inference;bound=service.inference_state
-                    if current is not None and bound is not None and current.ros_inputs is bound[2]:
-                        current._resolve_ros_observation()
-                try:inputs=RosInputs(state_node,[source],on_sample=received)
-                except BaseException:state_node.close();raise
-                self.service.inference_state=shared=(deepcopy(source),state_node,inputs)
-        self.ros_state_node,self.ros_inputs=shared[1:]
-        # A retained source declaration does not prove this new reader receives
-        # data. Establish the consumer before replacing the previous binding.
-        cache=self.ros_inputs.caches['state']
-        began=time.monotonic_ns()
+        self.state_cache=runtime.ros_publisher.state_cache
+        if self.state_cache.descriptor!=self.ros_sources['state']:
+            raise ValueError('Owner state history differs from the declared source')
+        # The producer commits the exact decoded state before DDS publication.
+        # A new sample proves progress without a same-process DDS loopback.
+        cache=self.state_cache;began=time.monotonic_ns()
         with cache.changed:
-            if not cache.changed.wait_for(lambda:bool(cache.samples)or cache.error or self.ros_state_node.errors,timeout=5.):
-                timing.fault('Owner state subscription has no initial sample',consumer=self.ros_inputs.consumer,
-                    reused=reused,reader_alive=self.ros_state_node.thread.is_alive(),
-                    publisher_count=self.ros_state_node.node.count_publishers(source['topic']))
-                raise TimeoutError('Owner state subscription has no initial sample; inference binding not ready')
-            if cache.error or self.ros_state_node.errors:
-                raise ValueError(cache.error or self.ros_state_node.errors[-1])
-        timing.record('owner.state_subscription_ready',began,consumer=self.ros_inputs.consumer,reused=reused)
+            previous=next(reversed(cache.samples),None)
+            if not cache.changed.wait_for(lambda:(bool(cache.samples)
+                    and next(reversed(cache.samples))!=previous)or cache.error,timeout=5.):
+                timing.fault('Owner state producer history stopped advancing',
+                    cached_samples=len(cache.samples),latest_sequence=previous.sequence if previous else None)
+                raise TimeoutError('Owner state producer history stopped advancing; inference binding not ready')
+            if cache.error:raise ValueError(cache.error)
+        timing.record('owner.state_history_ready',began,source_instance_id=runtime.nonce)
         self.ros_client=RosModelClient(self.ros_node,binding=binding,
             clock=lambda:round(runtime.owner.control_time()*1e9))
+        self.state_publisher=runtime.ros_publisher
+        self.state_listener=weakref.WeakMethod(self._resolve_ros_observation)
+        with self.state_publisher.lock:self.state_publisher.state_listeners.add(self.state_listener)
         self.ros_node.subscribe('observations',self.ros_node.types.Observation,self._receive_ros_observation)
 
     def _receive_ros_observation(self,message):
@@ -226,7 +212,8 @@ class OwnerInference:
                     or message.model_io_digest!=self.ros_client.binding['conversion_id']
                     or message.state.source_instance_id!=runtime.nonce):
                 raise ValueError('ROS observation belongs to another Owner, epoch or model conversion')
-            feedback=self.ros_inputs.resolve(message.state)
+            from .ros_data import StreamRef
+            feedback=self.state_cache.get(StreamRef.from_message(message.state))
             times=observation_times(message,feedback)
             observation=referenced_observation(message,self.ros_sources,feedback,state_to_device=lambda raw:device_state(
                 raw['qpos'],disabled_grippers=tuple(self.ros_configuration['disabled_grippers']),
@@ -236,7 +223,7 @@ class OwnerInference:
             with self.lock:
                 if self.ros_pending_observation is message:
                     self.observation=observation;self.ros_error=None;self.ros_pending_observation=None
-        except (ValueError,LookupError,KeyError)as error:
+        except Exception as error:
             outcome='waiting'if isinstance(error,LookupError)else'rejected'
             with self.lock:
                 if self.ros_pending_observation is not message:return
@@ -258,7 +245,7 @@ class OwnerInference:
         runtime=self.service.device.runtime;message=observation['ros_observation']
         if runtime is None or message.epoch!=runtime.owner.epoch:return None
         if any(self.ros_directory.values.get(key)!=source for key,source in self.ros_sources.items()):return None
-        if self.ros_inputs.caches['state'].error:return None
+        if self.state_cache.error:return None
         for rule,stamp,identity in [('G02',observation['source_time'],'model_observation'),
                 ('G03',observation['feedback_sample_time_s'],'paired_feedback')]:
             decision=self._input_decision(rule,stamp,now,identity)
@@ -273,10 +260,13 @@ class OwnerInference:
 
     def close(self):
         if self.ros_client is not None:self.ros_client.cancel()
+        if self.state_publisher is not None:
+            with self.state_publisher.lock:self.state_publisher.state_listeners.discard(self.state_listener)
+            self.state_publisher=self.state_listener=None
         recording=getattr(getattr(self.service.device.runtime,'owner',None),'recording',None)
         if isinstance(recording,RecordingFacts)and recording.bridge()is self:recording.close()
         if self.ros_node is not None:self.ros_node.close();self.ros_node=None
-        self.ros_inputs=self.ros_client=self.ros_directory=None
+        self.state_cache=self.ros_client=self.ros_directory=None
 
     def emit(self,kind,**value):
         self.service.event('owner_inference',session_id=self.session_id,kind=kind,**plain(value))

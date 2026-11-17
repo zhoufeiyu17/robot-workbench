@@ -164,7 +164,9 @@ class NormalModeTests(unittest.TestCase):
         return client,credential
 
     def setup_modes(self,recording=False,recorder_ids=None,finish_kind=None,finish_timeout_s=60.,initial_mode='MODEL',per_episode=False,reviewed=False,reviewed_duration_s=.5):
-        self.compiler=patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=prepare_reference)
+        def compile_in_process(*args, executor=None, **options):
+            return prepare_reference(*args, **options)
+        self.compiler=patch('robot_workbench.motion_reference.prepare_reference_process',side_effect=compile_in_process)
         self.compiler.start();self.addCleanup(self.compiler.stop)
         mapping=None;initial=None
         if finish_kind:

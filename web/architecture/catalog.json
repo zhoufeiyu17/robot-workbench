@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "architecture-traceability-20261105-v4-p1-raw-i06-context+capture-binding-20261106+control-capture-capability+wam-design1+manager-entry-mapping-20261107+family-backends-20261107+generic-wam-e04-2-20261107+progress.54520d0acafb",
+  "revision": "approved-lifecycle-20261117-v1+progress.a2990b9dfcb8",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-14T09:17:16.122013+00:00",
   "site_title": "工作台架构与控制策略",
@@ -2467,10 +2467,10 @@
     },
     "brake": {
       "path": "robot_workbench/motion_reference.py",
-      "line": 600,
-      "sha256": "97657554335283716d9925fbba064f9365ffe0b1e683d2ca0ae257dea5716584",
-      "excerpt": " 599 \n 600 def retime_for_brake_reserve(reference,limits,*,duration_s,velocity_limit,acceleration_limit,maximum_duration_s):\n 601     \"\"\"Stretch the existing zero-boundary curve to satisfy its normal brake proof.\"\"\"\n 602     if not isinstance(reference,PreparedReference):raise ValueError('analytic reference required for brake reserve')\n 603     _check_c2(reference.coefficients,reference.breaks)\n 604     _,start_v,start_a=reference.sample([0.])\n 605     if np.any(start_v!=0.)or np.any(start_a!=0.):raise ValueError('reserve retiming requires a confirmed zero-v/a start')\n 606     if any(type(x)not in(int,float)or not math.isfinite(x)or x<=0",
-      "scope": "已部署源码快照"
+      "line": 873,
+      "sha256": "610f17bf0ce60402ef87073a71d22cdc002485d0bcd7895d11cf8b4876a8679b",
+      "excerpt": " 873 def prepare_brake_after(reference, boundary_s, limits, **options):\n 874     \"\"\"Keep the prepared prefix exactly, then brake from its future q/v/a.\n 875 \n 876     The Owner must separately verify that the boundary is still future and\n 877     covers its committed native prefix before installing this candidate.\n 878     \"\"\"\n 879     if (not isinstance(reference,PreparedReference)or type(boundary_s)not in(int,float)\n 880             or not math.isfinite(boundary_s)or boundary_s<=0.):",
+      "scope": "current source entry"
     },
     "segment": {
       "path": "robot_workbench/inference_owner.py",
@@ -2941,7 +2941,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "1338b7b16125bc6e947697565b3af1ebfe988946e54d0e56fd456ff84ffe724d",
+        "fingerprint": "ab8c3a1f73b573a05ad2e007f169b078b16b6e400bf83ad7b36d196cc218d3ac",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -3065,7 +3065,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "e44f8e3086f3b1a36578f05fc91aa7e1345194efffffc10239191075b41b9712",
+        "fingerprint": "a4a5b8581d185f0480c6d16aecb1b0fcf62d7090c50e390f504927383db9bced",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3192,7 +3192,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "b320957f9dc7c9dd4e2a595dc9f579145a452a2b75d642f46c38e461ecf3dc2a",
+        "fingerprint": "4418f18a118749a05a322492ad16022b8d25627704b153bc5ddcba8dfb6f38f8",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3311,7 +3311,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "db2ed8cad6e37413c4a567daeee9f0d06bd51f8ef988629cf8019e0e8e8b7446",
+        "fingerprint": "cc0095b03cb23ceacae90c0d1b2f272f4a36fa460c8ca92ae5c88445c0f21817",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3525,7 +3525,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "62c214dcd363b6b74d88d1e5bea3df6e8f6494494ed282ed07ebd3e6ffe29d72",
+        "fingerprint": "0e036c0aecc0a81d2613ed21f0b7a60a1ad0bc15ccd05c498a4ffc58b3fe0341",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3688,7 +3688,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "3ed4a5920304fc4797afc7986c5d3b3e438509c74b902d8ecaa79c146963b753",
+        "fingerprint": "5b4df143eed5064c6d68fd024f89db24b62af87e077d686a912b6cd9137926f4",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3825,7 +3825,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "0505d972c4e55f8a949c76d2774b7d68d66309d2f536f812d39ea4fc90f8b450",
+        "fingerprint": "99e2c7a572c04f45f829048ed81e38d0a4f33ccb73f07874b27d8e19213d33cd",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3967,7 +3967,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "727766503070e6d771d179f2121201ff923ef3b9e31bc9bcdc477ef50c32b62c",
+        "fingerprint": "96ba34d2e471f3b5b253fb9f4dc136e01544b5237da18945ad7e0f32af6b1261",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4093,7 +4093,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "9dcf61873b1b251e8f682ff8bff37f132ba9f541047c4085a943b894fd1866b0",
+        "fingerprint": "247df8a3a0a7e654b3af91a3d7bffd0446ce4509d0b09c7a8fb4953fc56708b2",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4222,7 +4222,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "62cbd6b3d7859624b7406093d95e3db6716c423c6f5f79f54244be7a7100ceef",
+        "fingerprint": "f80fa65b1f9d6fed9f72af33f55bf6ca6f3e570e32f652cc3548d7cf4fb139c0",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4348,7 +4348,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "5f458c57a18db3c73fc5aa5903e0d273503ada0f936ee342fccd27b76c40a864",
+        "fingerprint": "94c3570718b42821a9f81d9318630eb2cef990aedcbe093abd4083400f00f240",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -10030,7 +10030,7 @@
       "robot_workbench/ros_inference.py",
       "robot_workbench/ros_recording.py"
     ],
-    "sharing": "One source topic. Inference borrows the common camera view original RGB cache after exact source validation; source replacement invalidates the binding. State and control events use independent executors. Observation and ModelInput reference original samples.",
+    "sharing": "One canonical state producer. Owner inference reads its bounded producer SampleCache before DDS publication; external consumers keep the original ROS topic and exact StreamRef. Inference borrows the common camera view original RGB cache after exact source validation; source replacement invalidates the binding. External state and control events use independent executors. Observation and ModelInput reference original samples.",
     "physical_acceptance": "paused; this migration is CPU/ROS-only until separately resumed",
     "assembly_files": [
       "robot_workbench/runtime.py",
@@ -10929,7 +10929,7 @@
       "activity": "Owner workbench.memory-activity.v2 publishes cumulative model/manual progress and bounded node target history; model retiming does not change logical steps.",
       "test_end": "cancel.end_test=true;confirmed control stop then clear memory and retire pin;ordinary internal parameter-renewal cancel retains memory",
       "audit_gap": "DataEvent gaps are diagnostic; paired RobotState cumulative logical progress drives scheduling; missing node history or source changes fail explicitly.",
-      "owner_state_lifetime": "one runtime-bound canonical state reader reused across inference bindings;new runtime replaces it;first readiness,exact references,age andepoch checks retained",
+      "owner_state_lifetime": "Owner inference reads the runtime-owned producer SampleCache directly;256 samples within64MiB;canonical state is cached before DDS publication;external ROS consumers retain the same StreamRef and payload;new sample progress,descriptor,epoch,age and explicit eviction checks retained;weak listeners retry pending exact references and retire with the binding",
       "model_update": "POST /memory/observe/model; observe_model_node accepts arbitrary adopted/completed cumulative logical prefix steps.",
       "frozen_queries": "infer explicitly names context revision/time. Fresh real observations can query at unchanged logical time on an isolated copy. Current and preceding contexts are retained. Expired contexts reject without unloading the worker.",
       "policy_summary": "workflow.inference.memory_policy supplies model/manual submission strides and logical step durations to the read-only MEM policy panel."
@@ -11061,5 +11061,33 @@
       "Preflight failure preserves the resident model"
     ],
     "evidence": ".evidence/gpu-admission-20261114-v1/qualification.json"
+  },
+  "sdk_fault_recovery": {
+    "status": "implemented",
+    "sources": [
+      "robot_workbench/sdk_retirement.py",
+      "robot_workbench/sdk_process.py",
+      "robot_workbench/runtime.py",
+      "robot_workbench/control_owner.py",
+      "robot_workbench/service.py"
+    ],
+    "source": "docs/WORKBENCH_INTEGRATION_INTERFACE.md",
+    "fault_read": "Confirmed retained native fault preserves the private command channel for normal close",
+    "lost_channel": "Explicit supported retirement verifies current process ancestry, script, UID, boot and start ticks then targets pidfds",
+    "receipt": "Exceptional supported process termination retains sdk_close_confirmed=false and verifies final worker reap before new Runtime",
+    "motion": "New connection enters its declared initial hold; model execution requires explicit user action"
+  },
+  "trajectory_planning": {
+    "version": "bounded_c2_grid.v1",
+    "scope": "zero-derivative MODEL references",
+    "admission": "position and dynamic bounds by construction",
+    "normal_stop": "fixed duration checked at requested boundary",
+    "source": "docs/BOUNDED_TRAJECTORY_DESIGN.md",
+    "retired": "unused all-times brake-reserve retiming entry and branch removed"
+  },
+  "pedal_lifecycle": {
+    "source": "docs/WORKBENCH_INTEGRATION_INTERFACE.md",
+    "restart": "revalidate the same registered pedal contract and unique publisher, rebuild subscription, clear gestures and reject pre-bind commands",
+    "recording": "new capture verifies the current source generation before creation"
   }
 }

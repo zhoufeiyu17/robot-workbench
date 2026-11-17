@@ -1060,7 +1060,12 @@ class InferenceWorkflow:
         control=self.ros_directory.resolve({'control':dict(source_instance_id=self.device.runtime.nonce)})
         sources=[*self.ros_inputs.sources.values(),*control,*self.ros_worker.source_descriptors(self.device.id)]
         pedal=getattr(self,'operator_pedal_source',None)
-        if pedal is not None:sources.append(pedal)
+        if pedal is not None:
+            from .ros_data import source_descriptor
+            declared=source_descriptor(json.loads(Path(self.operator_controls['pedal_source_descriptor']).read_text()))
+            if declared!=pedal or not declared['available']:
+                raise ValueError('踏板来源正在重新绑定，请等待踏板就绪后开始录制')
+            sources.append(pedal)
         return [capture_source(row,namespace=self.ros_plane['namespace'],domain_id=self.ros_plane['domain_id'])for row in sources]
 
     def _memory_observation(self,target_source_time,epoch,run_id):

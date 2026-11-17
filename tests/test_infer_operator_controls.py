@@ -306,7 +306,133 @@ class PedalSourceTests(unittest.TestCase):
             while flow.operator_input_status['state']!='unavailable':
                 self.assertLess(time.monotonic(),deadline,flow.operator_input_status);time.sleep(.02)
             self.assertEqual(len(calls),count,'heartbeat loss and recovery must not synthesize a pedal action')
+            old_pid=process.pid
+            restarted_read,restarted_write=os.pipe()
+            self.addCleanup(os.close,restarted_read);self.addCleanup(os.close,restarted_write)
+            device_path.unlink();device_path.symlink_to('/proc/self/fd/'+str(restarted_read))
+            with(root/'restarted-source.log').open('w')as log:
+                process=subprocess.Popen([sys.executable,'-u','-B',str(entry),'--profile',str(config),'--root',str(source_root)],
+                    pass_fds=(restarted_read,),stdout=log,stderr=log)
+            write_fd=restarted_write
+            deadline=time.monotonic()+10
+            while (flow.operator_input_status.get('state')!='ready'
+                    or flow.operator_pedal_source['source_instance_id']==original_source['source_instance_id']):
+                self.assertIsNone(process.poll(),(root/'restarted-source.log').read_text())
+                self.assertLess(time.monotonic(),deadline,flow.operator_input_status);time.sleep(.02)
+            self.assertNotEqual(process.pid,old_pid)
+            self.assertTrue(flow.operator_input_thread.is_alive())
+            self.assertIsNone(flow.operator_pedal_gesture)
+            self.assertEqual(len(calls),count,'publisher restart must not synthesize a pedal action')
+            second=CaptureSession.create(root/'capture-restarted',request_id='pedal-record-restarted',purpose_profile='infer_debug',
+                source_descriptors=[capture_source(flow.operator_pedal_source,**{k:profile['data_plane'][k]for k in ('namespace','domain_id')})])
+            self.addCleanup(second.close)
+            prepared=second.prepare()
+            second.bind(run_id='pedal-record-restarted',business_kind='inference',policy_hash='a'*64,
+                execution_owner=dict(owner_pid=os.getpid(),runtime_nonce='cpu-owner',command_epoch=1),health_source=prepared['health_source'])
+            second.start()
+            app.action('inference_focus',dict(focus,request_id='focus-after-process-restart',active=True))
+            key(3,age=3);time.sleep(.2);self.assertEqual(len(calls),count)
+            key(3);time.sleep(.3);self.assertEqual(mode[0],'TEACH')
+            key(3);time.sleep(.3);self.assertEqual(mode[0],'HOLD')
+            self.assertEqual(len(calls),count+2)
+            second.finish({},dict(status='completed'),source_endpoints={'pedal':dict(source_clock_id='host_wall',source_time=time.time())})
+            self.assertTrue(second.done.wait(10),second.snapshot())
+            restarted_manifest=json.loads((second.directory/'manifest.json').read_text())
+            self.assertEqual(restarted_manifest['recording_outcome'],'complete',restarted_manifest.get('issues'))
+            self.assertGreater(restarted_manifest['streams']['pedal']['committed'],0)
+            print(json.dumps(dict(fake_pedal_restart='passed',old_pid=old_pid,new_pid=process.pid,
+                old_source=original_source['source_instance_id'],new_source=flow.operator_pedal_source['source_instance_id'],
+                auto_rebound=True,stale_commands_rejected=True,unexpected_actions=0,
+                first_recording=manifest['recording_outcome'],restarted_recording=restarted_manifest['recording_outcome'],
+                restarted_pedal_records=restarted_manifest['streams']['pedal']['committed'])),flush=True)
             flow.operator_input_closed.set();flow.operator_input_thread.join(2)
+
+
+class PedalSourceRestartTests(unittest.TestCase):
+    def test_new_recording_refuses_a_retired_pedal_source(self):
+        from robot_workbench.inference_workflow import InferenceWorkflow
+        source=dict(device_id='cpu',stream_id='pedal',source_instance_id='old',source_clock_id='host_wall',
+            topic='/cpu/inputs/pedal',message_type='workbench_interfaces/msg/DataEvent',kind='event',
+            units='pedal_command',coordinate_frame='operator',nominal_hz=10.,available=True,metadata={})
+        with tempfile.TemporaryDirectory()as folder:
+            path=Path(folder)/'source.json';path.write_text(json.dumps(dict(source,source_instance_id='new')))
+            flow=SimpleNamespace(device=SimpleNamespace(id='cpu',runtime=SimpleNamespace(nonce='owner')),
+                ros_directory=SimpleNamespace(resolve=lambda expected:[]),ros_inputs=SimpleNamespace(sources={}),
+                ros_worker=SimpleNamespace(source_descriptors=lambda device:[]),
+                ros_plane=dict(namespace='/cpu',domain_id=0),operator_pedal_source=source,
+                operator_controls=dict(pedal_source_descriptor=str(path)))
+            with self.assertRaisesRegex(ValueError,'重新绑定'):InferenceWorkflow._ros_capture_sources(flow)
+            flow.operator_pedal_source=json.loads(path.read_text())
+            result=InferenceWorkflow._ros_capture_sources(flow)
+            self.assertEqual(result[0]['source_instance_id'],'new')
+
+    def test_source_restart_rebinds_without_replaying_commands_or_accepting_another_contract(self):
+        from unittest.mock import patch
+        from robot_workbench import ros_data
+        from robot_workbench.service import Application
+
+        source=dict(device_id='cpu',stream_id='pedal',source_instance_id='first',source_clock_id='host_wall',
+            topic='/cpu/inputs/pedal',message_type='workbench_interfaces/msg/DataEvent',kind='event',
+            units='pedal_command',coordinate_frame='operator',nominal_hz=10.,available=True,metadata={})
+        sources={'pedal':source};nodes=[];publisher_count=[1];calls=[]
+        class Node:
+            def __init__(self,*args,**kwargs):
+                self.node=self;self.types=SimpleNamespace(DataEvent=object);self.closed=False;self.callback=None
+                nodes.append(self)
+            def get_publishers_info_by_topic(self,topic):
+                return [SimpleNamespace(endpoint_gid=b'gid')]*publisher_count[0]
+            def subscribe(self,topic,kind,callback):self.callback=callback
+            def close(self):self.closed=True
+        class Directory:
+            def __init__(self,*args):self.values=sources
+            def resolve(self,expected):
+                if sources['pedal']['source_instance_id']!=expected['pedal']['source_instance_id']:
+                    raise ValueError('source differs')
+                return [deepcopy(sources['pedal'])]
+        def until(check):
+            deadline=time.monotonic()+3
+            while not check():
+                self.assertLess(time.monotonic(),deadline,getattr(flow,'operator_input_status',{}));time.sleep(.01)
+        def send(instance,*,occurred=None,command=11):
+            message=SimpleNamespace(reference=SimpleNamespace(source_instance_id=instance,stream_id='pedal',
+                source_time_ns=time.time_ns(),sequence=len(calls)+1),event='pedal_command',
+                payload_json=json.dumps(dict(command=command,occurred_at=time.time()if occurred is None else occurred)))
+            nodes[-1].callback(message)
+        with tempfile.TemporaryDirectory()as folder,patch.object(ros_data,'RosNode',Node),patch.object(ros_data,'SourceDirectory',Directory):
+            path=Path(folder)/'source.json';path.write_text(json.dumps(source))
+            device=SimpleNamespace(id='cpu',environment='physical',runtime=SimpleNamespace(nonce='owner'))
+            app=Application({'physical':device})
+            flow=SimpleNamespace(ros_plane=dict(namespace='/cpu',domain_id=0),
+                operator_controls=dict(event_max_age_s=1.),operator_pedal_gesture={'pending':True})
+            app.operator_focus['physical']=dict(client_id='page',runtime_nonce='owner',started_wall=time.time()-1,expires=time.monotonic()+10)
+            app._operator_pedal_action=lambda *args:calls.append(args[3].source_instance_id)or dict(accepted=True)
+            app.install_operator_pedal(device,flow,str(path))
+            try:
+                until(lambda:bool(nodes)and nodes[-1].callback is not None)
+                send('first');self.assertEqual(calls,['first'])
+                restarted=time.time()
+                source=dict(source,source_instance_id='second');sources['pedal']=source
+                path.write_text(json.dumps(source))
+                until(lambda:len(nodes)>=2 and nodes[-1].callback is not None)
+                self.assertTrue(nodes[0].closed);self.assertIsNone(flow.operator_pedal_gesture)
+                send('first');send('second',occurred=restarted-.01)
+                self.assertEqual(calls,['first'])
+                send('second');self.assertEqual(calls,['first','second'])
+                publisher_count[0]=2
+                until(lambda:flow.operator_input_status['state']=='unavailable')
+                self.assertTrue(flow.operator_input_thread.is_alive())
+                publisher_count[0]=1
+                until(lambda:nodes[-1].callback is not None and not nodes[-1].closed)
+                send('second');self.assertEqual(calls,['first','second','second'])
+                # A restart may change process identity, while role/topic/calibration stay bound.
+                source=dict(source,source_instance_id='third',metadata={'different_reader':True})
+                sources['pedal']=source;path.write_text(json.dumps(source))
+                until(lambda:'配置契约'in flow.operator_input_status.get('error',''))
+                self.assertEqual(calls,['first','second','second'])
+            finally:
+                flow.operator_input_closed.set();flow.operator_input_thread.join(3)
+            self.assertFalse(flow.operator_input_thread.is_alive())
+            self.assertTrue(all(node.closed for node in nodes))
 
 
 if __name__=='__main__':unittest.main()

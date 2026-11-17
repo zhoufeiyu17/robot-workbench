@@ -222,7 +222,6 @@ class ControlOwnerService:
         self.lock=threading.Lock();self.requests=OrderedDict();self.maintenance=None;self.stop_serial=0
         self.event_lock=threading.Lock();self.events=deque(maxlen=8192);self.event_sequence=0
         self.profile_sha256=profile_sha256;self.inference=None;self.last_runtime_nonce=None
-        self.inference_state=None;self.inference_state_lock=threading.Lock()
         self.identity=_identity()
         self.descriptor_path=self.root/'control-owner.json';socket_path=self.root/'control.sock'
         if socket_path.exists():raise ValueError('control socket already exists; inspect its owner before replacement')
@@ -391,17 +390,16 @@ class ControlOwnerService:
                     result['publication']=dict(sequences=dict(publisher.sequences),error=publisher.error,
                         dropped=publisher.dropped,thread_alive=publisher.thread.is_alive())
             bridge=self.inference
-            inputs=getattr(bridge,'ros_inputs',None);node=getattr(bridge,'ros_node',None)
-            if inputs is not None and node is not None:
-                cache=inputs.caches['state']
+            cache=getattr(bridge,'state_cache',None);node=getattr(bridge,'ros_node',None)
+            if cache is not None and node is not None:
                 with cache.lock:
                     latest=next(reversed(cache.samples),None)
-                    result['observation_input']=dict(consumer=inputs.consumer,
+                    result['observation_input']=dict(consumer='owner_producer_history',delivery='producer_cache',
                         sample_count=len(cache.samples),error=cache.error,
                         latest_state_sequence=latest.sequence if latest else None,
                         latest_state_source_ns=latest.source_time_ns if latest else None,
                         resolver_error=bridge.ros_error,callback_errors=list(node.errors),
-                        state_callback_errors=list(bridge.ros_state_node.errors))
+                        source_error=cache.error)
             return result
         if operation=='inspect':return self.inspect()
         if operation=='snapshot':return self.inspect(args.get('business'))
@@ -455,6 +453,7 @@ class ControlOwnerService:
             if args!={'arms_supported':True}:raise ValueError('current supported-arms fact required')
             if runtime is not None:raise ValueError('Owner already acquired; attach without reconnecting')
             if self.maintenance is not None:raise ValueError('end the prior control maintenance lease before acquiring SDK')
+            self._close_inference()
             self.device.connect(args)
             return self.inspect()
         if operation=='maintenance_end':
@@ -518,9 +517,10 @@ class ControlOwnerService:
             return dict(self.maintenance)
         if operation=='retire_protected':
             actor=_ControlActor(self,'recover_control',args.get('token'));actor.require(runtime)
-            result=runtime.retire_protected();self.device.closed.set()
+            result=runtime.retire_protected(arms_supported=args.get('arms_supported',False));self.device.closed.set()
             if self.device.thread is not None:self.device.thread.join(2)
             self.device.runtime=None;self.device.credentials={};self.maintenance=None
+            self._close_inference()
             return result
         if operation=='hardware_binding':
             path=Path(args['path'])
@@ -546,11 +546,12 @@ class ControlOwnerService:
 
     def serve_forever(self):self.server.serve_forever(poll_interval=.05)
 
+    def _close_inference(self):
+        if self.inference is not None:self.inference.close();self.inference=None
+
     def close(self):
         if self.device.runtime is not None:raise ValueError('normal supported release or verified protected retirement required before Owner service exit')
-        if self.inference is not None:self.inference.close();self.inference=None
-        if self.inference_state is not None:
-            self.inference_state[1].close();self.inference_state=None
+        self._close_inference()
         self.server.shutdown();self.server.server_close()
         _shutdown_encoder(self.event_encoder)
         _shutdown_encoder(self.read_encoder)
@@ -796,7 +797,7 @@ class ControlRuntimeClient:
                 for row in batch['events']:
                     if row['event']=='control_capture_sealed':callback(row['value'])
                 if batch['incomplete']:callback(None)
-            result=self._call('inference_configure',configuration=configuration,specification=specification)
+            result=self._call('inference_configure',configuration=configuration,specification=specification,timeout=20.)
             self.event_cursor=boundary
             self.inference_session=result['session_id']
             self.capture_backend=configuration.get('recording_backend')=='capture_session_v1'
@@ -966,9 +967,9 @@ class ControlRuntimeClient:
             if target!='collection':raise ValueError('only collection maintenance admission is declared')
             return self._actor_call('admit_collection',maintenance_actor)
         return self.handoff(self.clients[self.holder],target,active=active)
-    def retire_protected(self):
+    def retire_protected(self, *, arms_supported=False):
         if self.lease is None:raise PermissionError('Owner maintenance lease required')
-        result=self._call('retire_protected',token=self.lease['token'])
+        result=self._call('retire_protected',token=self.lease['token'],arms_supported=arms_supported)
         # Successful retirement consumes the service-side lease as well.
         self.protected_retirement=result;self.fd=None;self.lease=None
         return result

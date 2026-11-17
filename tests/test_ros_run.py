@@ -520,10 +520,9 @@ class RosRunTests(unittest.TestCase):
                                 execution_instance_id=capture.execution_instance_id,ingress_closed=False))
                 device=SimpleNamespace(id='cpu_robot',environment='fake',runtime=runtime)
                 service=SimpleNamespace(device=device,event=event,reference_executor=None,inference=None,
-                    inference_state=None,inference_state_lock=threading.Lock())
+                    )
                 bridge=OwnerInference(service,config,dict(profile=profile,reference=None,preloaded_prediction=None,feedforward=None))
                 service.inference=bridge
-                self.addCleanup(service.inference_state[1].close)
                 policy=runtime._guard_policy('inference')
                 pairer=TimestampPairer(Guard.bind(policy,dict(training_rgb_pair_error_s=TRAINING_RGB_PAIR_ERROR_S,
                                                             training_state_pair_error_s=TRAINING_STATE_PAIR_ERROR_S)))
@@ -586,7 +585,7 @@ class RosRunTests(unittest.TestCase):
                         {'binding':False,'recording':False})
                     for _ in range(16):
                         bridge=OwnerInference(service,config,dict(profile=profile,reference=None,preloaded_prediction=None,feedforward=None))
-                        self.assertIs(bridge.ros_inputs,service.inference_state[2])
+                        self.assertIs(bridge.state_cache,runtime.ros_publisher.state_cache)
                         service.inference=bridge
                         runtime.configure_inference(config,bridge.factory);runtime.revoke_inference()
                         retired=weakref.ref(bridge);service.inference=None;bridge.close();bridge=None

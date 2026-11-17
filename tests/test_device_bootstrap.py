@@ -411,7 +411,8 @@ class BootstrapTests(unittest.TestCase):
         close_deployment(first)
         second=build_physical_application(profile,output=self.root/'second-service')
         try:
-            self.assertEqual(second.inference.results(),[result])
+            self.assertEqual(second.inference.history.page()['results'],[result])
+            self.assertEqual(second.inference.results(),[])
             self.assertIsNone(second.device.runtime)
         finally:close_deployment(second)
 

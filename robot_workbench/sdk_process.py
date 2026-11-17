@@ -153,7 +153,7 @@ def serve_worker(connection, backend, epoch=None):
         except Exception as error:
             response=dict(id=previous,error=f'{type(error).__name__}: {error}'[:1000])
             native_type=getattr(getattr(backend,'_arx5',None),'NativeEmergencyLatched',())
-            if isinstance(error,native_type) and request['method']not in('connect','close') and backend.is_connected:
+            if (isinstance(error,SDKNativeFault) or isinstance(error,native_type)) and request['method']not in('connect','close') and backend.is_connected:
                 # Native latching is not a dead transport. Confirm fault output and
                 # stop the other arm before returning a retained-fault response.
                 backend.set_damping_hold(manual=False)
@@ -329,6 +329,7 @@ class SDKProcess:
                         if not all(native_support_confirmed(r) for r in faults.values()):
                             raise ValueError('native fault output not confirmed')
                         self.connected=True;self.release_steps=reply['release_steps']
+                        self.native_hold_state=dict(reason=reply['error'],native_faults=deepcopy(faults))
                         raise SDKNativeFault(faults)
                     if (guarded_reference or method=='read_execution_output')and reply.get('code')=='reference_rejected':
                         if (set(reply)!={'id','error','code','connected','release_steps'}or reply['connected']is not True
@@ -451,6 +452,30 @@ class SDKProcess:
             worker_exit_confirmed=worker_exited,supervisor_exit_confirmed=exited,
             supervisor_pid=self.process.pid if self.process else None,worker_pid=record.get('child_pid',self.worker_pid),
             supervisor_exit_code=self.process.returncode if self.process else None)
+
+    def supported_retirement_ready(self):
+        if not self.failure or self.process is None or self.process.poll() is not None:
+            return False
+        from .sdk_retirement import retained_processes
+        try:
+            record,_,_=retained_processes(self.guard_record, supervisor_pid=self.process.pid,
+                owner_pid=os.getpid(), script=Path(__file__).resolve().parents[1]/'scripts/serve_sdk_control.py')
+        except (OSError,ValueError,TypeError):
+            return False
+        self.native_hold_state=dict(reason=record.get('reason'),
+            native_fault_hold=record['native_fault_hold'],diagnostics=record.get('diagnostics'))
+        return True
+
+    def retire_supported(self, *, arms_supported):
+        if not self.failure or self.process is None:
+            raise ValueError('failed SDK command channel required for supported retirement')
+        from .sdk_retirement import retire_supported
+        result=retire_supported(self.guard_record, supervisor_pid=self.process.pid,
+            owner_pid=os.getpid(), script=Path(__file__).resolve().parents[1]/'scripts/serve_sdk_control.py',
+            arms_supported=arms_supported)
+        self.process.wait(timeout=2)
+        self.supported_retirement=result
+        return result
 
     def connect(self):return self.call('connect')
     def close(self):return self.call('close')

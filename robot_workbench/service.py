@@ -93,7 +93,7 @@ class Device:
                 if remote:self.closed.set()  # Stop only this business fact observer.
                 if self.thread is not None and self.thread.is_alive():self.thread.join(timeout=2)
                 if self.thread is not None and self.thread.is_alive():raise ValueError('保护后的控制线程仍在收尾')
-                retirement=self.runtime.retire_protected()
+                retirement=self.runtime.retire_protected(arms_supported=body.get('arms_supported',False))
                 if remote:self.runtime.detach()
             if self.thread is not None and self.thread.is_alive():
                 raise ValueError('上次设备连接仍在收尾，请等待断开确认')
@@ -390,66 +390,81 @@ class Application:
         from .ros_data import RosNode,SourceDirectory,source_descriptor,json_value
         closed=threading.Event();workflow.operator_input_closed=closed
         def work():
-            node=None
-            try:
-                plane=workflow.ros_plane
-                node=RosNode('infer_pedal_'+device.id,namespace=plane['namespace'],domain_id=plane['domain_id'],localhost_only=False)
-                declared=source_descriptor(json.loads(Path(descriptor).read_text()))
-                if declared['device_id']!=device.id or declared['stream_id']!='pedal'or declared['kind']!='event':
-                    raise ValueError('registered pedal belongs to another device/source role')
-                directory=SourceDirectory(node,device.id)
-                source=directory.resolve({'pedal':dict(source_instance_id=declared['source_instance_id'],kind='event')})[0]
-                publishers=node.node.get_publishers_info_by_topic(source['topic'])
-                if len(publishers)!=1:raise ValueError('one pedal publisher required')
-                publisher_gid=bytes(publishers[0].endpoint_gid)
-                workflow.operator_pedal_source=source;workflow.operator_input_status=dict(state='waiting',source_instance_id=source['source_instance_id'])
-                workflow.operator_last_seen=time.monotonic()
-                def receive(message):
-                    ref=message.reference;value=json_value(message.payload_json)
-                    if (ref.source_instance_id!=source['source_instance_id']or ref.stream_id!='pedal'
-                            or directory.values.get('pedal')!=source):return
+            contract=None
+            while not closed.is_set():
+                node=None
+                try:
+                    plane=workflow.ros_plane
+                    node=RosNode('infer_pedal_'+device.id,namespace=plane['namespace'],domain_id=plane['domain_id'],localhost_only=False)
+                    declared=source_descriptor(json.loads(Path(descriptor).read_text()))
+                    if declared['device_id']!=device.id or declared['stream_id']!='pedal'or declared['kind']!='event':
+                        raise ValueError('registered pedal belongs to another device/source role')
+                    current_contract={key:value for key,value in declared.items()
+                        if key not in ('source_instance_id','available')}
+                    if contract is not None and current_contract!=contract:
+                        raise ValueError('踏板配置契约已变化，请重载已核验的工作台配置')
+                    contract=current_contract
+                    bound_wall=time.time()
+                    directory=SourceDirectory(node,device.id)
+                    source=directory.resolve({'pedal':dict(source_instance_id=declared['source_instance_id'],kind='event')})[0]
                     publishers=node.node.get_publishers_info_by_topic(source['topic'])
-                    if len(publishers)!=1 or bytes(publishers[0].endpoint_gid)!=publisher_gid:
-                        workflow.operator_pedal_gesture=None
-                        workflow.operator_input_status=dict(state='unavailable',error='原踏板发布者已变化或存在多个发布者')
-                        return
-                    if not 0<=time.time()-ref.source_time_ns/1e9<=workflow.operator_controls['event_max_age_s']:return
+                    if len(publishers)!=1:raise ValueError('one pedal publisher required')
+                    publisher_gid=bytes(publishers[0].endpoint_gid)
+                    workflow.operator_pedal_source=source;workflow.operator_input_status=dict(state='waiting',source_instance_id=source['source_instance_id'])
                     workflow.operator_last_seen=time.monotonic()
-                    if message.event!='pedal_command':
-                        if value.get('connected')is False:
+                    def receive(message):
+                        ref=message.reference;value=json_value(message.payload_json)
+                        if (ref.source_instance_id!=source['source_instance_id']or ref.stream_id!='pedal'
+                                or directory.values.get('pedal')!=source):return
+                        publishers=node.node.get_publishers_info_by_topic(source['topic'])
+                        if len(publishers)!=1 or bytes(publishers[0].endpoint_gid)!=publisher_gid:
                             workflow.operator_pedal_gesture=None
-                            workflow.operator_input_status=dict(state='unavailable',error='踏板已断开，等待同一踏板重连')
+                            workflow.operator_input_status=dict(state='unavailable',error='原踏板发布者已变化或存在多个发布者')
                             return
-                        if workflow.operator_input_status.get('state')in('waiting','unavailable'):
-                            workflow.operator_input_status=dict(state='ready',source_instance_id=source['source_instance_id'])
-                        return
-                    occurred=value.get('occurred_at')
-                    if type(occurred)not in(int,float):return
-                    age=time.time()-occurred
-                    if not 0<=age<=workflow.operator_controls['event_max_age_s']:return
-                    with self.lock:focus=deepcopy(self.operator_focus.get(device.environment,{}))
-                    runtime=device.runtime
-                    if (not focus or focus['expires']<time.monotonic()or runtime is None
-                            or runtime.nonce!=focus['runtime_nonce']or occurred<focus['started_wall']):return
-                    command=value.get('command')
-                    if command not in(11,22,33):return
-                    try:
-                        result=self._operator_pedal_action(device,workflow,command,ref,occurred,focus)
-                        workflow.operator_input_status=dict(state='ready',last_command=command,source_time_ns=ref.source_time_ns,
-                            sequence=ref.sequence,request_id='pedal-'+ref.source_instance_id.replace(':','_')+'-'+str(ref.sequence),
-                            accepted=result.get('accepted',True))
-                    except Exception as error:workflow.operator_input_status=dict(state='rejected',last_command=command,error=str(error))
-                node.subscribe(source['topic'],node.types.DataEvent,receive)
-                while not closed.wait(.1):
-                    if directory.values.get('pedal')!=source:
-                        workflow.operator_pedal_gesture=None
-                        raise ValueError('原踏板来源已停止或身份变化，请重新绑定')
-                    if time.monotonic()-workflow.operator_last_seen>workflow.operator_controls['event_max_age_s']:
-                        workflow.operator_pedal_gesture=None
-                        workflow.operator_input_status=dict(state='unavailable',error='踏板 ROS 心跳中断，请检查踏板连接与来源服务')
-            except Exception as error:workflow.operator_input_status=dict(state='unavailable',error=str(error))
-            finally:
-                if node is not None:node.close()
+                        if not 0<=time.time()-ref.source_time_ns/1e9<=workflow.operator_controls['event_max_age_s']:return
+                        workflow.operator_last_seen=time.monotonic()
+                        if message.event!='pedal_command':
+                            if value.get('connected')is False:
+                                workflow.operator_pedal_gesture=None
+                                workflow.operator_input_status=dict(state='unavailable',error='踏板已断开，等待同一踏板重连')
+                                return
+                            if workflow.operator_input_status.get('state')in('waiting','unavailable'):
+                                workflow.operator_input_status=dict(state='ready',source_instance_id=source['source_instance_id'])
+                            return
+                        occurred=value.get('occurred_at')
+                        if type(occurred)not in(int,float):return
+                        age=time.time()-occurred
+                        if not 0<=age<=workflow.operator_controls['event_max_age_s']or occurred<bound_wall:return
+                        with self.lock:focus=deepcopy(self.operator_focus.get(device.environment,{}))
+                        runtime=device.runtime
+                        if (not focus or focus['expires']<time.monotonic()or runtime is None
+                                or runtime.nonce!=focus['runtime_nonce']or occurred<focus['started_wall']):return
+                        command=value.get('command')
+                        if command not in(11,22,33):return
+                        try:
+                            result=self._operator_pedal_action(device,workflow,command,ref,occurred,focus)
+                            workflow.operator_input_status=dict(state='ready',last_command=command,source_time_ns=ref.source_time_ns,
+                                sequence=ref.sequence,request_id='pedal-'+ref.source_instance_id.replace(':','_')+'-'+str(ref.sequence),
+                                accepted=result.get('accepted',True))
+                        except Exception as error:workflow.operator_input_status=dict(state='rejected',last_command=command,error=str(error))
+                    node.subscribe(source['topic'],node.types.DataEvent,receive)
+                    while not closed.wait(.1):
+                        latest=source_descriptor(json.loads(Path(descriptor).read_text()))
+                        if directory.values.get('pedal')!=source or latest!=declared:
+                            workflow.operator_pedal_gesture=None
+                            raise ValueError('踏板来源已变化，正在核验并重新绑定')
+                        publishers=node.node.get_publishers_info_by_topic(source['topic'])
+                        if len(publishers)!=1 or bytes(publishers[0].endpoint_gid)!=publisher_gid:
+                            raise ValueError('踏板发布者已变化，等待唯一登记来源后重新绑定')
+                        if time.monotonic()-workflow.operator_last_seen>workflow.operator_controls['event_max_age_s']:
+                            workflow.operator_pedal_gesture=None
+                            workflow.operator_input_status=dict(state='unavailable',error='踏板 ROS 心跳中断，请检查踏板连接与来源服务')
+                except Exception as error:
+                    workflow.operator_pedal_gesture=None
+                    workflow.operator_input_status=dict(state='unavailable',error=str(error))
+                finally:
+                    if node is not None:node.close()
+                closed.wait(.25)
         workflow.operator_input_thread=threading.Thread(target=work,daemon=True,name='infer-pedal-consumer')
         workflow.operator_input_thread.start()
 
