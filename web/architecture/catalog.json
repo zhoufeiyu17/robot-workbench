@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "approved-lifecycle-20261117-v1+progress.a2990b9dfcb8",
+  "revision": "approved-lifecycle-20261117-v1+progress.f7243d2b0b10",
   "stage": "P1–P4 CPU开发验收收口；P5实机发布验收待进行",
   "checked_at": "2026-11-14T09:17:16.122013+00:00",
   "site_title": "工作台架构与控制策略",
@@ -2941,7 +2941,7 @@
           "scope": "CPU protocol/fake-device qualification of SC01; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.816194+00:00",
-        "fingerprint": "ab8c3a1f73b573a05ad2e007f169b078b16b6e400bf83ad7b36d196cc218d3ac",
+        "fingerprint": "73076c6b806c0e87efa16543b67182140433350eb540aef137116b850566607a",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "c9e41e0dc2f4ed48f4b9c932dcbf6146f92a463747af2ce4e0662d39351194d6"
       },
@@ -3065,7 +3065,7 @@
           "scope": "CPU protocol/fake-device qualification of SC02; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.840646+00:00",
-        "fingerprint": "a4a5b8581d185f0480c6d16aecb1b0fcf62d7090c50e390f504927383db9bced",
+        "fingerprint": "38357a90d207547c6e77f6d4578d7015a61202170295b7967d9da3042266018a",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "04c748e6b8ddc4a2ae5643eba2276251336675efdf47f2addac0ed43d5fed212"
       },
@@ -3192,7 +3192,7 @@
           "scope": "CPU protocol/fake-device qualification of SC03; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.854024+00:00",
-        "fingerprint": "4418f18a118749a05a322492ad16022b8d25627704b153bc5ddcba8dfb6f38f8",
+        "fingerprint": "64cc93b74ed9de11bb5479e12ca1feab465c3b1a0ec450fa46469722ecb09f98",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "1df4a25c9be9f4b6a74ed833cb95baac9dacb29fa3e41e1cd4c623deb4366937"
       },
@@ -3311,7 +3311,7 @@
           "scope": "CPU protocol/fake-device qualification of SC04; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.866363+00:00",
-        "fingerprint": "cc0095b03cb23ceacae90c0d1b2f272f4a36fa460c8ca92ae5c88445c0f21817",
+        "fingerprint": "fdb726d22bab99b77a82aed3c6b7d0b122822aef4a2566c6a04d4ab1887927c4",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9fa9f85504c3b42c95a4d1c478c3aabf6a56e9bb007522238ca88200b4b843cb"
       },
@@ -3525,7 +3525,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772207+00:00",
-        "fingerprint": "0e036c0aecc0a81d2613ed21f0b7a60a1ad0bc15ccd05c498a4ffc58b3fe0341",
+        "fingerprint": "ea2e50f7c50964860ea0bdffd4c859f03114f4065b41bc91dc4bc10c4a6aa123",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -3688,7 +3688,7 @@
           ]
         },
         "updated_at": "2026-11-08T03:55:43.566613+00:00",
-        "fingerprint": "5b4df143eed5064c6d68fd024f89db24b62af87e077d686a912b6cd9137926f4",
+        "fingerprint": "032cebe6ab7a9964e825fdbb9371586674f2d2154e21d723844897c0e0d79ff6",
         "next": "补正式长时和异常恢复",
         "verified_fingerprint": null
       },
@@ -3825,7 +3825,7 @@
           "scope": "CPU protocol/fake-device qualification of SC07; physical acceptance remains P5"
         },
         "updated_at": "2026-11-06T05:03:37.921639+00:00",
-        "fingerprint": "99e2c7a572c04f45f829048ed81e38d0a4f33ccb73f07874b27d8e19213d33cd",
+        "fingerprint": "1333ff920d9b65d58204a179780130532bfe50bb800b31c20be60764d0739cb9",
         "next": "P5按实际设备进行发布与验收",
         "verified_fingerprint": "9600023c64b756029338db7edfc85a4df99db7d6f9f9f6a9eeee61d0b596a387"
       },
@@ -3967,7 +3967,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772651+00:00",
-        "fingerprint": "96ba34d2e471f3b5b253fb9f4dc136e01544b5237da18945ad7e0f32af6b1261",
+        "fingerprint": "09bb0452c468c4be1b0c9d343a4ec3e5ddac1cbb10bbdd29f8ef3146a2334fac",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4093,7 +4093,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772751+00:00",
-        "fingerprint": "247df8a3a0a7e654b3af91a3d7bffd0446ce4509d0b09c7a8fb4953fc56708b2",
+        "fingerprint": "f406a7aad132d2a846134b1a084f25242c484fd7bcfe429616e8deea66db4068",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4222,7 +4222,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772837+00:00",
-        "fingerprint": "f80fa65b1f9d6fed9f72af33f55bf6ca6f3e570e32f652cc3548d7cf4fb139c0",
+        "fingerprint": "9739969b253dcc6652d98cafc22431e58e68319ac967e24a02d1d9ce4da69a7c",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4348,7 +4348,7 @@
           "scope": "WAM E03 step003190/2denoise, ARX13 bounded three15step chunks, in-motion HTTP Stop, original ROS recording/reconstruction, diagnostic performance. This is not all-workbench/long-run/task-accuracy qualification."
         },
         "updated_at": "2026-11-07T04:25:46.772985+00:00",
-        "fingerprint": "94c3570718b42821a9f81d9318630eb2cef990aedcbe093abd4083400f00f240",
+        "fingerprint": "34776c9f77c3e1566f0dc05f6d8030a55074b89301dc5907be940597965eb928",
         "next": "正式发布前补剩余跨业务、性能预算与长期现场范围",
         "verified_fingerprint": null
       },
@@ -4703,16 +4703,16 @@
         },
         {
           "id": "UC03-S02",
-          "title": "按明确的普通接入或回收接入意图处理自有旧占用",
+          "title": "统一接管已登记的旧控制与数采资源",
           "inputs": "本次操作上下文及前序步骤回执",
-          "completion": "按接入意图取得必要的自有旧占用退出结果",
+          "completion": "桌面、普通接入与清理接管复用正常停止、退出核验和遗留维护恢复",
           "sc_refs": [
             "SC07"
           ],
           "bindings": [
             "op-check"
           ],
-          "condition": "仅回收接入意图需要释放自有旧占用时",
+          "condition": "部署登记managed Owner及数采交接入口时",
           "next": "UC03-S03"
         },
         {
@@ -4810,7 +4810,7 @@
         "SC03",
         "SC07"
       ],
-      "current": "connect_control/reclaim_control已有实现，回收范围与结果表达需要纳入统一用例。",
+      "current": "网页统一展示“接入设备”，提交connect_control并复用完整接管；桌面共享同一编排，软件发布与线上DOM验证已完成，具体部署以验收回执为准。",
       "acceptance": [
         {
           "kind": "success",
@@ -4823,6 +4823,18 @@
           "given": "旧使用方退出尚未确认",
           "when": "请求回收接入",
           "then": "停止依赖该结果的后续步骤并保留占用事实"
+        },
+        {
+          "kind": "success",
+          "given": "数采保留相机、旧工作台残留或遗留unknown，资源身份可核验",
+          "when": "桌面或网页发起接入并连续重复启动",
+          "then": "完成同一接管流程，复用健康SDK，恢复相机，保留退出与恢复证据"
+        },
+        {
+          "kind": "success",
+          "given": "管理服务同时登记connect_control与reclaim_control",
+          "when": "打开服务运维并请求接入设备",
+          "then": "仅显示一个接入设备按钮，状态引导指向同一入口，并提交connect_control及原有现场确认"
         }
       ],
       "evidence": [
