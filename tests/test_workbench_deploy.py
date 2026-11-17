@@ -36,6 +36,22 @@ def observation(state='DISCONNECTED',connected=False):
 
 
 class StartupTest(unittest.TestCase):
+    def test_registered_shutdown_transition_is_waited_without_resending_stop(self):
+        pin=dict(unit='collector.service',files={'/cpu/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
+        stopping=dict(ActiveState='deactivating',MainPID='7',ControlPID='8',SendSIGKILL='no',ControlGroup='')
+        stopped=dict(stopping,ActiveState='inactive',MainPID='0',ControlPID='0')
+        with patch.object(d,'verify_unit',side_effect=[stopping,stopping,stopped]),\
+                patch.object(d.time,'sleep'),patch.object(d.subprocess,'run')as command:
+            self.assertTrue(d.handoff_collection(pin,'cpu',stop_active=True)['exit_verified'])
+            command.assert_not_called()
+        for after in (dict(stopping,ActiveState='active',MainPID='9'),dict(stopping,ControlGroup='/other')):
+            with self.subTest(after=after),patch.object(d,'verify_unit',side_effect=[stopping,after]):
+                with self.assertRaises(d.Blocked):d.handoff_collection(pin,'cpu',stop_active=True)
+        with patch.object(d,'verify_unit',return_value=stopping),\
+                patch.object(d.time,'monotonic',side_effect=[0.,1.]):
+            with self.assertRaisesRegex(d.Blocked,'deadline'):
+                d.handoff_collection(pin,'cpu',stop_active=True,timeout=.1)
+
     def test_explicit_cleanup_drains_inactive_collection_children(self):
         pin=dict(unit='collector.service',files={'/cpu/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
         state=dict(ActiveState='inactive',MainPID='0',ControlPID='0',ControlGroup='/cpu/collector')

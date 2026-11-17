@@ -116,15 +116,19 @@ for(const mode of ['verified','lan-http','unknown','manager-changed','runtime-ch
 {
   const h=harness(),value=fixture();
   value.operations.reclaim_control={label:'清理现有控制并接入',impact:'正常结束数采，保留数据；不强杀、不续跑旧动作',allowed:true,requires_support:true};
+  value.operations.connect_control={...value.operations.reclaim_control,label:'接入设备'};
   h.reply(0,value);await settle();
-  assert(h.button('reclaim_control'),'the supported reclaim action must be visible');
-  h.button('reclaim_control').fire('click');
+  assert(h.button('connect_control'),'the unified connect action must be visible');
+  assert.equal(h.button('connect_control').textContent,'接入设备');
+  assert.equal(h.button('reclaim_control'),undefined,'the legacy action must not add a second connect button');
+  assert.equal(operationsGuidance(value).action,'connect_control');
+  h.button('connect_control').fire('click');
   assert.equal(h.api.elements.confirm.disabled,true);
   assert.match(h.api.elements.dialog.textContent,/正常结束数采/);
   h.api.elements.support.checked=true;h.api.elements.support.fire('change');
   h.api.elements.confirm.fire('click');await settle();
   const payload=JSON.parse(h.requests[h.last()].options.body);
-  assert.equal(payload.action,'reclaim_control');assert.equal(payload.arms_supported,true);
+  assert.equal(payload.action,'connect_control');assert.equal(payload.arms_supported,true);
   assert.deepEqual(payload.expected_target,value.target);
   h.reply(h.last(),{job_id:'reclaim-cpu',status:'succeeded',phase:'complete',verification:{ok:true},request:payload});await settle();
   h.api.destroy();

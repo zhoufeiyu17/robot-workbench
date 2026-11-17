@@ -310,7 +310,7 @@ class WorkbenchManager:
             ('restart_workbench','重载工作台后端','结束本设备控制连接并重载业务后端；物理设备会撤掉SDK保持，需可靠支撑。',self.environment=='physical'),
             ('stop_workbench','停止工作台后端','确认控制已释放后停止业务后端；独立相机、模型和管理服务保留，不自动启动。',self.environment=='physical'),
             ('recover_maintenance','核验并结束遗留维护','重核服务身份与业务空闲后结束遗留维护；不重试旧动作、不恢复运动。',False),
-            ('connect_control','接入设备控制','检查基础环境并接入本设备；物理设备需现场支撑。不会执行旧任务。',self.environment=='physical'),
+            ('connect_control','接入设备','检查基础环境并接入本设备；物理设备需现场支撑。不会执行旧任务。',self.environment=='physical'),
             ('reclaim_control','清理现有控制并接入','正常停止当前工作台任务和已登记的数采，再接入工作台。数采停机可能回零；健康连接停止旧动作后复用，必要时释放重接会撤掉保持。保留数据；退出不明时停止，不强杀、不续跑旧动作。',self.recovery_requires_support),
             ('exit_workbench','退出工作台','停止当前任务，正常低速回零并保留夹爪开度，释放SDK，等待录制封存，退出本工作台的模型、相机、踏板和其他自有服务，最后关闭管理入口。共享服务只解除本工作台绑定。回零失败不继续释放。',False),
             ('exit_environment','退出工作台并启动正式数采','先完成同一退出流程，再恢复已登记的数采网页并打开，最后关闭本工作台管理入口。不自动开始采集。',False),
@@ -328,6 +328,10 @@ class WorkbenchManager:
         if descriptor:
             definitions=[(name,label,'仅重载业务HTTP与工作流；独立Owner、SDK保持、相机与模型进程保留。'if name in('restart_workbench','stop_workbench')else impact,
                 False if name in('restart_workbench','stop_workbench')else support)for name,label,impact,support in definitions]
+        if self.control_action('connect_control')=='reclaim_control':
+            reclaim=next(row for row in definitions if row[0]=='reclaim_control')
+            definitions=[(name,label,reclaim[2],reclaim[3])if name=='connect_control'else(name,label,impact,support)
+                for name,label,impact,support in definitions]
         if self.model_external:
             definitions=[(name,'释放本工作台模型绑定'if name=='stop_model'else label,
                 '只释放本工作台的模型会话；共享服务与其他消费者保持运行。'if name=='stop_model'else
@@ -562,7 +566,13 @@ class WorkbenchManager:
         return [job['job_id'] for job in self.operations.jobs.values() if job['job_id'] in unresolved
             and domains&self.operation_domains(job['request']['action'],job['request'].get('parameters'))]
 
-    def check(self,action,request=None):
+    def control_action(self,action):
+        if (action=='connect_control' and not self.control_external and self.config.get('control_owner_descriptor')
+                and self.config.get('collection_handoff') and self.environment=='physical'):
+            return 'reclaim_control'
+        return action
+
+    def check(self,action,request=None,*,after_handoff=False):
         with self.health_lock:h=deepcopy(self.health_cache)
         parameters=(request or {}).get('parameters') or {}
         allowed={'model_id','expected_bundle_digest'} if action=='prepare_model' else {'capabilities'} if action=='prepare_environment' else {'asset_pair_id','expected_catalog_digest'} if action=='prepare_collection' else set()
@@ -587,6 +597,7 @@ class WorkbenchManager:
             raise OperationError('environment_state_unknown','环境状态已过期，请先检查状态',unknown=True)
         if h.get('services',{}).get('workbench',{}).get('state')=='unknown':
             raise OperationError('process_identity_unknown','工作台进程身份未知，请先检查诊断；不会自动停止未知控制进程',unknown=True)
+        if not after_handoff:action=self.control_action(action)
         if self.control_external:
             allowed={'status_check','connect_control','restart_workbench','stop_workbench','exit_workbench','exit_environment','prepare_model','stop_model'}
             if action not in allowed:return '共享设备生命周期由管理员负责；本工作台只能接入或退出自己的消费者'
@@ -1334,6 +1345,7 @@ class WorkbenchManager:
         return dict(service=stopped,binding=binding)
 
     def run(self,action,request,progress):
+        action=self.control_action(action)
         generation=self.stop_generation
         last_report=None;report_lock=threading.Lock()
         def report(*args,**kwargs):
@@ -1368,7 +1380,7 @@ class WorkbenchManager:
         observation_backend_start=None
         self.refresh()
         if self.target()!=request['expected_target']:raise OperationError('target_changed','执行前目标身份已变化，请重新审阅')
-        reason=self.check(action,request)
+        reason=self.check(action,request,after_handoff=True)
         if reason:raise OperationError('precondition_changed',reason)
         if action in ('exit_workbench','exit_environment'):
             result=(self.exit_workbench if action=='exit_workbench'else self.exit_environment)(request,progress)
@@ -1646,10 +1658,12 @@ class WorkbenchManager:
             else:ok=ok and control.get('motion_resumed') is False and (control.get('recovered') is True or control.get('already_operable') is True or control.get('reconnected') is True)
             evidence['control']=control
             if result.get('requested_action')=='reclaim_control':
-                handoff=(result.get('reclaim')or{}).get('collection')or{}
+                reclaim=result.get('reclaim')or{}
+                handoff=reclaim.get('collection')or{}
                 from scripts.workbench_deploy import unit_state
-                released=unit_state(handoff['unit']) if handoff.get('unit') else {}
-                ok=ok and handoff.get('exit_verified')is True and released.get('ActiveState')=='inactive' and released.get('MainPID')=='0'
+                for receipt in [handoff,*reclaim.get('additional_collections',[])]:
+                    released=unit_state(receipt['unit']) if receipt.get('unit') else {}
+                    ok=ok and receipt.get('exit_verified')is True and released.get('ActiveState')=='inactive' and released.get('MainPID')=='0'
                 evidence['collection_handoff']=handoff
         elif action=='release_control':
             receipt=runtime.get('release_receipt') or (result.get('control') or {}).get('release_receipt') or {}
@@ -1970,12 +1984,20 @@ class WorkbenchManager:
             else:raise OperationError('owner_start_unconfirmed','控制Owner启动未核验，未接入SDK',unknown=True)
             self.refresh()
         current=self.health_cache.get('runtime')or{}
+        observation=None
+        if self.control_healthy(current):
+            # A reused SDK can outlive its camera source. Restore observation
+            # through the existing bounded maintenance path before reusing it.
+            observation=self._run('prepare_environment',dict(request,expected_target=self.target(),
+                parameters={'capabilities':['observe']}),progress)
+            self.refresh()
         action='connect_control' if current.get('state')=='DISCONNECTED' else 'recover_control'
         progress('recovering_workbench_control')
         result=self._run(action,dict(request,expected_target=self.target()),progress)
+        if observation is not None:result['cameras']=observation['cameras']
         result['requested_action']='reclaim_control'
         result['reclaim']=dict(before=initial,stop=stopped,collection=handoffs[0],
-                              additional_collections=handoffs[1:],old_motion_resumed=False)
+                              additional_collections=handoffs[1:],observation=observation,old_motion_resumed=False)
         return result
 
     def stop(self,body):

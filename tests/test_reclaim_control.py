@@ -6,6 +6,8 @@ from unittest.mock import Mock,patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+import threading
+import time
 
 from robot_workbench.management import BackendRejection,WorkbenchManager
 from robot_workbench.operations import OperationError
@@ -13,6 +15,25 @@ from scripts import workbench_deploy
 
 
 class ReclaimControlTests(unittest.TestCase):
+    def test_web_connect_and_reclaim_share_admission_and_execution(self):
+        m=self.manager();m.health_lock=threading.Lock();m.stop_generation=0
+        m.health_cache.update(checked_wall_ns=time.time_ns(),backend_reachable=True,
+            services={name:dict(state='running')for name in ('workbench','control_owner')})
+        m.operations=SimpleNamespace(jobs={'old-unknown':dict(job_id='old-unknown',request={'action':'connect_control'})})
+        m.unresolved.return_value=['old-unknown']
+        self.assertIsNone(m.check('connect_control'))
+        self.assertIsNone(m.check('reclaim_control'))
+        self.assertIn('遗留维护',m.check('connect_control',after_handoff=True))
+        for action in ('connect_control','reclaim_control'):
+            with self.subTest(action=action):
+                m._run.reset_mock()
+                WorkbenchManager.run(m,action,dict(request_id='entry'),Mock())
+                self.assertEqual(m._run.call_args.args[0],'reclaim_control')
+        m.config['control_lifecycle']='external'
+        self.assertEqual(m.control_action('connect_control'),'connect_control')
+        m.config['control_lifecycle']='managed';m.environment='fake'
+        self.assertEqual(m.control_action('connect_control'),'connect_control')
+
     def test_idle_web_is_not_a_controller_but_sdk_and_collection_manager_are(self):
         with patch.object(sys,'path',[str(Path(__file__).resolve().parents[1]/'rule_based_workbench'),*sys.path]):
             from rule_based_workbench import real_control
@@ -82,6 +103,7 @@ class ReclaimControlTests(unittest.TestCase):
         runtime=dict(connected=connected,runtime_nonce='cpu'if connected or fault else None,
             state='FAULT_STOP_UNCONFIRMED'if fault else'READY'if connected else'DISCONNECTED',
             automatic_enabled=False,feedback_healthy=connected,stationary=connected,
+            sample_age_s=.001,
             stop_receipt=dict(stop_hold_return_confirmed=True,barrier_epoch=2))
         m.health_cache=dict(runtime=runtime,busy=False)
         m.refresh=Mock(side_effect=lambda:deepcopy(m.health_cache));m.window=None;m.unresolved=Mock(return_value=[])
@@ -89,7 +111,7 @@ class ReclaimControlTests(unittest.TestCase):
         m.services={'control_owner':SimpleNamespace(snapshot=lambda:dict(state='running'))}
         m.state=Mock(return_value=dict(csrf='cpu',server_instance_id='business',device=dict(id='arx13'),runtime=runtime))
         m._request_control_stop=Mock(return_value=dict(status='accepted',receipt=dict(stop=dict(barrier_epoch=2))))
-        m._run=Mock(return_value=dict(action='recover_control',control=dict(motion_resumed=False)))
+        m._run=Mock(return_value=dict(action='recover_control',control=dict(motion_resumed=False),cameras=dict(ready=True)))
         return m
 
     def test_disconnected_and_fault_reuse_normal_connect_or_recover_after_handoff(self):
@@ -115,6 +137,8 @@ class ReclaimControlTests(unittest.TestCase):
         with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),patch.object(workbench_deploy,'handoff_collection',return_value={'exit_verified':True}),patch('robot_workbench.management.json_request'):
             m.reclaim_control(dict(request_id='one',arms_supported=False),lambda *a,**k:None)
         m._request_control_stop.assert_called_once_with('one-stop')
+        self.assertEqual(m._run.call_args_list[0].args[0],'prepare_environment')
+        self.assertEqual(m._run.call_args_list[0].args[1]['parameters'],{'capabilities':['observe']})
         self.assertEqual(m._run.call_args.args[0],'recover_control')
         m=self.manager(connected=True);m.health_cache['runtime']['stop_receipt']['barrier_epoch']=1
         with patch.object(workbench_deploy,'verify_unit',return_value={'ActiveState':'inactive'}),patch.object(workbench_deploy,'handoff_collection')as handoff,patch('robot_workbench.management.json_request'):

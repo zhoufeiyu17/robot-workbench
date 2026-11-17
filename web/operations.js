@@ -92,8 +92,8 @@ export function operationsGuidance(state,stale=false){
   if(exited&&['workbench','control_owner','cameras','model'].every(name=>resources[name]?.state==='stopped'&&resources[name]?.running===false))
     return {title:'工作台环境已退出',message:'工作台控制、相机和模型已核验释放，原数采网页已恢复。请在数采端继续操作；此管理页保留回执，不会自动接回设备。'};
   if(missing)return {title:'等待现场处理 · '+missing.label,message:missing.reason||missing.actual||'请按依赖要求处理现场条件，再重新检查。',action:missing.recommended_action||'status_check'};
-  if(state.operations?.reclaim_control?.allowed===true&&(!runtime.connected||state.recovery?.required||['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(runtime.state)))
-    return {title:'清理旧控制并接入工作台',message:state.operations.reclaim_control.impact,action:'reclaim_control'};
+  if(state.operations?.connect_control?.allowed===true&&(!runtime.connected||state.recovery?.required||['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(runtime.state)))
+    return {title:'接入设备',message:state.operations.connect_control.impact,action:'connect_control'};
   if(state.recovery?.required)return {title:'先处理未完成的维护',message:'上次操作的结果尚未核验。先结束遗留维护，再开始新的操作；不会恢复旧动作。',action:'recover_maintenance'};
   if(runtime.release_receipt?.status==='unconfirmed')return {title:'设备释放结果未知',message:runtime.release_receipt.message||'SDK 关闭尚未确认；请先核对恢复计划和现场条件。',action:'recover_control'};
   if(['FAULT','FAULT_STOP_UNCONFIRMED','EMERGENCY'].includes(runtime.state))return {title:'控制故障仍锁定',message:runtime.reason||'反馈恢复不代表控制恢复；请核对中断恢复的范围与现场条件。',action:'recover_control'};
@@ -169,7 +169,7 @@ export function createOperations({document:doc,fetch:request,container,location=
   const health=make('div',undefined,'ops-health'),cards=make('div',undefined,'ops-groups');container.append(health);
   const current=make('section');current.id=prefix+'-current';current.setAttribute('aria-label','当前管理操作');container.append(current,cards);
   const groups=[
-    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['reclaim_control','exit_workbench','exit_environment','connect_control','release_control','recover_control','verify_hold']},
+    {title:'接入与控制',description:'核对目标、现场条件与控制事实。恢复不续跑旧任务。',actions:['connect_control','exit_workbench','exit_environment','release_control','recover_control','verify_hold']},
     {title:'依赖与能力',description:'预置、可准备、现场条件分别核验；各业务依赖独立判断。',actions:['prepare_environment','prepare_collection','prepare_model']},
     {title:'服务与资源',description:'按实际影响管理已登记服务；计算角色可单独重启，其他健康服务保留。',actions:['start_cameras','stop_cameras','restart_cameras','rebind_cameras','restart_model','stop_model','restart_detector','restart_planner','restart_scene','restart_workbench','stop_workbench','reset_camera_head','reset_camera_left','reset_camera_right'],collapsed:true},
     {title:'诊断与回执',description:'当前事实与历史操作分开；进程退出、SDK 释放与物理保持分别核验。',actions:['status_check','recover_maintenance']}

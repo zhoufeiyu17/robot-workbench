@@ -145,10 +145,28 @@ def validate_collection_camera(pin):
         raise ValueError('registered collection camera unit/state/profile required')
 
 
+def wait_collection_stop(pin,before,*,progress,timeout):
+    """Observe an already-running graceful stop without issuing it again."""
+    if before['ActiveState']!='deactivating':return before
+    require(before.get('SendSIGKILL')=='no','collection stop must not force-kill hardware children')
+    deadline=time.monotonic()+timeout
+    while time.monotonic()<deadline:
+        progress('waiting_collection_stop',detail=dict(unit=pin['unit']))
+        after=verify_unit(pin)
+        require(after.get('ControlGroup')in (None,'',before.get('ControlGroup')),
+            'collection cgroup changed during shutdown')
+        if after['ActiveState']=='inactive'and after['MainPID']=='0':
+            return dict(after,ControlGroup=before.get('ControlGroup')or after.get('ControlGroup'))
+        require(after['ActiveState']=='deactivating'and after['MainPID']in ('0',before['MainPID']),
+            'collection restarted or shutdown failed; exit unconfirmed')
+        time.sleep(.1)
+    raise Blocked('collection graceful stop deadline exceeded; exit unconfirmed')
+
+
 def stop_collection_camera(pin, *, progress, timeout):
     """Only after collector shutdown: normally stop its explicitly registered camera owner."""
     validate_collection_camera(pin)
-    before=verify_unit(pin)
+    before=wait_collection_stop(pin,verify_unit(pin),progress=progress,timeout=timeout)
     group=before.get('ControlGroup')
     require(not group or group.startswith('/')and '..'not in Path(group).parts,'camera cgroup identity invalid')
     processes=Path('/sys/fs/cgroup')/group.lstrip('/')/'cgroup.procs'if group else None
@@ -210,6 +228,7 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
     require(url.scheme=='http' and url.hostname=='127.0.0.1' and url.port and url.path=='/api/status'
             and not url.query and not url.fragment and not url.username,'collection status must be the registered loopback API')
     before=verify_unit({k:pin[k]for k in ('unit','files')})
+    if stop_active:before=wait_collection_stop({k:pin[k]for k in ('unit','files')},before,progress=progress,timeout=timeout)
     if before['ActiveState']=='inactive' and before['MainPID']=='0':
         children=finish_collection_children(pin,before,stop_active=stop_active,progress=progress,timeout=timeout)
         camera=stop_collection_camera(pin['camera_owner'],progress=progress,timeout=timeout)if 'camera_owner'in pin else None

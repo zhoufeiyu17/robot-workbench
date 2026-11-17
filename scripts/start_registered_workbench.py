@@ -13,7 +13,6 @@ def acquire_control(config):
     from robot_workbench.state_contract import control_healthy
     url=config['url']+'/api/state?environment=physical&business=inference'
     before=http_json(url)['runtime']
-    if control_healthy(before):return dict(ready=True,reused=True,sdk_acquisitions=0,runtime_nonce=before['runtime_nonce'])
     result=startup_operation(config,'reclaim_control',arms_supported=True,timeout=300)
     deadline=time.monotonic()+10
     while True:
@@ -21,7 +20,8 @@ def acquire_control(config):
         if control_healthy(after):break
         require(time.monotonic()<deadline,'control readiness unconfirmed after takeover; inspect job '+result['job_id'])
         time.sleep(.1)
-    return dict(ready=True,reused=False,job_id=result['job_id'],runtime_nonce=after['runtime_nonce'],
+    reused=control_healthy(before) and before.get('runtime_nonce')==after['runtime_nonce']
+    return dict(ready=True,reused=reused,job_id=result['job_id'],runtime_nonce=after['runtime_nonce'],
         sdk_acquisitions=int(not before.get('connected')or before.get('runtime_nonce')!=after['runtime_nonce']),
         confirmation_basis='operator-approved desktop launch')
 
@@ -90,6 +90,8 @@ def start(config):
                     device_id=manager['device_id'],services=services),apply=True)
         if not takeover and manager.get('control_lifecycle','managed')=='managed' and manager.get('collection_handoff'):
             handoff=handoff_collection(manager['collection_handoff'],manager['device_id'],stop_active=False)
+            for pin in manager.get('additional_collection_handoffs',[]):
+                handoff_collection(pin,manager['device_id'],stop_active=False)
     units=([recording_unit]if recording_unit else [])+[unit for unit in config['units']if unit!=recording_unit]
     for unit in units:
         require(re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*\.service',str(unit)),'registered workbench unit required')
@@ -146,7 +148,9 @@ def start(config):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',type=Path,required=True)
     p.add_argument('--open-page-only',action='store_true')
+    p.add_argument('--takeover',action='store_true',help='Explicit operator launch using the registered control takeover')
     a=p.parse_args();config=json.loads(a.config.read_text())
+    if a.takeover:config['connect_control']=True
     if a.open_page_only:open_page(config)
     else:
         with startup_lock(a.config.absolute().with_suffix('.startup.lock')):

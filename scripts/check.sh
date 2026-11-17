@@ -32,6 +32,7 @@ python tests/test_model_runtime.py
 python tests/test_docker_model_service.py
 python tests/test_environment_exit.py
 python tests/test_reclaim_control.py
+python tests/test_manual_startup.py
 python tests/test_recording_preparation.py
 python tests/test_recording_io.py
 python tests/test_recording_event_budget.py

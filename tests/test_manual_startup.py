@@ -1,5 +1,10 @@
 import unittest
 import json
+import os
+import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch,MagicMock
@@ -8,6 +13,56 @@ from scripts.workbench_deploy import Blocked
 
 
 class ManualStartupTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('flock'),'Linux desktop lock required')
+    def test_desktop_wrapper_reports_the_failed_stage_and_deduplicates_launches(self):
+        launcher=Path(__file__).resolve().parents[1]/'scripts/start_workbench_desktop.bash'
+        with TemporaryDirectory()as folder:
+            root=Path(folder);config=root/'desktop.json';config.write_text('{"connect_control":false}')
+            executor=root/'python-fixture';popup=root/'zenity'
+            executor.write_text('#!'+sys.executable+'\n'+'''import json,os,sys,time
+from pathlib import Path
+root=Path(os.environ['FIXTURE_ROOT'])
+page='--open-page-only'in sys.argv
+with(root/'calls.jsonl').open('a')as stream:stream.write(json.dumps(sys.argv[1:])+'\\n')
+failure=os.environ.get('FIXTURE_FAILURE')
+if failure==('page'if page else'prepare'):
+ print('fixture '+failure+' failed',file=sys.stderr);sys.exit(1)
+if not page:
+ assert '--takeover'in sys.argv
+ (root/'preparing').touch()
+ if os.environ.get('FIXTURE_WAIT'):
+  deadline=time.monotonic()+10
+  while not(root/'continue').exists():
+   assert time.monotonic()<deadline;time.sleep(.01)
+ print('{"ready":true}')
+''')
+            popup.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$FIXTURE_ROOT/popups"\n')
+            executor.chmod(0o700);popup.chmod(0o700)
+            env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ['PATH'],FIXTURE_ROOT=folder)
+            command=['bash',str(launcher),str(executor),str(config)]
+            for failure,title in [('page','页面打开失败'),('prepare','页面已打开，设备准备未完成'),('','')]:
+                with self.subTest(failure=failure):
+                    before=(root/'popups').read_text()if(root/'popups').exists()else''
+                    result=subprocess.run(command,env=dict(env,FIXTURE_FAILURE=failure),capture_output=True,text=True,timeout=10)
+                    self.assertEqual(result.returncode,1 if failure else 0,result.stderr)
+                    after=(root/'popups').read_text()if(root/'popups').exists()else''
+                    if failure:self.assertIn(title,after[len(before):])
+                    else:self.assertEqual(after,before)
+            (root/'preparing').unlink()
+            with subprocess.Popen(command,env=dict(env,FIXTURE_WAIT='1'),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)as first:
+                try:
+                    deadline=time.monotonic()+5
+                    while not(root/'preparing').exists():
+                        self.assertIsNone(first.poll());self.assertLess(time.monotonic(),deadline);time.sleep(.01)
+                    second=subprocess.run(command,env=env,capture_output=True,text=True,timeout=5)
+                    self.assertEqual(second.returncode,0,second.stderr)
+                    self.assertEqual(json.loads(second.stdout)['status'],'preparation_in_progress')
+                finally:
+                    (root/'continue').touch();first.communicate(timeout=10)
+                self.assertEqual(first.returncode,0)
+            calls=[json.loads(line)for line in(root/'calls.jsonl').read_text().splitlines()]
+            self.assertEqual(sum('--takeover'in args for args in calls),3)
+
     def test_webpage_opens_before_service_preparation_and_model_wait(self):
         config=dict(units=['demo-ui@bench.service'],ui_unit='demo-ui@bench.service',url='http://127.0.0.1:18868')
         response=MagicMock();response.__enter__.return_value.status=200
@@ -45,8 +100,9 @@ class ManualStartupTests(unittest.TestCase):
         self.assertEqual(result['sdk_acquisitions'],1)
         operation.assert_called_once_with(config,'reclaim_control',arms_supported=True,timeout=300)
         with patch('scripts.start_registered_workbench.http_json',return_value={'runtime':healthy}),\
-                patch('scripts.start_registered_workbench.startup_operation')as operation:
-            self.assertEqual(acquire_control(config)['sdk_acquisitions'],0);operation.assert_not_called()
+                patch('scripts.start_registered_workbench.startup_operation',return_value={'job_id':'reuse'})as operation:
+            self.assertEqual(acquire_control(config)['sdk_acquisitions'],0)
+            operation.assert_called_once_with(config,'reclaim_control',arms_supported=True,timeout=300)
 
     def test_auto_connect_defers_collection_shutdown_to_the_existing_reclaim_operation(self):
         with TemporaryDirectory()as folder:
