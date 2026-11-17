@@ -11,6 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def run_remote(command,stage,**options):
+    try:return subprocess.run(command,check=True,**options)
+    except subprocess.CalledProcessError as error:
+        reason='SSH connection or authentication failed'if error.returncode==255 else'remote operation failed'
+        raise SystemExit(f'{stage}: {reason} (exit {error.returncode}). Check the registered endpoint and remote deployment logs.')from None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -50,7 +57,7 @@ def main():
         target=json.loads(args.targets.read_bytes())['targets'][args.target]
         if target['ssh'].startswith('-'):raise ValueError('explicit SSH destination required')
         command=[target['python'],target['installer'],'lock-runtime','--target-profile',target['profile']]
-        return subprocess.run(['ssh','-o','BatchMode=yes',*target.get('ssh_args',[]),target['ssh'],shlex.join(command)],check=True).returncode
+        return run_remote(['ssh','-o','BatchMode=yes',*target.get('ssh_args',[]),target['ssh'],shlex.join(command)],'Target runtime lock').returncode
     if args.command == 'install' and args.target:
         targets = json.loads(args.targets.read_bytes())
         target = targets['targets'][args.target]
@@ -58,8 +65,8 @@ def main():
         provider=targets.get('credential_provider')
         if provider:
             if provider['ssh'].startswith('-'):raise ValueError('explicit credential provider required')
-            fetched=subprocess.run(['ssh','-o','BatchMode=yes',*provider.get('ssh_args',[]),provider['ssh'],
-                shlex.join(['cat','--',provider['config_file']])],check=True,capture_output=True,text=True)
+            fetched=run_remote(['ssh','-o','BatchMode=yes',*provider.get('ssh_args',[]),provider['ssh'],
+                shlex.join(['cat','--',provider['config_file']])],'OSS credential provider',capture_output=True,text=True)
             if len(fetched.stdout)>16384:raise ValueError('bounded OSS configuration required')
             credential=fetched.stdout
         source=args.source
@@ -72,15 +79,15 @@ def main():
                 if getattr(args,key) is not None:command.extend(['--'+key,getattr(args,key)])
             if credential:command.append('--oss-config-stdin')
             if producer['ssh'].startswith('-'):raise ValueError('explicit producer SSH destination required')
-            result=subprocess.run(['ssh','-o','BatchMode=yes',*producer.get('ssh_args',[]),producer['ssh'],shlex.join(command)],
-                check=True,capture_output=True,text=True,input=credential)
+            result=run_remote(['ssh','-o','BatchMode=yes',*producer.get('ssh_args',[]),producer['ssh'],shlex.join(command)],
+                'Training producer '+args.producer,capture_output=True,text=True,input=credential)
             source=json.loads(result.stdout)['source']
         command = [target['python'], target['installer'], 'install', '--source', source,
                    '--target-profile', target['profile']]
         if credential:command.append('--oss-config-stdin')
         if target['ssh'].startswith('-'):raise ValueError('explicit SSH destination required')
-        return subprocess.run(['ssh', '-o', 'BatchMode=yes',*target.get('ssh_args',[]), target['ssh'], shlex.join(command)],
-            check=True,text=True,input=credential).returncode
+        return run_remote(['ssh', '-o', 'BatchMode=yes',*target.get('ssh_args',[]), target['ssh'], shlex.join(command)],
+            'Target install '+args.target,text=True,input=credential).returncode
     if sys.platform == 'darwin':
         raise ValueError('Run asset export on the training host; install using --target from this computer')
     from robot_workbench.model_install import read_json, export_release, OssSource, install_release,resolve_training_release,digest,install_lock,publish_release

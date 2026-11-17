@@ -1,14 +1,27 @@
 """Native training sidecars resolve releases without loading checkpoint payloads."""
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+import subprocess
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from robot_workbench.model_install import resolve_training_release,write_json
+spec=importlib.util.spec_from_file_location('model_installer_cli',ROOT/'scripts/install_model.py')
+cli=importlib.util.module_from_spec(spec);spec.loader.exec_module(cli)
+
+
+class RemoteCommandTests(unittest.TestCase):
+    def test_failed_source_names_the_stage_without_echoing_private_command_or_input(self):
+        command=['ssh','fixture','private-command']
+        with patch.object(cli.subprocess,'run',side_effect=subprocess.CalledProcessError(255,command)):
+            with self.assertRaises(SystemExit)as error:cli.run_remote(command,'Training producer fixture',input='private-credential')
+        self.assertIn('Training producer fixture: SSH connection or authentication failed',str(error.exception))
+        self.assertNotIn('private-',str(error.exception))
 
 
 class ProducerTests(unittest.TestCase):
@@ -45,6 +58,12 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(sources['normalization.json'],stats)
         self.assertEqual(release['backends']['torch']['artifacts']['context'],'context.pt')
         self.assertEqual(next(r['bytes']for r in release['files']if r['path'].endswith('__init__.py')),0)
+        with TemporaryDirectory()as outside:
+            detached,paths=resolve_training_release('wam',run,'latest',self.root,Path(outside)/'release',runtime_id='runtime-v1')
+            self.assertEqual(detached,release)
+            self.assertTrue(paths['source-manifest.json'].is_relative_to(Path(outside)))
+            with self.assertRaisesRegex(ValueError,'source root'):
+                resolve_training_release('wam',run,'latest',run,Path(outside)/'invalid',runtime_id='runtime-v1')
         marker['step']=43;write_json(checkpoint/'COMPLETE.json',marker)
         with self.assertRaisesRegex(ValueError,'trainer state'):
             resolve_training_release('wam',run,checkpoint,self.root,self.root/'bad',runtime_id='runtime-v1')
@@ -71,6 +90,12 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(backend['instruction'],'pick cup');self.assertEqual(backend['cached_text_identity'],{'encoder':'fixture'})
         self.assertEqual(json.loads(sources['source-manifest.json'].read_text()),dependencies['source'])
         self.assertNotIn('stats',backend['artifacts'])
+        with TemporaryDirectory()as outside:
+            detached,paths=resolve_training_release('wam-mem',self.experiment,'latest',self.root,Path(outside)/'release',runtime_id='memory-v4')
+            self.assertEqual(detached,release)
+            self.assertTrue(paths['source-manifest.json'].is_relative_to(Path(outside)))
+            with self.assertRaisesRegex(ValueError,'source root'):
+                resolve_training_release('wam-mem',self.experiment,'latest',self.experiment,Path(outside)/'invalid',runtime_id='memory-v4')
         (checkpoint/'complete.json').unlink()
         write_json(checkpoint/'export.json', dict(format='world_memory_policy', weights_only=True,
             step=42, size=weight.stat().st_size, sha256=self.sha(weight)))

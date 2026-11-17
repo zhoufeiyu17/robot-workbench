@@ -107,6 +107,13 @@ def validate_release(value):
     return value
 
 
+def artifact_record(path,row):
+    size=path.stat().st_size
+    large_weight=size>WEIGHT_BYTES and path.suffix.lower()in WEIGHT_SUFFIXES
+    sha=row.get('sha256')if large_weight else hashlib.sha256(path.read_bytes()).hexdigest()
+    return dict(path=row['path'],object=row.get('object',row['path']),bytes=size,sha256=sha)
+
+
 def export_release(spec, source_root, destination):
     """Training completion hook. Read small files and stat weights once."""
     root = Path(source_root).resolve(strict=True)
@@ -116,10 +123,7 @@ def export_release(spec, source_root, destination):
         path = root / relative_path(row.get('source', row['path']))
         if path.is_symlink() or not path.resolve(strict=True).is_relative_to(root) or not path.is_file():
             raise ValueError('producer artifact must be a regular source file')
-        size = path.stat().st_size
-        large_weight = size > WEIGHT_BYTES and path.suffix.lower() in WEIGHT_SUFFIXES
-        sha = row.get('sha256') if large_weight else hashlib.sha256(path.read_bytes()).hexdigest()
-        rows.append(dict(path=row['path'], object=row.get('object', row['path']), bytes=size, sha256=sha))
+        rows.append(artifact_record(path,row))
     value.update(schema=RELEASE_SCHEMA, complete=True, files=rows)
     value = validate_release(value)
     write_json(destination, value)
@@ -166,13 +170,14 @@ def resolve_training_release(family, experiment, checkpoint, source_root, output
     producer=dict(family=family,experiment=str(experiment),checkpoint=str(checkpoint),checkpoint_committed=True,
                   completion_sha256=hashlib.sha256(marker.read_bytes()).hexdigest(),completion_kind=marker.name)
     files=[];artifacts={};sources={}
-    def add(path,destination,expected_sha=None,expected_size=None):
+    def add(path,destination,expected_sha=None,expected_size=None,*,generated=False):
         path=Path(path).resolve(strict=True);relative_path(destination)
-        if not path.is_relative_to(source_root)or not path.is_file():raise ValueError('producer dependency escaped its source root')
+        allowed_root=output if generated else source_root
+        if not path.is_relative_to(allowed_root)or not path.is_file():raise ValueError('producer dependency escaped its source root')
         if expected_size is not None and path.stat().st_size!=expected_size:raise ValueError('producer dependency size differs')
         if expected_sha and path.stat().st_size<=WEIGHT_BYTES and hashlib.sha256(path.read_bytes()).hexdigest()!=expected_sha:
             raise ValueError('producer dependency content differs')
-        files.append(dict(path=destination,source=str(path.relative_to(source_root)),sha256=expected_sha))
+        files.append(dict(path=destination,sha256=expected_sha))
         sources[destination]=path
         return destination
     artifacts['checkpoint']=add(checkpoint/'weights.pt','weights/weights.pt',weight.get('sha256'),expected)
@@ -199,7 +204,7 @@ def resolve_training_release(family, experiment, checkpoint, source_root, output
         artifacts['context']=add(contract['text_pack'],'context.pt',contexts[0]['sha256'])
         for relative,sha in sorted(source_files.items()):add(source/relative,'source/'+relative,sha)
         manifest=output/'source-manifest.json';write_json(manifest,source_files)
-        artifacts['engine']=add(manifest,'source-manifest.json')
+        artifacts['engine']=add(manifest,'source-manifest.json',generated=True)
         add(experiment/'contract.json','metadata/training-contract.json')
         add(checkpoint/'trainer_state.json','metadata/trainer-state.json')
     else:
@@ -229,11 +234,13 @@ def resolve_training_release(family, experiment, checkpoint, source_root, output
         for relative,sha in sorted(dependencies['source'].items()):
             add(source/relative_path(relative),'source/world_memory/'+relative,sha)
         manifest=output/'source-manifest.json';write_json(manifest,dependencies['source'])
-        artifacts['source_manifest']=add(manifest,'source-manifest.json')
+        artifacts['source_manifest']=add(manifest,'source-manifest.json',generated=True)
         backend.update(model_source='source',instruction=instruction,cached_text_identity=index['identity'])
         add(checkpoint.parent/'config.json','metadata/training-config.json')
     spec=dict(model_id=identity,step=step,producer=producer,files=files,backends={'torch':backend})
-    release=export_release(spec,source_root,output/'release.json')
+    release=validate_release(dict(spec,schema=RELEASE_SCHEMA,complete=True,
+        files=[artifact_record(sources[row['path']],row)for row in files]))
+    write_json(output/'release.json',release)
     return release,sources
 
 
