@@ -74,8 +74,9 @@ ARX6 桌面启动配置 `connect_control=true` 表达操作者已在现场确认
 满足实际三路帧、目标资产、人工规划、常驻记录器、所选模型与配置要求的控制就绪。
 
 数采 `safe_ok` 是 episode 的复位结果。仅 schema v1 的 stopped、明确 null、空 error、
-完整五类组件终态允许使用无 episode 的正常退出证据；manager/orphan/teleop 与 Web
-进程及 cgroup 退出仍须核验，false 或缺字段不降级为成功。桌面失败显示该 job 的实际原因。
+五类必要组件（robot、cameras、tactile、event、pedal）均已终止时，可以使用无 episode
+的正常退出证据。数采状态可附带 model 等组件。交接继续核验 manager、orphan、teleop、
+Web 进程与 cgroup，并在关闭 Web 前重新核对数采会话和退出状态。
 已确认的 `startup_failed` 可在 episode_index 和 recording_started_at 均明确为空、robot
 stopped、其余组件仅 waiting/stopped/disabled 时正常退役；它仍须通过上述真实进程退出
 核验，回执保留 previous_collection_phase/error，不把失败数采改写成成功。
@@ -1262,7 +1263,13 @@ SQLite 历史索引 schema 2 从 schema 1 事务迁移，先持久化删除标�
 - 反馈恢复不清除故障，不恢复旧轨迹。正常释放继续核对各臂 quiesce 及 Guard 退役回执。Owner 或 Guard 通信退出后，已激活的原生保持由本进程继续承担，实例退役需要按故障恢复流程确认现场支撑。 承载服务须采用 `SendSIGKILL=no`、`Restart=no`，由正常释放流程结束控制实例。
 - 隔离验收使用真实控制源码和内存 CAN 替身，覆盖反馈丢失、心跳中断、通信断开及无效反馈，并核对持续发送、未来撤销、拒绝新动作和显式释放。隔离结果不能替代机械承重验收。
 
-管理配置保留 `collection_handoff` 作为默认数采入口，`additional_collection_handoffs` 可登记其他数采来源，每项沿用同一 unit、文件身份、loopback status API 和可选相机归属契约。接管前逐项执行正常停止并核验退出。空闲 Web 进程不作为控制占用证据，数采 manager、机器人节点及 SDK 控制进程继续参与冲突核验。已失败 episode 只有在同 session 的 emergency recovery 完成、硬件安全收尾成立且所有控制者停止后才允许交接。
+管理配置保留 `collection_handoff` 作为默认数采入口，`additional_collection_handoffs` 可登记其他数采来源，每项沿用同一 unit、文件身份、loopback status API 和可选相机归属契约。接管前逐项执行正常停止并核验退出。空闲 Web 进程不作为控制占用证据，数采 manager、机器人节点及 SDK 控制进程继续参与冲突核验。
+
+DAgger 故障 episode 的 `safe_ok=false` 保留在原回执。五类必要组件已终止且 robot 已停止时，
+工作台从已登记数采 API 公布的数据根读取该批次及会话的原生 `shutdown.json`，确认同一会话、
+硬件关闭、SDK close、Guard 回执完整和两臂发送线程退出，再完成交接。缺失、过期或与当前
+会话不匹配的证据继续阻止接入。同会话 emergency recovery 已完成且 episode 已确认安全收尾
+的既有交接路径继续有效。
 
 维护触发为故障输出模式、共享内存版本、SDK 制品契约或数采交接来源变化。
 

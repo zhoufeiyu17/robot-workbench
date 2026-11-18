@@ -109,29 +109,73 @@ def http_json(url, body=None, headers=None):
     return json.loads(raw)
 
 
+def collection_retired(value, collection):
+    """Read the collector's existing session-scoped DAgger shutdown receipt."""
+    data_root, batch, session = value.get('data_root'), value.get('batch_name'), collection.get('session_id')
+    if not (isinstance(data_root, str) and Path(data_root).is_absolute()
+            and isinstance(batch, str) and batch not in ('', '.', '..') and Path(batch).name == batch
+            and batch == collection.get('batch_name')
+            and isinstance(session, str) and re.fullmatch('[a-f0-9]{32}', session)):
+        return False
+    limit = 256 * 1024
+    try:
+        receipt = Path(data_root).resolve(strict=True) / '.prometheus' / 'batches' / batch / 'dagger-runtime' / session / 'shutdown.json'
+        if receipt.resolve(strict=True) != receipt:
+            return False
+        with os.fdopen(os.open(receipt, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                return False
+            raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            return False
+        result = json.loads(raw)
+        retirement = result['retirement']
+        evidence = retirement['evidence']
+        return (result['session_id'] == session and result['hardware_closed'] is True
+                and retirement['sdk_close_confirmed'] is True and evidence['guard_receipts_complete'] is True
+                and all(evidence['native_quiesce'][side]['send_thread_joined'] is True for side in ('left', 'right')))
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return False
+
+
 def collection_stopped(value):
-    """Episode reset outcome is nullable; shutdown also reports component terminal facts."""
-    collection=value.get('collection')
-    if not collection:return True
-    if collection.get('phase')=='stopped'and collection.get('safe_ok')is True:return True
-    recovery = value.get('emergency_recovery') or {}
-    if (collection.get('phase') == 'failed' and collection.get('safe_ok') is True
-            and value.get('manager_alive') is False and value.get('orphan_alive') is False
-            and value.get('teleop') is None and value.get('collect_status') in ('idle', 'stopped')
-            and recovery.get('state') == 'completed' and not recovery.get('error')
-            and collection.get('session_id')
-            and recovery.get('session_id') == collection['session_id']):
+    """Check hardware handoff independently of the historical episode result."""
+    if (value.get('manager_alive') is not False or value.get('orphan_alive') is not False
+            or value.get('teleop') is not None or value.get('collect_status') not in ('idle', 'stopped')):
+        return False
+    collection = value.get('collection')
+    if collection is None:
+        return not value.get('batch_name')
+    if not isinstance(collection, dict) or collection.get('stale') is True or collection.get('status_error'):
+        return False
+    phase, safe = collection.get('phase'), collection.get('safe_ok')
+    if phase == 'stopped' and safe is True:
         return True
-    components=collection.get('components')
-    if not (collection.get('schema_version')==1 and 'safe_ok'in collection and collection['safe_ok']is None
-            and isinstance(components,dict)and set(components)=={'robot','cameras','tactile','event','pedal'}):return False
-    if collection.get('phase')=='stopped':
-        return collection.get('error')==''and all(state in ('stopped','disabled')for state in components.values())
+    recovery = value.get('emergency_recovery') or {}
+    if (phase == 'failed' and safe is True and isinstance(recovery, dict)
+            and recovery.get('state') == 'completed' and not recovery.get('error')
+            and collection.get('session_id') and recovery.get('session_id') == collection['session_id']):
+        return True
+    components = collection.get('components')
+    required = {'robot', 'cameras', 'tactile', 'event', 'pedal'}
+    if not (collection.get('schema_version') == 1 and 'safe_ok' in collection
+            and isinstance(components, dict) and required <= components.keys()):
+        return False
+    terminal = ('stopped', 'disabled')
+    hardware_stopped = all(components[name] in terminal for name in required)
+    if phase == 'failed' and safe is False:
+        return (hardware_stopped and components['robot'] == 'stopped'
+                and collection.get('end_reason') != 'stop_timeout' and collection_retired(value, collection))
+    if safe is not None:
+        return False
+    if phase == 'stopped':
+        return collection.get('error') == '' and hardware_stopped
     # A failed startup never reached an episode. Preserve that failure while
     # retiring its already-exited robot and components that never started.
-    return (collection.get('phase')=='failed'and collection.get('end_reason')=='startup_failed'
-        and collection.get('episode_index','missing')is None and collection.get('recording_started_at','missing')is None
-        and components['robot']=='stopped'and all(state in ('waiting','stopped','disabled')for state in components.values()))
+    return (phase == 'failed' and collection.get('end_reason') == 'startup_failed'
+            and collection.get('episode_index', 'missing') is None and collection.get('recording_started_at', 'missing') is None
+            and components['robot'] == 'stopped' and all(components[name] in ('waiting', *terminal) for name in required))
 
 
 def validate_collection_camera(pin):
@@ -251,9 +295,8 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
         while time.monotonic()<deadline:
             progress('waiting_collection_exit')
             value=observe()
-            require((value.get('collection')or{}).get('session_id')in(None,session),'collection session changed during handoff')
-            settled=(not value['manager_alive'] and value.get('collect_status')in('idle','stopped')and collection_stopped(value))
-            if settled:break
+            require((value.get('collection')or{}).get('session_id')==session,'collection session changed during handoff')
+            if collection_stopped(value):break
             require(value.get('collect_status')not in('stop_timeout','failed','error'),'collection reported failed shutdown; no SDK acquire')
             time.sleep(.25)
         else:raise Blocked('collection stop outcome unconfirmed; no Web stop or SDK acquire')
@@ -261,6 +304,9 @@ def handoff_collection(pin, device_id, *, stop_active=False, progress=lambda *a,
     require(collection_stopped(value),'collection hardware shutdown not verified; no SDK acquire')
     current=verify_unit({k:pin[k]for k in ('unit','files')})
     require(current['MainPID']==before['MainPID'] and current['ActiveState']=='active','collection Web identity changed')
+    value=observe()
+    require((value.get('collection')or{}).get('session_id')==session,'collection session changed during handoff')
+    require(collection_stopped(value),'collection hardware shutdown not verified; no SDK acquire')
     progress('stopping_collection_web')
     subprocess.run(['systemctl','--user','stop','--no-block',pin['unit']],check=True,timeout=10)
     deadline=time.monotonic()+timeout

@@ -82,7 +82,7 @@ class StartupTest(unittest.TestCase):
             if args[2]=='kill':children.clear()
             return SimpleNamespace(returncode=0)
         with patch.object(d,'verify_unit',return_value=active),patch.object(d,'unit_state',return_value=inactive),\
-                patch.object(d,'http_json',side_effect=[running,{},stopped]),\
+                patch.object(d,'http_json',side_effect=[running,{},stopped,stopped]),\
                 patch.object(Path,'exists',return_value=True),patch.object(Path,'read_text',side_effect=lambda:'\n'.join(children)),\
                 patch.object(d.subprocess,'run',side_effect=command):
             result=d.handoff_collection(pin,'cpu',stop_active=True)
@@ -120,6 +120,65 @@ class StartupTest(unittest.TestCase):
             candidate=dict(value,emergency_recovery=dict(value['emergency_recovery'],**change))
             self.assertFalse(d.collection_stopped(candidate))
         self.assertFalse(d.collection_stopped(dict(value,collection=dict(value['collection'],safe_ok=False))))
+
+    def test_faulted_dagger_handoff_requires_matching_confirmed_shutdown(self):
+        with TemporaryDirectory() as folder:
+            session = 'a' * 32
+            batch = '咖啡-fixture'
+            path = Path(folder) / '.prometheus' / 'batches' / batch / 'dagger-runtime' / session / 'shutdown.json'
+            path.parent.mkdir(parents=True)
+            retirement = dict(sdk_close_confirmed=True, evidence=dict(guard_receipts_complete=True,
+                native_quiesce={side: dict(send_thread_joined=True) for side in ('left', 'right')}))
+            receipt = dict(session_id=session, hardware_closed=True, retirement=retirement)
+            collection = dict(schema_version=1, phase='failed', safe_ok=False, save_ok=True, end_reason='runtime_failure',
+                error='ReferenceBoundaryRejected', batch_name=batch, session_id=session,
+                components=dict(robot='stopped', cameras='stopped', tactile='disabled', event='stopped', pedal='stopped',
+                    model='ready', recorder_robot='stopped'))
+            status = dict(robot_vin='cpu', manager_alive=False, orphan_alive=False, teleop=None, collect_status='stopped',
+                batch_name=batch, data_root=folder, collection=collection)
+            pin = dict(unit='collector.service', files={'/unit':'a'*64}, status_url='http://127.0.0.1:8080/api/status')
+            active = dict(ActiveState='active', MainPID='7', ControlPID='0', SendSIGKILL='no', ControlGroup='')
+            inactive = dict(ActiveState='inactive', MainPID='0')
+            with patch.object(d, 'verify_unit', return_value=active), patch.object(d, 'unit_state', return_value=inactive),\
+                    patch.object(d, 'http_json', return_value=status), patch.object(d.subprocess, 'run') as stop:
+                with self.assertRaisesRegex(d.Blocked, 'shutdown not verified'):
+                    d.handoff_collection(pin, 'cpu')
+                for invalid in (
+                        dict(receipt, session_id='b' * 32),
+                        dict(receipt, hardware_closed=False),
+                        dict(receipt, retirement=dict(retirement, sdk_close_confirmed=False)),
+                        dict(receipt, retirement=dict(retirement, evidence=dict(retirement['evidence'], guard_receipts_complete=False))),
+                        dict(receipt, retirement=dict(retirement, evidence=dict(retirement['evidence'],
+                            native_quiesce=dict(left=dict(send_thread_joined=True)))))):
+                    with self.subTest(receipt=invalid):
+                        path.write_text(json.dumps(invalid))
+                        with self.assertRaisesRegex(d.Blocked, 'shutdown not verified'):
+                            d.handoff_collection(pin, 'cpu')
+                stop.assert_not_called()
+                path.write_text(json.dumps(receipt))
+                result = d.handoff_collection(pin, 'cpu')
+                stop.assert_called_once()
+            self.assertTrue(result['exit_verified'])
+            self.assertFalse(result['normal_hardware_stop'])
+            self.assertEqual(result['previous_collection_error'], 'ReferenceBoundaryRejected')
+            self.assertEqual(result['previous_collection_phase'], 'failed')
+            for update in (dict(status, orphan_alive=True), dict(status, manager_alive=True),
+                    dict(status, batch_name='other-batch'), dict(status, collection=dict(collection, stale=True)),
+                    dict(status, collection=dict(collection, end_reason='stop_timeout')),
+                    dict(status, collection=dict(collection, components=dict(collection['components'], robot='running')))):
+                self.assertFalse(d.collection_stopped(update))
+
+    def test_handoff_does_not_stop_web_if_session_changes_after_exit_verification(self):
+        pin = dict(unit='collector.service', files={'/unit':'a'*64}, status_url='http://127.0.0.1:8080/api/status')
+        active = dict(ActiveState='active', MainPID='7', ControlPID='0', SendSIGKILL='no')
+        status = dict(robot_vin='cpu', manager_alive=False, orphan_alive=False, teleop=None, collect_status='stopped',
+            collection=dict(phase='stopped', safe_ok=True, session_id='old'))
+        changed = dict(status, manager_alive=True, collect_status='running', collection=dict(session_id='new'))
+        with patch.object(d, 'verify_unit', return_value=active), patch.object(d, 'http_json', side_effect=[status, changed]),\
+                patch.object(d.subprocess, 'run') as stop:
+            with self.assertRaisesRegex(d.Blocked, 'session changed'):
+                d.handoff_collection(pin, 'cpu')
+            stop.assert_not_called()
 
     def test_camera_rebind_recovers_stale_consumers_once_without_starting_hardware(self):
         stale=dict(media=[dict(id=role,ready=False,error='source unavailable',frame_id='old-frame')for role in ('head','left','right')])
@@ -326,7 +385,7 @@ class StartupTest(unittest.TestCase):
         active=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-cpu-fixture')
         running=dict(robot_vin='arx13',manager_alive=True,orphan_alive=False,teleop=None,collect_status='running',collection=dict(session_id='cpu',phase='recording'))
         stopped=dict(running,manager_alive=False,collect_status='stopped',collection=dict(session_id='cpu',phase='stopped',safe_ok=True))
-        with patch.object(d,'verify_unit',return_value=active),patch.object(d,'unit_state',return_value=dict(ActiveState='inactive',MainPID='0')),patch.object(d,'http_json',side_effect=[running,{'collect_status':'stopping'},stopped])as api,patch.object(d.subprocess,'run')as run:
+        with patch.object(d,'verify_unit',return_value=active),patch.object(d,'unit_state',return_value=dict(ActiveState='inactive',MainPID='0')),patch.object(d,'http_json',side_effect=[running,{'collect_status':'stopping'},stopped,stopped])as api,patch.object(d.subprocess,'run')as run:
             result=d.handoff_collection(pin,'arx13',stop_active=True)
         self.assertTrue(result['exit_verified']);self.assertTrue(result['may_have_returned_home'])
         self.assertEqual(api.call_args_list[1].args,('http://127.0.0.1:18980/api/collect/stop',{}))
@@ -368,8 +427,8 @@ class StartupTest(unittest.TestCase):
     def test_stopped_collection_without_episode_has_terminal_components_not_safe_result(self):
         pin=dict(unit='collector.service',files={'/unit':'a'*64},status_url='http://127.0.0.1:8080/api/status')
         unit=dict(ActiveState='active',MainPID='7',ControlPID='0',SendSIGKILL='no',ControlGroup='/missing-cpu-fixture')
-        terminal=dict(schema_version=1,phase='stopped',safe_ok=None,error='',
-            components=dict(robot='stopped',cameras='stopped',tactile='disabled',event='stopped',pedal='stopped'))
+        terminal=dict(schema_version=1,phase='stopped',safe_ok=None,error='',episode_index=None,recording_started_at=None,
+            components=dict(robot='stopped',cameras='stopped',tactile='disabled',event='stopped',pedal='stopped',model='ready'))
         status=dict(robot_vin='cpu',manager_alive=False,orphan_alive=False,teleop=None,collect_status='stopped',collection=terminal)
         with patch.object(d,'verify_unit',return_value=unit),patch.object(d,'unit_state',return_value=dict(ActiveState='inactive',MainPID='0')),\
                 patch.object(d,'http_json',return_value=status),patch.object(d.subprocess,'run')as stop:
@@ -382,6 +441,7 @@ class StartupTest(unittest.TestCase):
             result=d.handoff_collection(pin,'cpu')
         self.assertTrue(result['exit_verified']);self.assertEqual(result['previous_collection_phase'],'failed')
         for bad in (dict(terminal,schema_version=0),dict(terminal,components={}),dict(terminal,error='shutdown failed'),
+                    dict(terminal,components={k:v for k,v in terminal['components'].items()if k!='cameras'}),
                     dict(terminal,components=dict(terminal['components'],robot='running')),dict(terminal,safe_ok=False),
                     {k:v for k,v in terminal.items()if k!='safe_ok'},dict(failed,episode_index=1),
                     dict(failed,components=dict(failed['components'],robot='waiting'))):

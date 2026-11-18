@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": 669,
-  "updated_at": "2026-11-17T07:53:40.492014+00:00",
+  "revision": 672,
+  "updated_at": "2026-11-18T08:42:48.356928+00:00",
   "initiative": "工作台公共模块优化",
   "owner": "本聊天 · 01a16327-7545-7332-a361-0123ddad811d",
   "scope": "工作台运行时全部顶层Python文件、已核对SDK/标定/数采接入边界、模型与启动入口。外部SDK内部和旧业务包内部按其接入边界呈现。",
@@ -463,7 +463,7 @@
         "sha256": "f40c7a8775c5cfed03ef7d54b39f522dd41b84dcb81be082a2b0f61af998b988",
         "matches_file": true
       },
-      "fingerprint": "22113b636478a52334604962915c3adaaef135a936b5139667ed066ca3534a6a",
+      "fingerprint": "87ad27731ca9016dbc385c83be74d78957f3adacee441c01a13e7e99951831fb",
       "verified_fingerprint": null
     },
     {
@@ -487,7 +487,7 @@
         "sha256": "f40c7a8775c5cfed03ef7d54b39f522dd41b84dcb81be082a2b0f61af998b988",
         "matches_file": true
       },
-      "fingerprint": "e0a2c3bb012478b1057b5de6fa0a0db2c690e8cb68e8021c19fd1dcb3853a5e2",
+      "fingerprint": "73e6c955080a64730d9109178de3365a0240f22131a749db09dba549240e8002",
       "verified_fingerprint": null
     },
     {
@@ -523,7 +523,7 @@
         "sha256": "f40c7a8775c5cfed03ef7d54b39f522dd41b84dcb81be082a2b0f61af998b988",
         "matches_file": true
       },
-      "fingerprint": "b34113cc00a463e5ac92604e5239ae82e7717daf12bdb5c459f92eb241d44298",
+      "fingerprint": "d1a87790714cace78fbbbbca82dbcc46c90f0f8f2b930e4d3f2a8a6742dd14d2",
       "verified_fingerprint": null
     },
     {
@@ -2424,7 +2424,7 @@
           }
         ]
       },
-      "fingerprint": "e0a2c3bb012478b1057b5de6fa0a0db2c690e8cb68e8021c19fd1dcb3853a5e2"
+      "fingerprint": "73e6c955080a64730d9109178de3365a0240f22131a749db09dba549240e8002"
     },
     "robot_workbench/target_model.py": {
       "state": "baseline",
@@ -2651,7 +2651,7 @@
           }
         ]
       },
-      "fingerprint": "e0a2c3bb012478b1057b5de6fa0a0db2c690e8cb68e8021c19fd1dcb3853a5e2",
+      "fingerprint": "73e6c955080a64730d9109178de3365a0240f22131a749db09dba549240e8002",
       "verified_fingerprint": "719525d16c57f56483fe3943802c5d0c07eec59f4fbadd8f2015cdbc16bffe26"
     },
     "robot_workbench/maintenance.py": {
@@ -3144,23 +3144,19 @@
           }
         ]
       },
-      "fingerprint": "7a67598e2a46d32ce96bd7adde21f6a88676787355a2f33375921aae9b4eb3a6",
+      "fingerprint": "42700810c144bc7e81b4cdacf02c8a4b0a8d94380e0cd1aa6f0552453c282cfb",
       "verified_fingerprint": "7a67598e2a46d32ce96bd7adde21f6a88676787355a2f33375921aae9b4eb3a6"
     },
     "scripts/workbench_deploy.py": {
-      "state": "verified",
-      "note": "已登记数采和相机的正常退出、cgroup身份与过渡态等待通过目标软件回归。",
-      "next": "按统一交接契约维护。",
+      "state": "implemented",
+      "note": "交接判定已通过归档重放及 CPU 回归，覆盖同会话硬件退役、未开录正常停止和退出未确认。",
+      "next": "在目标机核验实际交接。",
       "owner": "本聊天",
-      "updated_at": "2026-11-17T07:53:39.440017+00:00",
-      "evidence": {
-        "path": ".evidence/arx6-desktop-takeover-release-20261117-v1/progress.json",
-        "sha256": "f40c7a8775c5cfed03ef7d54b39f522dd41b84dcb81be082a2b0f61af998b988",
-        "matches_file": true
-      },
+      "updated_at": "2026-11-18T08:42:48.355990+00:00",
+      "evidence": null,
       "source": {
         "exists": true,
-        "sha256": "a483251f143e65dbb574c310c20c8be76b1ffa152978a106837ee6a3d4956166",
+        "sha256": "1831890272eb2db4731d3335f24dad6f90157d24e0c416dadf49d7d59c9e4444",
         "imports": [
           "robot_workbench/camera_owner.py",
           "robot_workbench/control_owner.py",
@@ -3181,8 +3177,8 @@
           }
         ]
       },
-      "fingerprint": "e0a2c3bb012478b1057b5de6fa0a0db2c690e8cb68e8021c19fd1dcb3853a5e2",
-      "verified_fingerprint": "e0a2c3bb012478b1057b5de6fa0a0db2c690e8cb68e8021c19fd1dcb3853a5e2"
+      "fingerprint": "73e6c955080a64730d9109178de3365a0240f22131a749db09dba549240e8002",
+      "verified_fingerprint": null
     },
     "scripts/serve_inference_model.py": {
       "state": "baseline",
@@ -3981,7 +3977,7 @@
         ],
         "deployed_snapshots": []
       },
-      "fingerprint": "01cb02c30a6b46f942932cda61d89321b48899fcf5b8c7423ec5f5f6738c9a71"
+      "fingerprint": "25f87d1ffbe4a9930842f4d22e809cd2e8191025afcec83da0709e07b9d03a4e"
     },
     "scripts/launch_workbench_backend.py": {
       "state": "implemented",
@@ -4371,24 +4367,6 @@
     }
   },
   "changes": [
-    {
-      "at": "2026-11-10T19:49:38.658383+00:00",
-      "kind": "file",
-      "ids": [
-        "robot_workbench/wam_mem.py",
-        "robot_workbench/model_session.py",
-        "robot_workbench/inference_transport.py",
-        "robot_workbench/inference_workflow.py",
-        "robot_workbench/ros_inference.py",
-        "robot_workbench/service.py",
-        "robot_workbench/inference_model.py",
-        "robot_workbench/inference_catalog.py",
-        "robot_workbench/device_bootstrap.py",
-        "robot_workbench/wam.py"
-      ],
-      "state": "verified",
-      "note": "Published and softwarequalified; frozen acceptance receipt retains failure history and qualification limits."
-    },
     {
       "at": "2026-11-11T15:34:50.334034+00:00",
       "kind": "file",
@@ -5304,9 +5282,18 @@
       ],
       "state": "verified",
       "note": "已登记数采和相机的正常退出、cgroup身份与过渡态等待通过目标软件回归。"
+    },
+    {
+      "at": "2026-11-18T08:33:38.748738+00:00",
+      "kind": "file",
+      "ids": [
+        "scripts/workbench_deploy.py"
+      ],
+      "state": "implemented",
+      "note": "交接判定已通过归档重放及 CPU 回归，覆盖同会话硬件退役、未开录正常停止和退出未确认。"
     }
   ],
   "unmapped_files": [],
-  "source_head": "6b24449a093078200ff340767e64b90b12edb210",
-  "architecture_revision": "approved-lifecycle-20261117-v1+progress.f7243d2b0b10"
+  "source_head": "f6ec34c8d9c1a8cb470dbf0661a05665073d3881",
+  "architecture_revision": "approved-lifecycle-20261117-v1+progress.9f81fa134fda"
 }
